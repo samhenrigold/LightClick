@@ -333,6 +333,16 @@ static void test_busy(void) {
     CHECK(cf_seen == 0);
 }
 
+// XNU turns on MCE among its first acts, and nothing here needs to care: it must not stop.
+static void test_cr4(void) {
+    u64 cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4 | 0x40 | 0x100));
+    u64 back;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(back));
+    CHECK(back == (cr4 | 0x40 | 0x100));
+}
+
 void kmain(void) {
     __asm__ volatile("mov $0x10, %%ax\n mov %%ax, %%ds\n mov %%ax, %%es\n mov %%ax, %%ss\n" : : : "ax");
     tables();
@@ -345,6 +355,7 @@ void kmain(void) {
     test_level_interrupts();
     test_tsc();
     test_busy();
+    test_cr4();
     CHECK(!bad_vector);
     puts_("hybrid checks passed\n");
     done(0);

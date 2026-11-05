@@ -55,10 +55,35 @@ public final class Tally: @unchecked Sendable {
     func entered(rip: UInt64) {
         lock.lock()
         if firstRIP == nil { firstRIP = rip }
+        closeAway()
+        lock.unlock()
+    }
+
+    private func closeAway() {
         if let lastReason {
             reasons[lastReason, default: Row()].hostTicks += mach_absolute_time() &- lastLeftEngine
             self.lastReason = nil
         }
+    }
+
+    /// Off the engine by choice: the counters below stop, though the guest may be running well on TCG.
+    func refused(_ reason: String) {
+        lock.lock()
+        closeAway()
+        reasons[reason, default: Row()].count += 1
+        lastReason = reason
+        lastLeftEngine = mach_absolute_time()
+        lock.unlock()
+    }
+
+    func tcgSample(rip: UInt64, cpl: UInt32, cr3: UInt64) { addSample("tcg", rip, cpl, cr3) }
+
+    private func addSample(_ place: String, _ rip: UInt64, _ cpl: UInt32, _ cr3: UInt64) {
+        lock.lock()
+        samples.append(
+            String(format: "%8.1f ", seconds(mach_absolute_time() &- startTicks))
+                + "\(place) \(hex(rip)) cpl \(cpl) cr3 \(hex(cr3))")
+        if samples.count > 64 { samples.removeFirst() }
         lock.unlock()
     }
 
@@ -75,9 +100,8 @@ public final class Tally: @unchecked Sendable {
     func boundary(rip: UInt64, cpl: UInt32, cr3: UInt64) {
         lock.lock()
         boundaries += 1
-        samples.append("\(hex(rip)) cpl \(cpl) cr3 \(hex(cr3))")
-        if samples.count > 64 { samples.removeFirst() }
         lock.unlock()
+        addSample("engine", rip, cpl, cr3)
     }
 
     func mmio(_ gpa: UInt64) {
@@ -126,6 +150,11 @@ public final class Tally: @unchecked Sendable {
         var o =
             "# hvdbt tally. One vCPU; TCG up to XNU's 64-bit entry, then the engine. All counts are measured on this run.\n"
         o += "state: " + (hardStop.map { "HARD STOP: \($0)" } ?? "running or exited normally") + "\n"
+        let away = lastReason == nil ? 0 : mach_absolute_time() &- lastLeftEngine
+        if let lastReason, seconds(away) > 1 {
+            o += String(format: "off the engine, on TCG, for %.1f s now, after: ", seconds(away)) + lastReason + "\n"
+            o += "the engine's counters below don't move meanwhile, and say nothing about the guest\n"
+        }
         o += String(format: "seconds since hand-off: %.1f\n", elapsed)
         o += "hand-off rip: " + (firstRIP.map(hex) ?? "none") + "\n"
         o += "last rip sample: " + (samples.last ?? "none") + "\n\n"
@@ -133,7 +162,8 @@ public final class Tally: @unchecked Sendable {
         o +=
             "== stops and fallbacks, ranked by count. tcg_ms: time away from the engine after each, with TCG running ==\n"
         for (reason, row) in reasons.sorted(by: { $0.value.count > $1.value.count }) {
-            o += String(format: "%12d %10.1f  ", row.count, seconds(row.hostTicks) * 1000) + reason + "\n"
+            let open = reason == lastReason ? away : 0
+            o += String(format: "%12d %10.1f  ", row.count, seconds(row.hostTicks &+ open) * 1000) + reason + "\n"
         }
         o += "\n== by site: reason | first bytes at rip, ranked; first rip, detail (msr, address) ==\n"
         for (key, site) in sites.sorted(by: { $0.value.count > $1.value.count }).prefix(200) {
@@ -176,7 +206,9 @@ public final class Tally: @unchecked Sendable {
         for (port, count) in ports.sorted(by: { $0.value > $1.value }).prefix(40) {
             o += String(format: "%12d  ", count) + hex(UInt64(port)) + "\n"
         }
-        o += "\n== rip samples, one a second, oldest first ==\n" + samples.joined(separator: "\n") + "\n"
+        o +=
+            "\n== rip samples: seconds, where, rip. One a second, oldest first; a tcg rip is only as fresh as the last TB exit ==\n"
+            + samples.joined(separator: "\n") + "\n"
         o +=
             "\n== timeline: seconds, pt stores, pt table drops, cr3, blocks, insns, translate ms, mmio, fallbacks, irqs, rip ==\n"
         o += timeline.joined(separator: "\n") + "\n"

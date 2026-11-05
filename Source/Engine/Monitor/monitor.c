@@ -1682,8 +1682,9 @@ static void do_popf(void) {
     c->x[4] = next_rsp;
 }
 
-// Unsupported CR4 bits stop rather than half work.
-#define CR4_OK ((1ULL << 5) | (1ULL << 7) | (1ULL << 9) | (1ULL << 10) | (1ULL << 17) | (1ULL << 20) | (1ULL << 3) | (1ULL << 4) | (1ULL << 2))
+// Unsupported CR4 bits stop rather than half work. MCE, PCE and OSXSAVE ask nothing of this monitor: it raises no machine checks, and rdpmc and the
+// xsave family stop anyway, where CR4 is checked by whoever runs them.
+#define CR4_OK ((1ULL << 5) | (1ULL << 7) | (1ULL << 9) | (1ULL << 10) | (1ULL << 17) | (1ULL << 20) | (1ULL << 3) | (1ULL << 4) | (1ULL << 2) | (1ULL << 6) | (1ULL << 8) | (1ULL << 18))
 
 static void do_mov_cr_write(void) {
     u64 cr = c->x[R_S0], v = c->x[R_S1];

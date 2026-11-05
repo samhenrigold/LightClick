@@ -16,6 +16,7 @@
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
 #include "qemu/rcu.h"
+#include "qemu/thread.h"
 #include "qemu/timer.h"
 #include "cpu.h"
 #include "accel/tcg/handoff.h"
@@ -26,6 +27,7 @@
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
 #include "hw/i386/apic.h"
+#include "hw/i386/apic_internal.h"
 #include "hw/i386/x86.h"
 #include "system/address-spaces.h"
 #include "system/cpu-timers.h"
@@ -38,8 +40,8 @@
 
 #define HIGH_RAM (1ULL << 32)
 /* What the monitor's CR4_OK allows. */
-#define ENGINE_CR4 (CR4_TSD_MASK | CR4_DE_MASK | CR4_PSE_MASK | CR4_PAE_MASK | CR4_PGE_MASK | CR4_OSFXSR_MASK | CR4_OSXMMEXCPT_MASK | \
-                    CR4_PCIDE_MASK | CR4_SMEP_MASK)
+#define ENGINE_CR4 (CR4_TSD_MASK | CR4_DE_MASK | CR4_PSE_MASK | CR4_PAE_MASK | CR4_MCE_MASK | CR4_PGE_MASK | CR4_PCE_MASK | CR4_OSFXSR_MASK | \
+                    CR4_OSXMMEXCPT_MASK | CR4_PCIDE_MASK | CR4_OSXSAVE_MASK | CR4_SMEP_MASK)
 #define OTHER_INTERRUPTS (CPU_INTERRUPT_NMI | CPU_INTERRUPT_SMI | CPU_INTERRUPT_INIT | CPU_INTERRUPT_SIPI | CPU_INTERRUPT_MCE)
 
 static struct {
@@ -53,6 +55,8 @@ static struct {
     ram_addr_t written[64];
     unsigned written_count;
     bool protect_all;
+    char refused[64]; /* why the vCPU is on TCG, while it is */
+    bool dump_done;
 } hv;
 
 /* ---- Devices: the vCPU thread, BQL taken here, as TCG's slow path would. ---- */
@@ -379,6 +383,8 @@ static void hvdbt_write_tally_at_exit(void)
     engine_tally_write(hv.engine);
 }
 
+static void *hvdbt_watchdog(void *arg);
+
 static bool hvdbt_create(CPUState *cs)
 {
     MachineState *ms = current_machine;
@@ -435,6 +441,8 @@ static bool hvdbt_create(CPUState *cs)
         engine_tally_start(engine, tally);
         atexit(hvdbt_write_tally_at_exit);
     }
+    QemuThread watchdog;
+    qemu_thread_create(&watchdog, "hvdbt-watchdog", hvdbt_watchdog, cs, QEMU_THREAD_DETACHED);
     info_report("hvdbt: the engine takes over at rip 0x%" PRIx64 ", cr3 0x%" PRIx64, (uint64_t)env->eip, (uint64_t)env->cr[3]);
     return true;
 }
@@ -455,10 +463,32 @@ static bool hvdbt_want_engine(CPUState *cs, vaddr pc, uint32_t flags)
         error_report("hvdbt: needs -smp 1 and -accel tcg,thread=multi");
         exit(EXIT_FAILURE);
     }
-    ok = (flags & HF_CS64_MASK) && !(flags & (HF_SMM_MASK | TF_MASK)) && (env->cr[0] & CR0_WP_MASK) && !(env->cr[4] & ~ENGINE_CR4) &&
-         (env->mxcsr & 0x1F80) == 0x1F80 && QTAILQ_EMPTY(&cs->breakpoints) && !cpu_single_stepping(cs);
+    char why[sizeof hv.refused];
+    why[0] = 0;
+    if (!(flags & HF_CS64_MASK)) {
+        snprintf(why, sizeof why, "refused: not in 64-bit mode");
+    } else if (flags & HF_SMM_MASK) {
+        snprintf(why, sizeof why, "refused: SMM");
+    } else if (flags & TF_MASK) {
+        snprintf(why, sizeof why, "refused: TF set");
+    } else if (!(env->cr[0] & CR0_WP_MASK)) {
+        snprintf(why, sizeof why, "refused: CR0.WP clear");
+    } else if (env->cr[4] & ~ENGINE_CR4) {
+        snprintf(why, sizeof why, "refused: CR4 bits 0x%" PRIx64, (uint64_t)env->cr[4] & ~ENGINE_CR4);
+    } else if ((env->mxcsr & 0x1F80) != 0x1F80) {
+        snprintf(why, sizeof why, "refused: unmasked SSE exceptions");
+    } else if (!QTAILQ_EMPTY(&cs->breakpoints) || cpu_single_stepping(cs)) {
+        snprintf(why, sizeof why, "refused: debugger attached");
+    }
+    ok = !why[0];
     if (!ok) {
         hv.tcg_ran = true;
+    }
+    if (strcmp(why, hv.refused)) { /* on a change only: this runs at each TB miss while on TCG */
+        strcpy(hv.refused, why);
+        if (!ok && hv.engine) {
+            engine_tally_refused(hv.engine, why);
+        }
     }
     return ok;
 }
@@ -547,6 +577,96 @@ static void hvdbt_kick(CPUState *cs)
         engine_set_irq_line(hv.engine, true);
         engine_kick(hv.engine);
     }
+}
+
+/* ---- Stall report ---- */
+
+static void hvdbt_dump_bytes(CPUState *cs, const char *name, uint64_t at, int before, int after)
+{
+    uint64_t start = (at - before) & ~15ULL;
+
+    fprintf(stderr, "%s, around 0x%" PRIx64 ":\n", name, at);
+    for (uint64_t line = start; line < at + after; line += 16) {
+        uint8_t b[16];
+        fprintf(stderr, "%016" PRIx64 ":", line);
+        if (cpu_memory_rw_debug(cs, line, b, 16, false)) {
+            fprintf(stderr, " unmapped\n");
+            continue;
+        }
+        for (int i = 0; i < 16; i++) {
+            fprintf(stderr, " %02x", b[i]);
+        }
+        fprintf(stderr, "\n");
+    }
+}
+
+/* Runs from the work queue, so on the vCPU thread with the state in CPUX86State: a kick brought it off the engine, or out of TCG. */
+static void hvdbt_stall_report(CPUState *cs, run_on_cpu_data unused)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+    APICCommonState *apic = cpu->apic_state;
+    char text[2048];
+
+    qatomic_set(&hv.dump_done, true);
+    engine_debug_text(hv.engine, text, sizeof text);
+    fprintf(stderr, "\nhvdbt: no progress for 5 s. Last off the engine because: %s\n%s", hv.refused[0] ? hv.refused : "a stop to take this report", text);
+    cpu_dump_state(cs, stderr, CPU_DUMP_CODE | CPU_DUMP_CCOP);
+    hvdbt_dump_bytes(cs, "code", env->eip, 64, 64);
+    hvdbt_dump_bytes(cs, "stack", env->regs[R_ESP], 0, 64);
+    fprintf(stderr, "cpu: halted %d, interrupt_request 0x%x, IF %d, CR4 bits the engine won't take 0x%" PRIx64 "\n", cs->halted,
+            qatomic_read(&cs->interrupt_request), !!(env->eflags & IF_MASK), (uint64_t)env->cr[4] & ~ENGINE_CR4);
+    fprintf(stderr, "TSC by QEMU 0x%" PRIx64 ", tsc_deadline 0x%" PRIx64 "\n", cpu_get_tsc(env) + env->tsc_offset, (uint64_t)env->tsc_deadline);
+    if (apic) {
+        fprintf(stderr, "apic: base 0x%x tpr 0x%x svr 0x%x lvt-timer 0x%x initial-count 0x%x timer %s next %" PRId64 " now %" PRId64 "\n", apic->apicbase,
+                apic->tpr, apic->spurious_vec, apic->lvt[APIC_LVT_TIMER], apic->initial_count, timer_pending(apic->timer) ? "pending" : "idle",
+                apic->next_time, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        fprintf(stderr, "apic irr/isr, high word first:");
+        for (int i = 7; i >= 0; i--) {
+            fprintf(stderr, " %08x/%08x", apic->irr[i], apic->isr[i]);
+        }
+        fprintf(stderr, "\n");
+    }
+    fflush(stderr);
+}
+
+/* A separate thread, so none of this costs the vCPU anything until something is wrong. */
+static void *hvdbt_watchdog(void *arg)
+{
+    CPUState *cs = arg;
+    CPUX86State *env = cpu_env(cs);
+    uint64_t last = ~0ULL;
+    int idle = 0, reports = 0;
+
+    while (!qatomic_read(&hv.dead)) {
+        g_usleep(G_USEC_PER_SEC);
+        if (!runstate_is_running()) {
+            idle = 0;
+            continue;
+        }
+        if (!qatomic_read(&hv.in_engine)) { /* racy reads, and only for a human: does TCG's rip move? */
+            engine_tally_sample(hv.engine, env->eip, env->hflags & HF_CPL_MASK, env->cr[3]);
+        }
+        uint64_t now = engine_progress(hv.engine);
+        if (now != last) {
+            last = now;
+            idle = 0;
+            continue;
+        }
+        idle++;
+        if (idle == 5 && reports < 4) {
+            reports++;
+            qatomic_set(&hv.dump_done, false);
+            async_run_on_cpu(cs, hvdbt_stall_report, RUN_ON_CPU_NULL);
+        } else if (idle == 8 && reports && !qatomic_read(&hv.dump_done)) {
+            /* No stop in 3 s: no x86 boundary reached, or stuck in a host call or on the BQL. All that can be seen from here. */
+            char text[2048];
+            engine_debug_text(hv.engine, text, sizeof text);
+            fprintf(stderr, "\nhvdbt: no progress, and the vCPU did not stop for a report in 3 s. in_engine %d\n%s", qatomic_read(&hv.in_engine), text);
+            fflush(stderr);
+        }
+    }
+    return NULL;
 }
 
 static const TcgHandoffOps hvdbt_ops = {

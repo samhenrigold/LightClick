@@ -103,6 +103,14 @@ void engine_set_tsc(EngineHandle *engine, uint64_t ns_offset, uint64_t tsc_offse
 // boundary stop. Any thread.
 void engine_tally_start(EngineHandle *engine, const char *path);
 void engine_tally_write(EngineHandle *engine);
+// The vCPU stays off the engine for this reason, until the next engine_run. Timed and ranked with the fallbacks. Any thread.
+void engine_tally_refused(EngineHandle *engine, const char *reason);
+// A rip seen while the vCPU is off the engine. Any thread.
+void engine_tally_sample(EngineHandle *engine, uint64_t rip, uint32_t cpl, uint64_t cr3);
+// Any thread. Grows when the guest does anything the monitor or translator sees; unchanged means spinning in translated code, or off the engine.
+uint64_t engine_progress(EngineHandle *engine);
+// Any thread, for a stall report: whether the vCPU is in hv_vcpu_run, the last host call, the monitor's interrupt state and its last-saved registers.
+void engine_debug_text(EngineHandle *engine, char *out, unsigned long size);
 
 // Atomic helpers the Swift side needs, implemented in C.
 void engine_ctx_post_vector(void *ctx, uint8_t vector, bool level);

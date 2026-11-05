@@ -71,6 +71,11 @@ public final class Engine {
     /// One past the highest RAM GPA. Below it there can be holes, which `PI_RAM` tells apart.
     public let ramTop: UInt64
     public var tally: Tally?
+    // For stall reports, read from another thread. One word each, written around each exit.
+    private nonisolated(unsafe) var inVCPURun = false
+    private nonisolated(unsafe) var lastHostCall = 0
+    private nonisolated(unsafe) var fallbackCount: UInt64 = 0
+    private nonisolated(unsafe) var portCount: UInt64 = 0
 
     public init(options: EngineOptions) throws {
         self.options = options
@@ -262,7 +267,9 @@ public final class Engine {
         while true {
             // The hypervisor forgets a pending interrupt at each exit, so the line is held here until the monitor takes it.
             if irqLine { hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, true) }
+            inVCPURun = true
             let r = hv_vcpu_run(vcpu)
+            inVCPURun = false
             if r != HV_SUCCESS { throw EngineError.hypervisor("hv_vcpu_run", r) }
             exitCount += 1
             switch vcpuExit.pointee.reason {
@@ -284,6 +291,7 @@ public final class Engine {
                             "hc \(code) a0 \(hex(ctx.pointee.req_a.0)) a1 \(hex(ctx.pointee.req_a.1)) a2 \(hex(ctx.pointee.req_a.2)) elr \(hex(ctx.pointee.elr)) esr \(hex(ctx.pointee.esr))\n"
                                 .utf8))
                 }
+                lastHostCall = Int(code)
                 if let outcome = try hostCall(Int(code)) { return outcome }
             case HV_EXIT_REASON_CANCELED:
                 if watchdogFired {
@@ -380,6 +388,7 @@ public final class Engine {
         case Int(HC_PORT):
             guard let machine else { throw EngineError.stop("port access with no machine attached") }
             tally?.port(UInt16(truncatingIfNeeded: c.pointee.req_a.0))
+            portCount += 1
             if c.pointee.req_a.2 != 0 {
                 machine.portWrite(
                     port: UInt16(truncatingIfNeeded: c.pointee.req_a.0), size: Int(c.pointee.req_a.1),
@@ -428,6 +437,7 @@ public final class Engine {
             return .boundary(rip: boundaryRIP)
         case Int(HC_FALLBACK):
             boundaryRIP = c.pointee.req_a.1
+            fallbackCount += 1
             if let tally {
                 tally.fallback(
                     reason: fallbackReason(), rip: boundaryRIP, bytes: bytes(at: boundaryRIP, count: 4),
@@ -622,6 +632,26 @@ public final class Engine {
         ctx.pointee.tsc_offset = tscOffset
         ctx.pointee.tsc_num = num
         ctx.pointee.tsc_den = den
+    }
+
+    func progress() -> UInt64 {
+        let c = ctx.pointee
+        return tr_stats().blocks &+ fallbackCount &+ portCount &+ c.stat_fills &+ c.stat_dirty &+ c.stat_smc &+ c.stat_pf_delivered
+            &+ c.stat_pt_writes &+ c.stat_iret &+ c.stat_syscall &+ c.stat_mmio &+ c.stat_irq &+ c.stat_cr3
+    }
+
+    func debugText() -> String {
+        let c = ctx.pointee
+        let ns = (mach_absolute_time() &- vtimerOffset) &* 125 / 3 &+ c.tsc_ns_offset
+        let tsc = ns &+ ns &* c.tsc_num / c.tsc_den &+ c.tsc_offset
+        var o = "in hv_vcpu_run: \(inVCPURun), last host call \(lastHostCall), exits \(exitCount), progress \(progress())\n"
+        o += "monitor: elr \(hex(c.elr)) esr \(hex(c.esr)) far \(hex(c.far)) spsr \(hex(c.spsr)) cpl \(c.cpl) view \(c.view) cr0 \(hex(c.cr0)) cr3 \(hex(c.cr3)) cr4 \(hex(c.cr4))\n"
+        o += "interrupts: rflags_sys \(hex(c.rflags_sys)) irq_line \(c.irq_line) irq_pending \(c.irq_pending) stop_requested \(c.stop_requested) stepping \(c.stepping) steps \(c.stat_steps) irqs \(c.stat_irq)\n"
+        o += "engine TSC by its formula: \(hex(tsc))\n"
+        let x = withUnsafeBytes(of: c.x) { Array($0.bindMemory(to: UInt64.self)) }
+        o += "registers at the last monitor entry, x0-x15 are rax rcx rdx rbx rsp rbp rsi rdi r8-r15:\n"
+        for i in 0..<16 { o += hex(x[i]) + (i % 4 == 3 ? "\n" : " ") }
+        return o
     }
 
     func mxcsr() -> UInt32 {

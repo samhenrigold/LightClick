@@ -159,7 +159,11 @@ The first contact with a real guest, built to find out what is missing rather th
 
 Measured (`engine-run --hybrid`, `Tests/x86/kernel/hybrid.c`, which plays TCG by hand, not TCG itself): RAM split at 1 GB with the rest at 4 GB, mapped as `memory-backend-shm` does it, tables, code and data above 4 GB; a hole and a marked low page reaching device callbacks; state preserved across each fallback kind with the host changing registers, CR3, CR0.TS and CS; notes for code and tables, with ring overflow; #NM; no acknowledge with IF clear; 1.2 GHz TSC; about 10 boundary stops per run. Also: QEMU's configure accepts the option, and `libEngine.a` links into a C program at QEMU's deployment target and creates a hybrid engine.
 
-Not measured or never run: all of `hvdbt.c`, every TCG hook, QEMU linking it, the real TLB, TB and dirty-bitmap interplay, any real device, any real guest. Cost per fallback is unknown; the tally's `tcg_ms` column gives it. Writes by a separate process into guest RAM (the OOP graphics helper) are not noted. Reset after hand-off is unexamined: firmware in 64-bit mode would run on the engine.
+First real boot, Mavericks: it builds and links, the hand-off fires, and the engine runs 3699 x86 instructions and 28 fallbacks, MSRs and one CR4 write. The value 0x60 sets MCE, which neither the monitor nor the accelerator allowed, so TCG kept the vCPU from then on and every engine counter froze. Whether the guest went on under TCG was not observed. The same run showed page walks counted as stores: 114 table frames noted in 28 fallbacks, about four levels each, and 221 of 224 blocks invalidated as a result. Both are fixed; the fixes have not been booted.
+
+A watchdog thread reports to the session log after 5 s with no progress: registers, bytes at rip and rsp, APIC, interrupt state, whether the vCPU is in `hv_vcpu_run`. The tally's top lines now say when the vCPU is on TCG and why, and rip samples are marked engine or tcg.
+
+Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bitmap interplay beyond those few fallbacks. Cost per fallback is unknown; the tally's `tcg_ms` column gives it. Writes by a separate process into guest RAM (the OOP graphics helper) are not noted. Reset after hand-off is unexamined: firmware in 64-bit mode would run on the engine.
 
 ## Not exact, known
 

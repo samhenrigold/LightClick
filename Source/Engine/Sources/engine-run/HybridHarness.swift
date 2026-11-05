@@ -162,6 +162,11 @@ final class HybridHarness {
                     return 4
                 }
                 if deviceWrites == 0 { return 5 }
+                engine_tally_refused(handle, "refused for the test")
+                engine_tally_sample(handle, 0x1234, 0, 0)
+                var text = [CChar](repeating: 0, count: 4096)
+                engine_debug_text(handle, &text, 4096)
+                if !String(cString: text).contains("in hv_vcpu_run: false") || engine_progress(handle) == 0 { return 8 }
                 engine_tally_write(handle)
                 let tally = (try? String(contentsOfFile: tallyPath, encoding: .utf8)) ?? ""
                 for reason in [
@@ -171,6 +176,12 @@ final class HybridHarness {
                 where !tally.contains(reason) {
                     FileHandle.standardError.write(Data("tally lacks \(reason)\n".utf8))
                     return 6
+                }
+                if tally.contains("CR4 write") || !tally.contains("refused for the test")
+                    || !tally.contains("tcg 0x1234")
+                {
+                    FileHandle.standardError.write(Data("tally has a wrong row\n".utf8))
+                    return 9
                 }
                 if ProcessInfo.processInfo.environment["ENGINE_TALLY"] == nil { unlink(tallyPath) }
                 FileHandle.standardError.write(

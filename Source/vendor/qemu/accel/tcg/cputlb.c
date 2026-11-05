@@ -1703,7 +1703,15 @@ int probe_access_full_mmu(CPUArchState *env, vaddr addr, int size,
     /* Handle clean RAM pages.  */
     if (unlikely(flags & TLB_NOTDIRTY)) {
         int dirtysize = size == 0 ? 1 : size;
-        notdirty_write(env_cpu(env), addr, dirtysize, *pfull, 0);
+        /*
+         * Page walkers probe every table for store, then set A and D at most.
+         * With a handoff engine every RAM page stays clean so stores can be
+         * seen, and this is not one: it would drop the engine's shadow of each
+         * table walked, and mark it dirty so a real store later goes unseen.
+         */
+        if (likely(!tcg_handoff)) {
+            notdirty_write(env_cpu(env), addr, dirtysize, *pfull, 0);
+        }
         flags &= ~TLB_NOTDIRTY;
     }
 

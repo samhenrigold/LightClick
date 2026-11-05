@@ -124,6 +124,24 @@ public func engine_tally_start(_ h: OpaquePointer, _ path: UnsafePointer<CChar>)
 @_cdecl("engine_tally_write")
 public func engine_tally_write(_ h: OpaquePointer) { handle(h).engine.tally?.write() }
 
+@_cdecl("engine_tally_refused")
+public func engine_tally_refused(_ h: OpaquePointer, _ reason: UnsafePointer<CChar>) {
+    handle(h).engine.tally?.refused(String(cString: reason))
+}
+
+@_cdecl("engine_tally_sample")
+public func engine_tally_sample(_ h: OpaquePointer, _ rip: UInt64, _ cpl: UInt32, _ cr3: UInt64) {
+    handle(h).engine.tally?.tcgSample(rip: rip, cpl: cpl, cr3: cr3)
+}
+
+@_cdecl("engine_progress")
+public func engine_progress(_ h: OpaquePointer) -> UInt64 { handle(h).engine.progress() }
+
+@_cdecl("engine_debug_text")
+public func engine_debug_text(_ h: OpaquePointer, _ out: UnsafeMutablePointer<CChar>, _ size: UInt) {
+    strlcpy(out, handle(h).engine.debugText(), Int(size))
+}
+
 @_cdecl("engine_get_state")
 public func engine_get_state(_ h: OpaquePointer, _ out: UnsafeMutablePointer<EngineX86State>) {
     out.pointee = handle(h).engine.state()
