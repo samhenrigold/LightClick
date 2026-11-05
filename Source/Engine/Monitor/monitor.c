@@ -526,6 +526,7 @@ static u32 view_evict(void) {
     return best;
 }
 
+static u32 zap_why = KILL_RECLAIM; // for the tally: what the next zaps are for
 static void zap_entry(u64 *e, const ShadowDesc *d);
 
 // Every path that allocates shadow tables comes through here first, while it holds no pointer into them. Old views go first; if the running
@@ -535,6 +536,7 @@ static void pool_reclaim(void) {
     u32 limit = c->pool_limit ? c->pool_limit : POOL_PAGES;
     while (pool_free_count + (limit > pool_next ? limit - pool_next : 0) < POOL_MARGIN) {
         c->stat_pool_reclaim++;
+        zap_why = KILL_RECLAIM;
         if (view_evict() != MAX_VIEWS)
             continue;
         for (u32 i = 0; i < view_count; i++) {
@@ -853,8 +855,11 @@ static void zap_entry(u64 *e, const ShadowDesc *d) {
                 tlbi_va(view_asid(d->view), va);
         }
         if ((v & PTE_X_MARK) && !evicting) {
+            Walk now = (v & 1) ? x86_walk(views[d->view].cr3, va, 0, false) : (Walk){0};
             c->req_a[0] = d->view;
             c->req_a[1] = va;
+            c->req_a[2] = zap_why;
+            c->req_a[3] = now.ok && (now.gpa & ~0xfffULL) == (v & PTE_ADDR); // the guest's mapping of this page has not moved
             hostcall(HC_VIEW_INVALIDATE_VA);
             reset_all_return_stacks();
         }
@@ -897,6 +902,7 @@ static void zap_table(u32 idx) {
 #define PT_FLOOD_WRITES 64
 static void pt_slot_changed(u64 gpa_slot) {
     u32 fr = (u32)(gpa_slot >> 12), i = (u32)((gpa_slot & 0xfff) >> 3);
+    zap_why = KILL_PT_LEAF;
     for (u32 it = mirror_head[fr], next; it; it = next) {
         ShadowDesc *d = &desc[it - 1];
         u64 *t = pool_page(it - 1);
@@ -906,7 +912,9 @@ static void pt_slot_changed(u64 gpa_slot) {
             ShadowDesc pd = desc[pool_index(parent)];
             u32 view = d->view;
             c->stat_pt_unshadow++;
+            zap_why = KILL_PT_FLOOD;
             zap_entry(parent, &pd);
+            zap_why = KILL_PT_LEAF;
             __asm__ volatile("dsb ishst\n tlbi aside1is, %0\n dsb ish\n isb" : : "r"((u64)view_asid(view) << 48));
             next = mirror_head[fr]; // the list changed; anything still on it restarts, each has a bounded counter
             if (!next)
@@ -921,13 +929,16 @@ static void pt_slot_changed(u64 gpa_slot) {
             if (r[i]) {
                 ShadowDesc rd = *d;
                 rd.level = 3;
+                zap_why = KILL_PT_TABLE;
                 zap_entry(&r[i], &rd);
+                zap_why = KILL_PT_LEAF;
                 __asm__ volatile("dsb ishst\n tlbi aside1is, %0\n dsb ish\n isb" : : "r"((u64)view_asid(d->view) << 48));
             }
             continue;
         }
         if (t[i]) {
             bool table = d->level > 0;
+            zap_why = table ? KILL_PT_TABLE : KILL_PT_LEAF;
             zap_entry(&t[i], d);
             if (table) {
                 __asm__ volatile("dsb ishst\n tlbi aside1is, %0\n dsb ish\n isb" : : "r"((u64)view_asid(d->view) << 48));
@@ -1328,6 +1339,7 @@ static void handle_data_abort(bool lower) {
         // A store to a frame holding translated code. Kill those translations, run the store from a one-off block so that later
         // instructions in the same block see the new bytes, and leave the page writable until code runs from it again.
         c->req_a[0] = gpa;
+        c->req_a[1] = KILL_STORE;
         c->stat_smc++;
         hostcall(HC_SMC);
         page_info[gpa >> 12] = pi & ~PI_CODE;
@@ -1336,6 +1348,11 @@ static void handle_data_abort(bool lower) {
         tlbi_va(view_asid(c->view), far);
         c->elr = translate_here(rip_here(c->elr), 0, 0, true);
         return;
+    }
+    if (write && (pi & PI_PT) && !mirror_head[gpa >> 12]) { // no shadow mirrors it any more: an old table now holding data, which need not trap
+        pi &= ~PI_PT;
+        page_info[gpa >> 12] = pi;
+        c->stat_pt_stale++;
     }
     if (write && (pi & PI_PT)) {
         if (in_rep_stub(c->elr)) { // 32 bytes at a time is more slots than the one-step path below resyncs: on with the plain loop, one element per store
@@ -1576,6 +1593,7 @@ static void note_apply(u32 fr) {
     u8 pi = page_info[fr];
     if (pi & PI_CODE) {
         c->req_a[0] = (u64)fr << 12;
+        c->req_a[1] = KILL_NOTE;
         c->stat_note_code++;
         hostcall(HC_SMC);
         page_info[fr] &= ~PI_CODE;

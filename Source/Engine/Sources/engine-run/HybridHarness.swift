@@ -221,6 +221,15 @@ final class HybridHarness {
                     FileHandle.standardError.write(Data("tally lacks \(reason)\n".utf8))
                     return 6
                 }
+                // 250,000 stores go to a frame that stopped being a table: only the first may trap.
+                let stores = tally.split(separator: "\n").first { $0.hasPrefix("page-table stores") }?.split(
+                    separator: " "
+                ).dropFirst(2).first
+                if let stores, Int(stores) ?? .max > 100_000 {
+                    FileHandle.standardError.write(
+                        Data("a stale table still traps: \(stores) page-table stores\n".utf8))
+                    return 6
+                }
                 if tally.contains("CR4 write") || !tally.contains("refused for the test")
                     || !tally.contains("tcg 0x1234") || !tally.contains("vmport") || !tally.contains("FAULT vector 3")
                     || !tally.contains("wait4 returned 77 status 0x300 exit 3") || !tally.contains(" exit 7")

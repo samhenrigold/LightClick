@@ -373,9 +373,9 @@ public final class Engine {
                 tr_link(site, kind, result.arm, result.key)
             }
         case Int(HC_SMC):
-            _ = tr_invalidate_frame(c.pointee.req_a.0)
+            _ = tr_invalidate_frame(c.pointee.req_a.0, UInt32(c.pointee.req_a.1))
         case Int(HC_VIEW_INVALIDATE_VA):
-            _ = tr_invalidate_view_va(Int32(c.pointee.req_a.0), c.pointee.req_a.1)
+            _ = tr_invalidate_view_va(Int32(c.pointee.req_a.0), c.pointee.req_a.1, UInt32(c.pointee.req_a.2), c.pointee.req_a.3 != 0)
         case Int(HC_VIEW_DROP):
             tr_view_drop(Int32(c.pointee.req_a.0))
         case Int(HC_SYSCALL):

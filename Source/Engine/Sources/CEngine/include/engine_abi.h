@@ -182,6 +182,9 @@ typedef struct {
 } EngineEvent;
 #define EVENT_RING 128
 
+// Why translated blocks die, for the tally.
+enum { KILL_STORE, KILL_NOTE, KILL_PT_LEAF, KILL_PT_TABLE, KILL_PT_FLOOD, KILL_RECLAIM, KILL_VIEW_DROP, KILL_KINDS };
+
 typedef struct {
     uint64_t x[31]; // +0: x0-x30, saved on every monitor entry
     uint64_t elr; // +248
@@ -249,7 +252,7 @@ typedef struct {
     // Frames written behind the monitor's back (DMA, TCG), holding code or page tables. Many producers, consumed in the monitor.
     uint32_t note_head, note_tail, note_overflow, pad4;
     uint32_t note_ring[256]; // frame + 1
-    uint64_t stat_note_code, stat_note_pt, stat_nm;
+    uint64_t stat_note_code, stat_note_pt, stat_nm, stat_pt_stale;
     uint64_t stat_vector[256], vector_last_rip[256], vector_last_err[256], vector_last_cr3[256]; // every delivery, software int and #GP included
     uint64_t event_next;
     EngineEvent events[EVENT_RING];

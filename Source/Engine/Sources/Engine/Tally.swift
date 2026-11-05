@@ -304,6 +304,7 @@ public final class Tally: @unchecked Sendable {
 
         o += "\n== rates the design lists as unknown, totals and per wall second since hand-off ==\n"
         o += "page-table stores    " + perSecond(c.stat_pt_writes) + "\n"
+        o += "  frames found stale " + perSecond(c.stat_pt_stale) + "\n"
         o += "  dropping a table   " + perSecond(c.stat_pt_writes_zap) + "\n"
         o += "  by one-word step   " + perSecond(c.stat_pt_step) + "\n"
         o += "  tables unshadowed  " + perSecond(c.stat_pt_unshadow) + "\n"
@@ -311,7 +312,22 @@ public final class Tally: @unchecked Sendable {
         o += "cold x86 insns       " + perSecond(t.insns) + "\n"
         o += "cold ARM words       " + perSecond(t.words) + "\n"
         o += String(format: "translation time     %12.1f ms\n", seconds(t.translate_ns) * 1000)
-        o += "blocks invalidated   " + perSecond(t.invalidated) + "\n\n"
+        o += "blocks invalidated   " + perSecond(t.invalidated) + "\n"
+        o +=
+            "cold blocks a cache keyed by frame had: \(t.again_live) live in another view, \(t.again_dead) dead with the frame unchanged. Lower bounds\n\n"
+        o += "== why blocks died: blocks, of those with the page still on the same frame, calls ==\n"
+        let killed = withUnsafeBytes(of: t.killed) { Array($0.bindMemory(to: UInt64.self)) }
+        let unmoved = withUnsafeBytes(of: t.killed_unmoved) { Array($0.bindMemory(to: UInt64.self)) }
+        let calls = withUnsafeBytes(of: t.kill_calls) { Array($0.bindMemory(to: UInt64.self)) }
+        let kinds = [
+            "a store onto code", "DMA or TCG wrote code", "a leaf page-table store", "a store higher in the tables",
+            "a table written too often to shadow",
+            "the shadow pool ran out", "its view was reused"
+        ]
+        for (i, kind) in kinds.enumerated() {
+            o += String(format: "%12llu %12llu %12llu  ", killed[i], unmoved[i], calls[i]) + kind + "\n"
+        }
+        o += "\n"
 
         o += "== other counters ==\n"
         let counters: [(String, UInt64)] = [

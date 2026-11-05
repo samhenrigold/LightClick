@@ -30,11 +30,16 @@ typedef struct {
     u32 entry_word; // arm_off
     u64 frame[2]; // ~0 when unused
     u32 next_on_frame[2]; // block index + 1
+    u32 next_on_page[2]; // block index + 1: the x86 pages it was read from, for a change to their mappings
     bool dead, registered;
 } HostBlock;
 static HostBlock *hblocks;
 static u32 hblock_count;
 static u32 *frame_head; // per GPA frame: block index + 1
+#define PAGE_HEADS (1u << 18)
+static u32 *page_head; // by x86 page number, modulo PAGE_HEADS: block index + 1
+
+static inline u32 page_slot(u64 va) { return (u32)(va >> 12) & (PAGE_HEADS - 1); }
 
 // Lookup: (view, rip) to block index + 1. Open addressing, deleted entries keep probing.
 typedef struct {
@@ -528,6 +533,22 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     }
     (void)tail;
 
+    // How many blocks a cache keyed by frame would have saved.
+    if (res.frames[0] != ~0ULL && res.frames[0] < cfg.ram_size) {
+        u32 it = frame_head[res.frames[0] >> 12];
+        for (int look = 0; it && look < 32; look++) {
+            HostBlock *other = &hblocks[it - 1];
+            if (other->rip == rip) {
+                if (other->dead)
+                    stats.again_dead++;
+                else
+                    stats.again_live++;
+                break;
+            }
+            it = other->frame[0] == res.frames[0] ? other->next_on_frame[0] : other->next_on_frame[1];
+        }
+    }
+
     // Registers the block.
     u32 idx = hblock_count++;
     HostBlock *hb = &hblocks[idx];
@@ -541,6 +562,16 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
         if (hb->frame[f] != ~0ULL && hb->frame[f] < cfg.ram_size) {
             u32 *head = &frame_head[hb->frame[f] >> 12];
             hb->next_on_frame[f] = *head;
+            *head = idx + 1;
+        }
+    }
+    {
+        u32 *head = &page_head[page_slot(rip)];
+        hb->next_on_page[0] = *head;
+        *head = idx + 1;
+        if (hb->frame[1] != ~0ULL) { // it runs on into the next page
+            head = &page_head[page_slot(rip + 4096)];
+            hb->next_on_page[1] = *head;
             *head = idx + 1;
         }
     }
@@ -796,6 +827,7 @@ void tr_init(const TrConfig *config) {
     hblocks = calloc(BLOCKS_MAX, sizeof(HostBlock));
     block_map = calloc(MAP_SIZE, sizeof(MapEntry));
     frame_head = calloc(cfg.ram_size >> 12, sizeof(u32));
+    page_head = calloc(PAGE_HEADS, sizeof(u32));
 }
 
 TrResult tr_translate(int view, uint64_t cr3, int cpl, uint64_t rip, bool single) {
@@ -914,8 +946,9 @@ static void kill_block(u32 idx) {
     stats.invalidated++;
 }
 
-int tr_invalidate_frame(uint64_t gpa) {
+int tr_invalidate_frame(uint64_t gpa, uint32_t why) {
     int n = 0;
+    stats.kill_calls[why]++;
     if (gpa >= cfg.ram_size)
         return 0;
     u32 fr = (u32)(gpa >> 12);
@@ -931,27 +964,45 @@ int tr_invalidate_frame(uint64_t gpa) {
         }
         it = next;
     }
+    stats.killed[why] += (u64)n;
     return n;
 }
 
-int tr_invalidate_view_va(int view, uint64_t va) {
-    // Blocks are registered by frame, so this walks the view's blocks at this page via their start rip.
+int tr_invalidate_view_va(int view, uint64_t va, uint32_t why, bool unmoved) {
     int n = 0;
     u64 page = va & ~0xfffULL;
-    for (u32 i = 0; i < hblock_count; i++) {
-        HostBlock *hb = &hblocks[i];
-        if (!hb->dead && ((int)hb->view == view || (hb->view & KEY_DOMAIN)) && (hb->rip & ~0xfffULL) == page) {
-            kill_block(i);
-            n++;
+    u32 slot = page_slot(page);
+    u32 *link = &page_head[slot];
+    while (*link) {
+        HostBlock *hb = &hblocks[*link - 1];
+        u32 *next = &hb->next_on_page[(hb->rip >> 12 & (PAGE_HEADS - 1)) == slot ? 0 : 1];
+        if (hb->dead) { // dead blocks leave here, which keeps the chains as short as the live blocks on these pages
+            *link = *next;
+            continue;
         }
+        u64 first = hb->rip & ~0xfffULL;
+        if (((int)hb->view == view || (hb->view & KEY_DOMAIN)) && (first == page || (hb->frame[1] != ~0ULL && first + 4096 == page))) {
+            kill_block(*link - 1);
+            n++;
+            *link = *next;
+            continue;
+        }
+        link = next;
     }
+    stats.kill_calls[why]++;
+    stats.killed[why] += (u64)n;
+    if (unmoved)
+        stats.killed_unmoved[why] += (u64)n;
     return n;
 }
 
 void tr_view_drop(int view) {
+    stats.kill_calls[KILL_VIEW_DROP]++;
     for (u32 i = 0; i < hblock_count; i++)
-        if (!hblocks[i].dead && (int)hblocks[i].view == view)
+        if (!hblocks[i].dead && (int)hblocks[i].view == view) {
             kill_block(i);
+            stats.killed[KILL_VIEW_DROP]++;
+        }
     memset(hash_table(view), 0, HASH_BYTES);
     ctx_ptr->tr_flushed = 1;
 }
@@ -964,6 +1015,7 @@ void tr_flush_all(void) {
     ctx_ptr->block_count = 0;
     memset(block_map, 0, MAP_SIZE * sizeof(MapEntry));
     memset(frame_head, 0, (cfg.ram_size >> 12) * sizeof(u32));
+    memset(page_head, 0, PAGE_HEADS * sizeof(u32));
     for (int v = 0; v <= view_high; v++)
         memset(hash_table(v), 0, HASH_BYTES);
 }

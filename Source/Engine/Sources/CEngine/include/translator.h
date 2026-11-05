@@ -38,10 +38,10 @@ void tr_link(uint64_t site, int kind, uint64_t arm, int key);
 // Installs a lookup entry in the view's indirect-branch table.
 void tr_hash_insert(int view, uint64_t rip, uint64_t arm);
 
-// Invalidates every block translated from a guest frame, in all views. Returns the count.
-int tr_invalidate_frame(uint64_t gpa);
-// Invalidates the blocks of one view at one x86 page (its mapping changed).
-int tr_invalidate_view_va(int view, uint64_t va);
+// Invalidates every block translated from a guest frame, in all views. Returns the count. why: a KILL_ value.
+int tr_invalidate_frame(uint64_t gpa, uint32_t why);
+// Invalidates the blocks of one view at one x86 page (its mapping changed). unmoved: the page still maps the same frame.
+int tr_invalidate_view_va(int view, uint64_t va, uint32_t why, bool unmoved);
 // Forgets a view being reused for another address space: its own blocks and its lookup table.
 void tr_view_drop(int view);
 // Forgets one whole view.
@@ -54,6 +54,10 @@ typedef struct {
     uint64_t blocks, insns, words;
     uint64_t invalidated;
     uint64_t translate_ns;
+    uint64_t killed[KILL_KINDS], killed_unmoved[KILL_KINDS], kill_calls[KILL_KINDS];
+    // Cold blocks at a rip and frame some earlier block already covers, live in another view or dead with the frame unchanged:
+    // what translations keyed by frame would have saved. Looks at only the first few blocks on the frame, so these are lower bounds.
+    uint64_t again_live, again_dead;
 } TrStats;
 TrStats tr_stats(void);
 

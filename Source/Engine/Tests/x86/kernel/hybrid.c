@@ -822,6 +822,23 @@ static void test_process_log(u64 root) {
     // The harness checks the log. The gate needs putting back for nothing else: nothing here takes a breakpoint again.
 }
 
+// A table the guest stopped using and now keeps data in. Trapping every store there cost one boot 250,000 stores a
+// second.
+static void test_stale_table(u64 root) {
+    u64 va = TEST_VA + 0x40000000; // a page directory entry of its own
+    u64 *leaf = pte_of(root, va);
+    u64 table = ((u64)leaf - PHYSMAP) & ~0xFFFULL;
+    u64 third = PHYS(root)[(va >> 39) & 0x1ff] & 0x000FFFFFFFFFF000ULL;
+    volatile u64 *directory = PHYS(PHYS(third)[(va >> 30) & 0x1ff] & 0x000FFFFFFFFFF000ULL);
+    leaf[0] = frame() | PRESENT_RW;
+    CHECK(*(volatile u64 *)va != 1); // walked: the frame is tracked
+    directory[(va >> 21) & 0x1ff] = 0; // no longer a table
+    for (int round = 0; round < 500; round++)
+        for (int i = 0; i < 512; i++)
+            PHYS(table)[i] = (u64)(round + i);
+    CHECK(PHYS(table)[511] == 499 + 511);
+}
+
 // MMX registers live with the engine between fallbacks, and TCG needs them, with the tags as MMX leaves them, at each
 // one.
 static void test_mmx(void) {
@@ -891,6 +908,7 @@ void kmain(void) {
     test_lazy_fp(root);
     test_split_store_fault(root);
     test_mmx();
+    test_stale_table(root);
     test_process_log(root);
     test_view_churn(root);
     CHECK(!bad_vector);
