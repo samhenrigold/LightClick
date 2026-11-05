@@ -205,7 +205,8 @@ void cpu_x86_update_cr3(CPUX86State *env, target_ulong new_cr3)
         if (x86_tcg_pcid_contexts && (env->cr[4] & CR4_PCIDE_MASK) &&
             !(env->hflags & (HF_SMM_MASK | HF_GUEST_MASK))) {
             /* CR3 bits 11:0 are the PCID while CR4.PCIDE is set. */
-            tlb_context_switch(env_cpu(env), new_cr3, 0xfff, preserve);
+            tlb_context_switch(env_cpu(env), new_cr3, 0xfff, preserve,
+                               x86_tcg_keep_phys_tlb ? 1u << MMU_PHYS_IDX : 0);
         } else
 #endif
         if (x86_tcg_keep_phys_tlb && !(env->hflags & HF_SMM_MASK)) {

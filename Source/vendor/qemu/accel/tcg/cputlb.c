@@ -89,7 +89,8 @@ static void __attribute__((constructor)) pvg_init_tlb_floor(void)
 #if defined(__aarch64__)
     pvg_context_jump_cache = pvg_tcg_fast_path("PVG_TCG_CONTEXT_JMP_CACHE");
     pvg_tlb_floor_bits = 12;
-    pvg_tlb_floor_mask = 4;
+    /* User64, plus phys: it's kept across CR3 and so never resized at a flush. */
+    pvg_tlb_floor_mask = 0x44;
     const char *value = getenv("PVG_TCG_TLB_FLOOR_BITS");
     if (value) {
         char *end;
@@ -432,7 +433,7 @@ static void tlb_context_invalidate_locked(CPUState *cpu, bool forget_active)
 }
 
 void tlb_context_switch(CPUState *cpu, uint64_t key, uint64_t tag_mask,
-                        bool preserve)
+                        bool preserve, MMUIdxMap keep)
 {
     CPUTLBContextCache *cache;
     CPUTLBContextBank *bank;
@@ -472,7 +473,9 @@ void tlb_context_switch(CPUState *cpu, uint64_t key, uint64_t tag_mask,
          * which already invalidated every other bank. */
         cache->flushes += !cache->known;
         for (int i = 0; i < NB_MMU_MODES; i++) {
-            tlb_flush_one_mmuidx_locked(cpu, i, get_clock_realtime());
+            if (!(keep & (1u << i))) {
+                tlb_flush_one_mmuidx_locked(cpu, i, get_clock_realtime());
+            }
         }
         cache->known = true;
         bank = &cache->bank[cache->active];
@@ -507,6 +510,9 @@ void tlb_context_switch(CPUState *cpu, uint64_t key, uint64_t tag_mask,
             }
         } else if (!bank->valid || bank->key != key) {
             for (int i = 0; i < NB_MMU_MODES; i++) {
+                if (keep & (1u << i)) {
+                    continue; /* Swapped out below and never made active. */
+                }
                 /* Preserve the normal occupancy-driven growth policy. Bank
                  * reuse must not pin memory-heavy contexts to 256 entries. */
                 tlb_mmu_resize_locked(&bank->d[i],
@@ -518,6 +524,20 @@ void tlb_context_switch(CPUState *cpu, uint64_t key, uint64_t tag_mask,
         }
         bank->key = key;
         bank->valid = true;
+        /* Kept modes travel with the active context, so every invalidation
+         * that reaches the active TLB reaches them too. */
+        for (int i = 0; i < NB_MMU_MODES; i++) {
+            if (keep & (1u << i)) {
+                int fi = mmuidx_to_fast_index(i);
+                CPUTLBDesc d = bank->d[i];
+                CPUTLBDescFast f = bank->f[fi];
+
+                bank->d[i] = cache->bank[cache->active].d[i];
+                bank->f[fi] = cache->bank[cache->active].f[fi];
+                cache->bank[cache->active].d[i] = d;
+                cache->bank[cache->active].f[fi] = f;
+            }
+        }
         cpu->neg.tlb.d = bank->d;
         memcpy(cpu->neg.tlb.f, bank->f, sizeof(cpu->neg.tlb.f));
         cache->active = slot;

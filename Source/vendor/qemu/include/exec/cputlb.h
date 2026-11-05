@@ -31,9 +31,10 @@
 void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length);
 void tlb_reset_dirty_range_all(ram_addr_t start, ram_addr_t length);
 /* Local context-retention experiment. Owner vCPU only. */
-/* A non-preserving switch invalidates every bank whose key matches in tag_mask. */
+/* A non-preserving switch invalidates every bank whose key matches in tag_mask.
+ * Modes in keep don't depend on the context: they survive and aren't banked. */
 void tlb_context_switch(CPUState *cpu, uint64_t key, uint64_t tag_mask,
-                        bool preserve);
+                        bool preserve, MMUIdxMap keep);
 /* Snapshot: switches, bank hits, misses, flushing writes, same-key keeps. */
 void tlb_context_counts(CPUState *cpu, uint64_t counts[5]);
 bool tlb_context_jump_cache_enabled(void);
