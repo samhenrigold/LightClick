@@ -2421,6 +2421,8 @@ void mon_sync(void) {
                 c->req_a[1] = c->x[R_S1];
                 c->req_a[2] = n == SVC_OUT;
                 c->req_a[3] = c->x[R_S2];
+                if (c->hybrid) // who wrote a port, for the host to report
+                    c->req_a[4] = rip_here(c->elr - 4);
                 hostcall(HC_PORT);
                 if (n == SVC_IN)
                     c->x[R_S0] = c->req_r[0];

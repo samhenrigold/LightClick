@@ -105,6 +105,10 @@ void engine_tally_start(EngineHandle *engine, const char *path);
 void engine_tally_write(EngineHandle *engine);
 // The vCPU stays off the engine for this reason, until the next engine_run. Timed and ranked with the fallbacks. Any thread.
 void engine_tally_refused(EngineHandle *engine, const char *reason);
+// A line for the top of the tally. Any thread.
+void engine_tally_note(EngineHandle *engine, const char *text);
+// From port_write: records the access in progress with its rip, CR3, the bytes there, a frame-pointer walk and the stack. slide is subtracted for the unslid column.
+void engine_tally_port_write(EngineHandle *engine, uint16_t port, unsigned size, uint32_t value, uint64_t slide);
 // A rip seen while the vCPU is off the engine. Any thread.
 void engine_tally_sample(EngineHandle *engine, uint64_t rip, uint32_t cpl, uint64_t cr3);
 // Any thread. Grows when the guest does anything the monitor or translator sees; unchanged means spinning in translated code, or off the engine.

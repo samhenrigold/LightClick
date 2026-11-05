@@ -378,6 +378,19 @@ static void test_vmport(void) {
     CHECK(rax == 7);
 }
 
+// A write to PM1a_CNT is how a guest powers off, so its size and value had better be what the instruction says, with
+// the rest of rax not leaking in.
+static void test_port_forms(void) {
+    __asm__ volatile("mov $0xA5A50000, %%rax\n or $0x2000, %%rax\n mov $0x604, %%dx\n outw %%ax, %%dx"
+                     :
+                     :
+                     : "rax", "rdx");
+    __asm__ volatile("mov $0xA5A50020, %%rax\n mov $0x605, %%dx\n outb %%al, %%dx" : : : "rax", "rdx");
+    __asm__ volatile("mov $0xA5A50006, %%rax\n outb %%al, $0x70" : : : "rax");
+    __asm__ volatile("mov $0x12345678, %%rax\n mov $0x608, %%dx\n outl %%eax, %%dx" : : : "rax", "rdx");
+    command(9); // the host checks what it saw
+}
+
 void kmain(void) {
     __asm__ volatile("mov $0x10, %%ax\n mov %%ax, %%ds\n mov %%ax, %%es\n mov %%ax, %%ss\n" : : : "ax");
     tables();
@@ -392,6 +405,7 @@ void kmain(void) {
     test_busy();
     test_cr4();
     test_vmport();
+    test_port_forms();
     test_view_churn(root);
     CHECK(!bad_vector);
     puts_("hybrid checks passed\n");

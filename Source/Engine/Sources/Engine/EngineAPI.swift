@@ -129,6 +129,14 @@ public func engine_tally_refused(_ h: OpaquePointer, _ reason: UnsafePointer<CCh
     handle(h).engine.tally?.refused(String(cString: reason))
 }
 
+@_cdecl("engine_tally_note")
+public func engine_tally_note(_ h: OpaquePointer, _ text: UnsafePointer<CChar>) { handle(h).engine.tally?.note(String(cString: text)) }
+
+@_cdecl("engine_tally_port_write")
+public func engine_tally_port_write(_ h: OpaquePointer, _ port: UInt16, _ size: UInt32, _ value: UInt32, _ slide: UInt64) {
+    handle(h).engine.tally?.portWrite(port: port, size: size, value: value, slide: slide)
+}
+
 @_cdecl("engine_tally_sample")
 public func engine_tally_sample(_ h: OpaquePointer, _ rip: UInt64, _ cpl: UInt32, _ cr3: UInt64) {
     handle(h).engine.tally?.tcgSample(rip: rip, cpl: cpl, cr3: cr3)

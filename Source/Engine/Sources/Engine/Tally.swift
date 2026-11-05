@@ -30,6 +30,8 @@ public final class Tally: @unchecked Sendable {
     private var lastReason: String?
     private var lastLeftEngine: UInt64 = 0
     private var fallbacks: UInt64 = 0
+    private var notes: [String] = []
+    private var portWrites: [String] = []
 
     init(engine: Engine, path: String) {
         self.engine = engine
@@ -74,6 +76,51 @@ public final class Tally: @unchecked Sendable {
         lastReason = reason
         lastLeftEngine = mach_absolute_time()
         lock.unlock()
+    }
+
+    func note(_ text: String) {
+        lock.lock()
+        notes.append(text)
+        lock.unlock()
+    }
+
+    /// Runs on the vCPU thread during the port write, so the monitor's copy of the registers is the guest's.
+    func portWrite(port: UInt16, size: UInt32, value: UInt32, slide: UInt64) {
+        let c = engine.ctx.pointee
+        let rip = c.req_a.4
+        let regs = withUnsafeBytes(of: c.x) { Array($0.bindMemory(to: UInt64.self)) }
+        func unslid(_ at: UInt64) -> String { hex(at) + " unslid " + hex(at &- slide) }
+        var o = String(format: "%.3f s: ", seconds(mach_absolute_time() &- startTicks))
+        o +=
+            "port \(hex(UInt64(port))) size \(size) value \(hex(UInt64(value))) rip \(unslid(rip)) cpl \(c.cpl) cr3 \(hex(c.cr3))\n"
+        o += "  bytes at rip: " + engine.bytes(at: rip, count: 16) + "\n"
+        o +=
+            "  rax \(hex(regs[0])) rdx \(hex(regs[2])) rsp \(hex(regs[4])) rbp \(hex(regs[5]))\n  frame pointers, return addresses:\n"
+        var frame = regs[5]
+        for _ in 0..<32 {
+            guard let words = engine.readGuest(frame, count: 16) else { break }
+            let (next, back) = words.withUnsafeBytes {
+                (
+                    $0.loadUnaligned(fromByteOffset: 0, as: UInt64.self),
+                    $0.loadUnaligned(fromByteOffset: 8, as: UInt64.self)
+                )
+            }
+            o += "    " + unslid(back) + "\n"
+            if next <= frame { break }
+            frame = next
+        }
+        o += "  stack from rsp:\n"
+        if let stack = engine.readGuest(regs[4], count: 256) {
+            stack.withUnsafeBytes { raw in
+                for i in 0..<32 {
+                    o += hex(raw.loadUnaligned(fromByteOffset: i * 8, as: UInt64.self)) + (i % 4 == 3 ? "\n" : " ")
+                }
+            }
+        }
+        lock.lock()
+        portWrites.append(o)
+        lock.unlock()
+        write()
     }
 
     func tcgSample(rip: UInt64, cpl: UInt32, cr3: UInt64) { addSample("tcg", rip, cpl, cr3) }
@@ -157,7 +204,14 @@ public final class Tally: @unchecked Sendable {
         }
         o += String(format: "seconds since hand-off: %.1f\n", elapsed)
         o += "hand-off rip: " + (firstRIP.map(hex) ?? "none") + "\n"
-        o += "last rip sample: " + (samples.last ?? "none") + "\n\n"
+        o += "last rip sample: " + (samples.last ?? "none") + "\n"
+        for note in notes { o += note + "\n" }
+        o += "\n"
+        if !portWrites.isEmpty {
+            o +=
+                "== writes to the power and reset ports, in order. Bit 13 of PM1a_CNT is SLP_EN ==\n"
+                + portWrites.joined() + "\n"
+        }
 
         o +=
             "== stops and fallbacks, ranked by count. tcg_ms: time away from the engine after each, with TCG running ==\n"

@@ -16,6 +16,7 @@ final class HybridHarness {
     var pendingVector = false
     var acks = 0
     var slept: UInt64 = 0
+    var portsSeen: [String] = []
 
     func host(_ gpa: UInt64) -> UnsafeMutableRawPointer { ram + Int(gpa >= 1 << 32 ? gpa - (1 << 32) + below : gpa) }
     func mailbox(_ i: Int) -> UInt64 { host(0x3000).load(fromByteOffset: i * 8, as: UInt64.self) }
@@ -45,6 +46,10 @@ final class HybridHarness {
         case 7:
             // Every frame of low RAM, far more than the ring holds. Few are marked, so write far more notes than that: all of the kernel image.
             for _ in 0..<600 { engine_note_write(handle, 1 << 20, 16 << 20) }
+        case 9:
+            let want = ["1540:2:a5a52000", "1541:1:a5a50020", "112:1:a5a50006", "1544:4:12345678"]
+            // Only the low `size` bytes of a value count: address_space_write takes those.
+            if portsSeen != want { failed = "port writes were \(portsSeen)" }
         case 8:
             // Between the two rdtsc there is a little more than the sleep, so allow some way above 1.2.
             let ratio = Double(mailbox(1)) / (Double(slept) * 125 / 3)
@@ -86,9 +91,12 @@ final class HybridHarness {
                 h.deviceWrites += 1
             },
             port_read: { _, _, _ in 0xFFFF_FFFF },
-            port_write: { _, port, _, value in
+            port_write: { _, port, size, value in
                 let h = HybridHarness.current!
-                if port == 0xE9 {
+                if port == 0x604 || port == 0x605 || port == 0x70 || port == 0x608 {
+                    h.portsSeen.append("\(port):\(size):\(String(value, radix: 16))")
+                    if port == 0x604 { engine_tally_port_write(h.handle, port, size, value, 0x1000) }
+                } else if port == 0xE9 {
                     FileHandle.standardOutput.write(Data([UInt8(truncatingIfNeeded: value)]))
                 } else if port == 0xF4 {
                     h.exitCode = value
@@ -178,7 +186,9 @@ final class HybridHarness {
                     return 6
                 }
                 if tally.contains("CR4 write") || !tally.contains("refused for the test")
-                    || !tally.contains("tcg 0x1234") || !tally.contains("vmport") || !tally.contains("vector 0x7")
+                    || !tally.contains("tcg 0x1234") || !tally.contains("vmport")
+                    || !tally.contains("port 0x604 size 2")
+                    || !tally.contains("unslid") || !tally.contains("vector 0x7")
                     || !tally.contains("\nC 0x0 ")
                 {
                     FileHandle.standardError.write(Data("tally has a wrong row\n".utf8))

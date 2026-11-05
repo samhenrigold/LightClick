@@ -58,8 +58,12 @@ static struct {
     unsigned written_count;
     bool protect_all;
     char refused[64]; /* why the vCPU is on TCG, while it is */
+    uint64_t kernel_base, kernel_slide;
+    bool shutdown_dumped;
     bool dump_done;
 } hv;
+
+static void hvdbt_dump_kernel(CPUState *cs, const char *path);
 
 /* ---- Devices: the vCPU thread, BQL taken here, as TCG's slow path would. ---- */
 
@@ -102,8 +106,30 @@ static uint32_t hvdbt_port_read(void *opaque, uint16_t port, unsigned size)
     return v;
 }
 
+/*
+ * Who powers off or resets. shortcut: PMBASE as OVMF sets it on q35, 0x600, seen in every run so far. Writes run by TCG don't pass here, so a shutdown
+ * with no row means TCG made it.
+ */
+static void hvdbt_watch_power_ports(CPUState *cs, uint16_t port, unsigned size, uint32_t value)
+{
+    const char *kernel = getenv("LC_HVDBT_KERNEL");
+    bool off = (port == 0x604 && size >= 2 && (value & 0x2000)) || (port == 0x605 && (value & 0x20));
+    bool reset = port == 0xcf9 && (value & 4);
+
+    if (port != 0x604 && port != 0x605 && port != 0xcf9) {
+        return;
+    }
+    engine_tally_port_write(hv.engine, port, size, value, hv.kernel_slide);
+    if ((off || reset) && kernel && !hv.shutdown_dumped) { /* the kernel's data as it stands now: its message buffer, and any panic string */
+        g_autofree char *path = g_strdup_printf("%s.shutdown", kernel);
+        hv.shutdown_dumped = true;
+        hvdbt_dump_kernel(cs, path);
+    }
+}
+
 static void hvdbt_port_write(void *opaque, uint16_t port, unsigned size, uint32_t value)
 {
+    hvdbt_watch_power_ports(opaque, port, size, value);
     bql_lock();
     address_space_write(&address_space_io, port, MEMTXATTRS_UNSPECIFIED, &value, size);
     hvdbt_after_device(opaque);
@@ -386,7 +412,7 @@ static void hvdbt_write_tally_at_exit(void)
 }
 
 static void *hvdbt_watchdog(void *arg);
-static void hvdbt_dump_kernel(CPUState *cs, const char *path);
+static void hvdbt_find_kernel(CPUState *cs);
 
 static bool hvdbt_create(CPUState *cs)
 {
@@ -444,6 +470,7 @@ static bool hvdbt_create(CPUState *cs)
         engine_tally_start(engine, tally);
         atexit(hvdbt_write_tally_at_exit);
     }
+    hvdbt_find_kernel(cs);
     if (getenv("LC_HVDBT_KERNEL")) {
         hvdbt_dump_kernel(cs, getenv("LC_HVDBT_KERNEL"));
     }
@@ -670,28 +697,38 @@ static void hvdbt_screen_bh(void *opaque)
     fclose(f);
 }
 
+/* The header sits below the hand-off rip. The slide is measured from the unslid base of a 64-bit XNU, from memory; symbolising a rip by it checks that. */
+static void hvdbt_find_kernel(CPUState *cs)
+{
+    const uint64_t unslid_base = 0xffffff8000200000ULL;
+    CPUX86State *env = cpu_env(cs);
+    uint32_t head[8];
+
+    for (uint64_t at = env->eip & ~0xfffULL; at > env->eip - (64ULL << 20); at -= 4096) {
+        if (!cpu_memory_rw_debug(cs, at, head, sizeof head, false) && head[0] == 0xfeedfacf && head[3] == 2 /* MH_EXECUTE */) {
+            g_autofree char *line = g_strdup_printf("kernel header at 0x%" PRIx64 ", slide 0x%" PRIx64, at, at - unslid_base);
+            hv.kernel_base = at;
+            hv.kernel_slide = at - unslid_base;
+            engine_tally_note(hv.engine, line);
+            return;
+        }
+    }
+    engine_tally_note(hv.engine, "no kernel Mach-O header below the hand-off rip");
+}
+
 /*
  * Rebuilds the running kernel's Mach-O from guest memory while its symbols are still loaded: at hand-off, __LINKEDIT hasn't been dropped. nm and otool
  * work on it directly, and a guest rip minus the slide printed here is an unslid address. For reading stalls only: it stays on this machine.
  */
 static void hvdbt_dump_kernel(CPUState *cs, const char *path)
 {
-    const uint64_t unslid_base = 0xffffff8000200000ULL;
-    CPUX86State *env = cpu_env(cs);
-    uint64_t base = 0;
+    uint64_t base = hv.kernel_base;
     uint32_t head[8];
 
-    for (uint64_t at = env->eip & ~0xfffULL; at > env->eip - (64ULL << 20); at -= 4096) {
-        if (!cpu_memory_rw_debug(cs, at, head, sizeof head, false) && head[0] == 0xfeedfacf && head[3] == 2 /* MH_EXECUTE */) {
-            base = at;
-            break;
-        }
-    }
-    if (!base) {
-        fprintf(stderr, "hvdbt: no kernel Mach-O header below the hand-off rip\n");
+    if (!base || cpu_memory_rw_debug(cs, base, head, sizeof head, false)) {
+        fprintf(stderr, "hvdbt: no kernel Mach-O header to dump\n");
         return;
     }
-    fprintf(stderr, "hvdbt: kernel header at 0x%" PRIx64 ", so slide 0x%" PRIx64 " if the unslid base is 0x%" PRIx64 "\n", base, base - unslid_base, unslid_base);
     FILE *f = fopen(path, "wb");
     if (!f) {
         return;
