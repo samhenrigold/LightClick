@@ -75,10 +75,26 @@ static void __attribute__((constructor)) init_fast_ptw(void)
     x86_tcg_fast_ptw = pvg_tcg_fast_path("PVG_TCG_FAST_PTW");
 }
 
+/* PVG_TCG_EVENTS only: pages the walker read recently, direct-mapped. A hit is
+ * exact; a page leaves when another hashes over it.
+ * shortcut: a writable TLB entry made before the page was walked goes uncounted
+ * until flushed, and probe_access stores are not counted. Enough for an estimate;
+ * upgrade if deciding on write-protect traps needs an exact count. */
+static uint32_t pvg_pt_pages[4096];
+
+static inline uint32_t *pvg_pt_slot(hwaddr addr)
+{
+    return &pvg_pt_pages[(addr >> TARGET_PAGE_BITS) % ARRAY_SIZE(pvg_pt_pages)];
+}
+
 static bool ptw_translate(PTETranslate *inout, hwaddr addr)
 {
     int flags;
 
+    if (unlikely(pvg_events_enabled)) {
+        /* + 1 so the zeroed table doesn't claim page 0. */
+        qatomic_set(pvg_pt_slot(addr), (addr >> TARGET_PAGE_BITS) + 1);
+    }
     inout->gaddr = addr;
     if (x86_tcg_fast_ptw && inout->ptw_idx == MMU_PHYS_IDX) {
         CPUTLBDescFast *fast = cpu_tlb_fast(env_cpu(inout->env), MMU_PHYS_IDX);
@@ -657,10 +673,19 @@ bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
          * avoid filling it too fast.
          */
         assert(out.prot & (1 << access_type));
-        tlb_set_page_with_attrs(cs, addr & TARGET_PAGE_MASK,
-                                out.paddr & TARGET_PAGE_MASK,
-                                cpu_get_mem_attrs(env),
-                                out.prot, mmu_idx, out.page_size);
+        CPUTLBEntryFull full = {
+            .phys_addr = out.paddr & TARGET_PAGE_MASK,
+            .attrs = cpu_get_mem_attrs(env),
+            .prot = out.prot,
+            .lg_page_size = ctz64(out.page_size),
+        };
+        /* The walker reaches these pages through MMU_PHYS_IDX, so leave it fast. */
+        if (unlikely(pvg_events_enabled) && mmu_idx < MMU_PHYS_IDX &&
+            qatomic_read(pvg_pt_slot(out.paddr)) ==
+            (uint32_t)((out.paddr >> TARGET_PAGE_BITS) + 1)) {
+            full.tlb_fill_flags = TLB_PVG_PT_WRITE;
+        }
+        tlb_set_page_full(cs, mmu_idx, addr & TARGET_PAGE_MASK, &full);
         return true;
     }
 

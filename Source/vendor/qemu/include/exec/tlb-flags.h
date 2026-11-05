@@ -53,10 +53,12 @@
 #define TLB_DISCARD_WRITE    (1 << 3)
 /* Set if TLB entry is an IO callback.  */
 #define TLB_MMIO             (1 << 4)
+/* Set on stores to a recent guest page table, only under PVG_TCG_EVENTS. */
+#define TLB_PVG_PT_WRITE     (1 << 5)
 
 #define TLB_SLOW_FLAGS_MASK \
     (TLB_BSWAP | TLB_WATCHPOINT | TLB_CHECK_ALIGNED | \
-     TLB_DISCARD_WRITE | TLB_MMIO)
+     TLB_DISCARD_WRITE | TLB_MMIO | TLB_PVG_PT_WRITE)
 
 /*
  * Flags stored in CPUTLBEntry.addr_idx[x].

@@ -1461,6 +1461,7 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
 
     /* Now calculate the new entry */
     tn.addend = addend - addr_page;
+    read_flags &= ~TLB_PVG_PT_WRITE;
 
     tlb_set_compare(full, &tn, addr_page, read_flags,
                     MMU_INST_FETCH, prot & PAGE_EXEC);
@@ -1704,7 +1705,8 @@ static int probe_access_internal(CPUState *cpu, vaddr addr,
         flags |= TLB_FORCE_SLOW;
     }
 
-    *phost = (flags & ~(TLB_WATCHPOINT | TLB_NOTDIRTY | TLB_CHECK_ALIGNED)
+    *phost = (flags & ~(TLB_WATCHPOINT | TLB_NOTDIRTY | TLB_CHECK_ALIGNED |
+                        TLB_PVG_PT_WRITE)
               ? NULL
               : (void *)((uintptr_t)addr + entry->addend));
     return flags;
@@ -1998,6 +2000,11 @@ static void mmu_watch_or_dirty(CPUState *cpu, MMULookupPageData *data,
     int flags = data->flags;
     int size = data->size;
 
+    if (flags & TLB_PVG_PT_WRITE) {
+        PVG_EVENT(PT_WRITE);
+        flags &= ~TLB_PVG_PT_WRITE;
+    }
+
     /* On watchpoint hit, this will longjmp out.  */
     if (flags & TLB_WATCHPOINT) {
         int wp = access_type == MMU_DATA_STORE ? BP_MEM_WRITE : BP_MEM_READ;
@@ -2049,7 +2056,7 @@ static bool mmu_lookup(CPUState *cpu, vaddr addr, MemOpIdx oi,
     crosspage = (addr ^ last) & TARGET_PAGE_MASK;
     if (likely(!crosspage)) {
         flags = l->page[0].flags;
-        if (unlikely(flags & (TLB_WATCHPOINT | TLB_NOTDIRTY))) {
+        if (unlikely(flags & (TLB_WATCHPOINT | TLB_NOTDIRTY | TLB_PVG_PT_WRITE))) {
             mmu_watch_or_dirty(cpu, &l->page[0], type, ra);
         }
         if (unlikely(flags & TLB_BSWAP)) {
@@ -2075,7 +2082,7 @@ static bool mmu_lookup(CPUState *cpu, vaddr addr, MemOpIdx oi,
         }
 
         flags = l->page[0].flags | l->page[1].flags;
-        if (unlikely(flags & (TLB_WATCHPOINT | TLB_NOTDIRTY))) {
+        if (unlikely(flags & (TLB_WATCHPOINT | TLB_NOTDIRTY | TLB_PVG_PT_WRITE))) {
             mmu_watch_or_dirty(cpu, &l->page[0], type, ra);
             mmu_watch_or_dirty(cpu, &l->page[1], type, ra);
         }
@@ -2178,6 +2185,9 @@ static void *atomic_mmu_lookup(CPUState *cpu, vaddr addr, MemOpIdx oi,
 
     hostaddr = (void *)((uintptr_t)addr + tlbe->addend);
 
+    if (unlikely(tlb_addr & TLB_PVG_PT_WRITE)) {
+        PVG_EVENT(PT_WRITE);
+    }
     if (unlikely(tlb_addr & TLB_NOTDIRTY)) {
         notdirty_write(cpu, addr, size, full, retaddr);
     }
