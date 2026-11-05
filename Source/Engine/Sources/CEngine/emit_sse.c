@@ -849,9 +849,30 @@ void emit_sse(const Insn *in, int live) {
             break;
         }
         case 0x52:
-        case 0x53:
-            bad(in, "rcpps or rsqrtps: Intel's approximation tables are not reproduced");
+        case 0x53: {
+            // What TCG computes, Intel's tables being reproduced nowhere here: 1/x and 1/sqrt(x) exact, with the MXCSR flags left as they were.
+            if (pfx != 0 && pfx != 0xF3) {
+                svc(SVC_UD);
+                break;
+            }
+            bool scalar = pfx == 0xF3;
+            int s = src_op(in, scalar ? 2 : 4, !scalar);
+            E(0xD53B4420u | S0); // mrs x, fpsr
+            E(0x4F03F600u | V_S1); // fmov v.4s, #1.0
+            if (scalar) {
+                if (opc == 0x52)
+                    RR(0x1E21C000u, V_S2, s); // fsqrt s
+                RRR(0x1E201800u, V_S2, V_S1, opc == 0x52 ? V_S2 : s); // fdiv s
+                ins_elem(d, 0, V_S2, 0, 4);
+            } else if (opc == 0x52) {
+                RR(0x6EA1F800u, V_S2, s); // fsqrt .4s
+                RRR(0x6E20FC00u, d, V_S1, V_S2); // fdiv .4s
+            } else {
+                RRR(0x6E20FC00u, d, V_S1, s);
+            }
+            E(0xD51B4420u | S0); // msr fpsr, x
             break;
+        }
         case 0x54:
         case 0x55:
         case 0x56:

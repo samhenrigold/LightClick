@@ -1002,6 +1002,65 @@ static void test_shared_return(u64 root) {
     CHECK(shared_run_with_stack(b, root) == 21);
 }
 
+// rcpps and rsqrtps as TCG computes them: exact, against divps and sqrtps here, with no flag raised even where those
+// raise one.
+static void test_reciprocals(void) {
+    static const u32 values[12]
+        __attribute__((aligned(16))) = {0x3F800000, 0x40490FDB, 0xC0000000, 0x00000000, 0x80000000, 0x7F800000,
+                                        0xFF800000, 0x7FC00001, 0x7F800001, 0x00000001, 0x3EAAAAAB, 0x7F7FFFFF};
+    static const u32 ones[4] __attribute__((aligned(16))) = {0x3F800000, 0x3F800000, 0x3F800000, 0x3F800000};
+    for (int at = 0; at < 12; at += 4) {
+        u32 got[4] __attribute__((aligned(16))), want[4] __attribute__((aligned(16))),
+            scalar[4] __attribute__((aligned(16)));
+        u32 before, after, clean = 0x1F80;
+        __asm__ volatile("ldmxcsr %0" : : "m"(clean));
+        __asm__ volatile("movaps %2, %%xmm1\n rcpps %%xmm1, %%xmm2\n movaps %%xmm2, %0\n stmxcsr %1\n"
+                         : "=m"(got), "=m"(before)
+                         : "m"(values[at])
+                         : "xmm1", "xmm2");
+        CHECK(before == clean);
+        __asm__ volatile("movaps %1, %%xmm2\n divps %2, %%xmm2\n movaps %%xmm2, %0\n"
+                         : "=m"(want)
+                         : "m"(ones), "m"(values[at])
+                         : "xmm2");
+        for (int i = 0; i < 4; i++)
+            CHECK(got[i] == want[i]);
+        __asm__ volatile("ldmxcsr %0" : : "m"(clean));
+        __asm__ volatile("movaps %2, %%xmm1\n rsqrtps %%xmm1, %%xmm2\n movaps %%xmm2, %0\n stmxcsr %1\n"
+                         : "=m"(got), "=m"(after)
+                         : "m"(values[at])
+                         : "xmm1", "xmm2");
+        CHECK(after == clean);
+        __asm__ volatile("sqrtps %2, %%xmm1\n movaps %1, %%xmm2\n divps %%xmm1, %%xmm2\n movaps %%xmm2, %0\n"
+                         : "=m"(want)
+                         : "m"(ones), "m"(values[at])
+                         : "xmm1", "xmm2");
+        for (int i = 0; i < 4; i++)
+            CHECK(got[i] == want[i]);
+        // Scalar: only the low lane.
+        __asm__ volatile("ldmxcsr %0" : : "m"(clean));
+        __asm__ volatile("movaps %1, %%xmm2\n rcpss %2, %%xmm2\n movaps %%xmm2, %0\n"
+                         : "=m"(scalar)
+                         : "m"(ones), "m"(values[at])
+                         : "xmm2");
+        __asm__ volatile("movaps %1, %%xmm2\n divps %2, %%xmm2\n movaps %%xmm2, %0\n"
+                         : "=m"(want)
+                         : "m"(ones), "m"(values[at])
+                         : "xmm2");
+        CHECK(scalar[0] == want[0] && scalar[1] == ones[1] && scalar[2] == ones[2] && scalar[3] == ones[3]);
+        __asm__ volatile("movaps %1, %%xmm2\n rsqrtss %2, %%xmm2\n movaps %%xmm2, %0\n"
+                         : "=m"(scalar)
+                         : "m"(ones), "m"(values[at])
+                         : "xmm2");
+        __asm__ volatile("sqrtps %2, %%xmm1\n movaps %1, %%xmm2\n divps %%xmm1, %%xmm2\n movaps %%xmm2, %0\n"
+                         : "=m"(want)
+                         : "m"(ones), "m"(values[at])
+                         : "xmm1", "xmm2");
+        CHECK(scalar[0] == want[0] && scalar[1] == ones[1]);
+        __asm__ volatile("ldmxcsr %0" : : "m"(clean));
+    }
+}
+
 // Kernel code, shared by every address space. A process exiting must leave its translations for the rest, and changes
 // to it must still reach them all.
 #define KERNEL_SHARED_VA 0xFFFF960000000000ULL
@@ -1583,6 +1642,7 @@ void kmain(void) {
     test_ptest_flags();
     test_inline_ops(root);
     test_direct_map();
+    test_reciprocals();
     test_kernel_domain(root);
     test_many_blocks(root);
     test_linked_loop();
