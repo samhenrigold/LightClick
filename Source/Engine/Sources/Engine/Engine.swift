@@ -33,6 +33,8 @@ public struct EngineOptions {
     public var useTSO = true
     public var kernelModel = false
     public var tzcntLzcnt = false
+    public var codeCacheBytes: UInt64 = 0
+    public var shadowPoolPages: UInt32 = 0
     public init() {}
 }
 
@@ -89,6 +91,7 @@ public final class Engine {
         config.ram_size = options.ramBytes
         config.precise_flags = options.preciseFlags
         config.has_tzcnt_lzcnt = options.tzcntLzcnt
+        config.code_cache_bytes = options.codeCacheBytes
         let stubs = kPrivVA + kOffStubs
         config.stub_lookup = stubs
         config.stub_ret_miss = stubs + 0x80
@@ -204,6 +207,7 @@ public final class Engine {
         ctx.pointee.rflags_sys = 0x202
         ctx.pointee.spsr = 1 << 29  // EL0t, C set: x86 CF clear
         ctx.pointee.model_kernel = options.kernelModel ? 1 : 0
+        ctx.pointee.pool_limit = options.shadowPoolPages
         ctx.pointee.cr0 = 0x8001_0033
         ctx.pointee.cr4 = 0x620
         ctx.pointee.efer = 0xD01
@@ -301,7 +305,7 @@ public final class Engine {
             "exits \(exitCount) blocks \(t.blocks) x86-insns \(t.insns) arm-words \(t.words) "
             + "invalidated \(t.invalidated) fills \(ctx.pointee.stat_fills) dirty \(ctx.pointee.stat_dirty) "
             + "smc \(ctx.pointee.stat_smc) pfs \(ctx.pointee.stat_pf_delivered) pt-writes \(ctx.pointee.stat_pt_writes) "
-            + "steps \(ctx.pointee.stat_steps) irqs \(ctx.pointee.stat_irq) view-evictions \(ctx.pointee.stat_view_evictions) unshadowed \(ctx.pointee.stat_pt_unshadow)"
+            + "steps \(ctx.pointee.stat_steps) irqs \(ctx.pointee.stat_irq) view-evictions \(ctx.pointee.stat_view_evictions) unshadowed \(ctx.pointee.stat_pt_unshadow) pool-reclaims \(ctx.pointee.stat_pool_reclaim)"
         if t.insns > 0 { line += String(format: " words/insn %.2f", Double(t.words) / Double(t.insns)) }
         return line
     }
@@ -336,8 +340,6 @@ public final class Engine {
             _ = tr_invalidate_view_va(Int32(c.pointee.req_a.0), c.pointee.req_a.1)
         case Int(HC_VIEW_DROP):
             tr_view_drop(Int32(c.pointee.req_a.0))
-        case Int(HC_FLUSH_VIEWS):
-            tr_flush_all()
         case Int(HC_SYSCALL):
             guard let machine else { throw EngineError.stop("syscall with no machine attached") }
             try machine.syscall(c, engine: self)

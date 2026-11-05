@@ -130,24 +130,23 @@ static u32 *const mirror_head = (u32 *)PRIV(MIRROR_HEAD_OFF);
 static u32 *const rmap_head = (u32 *)PRIV(RMAP_HEAD_OFF);
 static RmapNode *const rmap_nodes = (RmapNode *)PRIV(RMAP_NODES_OFF);
 static u8 *const page_info = (u8 *)PRIV(OFF_PAGEINFO);
-static u32 pool_next, pool_free_head, rmap_next = 1, rmap_free;
+static u32 pool_next, pool_free_head, pool_free_count, rmap_next = 1, rmap_free;
 static u64 hole_entry_priv, hole_entry_ram; // root-level descriptors for the private slots
 
 static inline u64 *pool_page(u32 idx) { return (u64 *)(POOL_VA + (u64)idx * 4096); }
 static inline u32 pool_index(const void *p) { return (u32)(((u64)p - POOL_VA) >> 12); }
 
-static void flush_everything_and_retry(void);
 
 static u32 pool_alloc(u32 view, u32 level, u64 guest_table, u64 va_base) {
     u32 idx;
     if (pool_free_head) {
         idx = pool_free_head - 1;
         pool_free_head = *(u32 *)pool_page(idx);
-    } else if (pool_next < POOL_PAGES) {
+        pool_free_count--;
+    } else if (pool_next < (c->pool_limit ? c->pool_limit : POOL_PAGES)) {
         idx = pool_next++;
     } else {
-        flush_everything_and_retry();
-        __builtin_unreachable();
+        stop(STOP_SHADOW_FULL, 0, 1, pool_next, 0); // pool_reclaim runs first on every path that allocates
     }
     memset(pool_page(idx), 0, 4096);
     ShadowDesc *d = &desc[idx];
@@ -476,17 +475,20 @@ static void view_build(u32 idx, u64 key, u32 cpl) {
     sent[1] = 0;
 }
 
+
 static void zap_table(u32 idx);
 static bool evicting;
+static void reset_all_return_stacks(void);
+static inline u32 view_asid(u32 v);
 
-// Takes the least recently used view for reuse. A view that keeps a shared kernel domain's marks stays.
+// Takes the least recently used view for reuse, or returns MAX_VIEWS if none may go. A view that keeps a shared kernel domain's marks stays.
 static u32 view_evict(void) {
     u32 best = MAX_VIEWS;
     for (u32 i = 0; i < view_count; i++)
-        if (!views[i].keeper && i != c->view && (best == MAX_VIEWS || views[i].last_used < views[best].last_used))
+        if (views[i].valid && !views[i].keeper && i != c->view && (best == MAX_VIEWS || views[i].last_used < views[best].last_used))
             best = i;
     if (best == MAX_VIEWS)
-        stop(STOP_UNSUPPORTED, 0, 2, 0, 0); // every view is a keeper or running
+        return best;
     View *v = &views[best];
     c->stat_view_evictions++;
     // Code marks need no invalidation one by one: the host drops all the view's own blocks together.
@@ -501,15 +503,51 @@ static u32 view_evict(void) {
     return best;
 }
 
+static void zap_entry(u64 *e, const ShadowDesc *d);
+
+// Every path that allocates shadow tables comes through here first, while it holds no pointer into them. Old views go first; if the running
+// view and the keepers fill the pool alone, their shadows are dropped and refill on demand, and their translations go with their marks.
+#define POOL_MARGIN 16
+static void pool_reclaim(void) {
+    u32 limit = c->pool_limit ? c->pool_limit : POOL_PAGES;
+    while (pool_free_count + (limit > pool_next ? limit - pool_next : 0) < POOL_MARGIN) {
+        c->stat_pool_reclaim++;
+        if (view_evict() != MAX_VIEWS)
+            continue;
+        for (u32 i = 0; i < view_count; i++) {
+            if (!views[i].valid)
+                continue;
+            ShadowDesc *d0 = &desc[pool_index((void *)views[i].root0)], *d1 = &desc[pool_index((void *)views[i].root1)];
+            for (int n = 0; n < 256; n++) {
+                u64 *r0 = (u64 *)views[i].root0 + n, *r1 = (u64 *)views[i].root1 + 256 + n;
+                if (*r0)
+                    zap_entry(r0, d0);
+                if (*r1)
+                    zap_entry(r1, d1);
+            }
+        }
+        tlbi_all();
+        reset_all_return_stacks();
+        if (pool_free_count + (limit > pool_next ? limit - pool_next : 0) < POOL_MARGIN)
+            stop(STOP_SHADOW_FULL, 0, 2, pool_free_count, 0);
+    }
+}
+
 static View *view_find(u64 cr3_key, u32 cpl) {
     for (u32 i = 0; i < view_count; i++)
         if (views[i].cr3 == cr3_key && views[i].cpl == cpl && views[i].valid)
             return &views[i];
-    u32 idx;
-    if (view_count >= MAX_VIEWS)
-        idx = view_evict();
-    else
-        idx = view_count++;
+    pool_reclaim();
+    u32 idx = MAX_VIEWS;
+    for (u32 i = 0; i < view_count; i++)
+        if (!views[i].valid)
+            idx = i;
+    if (idx == MAX_VIEWS) {
+        if (view_count < MAX_VIEWS)
+            idx = view_count++;
+        else if ((idx = view_evict()) == MAX_VIEWS)
+            stop(STOP_UNSUPPORTED, 0, 2, 0, 0); // every view is a keeper or running
+    }
     view_build(idx, cr3_key, cpl);
     return &views[idx];
 }
@@ -625,7 +663,7 @@ static void track_root(View *v, u64 va, const Walk *w) {
 
 // ---- Delivering x86 events ----
 static u64 translate_here(u64 rip, u64 site, u32 kind, bool single);
-static bool event_delivered;
+static bool event_delivered, code_cache_reset;
 static void reset_all_return_stacks(void);
 static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int);
 
@@ -670,6 +708,7 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
             return hit;
         kind = SVC_LOOKUP_MISS;
     }
+    pool_reclaim();
     Walk w = x86_walk(c->cr3, rip, 16 | (c->cpl == 3 ? 4 : 0), true);
     if (!w.ok) {
         if (w.fault_err == ~0u) {
@@ -697,6 +736,7 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
     }
     if (c->tr_flushed) {
         c->tr_flushed = 0;
+        code_cache_reset = true;
         reset_all_return_stacks();
     }
     if (single)
@@ -730,7 +770,7 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
 }
 
 // ---- Page-table writes ----
-static void zap_table(u32 idx);
+
 
 static void zap_entry(u64 *e, const ShadowDesc *d) {
     u64 v = *e;
@@ -780,6 +820,7 @@ static void zap_table(u32 idx) {
 
     *(u32 *)t = pool_free_head;
     pool_free_head = idx + 1;
+    pool_free_count++;
     __asm__ volatile("dsb ishst");
 }
 
@@ -1107,6 +1148,7 @@ static void shadow_write_finish(void);
 
 static void handle_data_abort(bool lower) {
     (void)lower;
+    pool_reclaim();
     u64 far = c->far, esr = c->esr;
     u32 dfsc = esr & 0x3f;
     bool write = esr & (1 << 6);
@@ -1429,7 +1471,6 @@ static void x86_ud(void) {
 }
 static void x86_gp0(void) { raise_gp(0, rip_here(c->elr - 4)); }
 
-static void sw_set_x86_flags_no_change(void) {}
 
 static void do_syscall(void) {
     u64 next = next_rip_lit();
@@ -2002,8 +2043,10 @@ void mon_sync(void) {
             case SVC_LOOKUP_MISS: {
                 u64 target = c->x[R_S0];
                 event_delivered = false;
+                code_cache_reset = false;
                 u64 arm = translate_here(target, 0, SVC_LOOKUP_MISS, false);
-                if (event_delivered) { // the target did not fetch: a fault handler runs instead
+                // The target did not fetch and a fault handler runs instead; or the cache was reset, and the code at x30 is gone.
+                if (event_delivered || code_cache_reset) {
                     c->elr = arm;
                     break;
                 }
@@ -2295,38 +2338,3 @@ void mon_init(void) {
     mon_enter_guest();
 }
 
-// Whole-pool flush: the running x86 instruction restarts after everything is rebuilt. Fault paths are precise, so this is safe.
-static void flush_everything_and_retry(void) {
-    u64 pc = c->elr;
-    bool e, f;
-    u64 rip = rip_of_pc(pc, &e, &f);
-    if (!f)
-        stop(STOP_SHADOW_FULL, 0, 1, pc, 0);
-    tlbi_all();
-    memset(mirror_head, 0, (c->ram_size >> 12) * sizeof(u32));
-    memset(rmap_head, 0, (c->ram_size >> 12) * sizeof(u32));
-    memset(page_info, 0, c->ram_size >> 12);
-    rmap_next = 1;
-    rmap_free = 0;
-    pool_free_head = 0;
-    pool_next = 0;
-    u32 cpl = c->cpl;
-    u64 key = cr3_key(c->cr3);
-    view_count = 0;
-    hostcall(HC_FLUSH_VIEWS);
-    View *v = view_find(key, cpl);
-    c->view = (u32)(v - views);
-    c->x[R_RS] = v->rs_saved;
-    c->rs_top = v->rs_top;
-    c->x[R_HASH] = v->hash_va;
-    WSR(ttbr0_el1, v->ttbr0);
-    WSR(ttbr1_el1, v->ttbr1);
-    __asm__ volatile("isb");
-    c->elr = translate_here(rip, 0, 0, false);
-    exit_check();
-    mon_enter_guest();
-    __builtin_unreachable();
-}
-
-// Unused parameter quiets for a future use.
-void mon_unused(void) { sw_set_x86_flags_no_change(); }

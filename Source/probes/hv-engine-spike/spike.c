@@ -1,6 +1,7 @@
 // Minimal x86-64 to AArch64 translator running its output inside an HVF VM at EL0.
-// See DESIGN.md. Standalone probe: compile with build.sh, never linked into the app.
+// Standalone probe: compile with build.sh, never linked into the app.
 //
+// The engine grew out of this probe: see Source/Engine/DESIGN.md.
 // x86 regs are pinned: rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi,r8-r15 = x0-x15. x16,x17,x20,x22,x23,x24 are scratch,
 // x19 is the indirect-branch table, x21 holds the last flag-setting result (the cost of lazy PF is paid; no
 // consumer is translated). NZCV is canonical with C = !CF, the polarity ARM's subs produces.

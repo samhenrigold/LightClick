@@ -163,7 +163,7 @@ Honest order of risk, none of it started except as noted.
 4. **Far control flow and system odds:** `lretq`, far calls, mov to CS (the test kernel avoids them, starting with CS already set), `ins`/`outs`, debug registers, TF, NMI, machine checks, `xsave` family, `invpcid`, and proper MSR routing. SSE4 is unadvertised.
 5. **QEMU integration.** Compile the skeleton. RAM is assumed to be GPA 0 to N in one piece, so a PC memory map with a hole below 4 GB and RAM above needs slots in the walker and aliases. Firmware ROM. DMA into code or page-table frames must tell the engine, or stale translations survive: there is no such call yet.
    Device model time and BQL contention are unmeasured. MMIO in a real kext may also use forms that stop (SIMD to a device outside `rep`).
-6. **Limits to lift.** 64 views with LRU eviction exists but kernel domains are capped at 16; the whole-pool shadow flush and whole-cache flush paths have never run; code cache is 118 MB.
+6. **Limits to lift.** Kernel domains are capped at 16, and the code cache is 118 MB with a whole-cache reset. `Tests/stress-limits.sh` runs everything with a tiny cache and shadow pool, so the reset and reclaim paths are exercised, though never on a real guest's working set.
 7. **Unknown rates.** Page-table write rate in a real macOS guest. At these costs even 1M writes/s would be 60-300 ms of 4000. Cold translation during boot: 2.4 us per function, and how much code a boot touches is unmeasured.
 8. **Platform durability.** `ACTLR_EL1.EnTSO` from HVF is undocumented as far as I know, and hardware TSO could go when Rosetta does.
 

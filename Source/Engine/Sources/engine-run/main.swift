@@ -27,6 +27,8 @@ do {
         let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[2]))))
         var kernelOptions = EngineOptions()
         kernelOptions.useTSO = ProcessInfo.processInfo.environment["ENGINE_NO_TSO"] == nil
+        kernelOptions.codeCacheBytes = UInt64(ProcessInfo.processInfo.environment["ENGINE_CC_BYTES"] ?? "") ?? 0
+        kernelOptions.shadowPoolPages = UInt32(ProcessInfo.processInfo.environment["ENGINE_POOL_PAGES"] ?? "") ?? 0
         let guest = try KernelGuest(options: kernelOptions)
         let code = try guest.run(image: image)
         if ProcessInfo.processInfo.environment["ENGINE_STATS"] != nil {
@@ -38,6 +40,8 @@ do {
     var options = EngineOptions()
     options.preciseFlags = ProcessInfo.processInfo.environment["ENGINE_FAST_FLAGS"] == nil
     options.tzcntLzcnt = true // as Rosetta advertises: flat tests compare against it
+    options.codeCacheBytes = UInt64(ProcessInfo.processInfo.environment["ENGINE_CC_BYTES"] ?? "") ?? 0
+    options.shadowPoolPages = UInt32(ProcessInfo.processInfo.environment["ENGINE_POOL_PAGES"] ?? "") ?? 0
     let guest = try FlatGuest(options: options)
     let code = try guest.run(
         image: image,

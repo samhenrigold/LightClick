@@ -18,6 +18,7 @@ u64 tr_stub_lookup, tr_stub_ret_miss, tr_stub_pushf, tr_stub_sahf;
 
 static TrConfig cfg;
 static u32 *cc_base;
+static u64 cc_limit;
 static BlockEntry *block_table;
 static PcMap *pc_map;
 static u32 pc_map_used;
@@ -383,7 +384,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     walk_cr3 = cr3;
     walk_cpl = cpl;
     tr_cpl = cpl;
-    if ((u8 *)tr_cc - (u8 *)cc_base > (long)(CC_SIZE - 0x40000) || hblock_count >= BLOCKS_MAX - 2 ||
+    if ((u8 *)tr_cc - (u8 *)cc_base > (long)(cc_limit - 0x40000) || hblock_count >= BLOCKS_MAX - 2 ||
         pc_map_used + MAX_INSNS >= PCMAP_BYTES / sizeof(PcMap)) {
         flush_everything();
         res.flushed = true;
@@ -771,6 +772,7 @@ void tr_init(const TrConfig *config) {
     ctx_ptr = (EngineCtx *)(cfg.priv + OFF_CTX);
     tr_precise_flags = cfg.precise_flags;
     tr_has_tzcnt = cfg.has_tzcnt_lzcnt;
+    cc_limit = cfg.code_cache_bytes ? cfg.code_cache_bytes : CC_SIZE;
     tr_stub_lookup = cfg.stub_lookup;
     tr_stub_ret_miss = cfg.stub_ret_miss;
     tr_stub_pushf = cfg.stub_pushf;
@@ -946,12 +948,9 @@ void tr_flush_all(void) {
     ctx_ptr->block_count = 0;
     memset(block_map, 0, MAP_SIZE * sizeof(MapEntry));
     memset(frame_head, 0, (cfg.ram_size >> 12) * sizeof(u32));
-    memset(cfg.priv + OFF_HASH, 0, HASH_BYTES * MAX_VIEWS);
+    for (int v = 0; v <= view_high; v++)
+        memset(hash_table(v), 0, HASH_BYTES);
 }
 
 TrStats tr_stats(void) { return stats; }
 
-int tr_debug_insn_len(const uint8_t *bytes) {
-    (void)bytes;
-    return 0;
-}

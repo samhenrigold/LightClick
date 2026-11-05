@@ -140,7 +140,6 @@ enum {
     HC_CPUID, // a[0] leaf, a[1] subleaf. r[0..3] eax,ebx,ecx,edx
     HC_HLT, // guest halted with interrupts possibly enabled. Host returns when an interrupt may be pending.
     HC_IRQ, // host-injected IRQ arrived; a[0] arm pc. Asks the host for an external vector. r[0] vector or -1
-    HC_FLUSH_VIEWS, // shadow pool wrapped: drop all translations
     HC_APIC_EOI, // a[0] vector: EOI of a level-triggered vector, for the host's IO-APIC
     HC_APIC_ICR, // a[0] icr: an IPI the monitor cannot finish itself
     HC_BOUNDARY, // a[0] x86 rip: the vCPU stopped at an instruction boundary on request. r[0] rip to continue at
@@ -193,6 +192,7 @@ typedef struct {
     uint32_t irq_pending; // host or in-VM APIC has an interrupt ready
     uint32_t halted;
     uint32_t stepping; // walking to an x86 boundary with the software step
+    uint32_t pool_limit; // shadow pool pages, 0 for all of them; tests shrink it
     uint32_t tr_flushed; // the translator reset the code cache; every return stack is stale
     uint32_t pad2;
     uint64_t ram_size;
@@ -213,7 +213,7 @@ typedef struct {
     // Statistics, read by the host.
     uint64_t stat_svc[128];
     uint64_t stat_fills, stat_dirty, stat_pf_delivered, stat_pt_writes, stat_pt_writes_zap, stat_pt_step, stat_smc,
-        stat_irq, stat_steps, stat_cr3, stat_iret, stat_syscall, stat_mmio, stat_mmio_vm, stat_view_evictions, stat_pt_unshadow;
+        stat_irq, stat_steps, stat_cr3, stat_iret, stat_syscall, stat_mmio, stat_mmio_vm, stat_view_evictions, stat_pt_unshadow, stat_pool_reclaim;
 } EngineCtx;
 
 // Block table, one entry per translated block, ordered by arm_off because the code cache only grows.
