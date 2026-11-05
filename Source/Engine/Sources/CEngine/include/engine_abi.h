@@ -169,7 +169,15 @@ enum {
     FB_RDMSR, // a[3] msr
     FB_WRMSR, // a[3] msr
     FB_FETCH_NOT_RAM, // a[3] gpa
+    FB_VMPORT, // the VMware backdoor port: its device model reads and writes the CPU's registers, which only TCG's CPU can show it
 };
+
+// What the kernel model just did, for a person reading the tally: delivery, iret, syscall, sysret, CR3 writes, oldest overwritten. Hybrid only.
+typedef struct {
+    uint64_t rip, a, cr3; // a: error code, iret target, or the CR3 value written
+    uint32_t kind, vector; // kind: 'E' event delivered, 'I' iret (vector: target CS), 'C' CR3 write, 'S' syscall, 'R' sysret
+} EngineEvent;
+#define EVENT_RING 128
 
 typedef struct {
     uint64_t x[31]; // +0: x0-x30, saved on every monitor entry
@@ -238,6 +246,9 @@ typedef struct {
     uint32_t note_head, note_tail, note_overflow, pad4;
     uint32_t note_ring[256]; // frame + 1
     uint64_t stat_note_code, stat_note_pt, stat_nm;
+    uint64_t stat_vector[256], vector_last_rip[256], vector_last_err[256]; // every delivery, software int and #GP included
+    uint64_t event_next;
+    EngineEvent events[EVENT_RING];
 } EngineCtx;
 
 // Block table, one entry per translated block, ordered by arm_off because the code cache only grows.

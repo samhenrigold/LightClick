@@ -343,6 +343,16 @@ static void test_cr4(void) {
     CHECK(back == (cr4 | 0x40 | 0x100));
 }
 
+// The VMware backdoor reads the CPU's registers in its device model: it has to run where those are.
+static void test_vmport(void) {
+    u64 rax = 0;
+    __asm__ volatile("mov $5, %%r13\n mov $1, %%r14\n mov $0x5658, %%dx\n inl %%dx, %%eax\n"
+                     : "=a"(rax)
+                     :
+                     : "r13", "r14", "rdx");
+    CHECK(rax == 7);
+}
+
 void kmain(void) {
     __asm__ volatile("mov $0x10, %%ax\n mov %%ax, %%ds\n mov %%ax, %%es\n mov %%ax, %%ss\n" : : : "ax");
     tables();
@@ -356,6 +366,7 @@ void kmain(void) {
     test_tsc();
     test_busy();
     test_cr4();
+    test_vmport();
     CHECK(!bad_vector);
     puts_("hybrid checks passed\n");
     done(0);

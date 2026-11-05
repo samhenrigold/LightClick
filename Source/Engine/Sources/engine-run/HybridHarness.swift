@@ -178,7 +178,8 @@ final class HybridHarness {
                     return 6
                 }
                 if tally.contains("CR4 write") || !tally.contains("refused for the test")
-                    || !tally.contains("tcg 0x1234")
+                    || !tally.contains("tcg 0x1234") || !tally.contains("vmport") || !tally.contains("vector 0x7")
+                    || !tally.contains("\nI 0x8 ") || !tally.contains("\nC 0x0 ")
                 {
                     FileHandle.standardError.write(Data("tally has a wrong row\n".utf8))
                     return 9

@@ -198,6 +198,29 @@ public final class Tally: @unchecked Sendable {
             o += name.padding(toLength: 34, withPad: " ", startingAt: 0) + perSecond(value) + "\n"
         }
 
+        o += "\n== events delivered by vector, ranked; last return rip, error code, bytes there ==\n"
+        let vectors = withUnsafeBytes(of: c.stat_vector) { Array($0.bindMemory(to: UInt64.self)) }
+        let vectorRIP = withUnsafeBytes(of: c.vector_last_rip) { Array($0.bindMemory(to: UInt64.self)) }
+        let vectorErr = withUnsafeBytes(of: c.vector_last_err) { Array($0.bindMemory(to: UInt64.self)) }
+        for v in vectors.indices.filter({ vectors[$0] > 0 }).sorted(by: { vectors[$0] > vectors[$1] }) {
+            o +=
+                "vector " + hex(UInt64(v)) + perSecond(vectors[v]) + "  " + hex(vectorRIP[v]) + " err "
+                + hex(vectorErr[v]) + "  " + engine.bytes(at: vectorRIP[v]) + "\n"
+        }
+        o += "\n== the monitor's last events, oldest first: E delivered, I iret, C cr3 write, S syscall, R sysret ==\n"
+        o +=
+            "kind vector rip a(error, target, cr3 value) cr3, bytes at rip. Read while running, so a line can be torn.\n"
+        let events = withUnsafeBytes(of: c.events) { Array($0.bindMemory(to: EngineEvent.self)) }
+        for i in 0..<UInt64(events.count) {
+            let e = events[Int((c.event_next &+ i) % UInt64(events.count))]
+            if e.kind != 0 {
+                o +=
+                    String(UnicodeScalar(UInt8(truncatingIfNeeded: e.kind))) + " " + hex(UInt64(e.vector)) + " "
+                    + hex(e.rip) + " " + hex(e.a) + " " + hex(e.cr3) + "  "
+                    + engine.bytes(at: e.rip, count: 8, cr3: e.cr3) + "\n"
+            }
+        }
+
         o += "\n== mmio by page ==\n"
         for (page, count) in mmioPages.sorted(by: { $0.value > $1.value }).prefix(40) {
             o += String(format: "%12d  ", count) + hex(page) + "\n"

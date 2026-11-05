@@ -36,6 +36,8 @@
 #include "system/physmem.h"
 #include "system/runstate.h"
 #include "system/tcg.h"
+#include "ui/console.h"
+#include "ui/qemu-pixman.h"
 #include "engine_api.h"
 
 #define HIGH_RAM (1ULL << 32)
@@ -384,6 +386,7 @@ static void hvdbt_write_tally_at_exit(void)
 }
 
 static void *hvdbt_watchdog(void *arg);
+static void hvdbt_dump_kernel(CPUState *cs, const char *path);
 
 static bool hvdbt_create(CPUState *cs)
 {
@@ -440,6 +443,9 @@ static bool hvdbt_create(CPUState *cs)
     if (tally) {
         engine_tally_start(engine, tally);
         atexit(hvdbt_write_tally_at_exit);
+    }
+    if (getenv("LC_HVDBT_KERNEL")) {
+        hvdbt_dump_kernel(cs, getenv("LC_HVDBT_KERNEL"));
     }
     QemuThread watchdog;
     qemu_thread_create(&watchdog, "hvdbt-watchdog", hvdbt_watchdog, cs, QEMU_THREAD_DETACHED);
@@ -630,16 +636,115 @@ static void hvdbt_stall_report(CPUState *cs, run_on_cpu_data unused)
     fflush(stderr);
 }
 
+/* ---- For looking at a guest that has no other way out: LC_HVDBT_SCREEN and LC_HVDBT_KERNEL ---- */
+
+/* On the main loop, BQL held. A numbered PPM, so a series shows whether the screen moves. */
+static void hvdbt_screen_bh(void *opaque)
+{
+    static int number;
+    const char *path = opaque;
+    QemuConsole *con = qemu_console_lookup_by_index(0);
+    DisplaySurface *surface;
+
+    if (!con) {
+        return;
+    }
+    qemu_console_hw_update(con);
+    surface = qemu_console_surface(con);
+    if (!surface) {
+        return;
+    }
+    g_autofree char *name = g_strdup_printf("%s.%03d.ppm", path, number++);
+    FILE *f = fopen(name, "wb");
+    if (!f) {
+        return;
+    }
+    int width = surface_width(surface), height = surface_height(surface);
+    pixman_image_t *line = qemu_pixman_linebuf_create(PIXMAN_BE_r8g8b8, width);
+    fprintf(f, "P6\n%d %d\n255\n", width, height);
+    for (int y = 0; y < height; y++) {
+        qemu_pixman_linebuf_fill(line, surface->image, width, 0, y);
+        fwrite(pixman_image_get_data(line), 3, width, f);
+    }
+    pixman_image_unref(line);
+    fclose(f);
+}
+
+/*
+ * Rebuilds the running kernel's Mach-O from guest memory while its symbols are still loaded: at hand-off, __LINKEDIT hasn't been dropped. nm and otool
+ * work on it directly, and a guest rip minus the slide printed here is an unslid address. For reading stalls only: it stays on this machine.
+ */
+static void hvdbt_dump_kernel(CPUState *cs, const char *path)
+{
+    const uint64_t unslid_base = 0xffffff8000200000ULL;
+    CPUX86State *env = cpu_env(cs);
+    uint64_t base = 0;
+    uint32_t head[8];
+
+    for (uint64_t at = env->eip & ~0xfffULL; at > env->eip - (64ULL << 20); at -= 4096) {
+        if (!cpu_memory_rw_debug(cs, at, head, sizeof head, false) && head[0] == 0xfeedfacf && head[3] == 2 /* MH_EXECUTE */) {
+            base = at;
+            break;
+        }
+    }
+    if (!base) {
+        fprintf(stderr, "hvdbt: no kernel Mach-O header below the hand-off rip\n");
+        return;
+    }
+    fprintf(stderr, "hvdbt: kernel header at 0x%" PRIx64 ", so slide 0x%" PRIx64 " if the unslid base is 0x%" PRIx64 "\n", base, base - unslid_base, unslid_base);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return;
+    }
+    g_autofree uint8_t *commands = g_malloc(head[5]);
+    if (cpu_memory_rw_debug(cs, base + 32, commands, head[5], false)) {
+        fclose(f);
+        return;
+    }
+    /* Whether the header's addresses are slid yet depends on who has run. __TEXT starts at the header, whichever it is. */
+    uint64_t delta = 0;
+    for (uint32_t i = 0, at = 0; i < head[4] && at + 72 <= head[5]; i++, at += ldl_le_p(commands + at + 4)) {
+        if (ldl_le_p(commands + at) == 0x19 && !strncmp((char *)commands + at + 8, "__TEXT", 16)) {
+            delta = base - ldq_le_p(commands + at + 24);
+        }
+    }
+    fprintf(stderr, "hvdbt: load addresses in the header + 0x%" PRIx64 " are where the segments sit\n", delta);
+    uint8_t page[4096];
+    uint32_t offset = 0;
+    for (uint32_t i = 0; i < head[4] && offset + 8 <= head[5]; i++) {
+        uint32_t cmd = ldl_le_p(commands + offset), size = ldl_le_p(commands + offset + 4);
+        if (cmd == 0x19 /* LC_SEGMENT_64 */ && size >= 72) {
+            uint64_t vmaddr = ldq_le_p(commands + offset + 24), fileoff = ldq_le_p(commands + offset + 40), filesize = ldq_le_p(commands + offset + 48);
+            fprintf(stderr, "hvdbt: segment %.16s at 0x%" PRIx64 " file 0x%" PRIx64 " size 0x%" PRIx64 "\n", (char *)commands + offset + 8, vmaddr, fileoff, filesize);
+            for (uint64_t done = 0; done < filesize; done += sizeof page) {
+                uint64_t n = MIN(filesize - done, sizeof page);
+                if (!cpu_memory_rw_debug(cs, vmaddr + delta + done, page, n, false)) {
+                    fseeko(f, fileoff + done, SEEK_SET);
+                    fwrite(page, 1, n, f);
+                }
+            }
+        }
+        offset += size;
+    }
+    fclose(f);
+    fprintf(stderr, "hvdbt: kernel written to %s\n", path);
+    fflush(stderr);
+}
+
 /* A separate thread, so none of this costs the vCPU anything until something is wrong. */
 static void *hvdbt_watchdog(void *arg)
 {
     CPUState *cs = arg;
     CPUX86State *env = cpu_env(cs);
     uint64_t last = ~0ULL;
-    int idle = 0, reports = 0;
+    int idle = 0, reports = 0, seconds = 0;
+    const char *screen = getenv("LC_HVDBT_SCREEN");
 
     while (!qatomic_read(&hv.dead)) {
         g_usleep(G_USEC_PER_SEC);
+        if (screen && ++seconds % 30 == 0) {
+            aio_bh_schedule_oneshot(qemu_get_aio_context(), hvdbt_screen_bh, (void *)screen);
+        }
         if (!runstate_is_running()) {
             idle = 0;
             continue;

@@ -682,6 +682,17 @@ static void track_root(View *v, u64 va, const Walk *w) {
 }
 
 // ---- Delivering x86 events ----
+static inline void note_event(u32 kind, u64 rip, u64 a, u32 vector) {
+    if (!c->hybrid)
+        return;
+    EngineEvent *e = &c->events[c->event_next++ % EVENT_RING];
+    e->kind = kind;
+    e->vector = vector;
+    e->rip = rip;
+    e->a = a;
+    e->cr3 = c->cr3;
+}
+
 static u64 translate_here(u64 rip, u64 site, u32 kind, bool single);
 static bool event_delivered, code_cache_reset;
 static u32 deliver_depth;
@@ -1346,6 +1357,10 @@ static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int)
         return;
     }
     event_delivered = true;
+    c->stat_vector[vector & 255]++;
+    c->vector_last_rip[vector & 255] = ret_rip;
+    c->vector_last_err[vector & 255] = err;
+    note_event('E', ret_rip, err, vector);
     if (deliver_depth >= 3)
         stop(STOP_TRIPLE_FAULT, ret_rip, vector, err, c->cr2);
     deliver_depth++;
@@ -1582,6 +1597,7 @@ static void do_syscall(void) {
         return;
     }
     c->stat_syscall++;
+    note_event('S', next, c->x[0], 0);
     c->x[1] = next;
     u64 fl = rflags_get();
     c->x[11] = fl;
@@ -1606,6 +1622,7 @@ static void do_sysret(void) {
         x86_gp0();
         return;
     }
+    note_event('R', rip, c->x[0], 0);
     u64 fl = (c->x[11] & 0x3C7FD7ULL) | RFLAGS_FIXED;
     rflags_set(fl);
     u16 base = (u16)((c->star >> 48) & 0xffff);
@@ -1627,6 +1644,7 @@ static void do_iret(void) {
         return;
     }
     u64 rip = f[0], rfl = f[2], rsp = f[3];
+    note_event('I', here, rip, (u32)f[1] & 0xffff);
     u32 cs = (u32)f[1] & 0xffff, ss = (u32)f[4] & 0xffff;
     u32 new_cpl = cs & 3;
     if (new_cpl < c->cpl) {
@@ -1701,6 +1719,7 @@ static void do_mov_cr_write(void) {
             break;
         case 3: {
             c->stat_cr3++;
+            note_event('C', here, v, 0);
             c->cr3 = v & ~(1ULL << 63);
             // The shadow stays in step with x86 tables through write protection, so a flush needs no work: the x86 TLB
             // may always be emptier than software assumed, and here it simply never holds a stale entry.
@@ -2381,6 +2400,8 @@ void mon_sync(void) {
             }
             case SVC_IN:
             case SVC_OUT: {
+                if (c->hybrid && (c->x[R_S0] & 0xffff) == 0x5658)
+                    stop(STOP_FALLBACK, rip_here(c->elr - 4), FB_VMPORT, 0, 0);
                 u32 iopl = (u32)(c->rflags_sys >> 12) & 3;
                 if (c->cpl > iopl) {
                     x86_gp0();

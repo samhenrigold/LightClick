@@ -494,6 +494,7 @@ public final class Engine {
             case Int(FB_RDMSR): return "rdmsr \(hex(a.3))"
             case Int(FB_WRMSR): return "wrmsr \(hex(a.3))"
             case Int(FB_FETCH_NOT_RAM): return "fetch from a page outside RAM"
+            case Int(FB_VMPORT): return "vmport: its model uses the CPU's registers"
             default: return "fallback \(a.2)"
             }
         }
@@ -527,10 +528,10 @@ public final class Engine {
     func hex(_ v: UInt64) -> String { "0x" + String(v, radix: 16) }
 
     /// Guest bytes at a VA for error messages, through the current CR3.
-    public func bytes(at va: UInt64, count: Int = 12) -> String {
+    public func bytes(at va: UInt64, count: Int = 12, cr3: UInt64? = nil) -> String {
         var out: [String] = []
         for i in 0..<count {
-            guard let gpa = translate(va + UInt64(i)), let at = host(gpa) else { break }
+            guard let gpa = translate(va + UInt64(i), cr3: cr3), let at = host(gpa) else { break }
             out.append(String(format: "%02x", at.load(as: UInt8.self)))
         }
         return out.joined(separator: " ")
@@ -558,8 +559,8 @@ public final class Engine {
     }
 
     /// Software walk with no permission checks.
-    public func translate(_ va: UInt64) -> UInt64? {
-        var table = ctx.pointee.cr3 & 0x000F_FFFF_FFFF_F000
+    public func translate(_ va: UInt64, cr3: UInt64? = nil) -> UInt64? {
+        var table = (cr3 ?? ctx.pointee.cr3) & 0x000F_FFFF_FFFF_F000
         var level = 3
         while level >= 0 {
             let index = (va >> UInt64(12 + 9 * level)) & 0x1FF

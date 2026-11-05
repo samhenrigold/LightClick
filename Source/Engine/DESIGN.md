@@ -163,6 +163,8 @@ First real boot, Mavericks: it builds and links, the hand-off fires, and the eng
 
 A watchdog thread reports to the session log after 5 s with no progress: registers, bytes at rip and rsp, APIC, interrupt state, whether the vCPU is in `hv_vcpu_run`. The tally's top lines now say when the vCPU is on TCG and why, and rip samples are marked engine or tcg.
 
+Second and third boots, the same build, 174 s and longer: on the engine throughout, with 34078 cold blocks and 865651 cold x86 instructions in 50 ms of translation, 197 page-table stores/s. Both runs reached the same 5777 page faults and 102 syscalls and stayed there, at about 175,000 iret/s and two CR3 writes per iret, with no stop reason and no disk writes. What is trapping is not yet known: nothing counted software interrupts or #GP. Every delivery is now counted by vector, and the tally shows the monitor's last 128 events. MMIO was 25,000/s, nearly all a 33-page rectangle in the framebuffer BAR redrawn at a steady rate. A BAR is never `pc.ram`, so it reaches the host per access whatever the map says; mapping VRAM in stage 2 would be new work, and at this rate is not what limits the boot.
+
 Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bitmap interplay beyond those few fallbacks. Cost per fallback is unknown; the tally's `tcg_ms` column gives it. Writes by a separate process into guest RAM (the OOP graphics helper) are not noted. Reset after hand-off is unexamined: firmware in 64-bit mode would run on the engine.
 
 ## Not exact, known
