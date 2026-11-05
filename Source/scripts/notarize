@@ -1,14 +1,17 @@
 #!/bin/zsh
 # Notarizes and staples a release built with a Developer ID identity, then rewrites its ZIP.
 #
-#     scripts/notarize <folder from build-release.py> <notarytool keychain profile>
+#     scripts/notarize <folder from build-release.py>
 #
-# Create the profile once with `xcrun notarytool store-credentials`.
+# Uses the App Store Connect API key shared with Light Touch: LTM_NOTARY_KEY, LTM_NOTARY_KEY_ID and
+# LTM_NOTARY_ISSUER from the environment or ~/.config/lighttouch/notary.env (mode 600).
 set -euo pipefail
-folder=${1:?usage: scripts/notarize <release folder> <keychain profile>}
-profile=${2:?usage: scripts/notarize <release folder> <keychain profile>}
+folder=${1:?usage: scripts/notarize <release folder>}
+config=$HOME/.config/lighttouch/notary.env
+[[ -f $config ]] && source "$config"
 archive=$folder/LightClick.zip
-xcrun notarytool submit "$archive" --keychain-profile "$profile" --wait
+xcrun notarytool submit "$archive" --key "${LTM_NOTARY_KEY:?}" --key-id "${LTM_NOTARY_KEY_ID:?}" \
+    --issuer "${LTM_NOTARY_ISSUER:?}" --wait
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 ditto -x -k "$archive" "$work"
