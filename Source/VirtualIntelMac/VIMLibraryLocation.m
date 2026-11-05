@@ -330,7 +330,12 @@ static BOOL PrepareRoot(NSURL *root, NSURL *previousRoot, NSError **error) {
             [defaults setObject:previous forKey:key];
         [defaults removeObjectForKey:old];
     }
-    [defaults setObject:root.path forKey:@"VIMLibraryPath"];
+    // Only a chosen library is worth remembering. Writing the default would pin another home's path:
+    // preferences stay shared when CFFIXED_USER_HOME redirects Application Support.
+    if ([root.path isEqual:[self rootURLForLibrary:self.defaultURL].path])
+        [defaults removeObjectForKey:@"VIMLibraryPath"];
+    else
+        [defaults setObject:root.path forKey:@"VIMLibraryPath"];
     return YES;
 }
 + (BOOL)setURL:(NSURL *)URL error:(NSError **)error {

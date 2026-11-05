@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Boots an APFS clone of a VM from a private home, leaving the real library and preferences alone.
+# Boots an APFS clone of a VM from a private home, leaving the real library alone. CFFIXED_USER_HOME doesn't
+# redirect preferences, so window positions and similar settings still land in the real domain.
 #
 #     scripts/boot-clone <app> <machine.vintelmac> [work directory]
 #

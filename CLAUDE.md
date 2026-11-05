@@ -25,7 +25,7 @@ environment or `~/.config/lighttouch/notary.env` (mode 600). Never commit their 
 
 Test only what a change could actually break, and be sparing: no broad suites or test gates. Prefer one script, then
 `scripts/test-launch-plan` and `scripts/test-guest-profile` when those areas change. Never boot the real library;
-`scripts/boot-clone` boots an APFS clone in a private home. In `pgrep`, use `-x`, since `-f` matches its own shell.
+`scripts/boot-clone` boots an APFS clone in a private home, though preferences stay shared with the real app. In `pgrep`, use `-x`, since `-f` matches its own shell.
 
 ## Conventions
 
