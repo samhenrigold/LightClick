@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "accel/tcg/handoff.h"
 #include "exec/page-vary.h"
 #include "qapi/error.h"
 
@@ -3128,6 +3129,8 @@ MemoryRegion *get_system_io(void)
     return system_io;
 }
 
+const TcgHandoffOps *tcg_handoff;
+
 static void invalidate_and_set_dirty(MemoryRegion *mr, hwaddr addr,
                                      hwaddr length)
 {
@@ -3137,6 +3140,10 @@ static void invalidate_and_set_dirty(MemoryRegion *mr, hwaddr addr,
     /* We know we're only called for RAM MemoryRegions */
     assert(ramaddr != RAM_ADDR_INVALID);
     addr += ramaddr;
+
+    if (unlikely(tcg_handoff)) {
+        tcg_handoff->note_write(addr, length, false);
+    }
 
     /* No early return if dirty_log_mask is or becomes 0, because
      * physical_memory_set_dirty_range will still call

@@ -77,6 +77,9 @@ for arch in ('x86_64', 'arm64'):
         '--python='+sys.executable, '--cc=clang '+flags, '--cxx=clang++ '+flags,
         '--objcc=clang '+flags, '--extra-cflags='+flags,
         '--extra-objcflags='+flags, '--extra-ldflags='+flags]
+    # Research: the HV engine as a second CPU for TCG, arm64 only and off at run time without LC_HVDBT=1. Build Engine/build.sh first.
+    if arch == 'arm64' and os.environ.get('LC_HVDBT_ENGINE'):
+        command += ['-Dhvdbt_engine='+os.environ['LC_HVDBT_ENGINE']]
     if arch != platform.machine():
         # QEMU requires an explicit cross-build even with clang -arch; otherwise
         # Meson attempts to execute ARM configure probes on an Intel builder.

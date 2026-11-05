@@ -12,7 +12,7 @@ Build: `Source/Engine/build.sh` (monitor blob, x86 test images, Swift package, s
 | `Sources/CEngine/` | Decoder, block builder and emitters (C), ABI shared with the monitor, `engine_api.h` for QEMU |
 | `Sources/Engine/` | Control plane (Swift): VM setup, run loop, guests, the C API |
 | `Tests/x86/` | Flat test images, the fuzz generator, the test kernel |
-| `qemu-accel/` | AccelOps skeleton, never compiled |
+| `vendor/qemu/target/i386/tcg/system/hvdbt.c` | The QEMU side: hand-off from TCG, state both ways, device callbacks. See "Hybrid with TCG" |
 
 Everything below separates **measured** from **not measured**. Measured means on this machine: M4 Max, macOS 27.2, other work running (load 8), so
 numbers are best of N and move 10-20% between runs. No Intel hardware was used: Rosetta is the reference, and where it disagrees with the SDM that is noted.
@@ -25,7 +25,7 @@ numbers are best of N and move 10-20% between runs. No Intel hardware was used: 
 | 2. Differential testing | Done: fuzz, QEMU test-i386, a compiled corpus, lc-bench arithmetic, all matching Rosetta |
 | 3. Kernel model | Done: shadow paging, CR3 and PCID, IDT, syscall, iret, exceptions, in the monitor, passing a test kernel |
 | 4. APIC and device interface | Done: in-VM APIC hot paths; `engine_api.h`, exercised by a harness |
-| 5. QEMU accel | Skeleton only, uncompiled. XNU has never run. See "What is left" |
+| 5. QEMU accel | Hybrid with TCG written; never built into QEMU or booted. XNU has never run. See "Hybrid with TCG" |
 
 ## Measured: correctness
 
@@ -144,6 +144,23 @@ Overhead estimate from these, at the real-guest rates in the brief (4 vCPU total
 - **APIC.** Register page in the monitor, by ARM word decode. Timer on the virtual counter: the compare's exit raises the IRQ line, the monitor rearms, then the host unmasks. Anything for other CPUs or level-triggered EOIs goes to the host.
 - **Devices.** MMIO completes the faulting ARM load or store, so every x86 form of a move or read-modify-write works. Pairs, SIMD and atomics on a device stop, except `rep movs` and `stos`, which fall back to the per-element loop.
 
+## Hybrid with TCG
+
+The first contact with a real guest, built to find out what is missing rather than to be fast. One vCPU. `-Dhvdbt_engine=<Source/Engine>` builds it into QEMU, `LC_HVDBT=1` turns it on, `LC_HVDBT_TALLY=<file>` writes the tally. Without them no behaviour changes: the hooks are a null pointer test on slow paths (TB miss, kick, notdirty, DMA).
+
+- **Hand-off.** TCG runs firmware and boot loaders. The first TB miss in 64-bit mode at a high-half address is XNU's `vstart`: the engine takes the state from `CPUX86State` and runs on TCG's vCPU thread.
+- **Fallback.** Anything the engine can't do returns `ENGINE_RUN_FALLBACK` with the state precise at that instruction, as for an x86 fault. TCG runs that one instruction (`CF_NOIRQ`, count 1) and the next TB miss returns control. No normal TB is ever generated for a state the engine accepts, so a miss always comes. An instruction leaving 64-bit mode, or setting TF, means TCG keeps going until the state is acceptable: 32-bit processes run this way, slowly and correctly, as far as reading goes.
+- **What goes back by design**, as its state stays QEMU's: `hlt`, `fxsave` and `fxrstor` (x87 is in `CPUX86State`), `mov cr8`, every MSR but the syscall family, all #UD (SSE4 and AES are advertised, and only TCG knows them), popcnt (below). The monitor's `stop` is the mechanism, so each old "stops with a clear error" with a known rip now falls back. Stops with no rip are about the engine's limits and stay final, with a register dump and the VM paused.
+- **The APIC is QEMU's**, in both halves. The in-VM APIC is off, each access is a host exit, and the rates above don't apply. Interrupts are level-triggered as QEMU sees them: `irq_line` says one may wait, and the monitor acknowledges only when IF allows, since an acknowledged vector has left the APIC.
+- **RAM.** One host block, GPA 0 up to `ram_below_4g` and 4 GB upward, with `PI_RAM` per frame for holes inside that: anything else reaches the device callbacks. The map is read once at hand-off.
+- **Writes behind the monitor.** DMA (`invalidate_and_set_dirty`) and TCG (`notdirty_write`, with every RAM page kept clean so each first write hits it) put frames holding code or page tables on a ring. The monitor drains it on every exit and treats them as trapped stores. TCG sees engine writes differently: the stepped page's TBs are dropped each fallback, and all TBs after any run of normal TBs.
+- **CR0.TS** now traps EL0 SIMD through FPEN and gives #NM, in all modes. XNU's lazy FP depends on it. Integer emitters that used NEON can't run under it: popcnt falls back in hybrid mode, `rep stos` skips its bulk stub, and `rep movs` backs out of its stub to the plain loop.
+- **TSC.** Same steps as `cpu_get_tsc` from the same clock, so TCG and the engine agree.
+
+Measured (`engine-run --hybrid`, `Tests/x86/kernel/hybrid.c`, which plays TCG by hand, not TCG itself): RAM split at 1 GB with the rest at 4 GB, mapped as `memory-backend-shm` does it, tables, code and data above 4 GB; a hole and a marked low page reaching device callbacks; state preserved across each fallback kind with the host changing registers, CR3, CR0.TS and CS; notes for code and tables, with ring overflow; #NM; no acknowledge with IF clear; 1.2 GHz TSC; about 10 boundary stops per run. Also: QEMU's configure accepts the option, and `libEngine.a` links into a C program at QEMU's deployment target and creates a hybrid engine.
+
+Not measured or never run: all of `hvdbt.c`, every TCG hook, QEMU linking it, the real TLB, TB and dirty-bitmap interplay, any real device, any real guest. Cost per fallback is unknown; the tally's `tcg_ms` column gives it. Writes by a separate process into guest RAM (the OOP graphics helper) are not noted. Reset after hand-off is unexamined: firmware in 64-bit mode would run on the engine.
+
 ## Not exact, known
 
 - **The private window.** Private memory lives at a non-canonical VA (bit 47 set, top bits clear), 2 TB slots at `0xF000_0000_0000` and `0xF100_0000_0000`. Other non-canonical addresses fault and become #GP, tested. A guest access inside the window instead reads the lookup table or context, or writes context or return stacks. A compatibility risk; stage 2
@@ -158,11 +175,11 @@ Overhead estimate from these, at the real-guest rates in the brief (4 vCPU total
 Honest order of risk, none of it started except as noted.
 
 1. **Multi-vCPU.** Everything here ran on one vCPU. Monitor statics must split per vCPU, shadow tables and block maps need locks, invalidation needs IPIs (a killed block's return-stack entries on another vCPU), and the host's translator needs a lock. EnTSO was only proved on two vCPUs in the spike's litmus.
-2. **Compatibility mode and 32-bit code.** 32-bit apps, kernels up to 10.7 or so, and `sysenter`. The decoder and emitters assume 64-bit mode. Real mode and firmware are meant to stay on TCG, using `EngineX86State` as the hand-off; whether QEMU tolerates two engines on one vCPU is untested.
+2. **Compatibility mode and 32-bit code.** 32-bit apps, kernels up to 10.7 or so, and `sysenter`. The decoder and emitters assume 64-bit mode. Real mode and firmware stay on TCG, using `EngineX86State` as the hand-off; whether QEMU tolerates two engines on one vCPU is still untested on a real boot.
 3. **x87 and MMX.** Stop today. Needs 80-bit helpers in the monitor, since a host exit per operation would be 1 us. Real apps use them; test-i386's `test_floats` is ready as the check.
 4. **Far control flow and system odds:** `lretq`, far calls, mov to CS (the test kernel avoids them, starting with CS already set), `ins`/`outs`, debug registers, TF, NMI, machine checks, `xsave` family, `invpcid`, and proper MSR routing. SSE4 is unadvertised.
-5. **QEMU integration.** Compile the skeleton. RAM is assumed to be GPA 0 to N in one piece, so a PC memory map with a hole below 4 GB and RAM above needs slots in the walker and aliases. Firmware ROM. DMA into code or page-table frames must tell the engine, or stale translations survive: there is no such call yet.
-   Device model time and BQL contention are unmeasured. MMIO in a real kext may also use forms that stop (SIMD to a device outside `rep`).
+5. **QEMU integration.** Written, unproven: see "Hybrid with TCG", whose tally ranks the rest of this list.
+   Device model time and BQL contention are unmeasured. MMIO in a real kext may also use forms that stop (SIMD to a device outside `rep`); those now fall back, and the tally counts them.
 6. **Limits to lift.** Kernel domains are capped at 16, and the code cache is 118 MB with a whole-cache reset. `Tests/stress-limits.sh` runs everything with a tiny cache and shadow pool, so the reset and reclaim paths are exercised, though never on a real guest's working set.
 7. **Unknown rates.** Page-table write rate in a real macOS guest. At these costs even 1M writes/s would be 60-300 ms of 4000. Cold translation during boot: 2.4 us per function, and how much code a boot touches is unmeasured.
 8. **Platform durability.** `ACTLR_EL1.EnTSO` from HVF is undocumented as far as I know, and hardware TSO could go when Rosetta does.

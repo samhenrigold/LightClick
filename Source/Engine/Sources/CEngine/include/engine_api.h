@@ -1,5 +1,5 @@
 // The C interface a QEMU AccelOps accelerator drives. Devices, memory topology and the machine stay in QEMU; the engine owns the x86 CPU,
-// its translation, its shadow page tables and the local APIC's hot paths. See qemu-accel/ for the (uncompiled) accelerator skeleton.
+// its translation, its shadow page tables and the local APIC's hot paths. QEMU's side is vendor/qemu/target/i386/tcg/system/hvdbt.c.
 // Threading: everything below runs on the thread that created the engine, unless marked "any thread".
 #pragma once
 #include <stdbool.h>

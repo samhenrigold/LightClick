@@ -10,6 +10,8 @@ option('qemu_firmwarepath', type : 'array', value : ['share/qemu-firmware'],
        description: 'search PATH for firmware files')
 option('pkgversion', type : 'string', value : '',
        description: 'use specified string as sub-version of the package')
+option('hvdbt_engine', type : 'string', value : '',
+       description: 'Source/Engine, built with its build.sh: link the HV engine as a second x86 CPU for TCG, enabled at run time by LC_HVDBT=1 (aarch64 hosts)')
 option('smbd', type : 'string', value : '',
        description: 'Path to smbd for slirp networking')
 option('iasl', type : 'string', value : '',

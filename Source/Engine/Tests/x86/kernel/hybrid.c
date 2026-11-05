@@ -1,6 +1,7 @@
-// Checks what the QEMU accelerator relies on, without QEMU: a split RAM map with a hole, single instructions run by "the host" (the harness plays TCG,
-// by advancing rip and changing registers), state written back at each, writes behind the monitor's back, CR0.TS, level-triggered interrupts. Each
-// fallback site loads r13 with an action and r14 with the instruction's length, so the harness never has to decode x86.
+// Checks what the QEMU accelerator relies on, without QEMU: a split RAM map with a hole, single instructions run by
+// "the host" (the harness plays TCG, by advancing rip and changing registers), state written back at each, writes
+// behind the monitor's back, CR0.TS, level-triggered interrupts. Each fallback site loads r13 with an action and r14
+// with the instruction's length, so the harness never has to decode x86.
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -34,12 +35,12 @@ static void done(u32 code) {
     for (;;)
         ;
 }
-#define CHECK(x)                    \
-    do {                            \
-        if (!(x)) {                 \
-            puts_("FAIL: " #x "\n"); \
-            done(1);                \
-        }                           \
+#define CHECK(x)                                                                                                       \
+    do {                                                                                                               \
+        if (!(x)) {                                                                                                    \
+            puts_("FAIL: " #x "\n");                                                                                   \
+            done(1);                                                                                                   \
+        }                                                                                                              \
     } while (0)
 
 static u64 gdt[3] __attribute__((aligned(16))) = {0, 0x00AF9A000000FFFFULL, 0x00CF92000000FFFFULL};
@@ -86,7 +87,8 @@ static void tables(void) {
     gate(0x40, irq_stub);
 }
 
-// Harness actions: 1 sets rbx to 0x1234; 2 clears CR0.TS; 3 returns far: rip from r11, cs from r10, pops two; 4 switches cr3 to r12; 5 sets rax to 7.
+// Harness actions: 1 sets rbx to 0x1234; 2 clears CR0.TS; 3 returns far: rip from r11, cs from r10, pops two; 4
+// switches cr3 to r12; 5 sets rax to 7.
 
 // ---- Memory above the hole: tables, data and code ----
 static u64 next_frame = HIGH + (64 << 20);
@@ -149,17 +151,20 @@ static void test_ram_map(u64 root) {
     u64 code = frame();
     put_function(code, 41);
     *pte_of(root2, TEST_VA) = code | PRESENT_RW;
-    CHECK(((u32(*)(void))TEST_VA)() == 41);
+    CHECK(((u32 (*)(void))TEST_VA)() == 41);
     write_cr3(root);
 }
 
 static void test_fallback_state(void) {
     // Everything the instruction did not touch survives the trip through the host, flags included.
-    u64 rbx = 0, r15 = 0xF15F15F15F15F15ULL, flags = 0, xmm[2] __attribute__((aligned(16))) = {0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL}, back[2] __attribute__((aligned(16)));
+    u64 rbx = 0, r15 = 0xF15F15F15F15F15ULL, flags = 0,
+        xmm[2] __attribute__((aligned(16))) = {0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL},
+        back[2] __attribute__((aligned(16)));
     __asm__ volatile("movaps %[xi], %%xmm15\n"
                      "stc\n"
                      "mov $1, %%r13\n mov $5, %%r14\n"
-                     ".byte 0x66, 0x0F, 0x38, 0x40, 0xC1\n" // pmulld xmm0, xmm1: the decoder has no SSE4 and #UD is not its call to make
+                     ".byte 0x66, 0x0F, 0x38, 0x40, 0xC1\n" // pmulld xmm0, xmm1: the decoder has no SSE4 and #UD is not
+                                                            // its call to make
                      "pushfq\n popq %[fl]\n"
                      "movaps %%xmm15, %[xo]\n"
                      : "=b"(rbx), [fl] "=r"(flags), [xo] "=m"(back), "+r"(r15)
@@ -176,11 +181,20 @@ static void test_fallback_state(void) {
     u64 rax = 0;
     __asm__ volatile("mov $5, %%r13\n mov $4, %%r14\n mov %%cr8, %%rax\n" : "=a"(rax) : : "r13", "r14");
     CHECK(rax == 7);
-    __asm__ volatile("mov $5, %%r13\n mov $2, %%r14\n mov $0x1B, %%ecx\n rdmsr\n" : "=a"(rax) : : "r13", "r14", "rcx", "rdx");
+    __asm__ volatile("mov $5, %%r13\n mov $2, %%r14\n mov $0x1B, %%ecx\n rdmsr\n"
+                     : "=a"(rax)
+                     :
+                     : "r13", "r14", "rcx", "rdx");
     CHECK(rax == 7);
-    __asm__ volatile("mov $0, %%r13\n mov $2, %%r14\n mov $0x6E0, %%ecx\n xor %%eax, %%eax\n xor %%edx, %%edx\n wrmsr\n" : : : "r13", "r14", "rcx", "rax", "rdx");
+    __asm__ volatile("mov $0, %%r13\n mov $2, %%r14\n mov $0x6E0, %%ecx\n xor %%eax, %%eax\n xor %%edx, %%edx\n wrmsr\n"
+                     :
+                     :
+                     : "r13", "r14", "rcx", "rax", "rdx");
     rax = 1;
-    __asm__ volatile("mov $5, %%r13\n mov $5, %%r14\n .byte 0xF3, 0x48, 0x0F, 0xB8, 0xC1\n" : "=a"(rax) : : "r13", "r14"); // popcnt rax, rcx
+    __asm__ volatile("mov $5, %%r13\n mov $5, %%r14\n .byte 0xF3, 0x48, 0x0F, 0xB8, 0xC1\n"
+                     : "=a"(rax)
+                     :
+                     : "r13", "r14"); // popcnt rax, rcx
     CHECK(rax == 7);
     // lretq, played by the host: it takes the target from r11 and CS from r10.
     rax = 0;
@@ -190,12 +204,17 @@ static void test_fallback_state(void) {
                      ".byte 0x48, 0xCB\n"
                      "ud2\n"
                      "1: mov $9, %%eax\n"
-                     : "=a"(rax) : : "r10", "r11", "r13", "r14");
+                     : "=a"(rax)
+                     :
+                     : "r10", "r11", "r13", "r14");
     CHECK(rax == 9);
-    // SIMD to a device: an MMIO form the monitor cannot complete. The instruction is in the host's hands, nothing has happened yet.
+    // SIMD to a device: an MMIO form the monitor cannot complete. The instruction is in the host's hands, nothing has
+    // happened yet.
     u64 *hole = (u64 *)PHYS(HOLE + 0x80);
     __asm__ volatile("xor %%ebx, %%ebx\n mov $1, %%r13\n mov $4, %%r14\n .byte 0x0F, 0x10, 0x00, 0x90\n"
-                     : "=b"(rbx) : "a"(hole) : "r13", "r14", "xmm0");
+                     : "=b"(rbx)
+                     : "a"(hole)
+                     : "r13", "r14", "xmm0");
     CHECK(rbx == 0x1234);
 }
 
@@ -207,7 +226,10 @@ static void test_host_changes_cr3(u64 root) {
     *pte_of(root, TEST_VA + 0x10000) = a | PRESENT_RW;
     *pte_of(root2, TEST_VA + 0x10000) = b | PRESENT_RW;
     CHECK(*(volatile u64 *)(TEST_VA + 0x10000) == 0xAAAA);
-    __asm__ volatile("mov %0, %%r12\n mov $4, %%r13\n mov $3, %%r14\n .byte 0x0F, 0x00, 0xE0\n" : : "r"(root2) : "r12", "r13", "r14"); // verr ax
+    __asm__ volatile("mov %0, %%r12\n mov $4, %%r13\n mov $3, %%r14\n .byte 0x0F, 0x00, 0xE0\n"
+                     :
+                     : "r"(root2)
+                     : "r12", "r13", "r14"); // verr ax
     CHECK(read_cr3() == root2);
     CHECK(*(volatile u64 *)(TEST_VA + 0x10000) == 0xBBBB);
     write_cr3(root);
@@ -218,7 +240,7 @@ static void test_notes(u64 root) {
     u64 code = frame();
     put_function(code, 1);
     *pte_of(root, TEST_VA + 0x20000) = code | PRESENT_RW;
-    u32 (*f)(void) = (u32(*)(void))(TEST_VA + 0x20000);
+    u32 (*f)(void) = (u32 (*)(void))(TEST_VA + 0x20000);
     CHECK(f() == 1);
     MAILBOX[1] = code + 1;
     MAILBOX[2] = 2;

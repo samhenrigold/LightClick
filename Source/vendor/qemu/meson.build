@@ -833,6 +833,19 @@ coref = []
 iokit = []
 pvg = not_found
 emulator_link_args = []
+hvdbt = not_found
+hvdbt_link_depends = []
+if get_option('hvdbt_engine') != ''
+  if host_arch != 'aarch64' or host_os != 'darwin'
+    error('hvdbt_engine needs an Apple silicon host')
+  endif
+  hvdbt_library = get_option('hvdbt_engine') / '.build/release/libEngine.a'
+  hvdbt = declare_dependency(
+    compile_args: ['-I' + get_option('hvdbt_engine') / 'Sources/CEngine/include'],
+    link_args: [hvdbt_library, '-L/usr/lib/swift', '-Wl,-rpath,/usr/lib/swift',
+                '-framework', 'Foundation', '-framework', 'Hypervisor'])
+  hvdbt_link_depends = files(hvdbt_library)
+endif
 midl = not_found
 widl = not_found
 pathcch = not_found
@@ -4497,7 +4510,7 @@ foreach target : target_dirs
                c_args: c_args,
                dependencies: arch_deps + exe['dependencies'],
                objects: lib.extract_all_objects(recursive: true),
-               link_depends: [block_syms, qemu_syms],
+               link_depends: [block_syms, qemu_syms] + hvdbt_link_depends,
                link_args: link_args,
                win_subsystem: exe['win_subsystem'])
 

@@ -21,6 +21,7 @@
 #include "qemu/pvg-events.h"
 #include "qemu/pvg-tcg.h"
 #include "qemu/qemu-print.h"
+#include "accel/tcg/handoff.h"
 #include "qapi/error.h"
 #include "qapi/type-helpers.h"
 #include "hw/core/cpu.h"
@@ -875,6 +876,11 @@ void tcg_kick_vcpu_thread(CPUState *cpu)
      * CPU thread; see kvm_arch_pre_run() for example.
      */
     qatomic_store_release(&cpu->exit_request, true);
+#ifndef CONFIG_USER_ONLY
+    if (unlikely(tcg_handoff)) {
+        tcg_handoff->kick(cpu);
+    }
+#endif
 
     /* Ensure cpu_exec will see the exit request after TCG has exited.  */
     qatomic_store_release(&cpu->neg.icount_decr.u16.high, -1);
@@ -1081,6 +1087,13 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             tb = tb_lookup(cpu, s);
             if (tb == NULL) {
                 CPUJumpCache *jc;
+#ifndef CONFIG_USER_ONLY
+                if (unlikely(tcg_handoff) && s.cflags == curr_cflags(cpu) &&
+                    tcg_handoff->want_engine(cpu, s.pc, s.flags)) {
+                    cpu->exception_index = EXCP_HANDOFF;
+                    break;
+                }
+#endif
                 uint32_t h;
                 uint64_t generation;
 

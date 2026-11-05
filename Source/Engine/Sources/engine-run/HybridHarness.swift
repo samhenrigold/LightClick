@@ -23,7 +23,9 @@ final class HybridHarness {
     func command(_ n: UInt32) {
         switch n {
         case 1:
-            if host((1 << 32) + 0x2000).load(as: UInt64.self) != 0xAABB_CCDD_EEFF_0011 { failed = "a guest write above 4 GB is not where the host looks" }
+            if host((1 << 32) + 0x2000).load(as: UInt64.self) != 0xAABB_CCDD_EEFF_0011 {
+                failed = "a guest write above 4 GB is not where the host looks"
+            }
         case 2:
             host(mailbox(1)).storeBytes(of: UInt32(truncatingIfNeeded: mailbox(2)), as: UInt32.self)
             engine_note_write(handle, mailbox(1), 4)
@@ -73,7 +75,8 @@ final class HybridHarness {
         HybridHarness.current = self
         ram = engine_test_shared_ram(total)
         var config = EngineConfig(
-            ram_bytes: total, ram_host: ram, kernel_model: true, precise_flags: true, tso: true, tzcnt_lzcnt: false, ram_below_4g: below, hybrid: true)
+            ram_bytes: total, ram_host: ram, kernel_model: true, precise_flags: true, tso: true, tzcnt_lzcnt: false,
+            ram_below_4g: below, hybrid: true)
         var ops = EngineMachineOps(
             opaque: nil,
             mmio_read: { _, gpa, _ in gpa &* 3 },
@@ -112,7 +115,8 @@ final class HybridHarness {
         handle = created
         host((1 << 32) + 0x1000).storeBytes(of: UInt64(0x1122_3344_5566_7788), as: UInt64.self)
         engine_mark_device(handle, 0xA0000, 0x1000)
-        let tallyPath = ProcessInfo.processInfo.environment["ENGINE_TALLY"] ?? NSTemporaryDirectory() + "hybrid-tally-\(getpid())"
+        let tallyPath =
+            ProcessInfo.processInfo.environment["ENGINE_TALLY"] ?? NSTemporaryDirectory() + "hybrid-tally-\(getpid())"
         tallyPath.withCString { engine_tally_start(handle, $0) }
         engine_set_tsc(handle, 0, 1 << 50, 1, 5)
 
@@ -138,7 +142,8 @@ final class HybridHarness {
                 engine_request_boundary(target)
             }
         }
-        var fallbacks = 0, boundaries = 0
+        var fallbacks = 0
+        var boundaries = 0
         while true {
             let result = engine_run(handle)
             switch result {
@@ -159,16 +164,21 @@ final class HybridHarness {
                 if deviceWrites == 0 { return 5 }
                 engine_tally_write(handle)
                 let tally = (try? String(contentsOfFile: tallyPath, encoding: .utf8)) ?? ""
-                for reason in ["unknown opcode", "x87 instruction", "hlt", "far return", "mov cr8", "rdmsr 0x1b", "wrmsr 0x6e0", "popcnt", "mmio form", "verr"]
+                for reason in [
+                    "unknown opcode", "x87 instruction", "hlt", "far return", "mov cr8", "rdmsr 0x1b", "wrmsr 0x6e0",
+                    "popcnt", "mmio form", "verr"
+                ]
                 where !tally.contains(reason) {
                     FileHandle.standardError.write(Data("tally lacks \(reason)\n".utf8))
                     return 6
                 }
                 if ProcessInfo.processInfo.environment["ENGINE_TALLY"] == nil { unlink(tallyPath) }
-                FileHandle.standardError.write(Data("hybrid: \(fallbacks) fallbacks, \(boundaries) boundary stops\n".utf8))
+                FileHandle.standardError.write(
+                    Data("hybrid: \(fallbacks) fallbacks, \(boundaries) boundary stops\n".utf8))
                 return Int32(bitPattern: exitCode)
             case ENGINE_RUN_ERROR:
-                FileHandle.standardError.write(Data("engine stop: \(String(cString: engine_error_text(handle)))\n".utf8))
+                FileHandle.standardError.write(
+                    Data("engine stop: \(String(cString: engine_error_text(handle)))\n".utf8))
                 return 2
             default:
                 FileHandle.standardError.write(Data("guest halted for good\n".utf8))
