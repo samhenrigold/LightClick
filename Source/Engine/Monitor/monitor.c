@@ -18,6 +18,7 @@ void mon_hvc(void);
 void mon_fp_save(void *);
 void mon_fp_restore(void *);
 void mon_enter_guest(void);
+_Noreturn void mon_restart(void);
 
 static inline void sysreg_isb(void) { __asm__ volatile("isb"); }
 #define RSR(name) ({ u64 v_; __asm__ volatile("mrs %0, " #name : "=r"(v_)); v_; })
@@ -135,6 +136,8 @@ static u64 hole_entry_priv, hole_entry_ram; // root-level descriptors for the pr
 
 static inline u64 *pool_page(u32 idx) { return (u64 *)(POOL_VA + (u64)idx * 4096); }
 static inline u32 pool_index(const void *p) { return (u32)(((u64)p - POOL_VA) >> 12); }
+// ram_size is the top of RAM: below it there can be holes, which belong to devices.
+static inline bool is_ram(u64 gpa) { return gpa < c->ram_size && (page_info[gpa >> 12] & PI_RAM); }
 
 
 static u32 pool_alloc(u32 view, u32 level, u64 guest_table, u64 va_base) {
@@ -201,7 +204,7 @@ static Walk x86_walk(u64 cr3, u64 va, u32 access, bool set_ad) {
     u64 table = cr3 & X_ADDR;
     bool nxe = c->efer & (1ULL << 11);
     for (int level = 3; level >= 0; level--) {
-        if (table + 4096 > c->ram_size)
+        if (!is_ram(table))
             stop(STOP_UNSUPPORTED, 0, 1, table, va); // x86 page table outside RAM
         u64 *ep = (u64 *)RAM(table + ((va >> (12 + 9 * level)) & 0x1ff) * 8);
         u64 e = *ep;
@@ -250,7 +253,7 @@ static bool guest_read(u64 va, void *out, u32 n, u32 access) {
     u8 *o = out;
     while (n) {
         Walk w = x86_walk(c->cr3, va, access, true);
-        if (!w.ok || w.gpa >= c->ram_size)
+        if (!w.ok || !is_ram(w.gpa))
             return false;
         u32 chunk = 4096 - (u32)(va & 0xfff);
         if (chunk > n)
@@ -266,7 +269,7 @@ static bool guest_write(u64 va, const void *in, u32 n, u32 access) {
     const u8 *o = in;
     while (n) {
         Walk w = x86_walk(c->cr3, va, access | 2, true);
-        if (!w.ok || w.gpa >= c->ram_size)
+        if (!w.ok || !is_ram(w.gpa))
             return false;
         u32 chunk = 4096 - (u32)(va & 0xfff);
         if (chunk > n)
@@ -400,12 +403,29 @@ static u64 rip_here(u64 pc) {
 }
 
 // ---- Stops ----
+// A stop this instruction can come back from, in hybrid mode. The state is precise at every rip passed to stop: nothing guest-visible changes
+// before an instruction's last access. Stops with no rip are about the engine's own limits, and stay final.
+static bool mon_resync;
+static void irq_deliver_now(u64 rip, u32 apic_vector);
 _Noreturn static void stop(u64 reason, u64 rip, u64 a, u64 b, u64 d) {
+    bool resumable = c->hybrid && rip && (reason == STOP_UNTRANSLATED || reason == STOP_UNSUPPORTED || reason == STOP_FALLBACK);
+    // A vector already taken from QEMU's APIC goes first. The instruction restarts on return from the handler, and the host never sits on
+    // an interrupt it cannot see through a long stay on TCG.
+    if (resumable && c->irq_pending && (c->rflags_sys & RF_IF) && rip != c->irq_shadow_rip) {
+        irq_deliver_now(rip, 0);
+        mon_restart();
+    }
     c->req_a[0] = reason;
     c->req_a[1] = rip;
     c->req_a[2] = a;
     c->req_a[3] = b;
     c->req_a[4] = d;
+    if (resumable) {
+        c->req_r[0] = rip;
+        hostcall(HC_FALLBACK);
+        mon_resync = true;
+        mon_restart();
+    }
     for (;;)
         hostcall(HC_STOP);
 }
@@ -664,6 +684,7 @@ static void track_root(View *v, u64 va, const Walk *w) {
 // ---- Delivering x86 events ----
 static u64 translate_here(u64 rip, u64 site, u32 kind, bool single);
 static bool event_delivered, code_cache_reset;
+static u32 deliver_depth;
 static void reset_all_return_stacks(void);
 static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int);
 
@@ -719,6 +740,8 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
             raise_pf(rip, w.fault_err, rip);
         return c->elr;
     }
+    if (c->hybrid && !is_ram(w.gpa))
+        stop(STOP_FALLBACK, rip, FB_FETCH_NOT_RAM, w.gpa, 0);
     c->req_a[0] = c->view;
     c->req_a[1] = rip;
     c->req_a[2] = site;
@@ -731,6 +754,8 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
         if (!c->model_kernel)
             shim_fault(14, 0x10, rip, fault - 1);
         Walk f = x86_walk(c->cr3, fault - 1, 16 | (c->cpl == 3 ? 4 : 0), false);
+        if (c->hybrid && f.ok) // mapped, but the rest of the instruction is not in RAM
+            stop(STOP_FALLBACK, rip, FB_FETCH_NOT_RAM, f.gpa, 0);
         raise_pf(fault - 1, f.fault_err, rip);
         return c->elr;
     }
@@ -878,7 +903,7 @@ typedef struct {
 } ArmAccess;
 
 static bool arm_decode(u32 w, ArmAccess *a) {
-    if ((w & 0x3B000000u) != 0x38000000u && (w & 0x3B000000u) != 0x39000000u)
+    if ((w & 0x3F000000u) != 0x38000000u && (w & 0x3F000000u) != 0x39000000u)
         return false; // bit 26 set is SIMD; pairs and exclusives live elsewhere
     u32 opc = (w >> 22) & 3, size = w >> 30;
     a->bytes = (u8)(1u << size);
@@ -1173,7 +1198,7 @@ static void handle_data_abort(bool lower) {
         raise_pf(far, w.fault_err, rip_here(c->elr));
         return;
     }
-    if (w.gpa >= c->ram_size) { // device hole: emulate the ARM access itself, so all x86 forms of a move or RMW work
+    if (!is_ram(w.gpa)) { // device hole: emulate the ARM access itself, so all x86 forms of a move or RMW work
         if (in_rep_stub(c->elr)) { // string instruction on a device: back to the plain per-element loop
             c->elr = c->x[R_LR];
             return;
@@ -1315,8 +1340,6 @@ static void set_cpl(u32 cpl, u64 ring_rsp_unused) {
     view_activate(view_find(cr3_key(c->cr3), cpl));
 }
 
-static u32 deliver_depth;
-
 static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int) {
     if (!c->model_kernel) {
         shim_fault(vector, err, ret_rip, c->far);
@@ -1420,6 +1443,68 @@ static void irq_deliver_now(u64 rip, u32 apic_vector) {
     deliver(vector, 0, false, rip, false);
 }
 
+// Frames written behind the monitor's back. Same treatment as a store that traps, except that nothing has to be re-run.
+static void note_apply(u32 fr) {
+    u8 pi = page_info[fr];
+    if (pi & PI_CODE) {
+        c->req_a[0] = (u64)fr << 12;
+        c->stat_note_code++;
+        hostcall(HC_SMC);
+        page_info[fr] &= ~PI_CODE;
+        reset_all_return_stacks();
+    }
+    if (pi & PI_PT) {
+        c->stat_note_pt++;
+        for (u32 i = 0; i < 512; i++)
+            pt_slot_changed(((u64)fr << 12) + i * 8);
+    }
+}
+
+static void notes_drain(void) {
+    // Overflow: rescan. The write came before the note, so a producer still storing its slot is covered, and its stale slot is only a spare invalidation.
+    if (__atomic_load_n(&c->note_overflow, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&c->note_overflow, 0, __ATOMIC_RELEASE);
+        for (u32 fr = 0; fr < c->ram_size >> 12; fr++)
+            if (page_info[fr] & (PI_CODE | PI_PT))
+                note_apply(fr);
+        c->note_tail = __atomic_load_n(&c->note_head, __ATOMIC_ACQUIRE);
+        return;
+    }
+    u32 head = __atomic_load_n(&c->note_head, __ATOMIC_ACQUIRE);
+    while (c->note_tail != head) {
+        u32 v = __atomic_exchange_n(&c->note_ring[c->note_tail % 256], 0, __ATOMIC_ACQ_REL);
+        if (!v)
+            break; // reserved, not stored yet: its kick comes after the store
+        note_apply(v - 1);
+        c->note_tail++;
+    }
+}
+
+static void fp_trap_sync(void);
+static void mxcsr_apply(u32 v);
+
+// The host may have run instructions: anything the monitor derives from x86 state is stale.
+static void host_resync(void) {
+    mxcsr_apply(c->resume_mxcsr);
+    fp_trap_sync();
+    view_activate(view_find(cr3_key(c->cr3), c->cpl));
+    c->irq_shadow_rip = ~0ULL;
+    deliver_depth = 0;
+    c->elr = translate_here(c->req_r[0], 0, 0, false);
+}
+
+static void exit_check(void);
+
+// Reached through mon_restart with the monitor's stack reset: a stop abandons whatever called it.
+void mon_after_stop(void) {
+    if (mon_resync) {
+        mon_resync = false;
+        host_resync();
+    }
+    deliver_depth = 0;
+    exit_check();
+}
+
 // Called on every way out of the monitor. If an interrupt is due and the pc is at an x86 boundary, take it. Otherwise step ARM
 // instructions until it is: one trap per ARM word, only while an interrupt waits. Costs nothing when none does.
 static void exit_check(void) {
@@ -1427,6 +1512,14 @@ static void exit_check(void) {
     if (pt_step_slot) {
         step_on();
         return;
+    }
+    if (c->hybrid) {
+        notes_drain();
+        if (c->irq_line && !c->irq_pending && (c->rflags_sys & RF_IF)) {
+            hostcall(HC_IRQ); // level-triggered in QEMU's APIC: IF has opened since the line rose
+            if (c->req_r[0] != ~0ULL)
+                c->irq_pending = (u32)c->req_r[0] + 1;
+        }
     }
     bool stop_now = c->stop_requested;
     u32 apic_vector = 0;
@@ -1442,7 +1535,9 @@ static void exit_check(void) {
             c->req_a[0] = rip;
             c->req_r[0] = rip;
             hostcall(HC_BOUNDARY);
-            if (c->req_r[0] != rip) { // the host moved the x86 pc
+            if (c->hybrid)
+                host_resync();
+            else if (c->req_r[0] != rip) { // the host moved the x86 pc
                 event_delivered = false;
                 c->elr = translate_here(c->req_r[0], 0, 0, false);
             }
@@ -1506,7 +1601,7 @@ static void do_sysret(void) {
         return;
     }
     if (!op64)
-        stop(STOP_UNSUPPORTED, rip, 6, 0, 0); // sysret to compatibility mode
+        stop(STOP_UNSUPPORTED, rip_here(c->elr - 4), 6, 0, 0); // sysret to compatibility mode
     if (!canonical(rip)) {
         x86_gp0();
         return;
@@ -1598,6 +1693,7 @@ static void do_mov_cr_write(void) {
             if ((v & 0x80010001ULL) != 0x80010001ULL)
                 stop(STOP_UNSUPPORTED, here, 10, v, 0); // paging, protection or WP off
             c->cr0 = v;
+            fp_trap_sync();
             break;
         case 2:
             c->cr2 = v;
@@ -1618,6 +1714,8 @@ static void do_mov_cr_write(void) {
             c->cr4 = v;
             break;
         case 8:
+            if (c->hybrid)
+                stop(STOP_FALLBACK, here, FB_CR8, 0, 0);
             c->apic_tpr = (u32)(v & 15) << 4;
             break;
     }
@@ -1635,7 +1733,16 @@ static void do_mov_cr_write(void) {
 #define MSR_APIC_BASE 0x1Bu
 #define MSR_TSC_DEADLINE 0x6E0u
 
-static inline u64 tsc_now(void) { return RSR(cntvct_el0) * 125 / 3 + c->tsc_offset; } // 24 MHz counter shown as 1 GHz
+// The 24 MHz counter in nanoseconds, then at the guest's TSC rate, in the same steps as QEMU's cpu_get_tsc so TCG and the engine agree.
+static inline u64 tsc_now(void) {
+    u64 ns = RSR(cntvct_el0) * 125 / 3 + c->tsc_ns_offset;
+    return ns + ns * c->tsc_num / c->tsc_den + c->tsc_offset;
+}
+
+// The MSRs that live here in hybrid mode. Everything else, including the APIC's and the TSC's, is QEMU's.
+static bool msr_is_monitors(u32 m) {
+    return m == MSR_EFER || m == MSR_STAR || m == MSR_LSTAR || m == MSR_CSTAR || m == MSR_SFMASK || m == MSR_FS || m == MSR_GS || m == MSR_KGS;
+}
 
 static bool rdmsr(u32 m, u64 *v) {
     switch (m) {
@@ -1768,6 +1875,12 @@ static u32 mxcsr_read(void) {
     if (s & 128)
         v |= 2;
     return v;
+}
+
+// CR0.TS: lazy FP switching in a real kernel relies on #NM. FPEN traps EL0's SIMD to EL1, whichever x86 instruction it belongs to.
+static void fp_trap_sync(void) {
+    WSR(cpacr_el1, (c->cr0 & 8) ? 1ULL << 20 : 3ULL << 20);
+    __asm__ volatile("isb");
 }
 
 // Reads the flags as data for a helper; PF and AF stay in their lazy form.
@@ -1986,6 +2099,13 @@ static void do_fx(bool save) {
     static u8 area[512] __attribute__((aligned(16)));
     u64 va = c->x[R_S0];
     u64 here = rip_here(c->elr - 4);
+    if (c->hybrid)
+        stop(STOP_FALLBACK, here, FB_FX, 0, 0);
+    if (c->cr0 & 8) {
+        c->stat_nm++;
+        deliver(7, 0, false, here, false);
+        return;
+    }
     if (save) {
         memset(area, 0, 512);
         *(u16 *)(area + 0) = 0x37F; // default x87 control: no x87 state exists here
@@ -2080,6 +2200,8 @@ void mon_sync(void) {
                 deliver(3, 0, false, next_rip_lit(), true);
                 break;
             case SVC_UD:
+                if (c->hybrid)
+                    stop(STOP_FALLBACK, rip_here(c->elr - 4), FB_UD, 0, 0);
                 x86_ud();
                 break;
             case SVC_DE:
@@ -2093,6 +2215,13 @@ void mon_sync(void) {
                     stop(STOP_GUEST_HALT, rip_here(c->elr - 4), c->x[0], 0, 0);
                 }
                 u64 next = next_rip_lit();
+                if (c->hybrid) {
+                    if (c->irq_pending && (c->rflags_sys & RF_IF)) { // sti; hlt with a vector already in hand: the hlt is over before it starts
+                        c->elr = translate_here(next, 0, 0, false);
+                        break;
+                    }
+                    stop(STOP_FALLBACK, rip_here(c->elr - 4), FB_HLT, 0, 0);
+                }
                 for (;;) {
                     apic_merge_host();
                     apic_timer_check();
@@ -2131,6 +2260,8 @@ void mon_sync(void) {
             }
             case SVC_RDMSR: {
                 u64 v;
+                if (c->hybrid && !msr_is_monitors((u32)c->x[1]))
+                    stop(STOP_FALLBACK, rip_here(c->elr - 4), FB_RDMSR, (u32)c->x[1], 0);
                 if (!rdmsr((u32)c->x[1], &v)) {
                     x86_gp0();
                     break;
@@ -2140,6 +2271,8 @@ void mon_sync(void) {
                 break;
             }
             case SVC_WRMSR:
+                if (c->hybrid && !msr_is_monitors((u32)c->x[1]))
+                    stop(STOP_FALLBACK, rip_here(c->elr - 4), FB_WRMSR, (u32)c->x[1], 0);
                 if (!wrmsr((u32)c->x[1], (u64)(u32)c->x[2] << 32 | (u32)c->x[0]))
                     x86_gp0();
                 break;
@@ -2167,6 +2300,8 @@ void mon_sync(void) {
                         c->x[R_S0] = c->cr4;
                         break;
                     case 8:
+                        if (c->hybrid)
+                            stop(STOP_FALLBACK, rip_here(c->elr - 4), FB_CR8, 0, 0);
                         c->x[R_S0] = c->apic_tpr >> 4;
                         break;
                     default:
@@ -2261,6 +2396,11 @@ void mon_sync(void) {
             }
             case SVC_LDMXCSR: {
                 u32 v = (u32)c->x[R_S0];
+                if (c->cr0 & 8) {
+                    c->stat_nm++;
+                    deliver(7, 0, false, rip_here(c->elr - 4), false);
+                    break;
+                }
                 if (v & 0xFFFF0000u) {
                     x86_gp0();
                     break;
@@ -2271,6 +2411,11 @@ void mon_sync(void) {
                 break;
             }
             case SVC_STMXCSR:
+                if (c->cr0 & 8) {
+                    c->stat_nm++;
+                    deliver(7, 0, false, rip_here(c->elr - 4), false);
+                    break;
+                }
                 c->x[R_S0] = mxcsr_read();
                 break;
             case SVC_FXSAVE:
@@ -2290,6 +2435,13 @@ void mon_sync(void) {
                 break;
             default:
                 stop(STOP_UNSUPPORTED, 0, 15, n, c->elr);
+        }
+    } else if (ec == 0x07) { // SIMD with CR0.TS set
+        if (in_rep_stub(c->elr)) { // no x86 FP here, only a bulk copy: on with the plain loop at the call site, as for a device
+            c->elr = c->x[R_LR];
+        } else {
+            c->stat_nm++;
+            deliver(7, 0, false, rip_here(c->elr), false);
         }
     } else if (ec == 0x32) { // software step
         if (pt_step_slot)
@@ -2331,7 +2483,8 @@ void mon_init(void) {
     WSR(ttbr0_el1, v->ttbr0);
     WSR(ttbr1_el1, v->ttbr1);
     __asm__ volatile("isb");
-    mxcsr_apply(0x1F80);
+    mxcsr_apply(c->hybrid ? c->resume_mxcsr : 0x1F80);
+    fp_trap_sync();
     u64 entry = c->req_a[0];
     c->elr = translate_here(entry, 0, 0, false);
     exit_check();

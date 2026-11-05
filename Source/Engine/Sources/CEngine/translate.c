@@ -12,7 +12,7 @@
 #define MAP_SIZE (1u << MAP_BITS)
 
 u32 *tr_cc;
-bool tr_precise_flags, tr_has_tzcnt;
+bool tr_precise_flags, tr_has_tzcnt, tr_hybrid;
 int tr_cpl;
 u64 tr_stub_lookup, tr_stub_ret_miss, tr_stub_pushf, tr_stub_sahf;
 
@@ -86,6 +86,9 @@ static void map_remove(int view, u64 rip) {
     }
 }
 
+static u8 *ram_at(u64 gpa) { return cfg.ram + (cfg.ram_below_4g && gpa >= 1ULL << 32 ? gpa - (1ULL << 32) + cfg.ram_below_4g : gpa); }
+static bool is_ram(u64 gpa) { return gpa < cfg.ram_size && (cfg.priv[OFF_PAGEINFO + (gpa >> 12)] & PI_RAM); }
+
 // Ring-0 code in the high half is shared by every address space that reaches it through the same PML4 entry target: an x86 kernel keeps
 // those entries identical, and a change to them invalidates through the page-table write path. Everything else belongs to one view.
 #define KEY_DOMAIN 0x40000000
@@ -93,8 +96,8 @@ static int view_high;
 static int block_key(int view, u64 cr3, int cpl, u64 rip) {
     if (cpl == 0 && (rip >> 47)) {
         u64 table = cr3 & 0x000FFFFFFFFFF000ULL;
-        if (table + 4096 <= cfg.ram_size) {
-            u64 e = *(u64 *)(cfg.ram + table + ((rip >> 39) & 0x1ff) * 8);
+        if (is_ram(table)) {
+            u64 e = *(u64 *)(ram_at(table) + ((rip >> 39) & 0x1ff) * 8);
             return KEY_DOMAIN | (int)((e >> 12) & 0x3FFFFFFF);
         }
     }
@@ -115,9 +118,9 @@ static bool fetch_walk(u64 va, u64 *gpa) {
     u64 table = walk_cr3 & X_ADDR;
     bool user = true, nx = false;
     for (int level = 3; level >= 0; level--) {
-        if (table + 4096 > cfg.ram_size)
+        if (!is_ram(table))
             return false;
-        u64 e = *(u64 *)(cfg.ram + table + ((va >> (12 + 9 * level)) & 0x1ff) * 8);
+        u64 e = *(u64 *)(ram_at(table) + ((va >> (12 + 9 * level)) & 0x1ff) * 8);
         if (!(e & X_P))
             return false;
         user = user && (e & X_US);
@@ -138,7 +141,7 @@ static bool fetch_walk(u64 va, u64 *gpa) {
 ok:
     if (nx || (walk_cpl == 3 && !user))
         return false;
-    return *gpa < cfg.ram_size;
+    return is_ram(*gpa);
 }
 
 int tr_fetch(u64 va, u8 *out, int n) {
@@ -150,7 +153,7 @@ int tr_fetch(u64 va, u8 *out, int n) {
         int chunk = 4096 - (int)((va + got) & 0xfff);
         if (chunk > n - got)
             chunk = n - got;
-        memcpy(out + got, cfg.ram + gpa, chunk);
+        memcpy(out + got, ram_at(gpa), chunk);
         got += chunk;
     }
     return got;
@@ -772,6 +775,7 @@ void tr_init(const TrConfig *config) {
     ctx_ptr = (EngineCtx *)(cfg.priv + OFF_CTX);
     tr_precise_flags = cfg.precise_flags;
     tr_has_tzcnt = cfg.has_tzcnt_lzcnt;
+    tr_hybrid = cfg.hybrid;
     cc_limit = cfg.code_cache_bytes ? cfg.code_cache_bytes : CC_SIZE;
     tr_stub_lookup = cfg.stub_lookup;
     tr_stub_ret_miss = cfg.stub_ret_miss;

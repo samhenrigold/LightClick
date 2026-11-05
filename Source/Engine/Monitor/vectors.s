@@ -115,6 +115,16 @@ _mon_enter_guest:
     ldr x30, [x18, #240]
     eret
 
+// A stop that came back: start over on an empty stack, whatever depth the monitor stopped at.
+    .globl _mon_restart
+_mon_restart:
+    movz x0, #0xF000, lsl #32
+    movk x0, #0x003F, lsl #16
+    movk x0, #0xFFF0
+    mov sp, x0
+    bl _mon_after_stop
+    b _mon_enter_guest
+
 // Host call: hvc #code. The host runs with the vCPU stopped here and resumes at the next instruction.
     .globl _mon_hvc
 _mon_hvc:

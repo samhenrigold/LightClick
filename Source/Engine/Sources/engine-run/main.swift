@@ -23,6 +23,10 @@ do {
         let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[2]))))
         exit(CAPIHarness().run(image: image))
     }
+    if arguments[1] == "--hybrid" {
+        let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[2]))))
+        exit(HybridHarness().run(image: image))
+    }
     if arguments[1] == "--kernel" {
         let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[2]))))
         var kernelOptions = EngineOptions()

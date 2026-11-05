@@ -36,4 +36,5 @@ ld -arch arm64 -preload -e _mon_init -no_uuid -pagezero_size 0 \
 # ---- Swift package ----
 cd "$here"
 swift build -c "$config" --product engine-run 2>&1 | grep -E "error|warning: unre|Compiling engine|Build complete|: error" | head -40 || true
+swift build -c "$config" --product Engine 2>&1 | grep -E "error|: error" | head -40 || true # libEngine.a, for QEMU's -Dhvdbt_engine
 codesign --force --sign - --entitlements "$here/Engine.entitlements" "$here/.build/$config/engine-run"

@@ -47,6 +47,11 @@ clang -target x86_64-apple-macos10.9 -c "$here/kernel/kentry.s" -o "$out/kentry.
 ld -arch x86_64 -preload -e _kstart -no_uuid -pagezero_size 0 -segaddr __TEXT 0xFFFF800000100000 -segaddr __DATA 0xFFFF800000800000 \
     -o "$out/kernel" "$out/kentry.o" "$out/kernel.o" "$out/kstubs.o"
 
+# The checks for hybrid mode: the same entry, no ring 3, no stubs of its own beyond its traps.
+clang "${kflags[@]}" -c "$here/kernel/hybrid.c" -o "$out/hybrid.o"
+ld -arch x86_64 -preload -e _kstart -no_uuid -pagezero_size 0 -segaddr __TEXT 0xFFFF800000100000 -segaddr __DATA 0xFFFF800000800000 \
+    -o "$out/hybrid" "$out/kentry.o" "$out/hybrid.o"
+
 # lc-bench's arithmetic.
 clang "${flags[@]}" -w -I"$here/../../../probes" -c "$here/t_lcbench.c" -o "$out/t_lcbench.o"
 clang "${flags[@]}" -w -c "$here/t_lcbench_stubs.c" -o "$out/t_lcbench_stubs.o"

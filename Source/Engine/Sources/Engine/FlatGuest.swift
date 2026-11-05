@@ -97,7 +97,7 @@ public final class FlatGuest: EngineMachine {
         switch try engine.run(entry: entry) {
         case .exited(let code): return code
         case .halted(let rax): throw EngineError.stop("guest halted, rax \(rax)")
-        case .boundary: throw EngineError.stop("unexpected boundary stop")
+        case .boundary, .fallback: throw EngineError.stop("unexpected boundary stop")
         }
     }
 

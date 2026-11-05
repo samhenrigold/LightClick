@@ -1112,6 +1112,10 @@ static void emit_bitscan(const Insn *in, int live) {
             mov_reg(0, R_PF, S1);
         return;
     }
+    if (tr_hybrid) { // CR0.TS may be set, and a kernel's own popcnt must not take #NM
+        emit_stop(in->rip, "popcnt: the emitter needs NEON, unavailable under CR0.TS");
+        return;
+    }
     // popcnt: ZF for a zero source, every other arithmetic flag clear.
     // fmov d24, x17; cnt v24.8b, v24.8b; addv b24, v24.8b; fmov w22, s24
     E(0x9E670000u | S1 << 5 | V_S0);
@@ -1140,7 +1144,7 @@ static void emit_string(const Insn *in) {
     }
     u32 *start = tr_cc;
     u32 *skip = 0;
-    if (in->rep && (sub == 0 || sub == 2)) {
+    if (in->rep && (sub == 0 || (sub == 2 && !tr_hybrid))) { // stos's dup is outside the stub, where CR0.TS could not be backed out of
         // Bulk first: a stub moves whole 32-byte chunks with exact registers between them. The plain loop below does what is left.
         movimm(S1, (u64)(32 / sz));
         if (sub == 2)

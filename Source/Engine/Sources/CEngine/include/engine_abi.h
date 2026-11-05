@@ -145,6 +145,7 @@ enum {
     HC_BOUNDARY, // a[0] x86 rip: the vCPU stopped at an instruction boundary on request. r[0] rip to continue at
     HC_VIEW_DROP, // a[0] view, being reused for another address space
     HC_DEBUG, // a[0] a[1] printable
+    HC_FALLBACK, // layout as HC_STOP. The host runs this x86 instruction elsewhere and sets the state; r[0] is the rip to continue at
 };
 
 // Stop reasons for HC_STOP.
@@ -156,6 +157,18 @@ enum {
     STOP_TRIPLE_FAULT,
     STOP_GUEST_FAULT_NO_IDT, // user-mode shim: x86 exception with no IDT model. a[2] vector, a[3] error code, a[4] cr2
     STOP_SHADOW_FULL,
+    STOP_FALLBACK, // hybrid only, a[2]: why, FB_*
+};
+
+// Why a hybrid engine hands an instruction to the host although it could have decoded it. The state these belong to lives in QEMU's CPU.
+enum {
+    FB_UD, // the decoder knows no such instruction; only the host's CPU model can say whether it exists
+    FB_HLT,
+    FB_FX, // fxsave, fxrstor: x87 state is QEMU's
+    FB_CR8, // the TPR is in QEMU's APIC
+    FB_RDMSR, // a[3] msr
+    FB_WRMSR, // a[3] msr
+    FB_FETCH_NOT_RAM, // a[3] gpa
 };
 
 typedef struct {
@@ -214,6 +227,17 @@ typedef struct {
     uint64_t stat_svc[128];
     uint64_t stat_fills, stat_dirty, stat_pf_delivered, stat_pt_writes, stat_pt_writes_zap, stat_pt_step, stat_smc,
         stat_irq, stat_steps, stat_cr3, stat_iret, stat_syscall, stat_mmio, stat_mmio_vm, stat_view_evictions, stat_pt_unshadow, stat_pool_reclaim;
+
+    // Hybrid mode: QEMU's TCG owns everything the engine does not, and takes single instructions back through HC_FALLBACK.
+    uint32_t hybrid;
+    uint32_t irq_line; // set from any thread: QEMU's APIC may have an interrupt. Level, not edge: stays set while IF is clear.
+    uint32_t resume_mxcsr;
+    uint32_t pad3;
+    uint64_t tsc_ns_offset, tsc_num, tsc_den; // TSC = ns + ns * num / den + tsc_offset, ns = counter * 125 / 3 + tsc_ns_offset
+    // Frames written behind the monitor's back (DMA, TCG), holding code or page tables. Many producers, consumed in the monitor.
+    uint32_t note_head, note_tail, note_overflow, pad4;
+    uint32_t note_ring[256]; // frame + 1
+    uint64_t stat_note_code, stat_note_pt, stat_nm;
 } EngineCtx;
 
 // Block table, one entry per translated block, ordered by arm_off because the code cache only grows.

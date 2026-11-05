@@ -56,7 +56,15 @@ public func engine_create(_ config: UnsafePointer<EngineConfig>, _ ops: UnsafePo
     options.useTSO = config.pointee.tso
     options.tzcntLzcnt = config.pointee.tzcnt_lzcnt
     options.hostRAM = config.pointee.ram_host
-    guard let engine = try? Engine(options: options) else { return nil }
+    options.ramBelow4G = config.pointee.ram_below_4g
+    options.hybrid = config.pointee.hybrid
+    let engine: Engine
+    do {
+        engine = try Engine(options: options)
+    } catch {
+        FileHandle.standardError.write(Data("engine_create: \(error)\n".utf8))
+        return nil
+    }
     let machine = CMachine(ops: ops.pointee)
     engine.machine = machine
     return OpaquePointer(Unmanaged.passRetained(Handle(engine: engine, machine: machine)).toOpaque())
@@ -71,6 +79,7 @@ public func engine_ram(_ h: OpaquePointer) -> UnsafeMutableRawPointer { handle(h
 @_cdecl("engine_run")
 public func engine_run(_ h: OpaquePointer) -> UInt32 {
     let box = handle(h)
+    box.engine.tally?.entered(rip: box.started ? box.engine.ctx.pointee.req_r.0 : box.entry)
     do {
         let outcome = box.started ? try box.engine.resume() : try box.engine.run(entry: box.entry)
         box.started = true
@@ -78,16 +87,42 @@ public func engine_run(_ h: OpaquePointer) -> UInt32 {
         case .exited: return ENGINE_RUN_EXIT.rawValue
         case .halted: return ENGINE_RUN_HALTED.rawValue
         case .boundary: return ENGINE_RUN_BOUNDARY.rawValue
+        case .fallback: return ENGINE_RUN_FALLBACK.rawValue
         }
     } catch {
         free(box.error)
         box.error = strdup("\(error)")
+        box.engine.tally?.stopped("\(error)")
         return ENGINE_RUN_ERROR.rawValue
     }
 }
 
 @_cdecl("engine_error_text")
 public func engine_error_text(_ h: OpaquePointer) -> UnsafePointer<CChar>? { UnsafePointer(handle(h).error) }
+
+@_cdecl("engine_mark_device")
+public func engine_mark_device(_ h: OpaquePointer, _ gpa: UInt64, _ bytes: UInt64) { handle(h).engine.markDevice(gpa: gpa, bytes: bytes) }
+
+@_cdecl("engine_note_write")
+public func engine_note_write(_ h: OpaquePointer, _ gpa: UInt64, _ bytes: UInt64) { handle(h).engine.noteWrite(gpa: gpa, bytes: bytes) }
+
+@_cdecl("engine_set_irq_line")
+public func engine_set_irq_line(_ h: OpaquePointer, _ level: Bool) { engine_ctx_set_irq_line(handle(h).engine.ctx, level) }
+
+@_cdecl("engine_set_tsc")
+public func engine_set_tsc(_ h: OpaquePointer, _ nsOffset: UInt64, _ tscOffset: UInt64, _ num: UInt64, _ den: UInt64) {
+    handle(h).engine.setTSC(nsOffset: nsOffset, tscOffset: tscOffset, num: num, den: den)
+}
+
+@_cdecl("engine_tally_start")
+public func engine_tally_start(_ h: OpaquePointer, _ path: UnsafePointer<CChar>) {
+    let tally = Tally(engine: handle(h).engine, path: String(cString: path))
+    handle(h).engine.tally = tally
+    tally.startWriting()
+}
+
+@_cdecl("engine_tally_write")
+public func engine_tally_write(_ h: OpaquePointer) { handle(h).engine.tally?.write() }
 
 @_cdecl("engine_get_state")
 public func engine_get_state(_ h: OpaquePointer, _ out: UnsafeMutablePointer<EngineX86State>) {
@@ -200,6 +235,7 @@ extension Engine {
         c.pointee.ldtr = s.ldtr
         c.pointee.cpl = s.cpl
         c.pointee.mxcsr = s.mxcsr & 0xFFC0
+        c.pointee.resume_mxcsr = s.mxcsr
         writeXMM(from: s)
         c.pointee.req_r.0 = s.rip
     }

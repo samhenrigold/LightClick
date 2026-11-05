@@ -150,7 +150,7 @@ bool insn_is_terminator(const Insn *in);
 
 // ---- emit state ----
 extern u32 *tr_cc; // write cursor
-extern bool tr_precise_flags, tr_has_tzcnt;
+extern bool tr_precise_flags, tr_has_tzcnt, tr_hybrid;
 extern int tr_cpl;
 static inline void E(u32 v) { *tr_cc++ = v; }
 

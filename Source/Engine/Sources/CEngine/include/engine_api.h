@@ -40,6 +40,11 @@ typedef struct {
     bool precise_flags;
     bool tso;
     bool tzcnt_lzcnt;
+    // Nonzero: ram_host holds this many bytes at GPA 0 and the rest (ram_bytes minus this) at GPA 4 GB. Zero: all of it at GPA 0.
+    uint64_t ram_below_4g;
+    // Another CPU emulator owns the machine, and takes single instructions back on ENGINE_RUN_FALLBACK: hlt, x87, unknown opcodes, far control
+    // flow, any MSR outside the syscall family, the APIC. In-VM APIC is off, interrupts come through has_interrupt_waiting and acknowledge_interrupt.
+    bool hybrid;
 } EngineConfig;
 
 typedef enum {
@@ -47,6 +52,7 @@ typedef enum {
     ENGINE_RUN_BOUNDARY, // stopped at an instruction boundary after engine_request_boundary
     ENGINE_RUN_HALTED, // hlt with nothing able to wake it
     ENGINE_RUN_ERROR, // a clear stop: engine_error_text says why
+    ENGINE_RUN_FALLBACK, // hybrid only: run the instruction at state.rip elsewhere, engine_set_state, engine_run
 } EngineRunResult;
 
 // CPU state in QEMU's terms, to fill CPUX86State at a boundary. Segment bases beyond fs and gs are always zero in long mode.
@@ -68,7 +74,8 @@ EngineHandle *engine_create(const EngineConfig *config, const EngineMachineOps *
 void engine_destroy(EngineHandle *engine);
 // Host pointer to RAM, for loaders and DMA.
 void *engine_ram(EngineHandle *engine);
-// Marks a guest-physical range as a device hole or RAM; defaults come from ram_bytes.
+// Before the first run: this guest-physical range belongs to a device, though RAM lies behind it. Accesses reach mmio_read and mmio_write.
+void engine_mark_device(EngineHandle *engine, uint64_t gpa, uint64_t bytes);
 // Runs until something needs the host's attention. The first call starts at state.rip after engine_set_state.
 EngineRunResult engine_run(EngineHandle *engine);
 const char *engine_error_text(EngineHandle *engine);
@@ -83,10 +90,26 @@ void engine_request_exit(EngineHandle *engine);
 void engine_request_boundary(EngineHandle *engine); // kick: engine_run returns ENGINE_RUN_BOUNDARY at the next x86 boundary
 void engine_kick(EngineHandle *engine); // look at has_interrupt_waiting and pending vectors
 void engine_post_vector(EngineHandle *engine, uint8_t vector, bool level);
+// Guest RAM was written other than by this engine (DMA, TCG): drop what depends on it. Translations and shadow tables are gone before the next
+// monitor exit after a kick; a guest polling the written memory could see the old state for that long.
+void engine_note_write(EngineHandle *engine, uint64_t gpa, uint64_t bytes);
+// Hybrid: an interrupt may be waiting. The monitor asks acknowledge_interrupt once IF allows.
+void engine_set_irq_line(EngineHandle *engine, bool level);
+
+// While stopped. The guest's TSC in QEMU's terms: ns is the host's uptime clock plus ns_offset, TSC = ns + ns * num / den + tsc_offset.
+void engine_set_tsc(EngineHandle *engine, uint64_t ns_offset, uint64_t tsc_offset, uint64_t num, uint64_t den);
+
+// Writes the ranked tally of stops and the unknown rates to path now, every 2 seconds, and on engine_tally_write. Samples the rip each second by a
+// boundary stop. Any thread.
+void engine_tally_start(EngineHandle *engine, const char *path);
+void engine_tally_write(EngineHandle *engine);
 
 // Atomic helpers the Swift side needs, implemented in C.
 void engine_ctx_post_vector(void *ctx, uint8_t vector, bool level);
 void engine_ctx_set_stop(void *ctx);
+void engine_ctx_set_irq_line(void *ctx, bool level);
+bool engine_ctx_note_write(void *ctx, const unsigned char *page_info, uint64_t gpa, uint64_t bytes);
+void *engine_test_shared_ram(uint64_t bytes);
 
 #ifdef __cplusplus
 }

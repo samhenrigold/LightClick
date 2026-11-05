@@ -61,7 +61,7 @@ final class CAPIHarness {
 
     func run(image: MachOImage) -> Int32 {
         CAPIHarness.current = self
-        var config = EngineConfig(ram_bytes: 2 << 30, ram_host: nil, kernel_model: true, precise_flags: true, tso: true, tzcnt_lzcnt: false)
+        var config = EngineConfig(ram_bytes: 2 << 30, ram_host: nil, kernel_model: true, precise_flags: true, tso: true, tzcnt_lzcnt: false, ram_below_4g: 0, hybrid: false)
         var ops = EngineMachineOps(
             opaque: nil,
             mmio_read: { _, gpa, _ in CAPIHarness.current!.deviceRegisters[gpa] ?? 0 },

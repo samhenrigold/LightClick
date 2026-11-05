@@ -35,6 +35,10 @@ public struct EngineOptions {
     public var tzcntLzcnt = false
     public var codeCacheBytes: UInt64 = 0
     public var shadowPoolPages: UInt32 = 0
+    /// Nonzero: this many bytes of RAM at GPA 0, the rest at GPA 4 GB.
+    public var ramBelow4G: UInt64 = 0
+    /// Another CPU emulator owns the machine and takes single instructions back: see `ENGINE_RUN_FALLBACK`.
+    public var hybrid = false
     public init() {}
 }
 
@@ -42,6 +46,7 @@ public enum RunOutcome: Equatable, Sendable {
     case boundary(rip: UInt64)
     case halted(rax: UInt64)
     case exited(code: Int32)
+    case fallback(rip: UInt64)
 }
 
 /// One VM with one x86 vCPU, created and run on the calling thread.
@@ -63,9 +68,16 @@ public final class Engine {
     private var vtimerExits = 0
     private var irqLine = false
     private var vtimerOffset: UInt64 = 0
+    /// One past the highest RAM GPA. Below it there can be holes, which `PI_RAM` tells apart.
+    public let ramTop: UInt64
+    public var tally: Tally?
 
     public init(options: EngineOptions) throws {
         self.options = options
+        let below = options.ramBelow4G
+        ramTop = below != 0 && options.ramBytes > below ? (1 << 32) + options.ramBytes - below : options.ramBytes
+        // The monitor's per-frame tables hold 32 GB of frames; see MIRROR_HEAD_OFF and RMAP_HEAD_OFF.
+        if ramTop > 32 << 30 { throw EngineError.stop("RAM reaches past GPA 32 GB") }
         try hvCheck("hv_vm_create") {
             let config = hv_vm_config_create()
             if #available(macOS 26.0, *) {
@@ -82,13 +94,20 @@ public final class Engine {
         priv = try anon(kPrivSize)
         ctx = (priv + Int(kOffCtx)).bindMemory(to: EngineCtx.self, capacity: 1)
         let rwx = hv_memory_flags_t(HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC)
-        try hvCheck("hv_vm_map ram") { hv_vm_map(ram, 0, Int(options.ramBytes), rwx) }
+        if ramTop > options.ramBytes {
+            try hvCheck("hv_vm_map ram below 4 GB") { hv_vm_map(ram, 0, Int(below), rwx) }
+            try hvCheck("hv_vm_map ram above 4 GB") { hv_vm_map(ram + Int(below), 1 << 32, Int(options.ramBytes - below), rwx) }
+        } else {
+            try hvCheck("hv_vm_map ram") { hv_vm_map(ram, 0, Int(options.ramBytes), rwx) }
+        }
         try hvCheck("hv_vm_map private") { hv_vm_map(priv, kPrivIPA, Int(kPrivSize), rwx) }
         try loadMonitor()
         var config = TrConfig()
         config.priv = priv.assumingMemoryBound(to: UInt8.self)
         config.ram = ram.assumingMemoryBound(to: UInt8.self)
-        config.ram_size = options.ramBytes
+        config.ram_size = ramTop
+        config.ram_below_4g = ramTop > options.ramBytes ? below : 0
+        config.hybrid = options.hybrid
         config.precise_flags = options.preciseFlags
         config.has_tzcnt_lzcnt = options.tzcntLzcnt
         config.code_cache_bytes = options.codeCacheBytes
@@ -166,7 +185,7 @@ public final class Engine {
         // RAM alias for the monitor: 1 GB blocks where possible.
         let ramL1 = table()
         var gb: UInt64 = 0
-        while gb < options.ramBytes {
+        while gb < ramTop {
             slot(ramL1, Int((kRamAliasVA + gb) >> 30) & 0x1FF).pointee = gb | block | apEL1RW | uxn | pxn
             gb += 1 << 30
         }
@@ -202,7 +221,14 @@ public final class Engine {
         try hvCheck("set x18") { hv_vcpu_set_reg(vcpu, HV_REG_X18, kPrivVA + kOffCtx) }
         hv_vcpu_get_vtimer_offset(vcpu, &vtimerOffset)
         try hvCheck("unmask vtimer") { hv_vcpu_set_vtimer_mask(vcpu, false) }
-        ctx.pointee.ram_size = options.ramBytes
+        ctx.pointee.ram_size = ramTop
+        ctx.pointee.hybrid = options.hybrid ? 1 : 0
+        ctx.pointee.tsc_den = 1
+        ctx.pointee.resume_mxcsr = 0x1F80
+        let pageInfo = priv + Int(kOffPageInfo)
+        let lowFrames = Int(min(options.ramBelow4G != 0 ? options.ramBelow4G : options.ramBytes, options.ramBytes) >> 12)
+        memset(pageInfo, Int32(PI_RAM), lowFrames)
+        if ramTop > options.ramBytes { memset(pageInfo + (1 << 20), Int32(PI_RAM), Int((ramTop - (1 << 32)) >> 12)) }
         ctx.pointee.df = 1
         ctx.pointee.rflags_sys = 0x202
         ctx.pointee.spsr = 1 << 29  // EL0t, C set: x86 CF clear
@@ -211,7 +237,6 @@ public final class Engine {
         ctx.pointee.cr0 = 0x8001_0033
         ctx.pointee.cr4 = 0x620
         ctx.pointee.efer = 0xD01
-        // Everything below 1 MB of RAM frames counts as plain RAM; page_info bits start at zero.
     }
 
     // ---- Running ----
@@ -346,6 +371,7 @@ public final class Engine {
             if let code = exitCode { return .exited(code: code) }
         case Int(HC_MMIO):
             guard let machine else { throw EngineError.stop("device access with no machine attached") }
+            tally?.mmio(c.pointee.req_a.0)
             if c.pointee.req_a.2 != 0 {
                 machine.mmioWrite(address: c.pointee.req_a.0, size: Int(c.pointee.req_a.1), value: c.pointee.req_a.3)
             } else {
@@ -353,6 +379,7 @@ public final class Engine {
             }
         case Int(HC_PORT):
             guard let machine else { throw EngineError.stop("port access with no machine attached") }
+            tally?.port(UInt16(truncatingIfNeeded: c.pointee.req_a.0))
             if c.pointee.req_a.2 != 0 {
                 machine.portWrite(
                     port: UInt16(truncatingIfNeeded: c.pointee.req_a.0), size: Int(c.pointee.req_a.1),
@@ -397,14 +424,32 @@ public final class Engine {
             machine?.apicICR(c.pointee.req_a.0)
         case Int(HC_BOUNDARY):
             boundaryRIP = c.pointee.req_a.0
+            tally?.boundary(rip: boundaryRIP, cpl: c.pointee.cpl, cr3: c.pointee.cr3)
             return .boundary(rip: boundaryRIP)
+        case Int(HC_FALLBACK):
+            boundaryRIP = c.pointee.req_a.1
+            if let tally {
+                tally.fallback(
+                    reason: fallbackReason(), rip: boundaryRIP, bytes: bytes(at: boundaryRIP, count: 4),
+                    detail: c.pointee.req_a.3)
+            }
+            return .fallback(rip: boundaryRIP)
         case Int(HC_IRQ):
             irqLine = false
             if vtimerMasked {
                 vtimerMasked = false
                 hv_vcpu_set_vtimer_mask(vcpu, false)
             }
-            if let vector = machine?.acknowledgeInterrupt() {
+            if options.hybrid {
+                // QEMU's APIC keeps a vector until it is taken, so take one only when it can go in at once. The monitor comes back here when IF opens.
+                c.pointee.req_r.0 = ~0
+                let line = machine?.hasInterruptWaiting() ?? false
+                engine_ctx_set_irq_line(c, line)
+                if line && c.pointee.irq_pending == 0 && c.pointee.rflags_sys & 0x200 != 0 {
+                    if let vector = machine?.acknowledgeInterrupt() { c.pointee.req_r.0 = UInt64(vector) }
+                    engine_ctx_set_irq_line(c, machine?.hasInterruptWaiting() ?? false)
+                }
+            } else if let vector = machine?.acknowledgeInterrupt() {
                 c.pointee.req_r.0 = UInt64(vector)
             } else {
                 c.pointee.req_r.0 = ~0
@@ -415,6 +460,33 @@ public final class Engine {
             throw EngineError.stop("unknown host call \(code)")
         }
         return nil
+    }
+
+    private func fallbackReason() -> String {
+        let a = ctx.pointee.req_a
+        switch Int(a.0) {
+        case Int(STOP_UNTRANSLATED):
+            return String(cString: tr_stop_reason(UInt32(truncatingIfNeeded: a.2)))
+        case Int(STOP_UNSUPPORTED):
+            let names: [UInt64: String] = [
+                3: "split locked access", 4: "mmio form: pair, atomic or SIMD to a device", 5: "split store on a page table",
+                6: "sysret to compatibility mode", 7: "16 or 32-bit iret", 8: "iret to compatibility mode", 9: "TF set",
+                10: "CR0 write: paging, protection or WP off", 11: "CR4 write: unsupported bit", 13: "non-flat fs or gs",
+                14: "unmasked SSE exceptions",
+            ]
+            return names[a.2] ?? "unsupported case \(a.2)"
+        default:
+            switch Int(a.2) {
+            case Int(FB_UD): return "unknown opcode: #UD or a feature only TCG has"
+            case Int(FB_HLT): return "hlt"
+            case Int(FB_FX): return "fxsave, fxrstor: x87 state is TCG's"
+            case Int(FB_CR8): return "mov cr8: the TPR is in QEMU's APIC"
+            case Int(FB_RDMSR): return "rdmsr \(hex(a.3))"
+            case Int(FB_WRMSR): return "wrmsr \(hex(a.3))"
+            case Int(FB_FETCH_NOT_RAM): return "fetch from a page outside RAM"
+            default: return "fallback \(a.2)"
+            }
+        }
     }
 
     private func stopReport() throws -> RunOutcome? {
@@ -445,13 +517,34 @@ public final class Engine {
     func hex(_ v: UInt64) -> String { "0x" + String(v, radix: 16) }
 
     /// Guest bytes at a VA for error messages, through the current CR3.
-    public func bytes(at va: UInt64) -> String {
+    public func bytes(at va: UInt64, count: Int = 12) -> String {
         var out: [String] = []
-        for i in 0..<12 {
-            guard let gpa = translate(va + UInt64(i)) else { break }
-            out.append(String(format: "%02x", ram.load(fromByteOffset: Int(gpa), as: UInt8.self)))
+        for i in 0..<count {
+            guard let gpa = translate(va + UInt64(i)), let at = host(gpa) else { break }
+            out.append(String(format: "%02x", at.load(as: UInt8.self)))
         }
         return out.joined(separator: " ")
+    }
+
+    /// The host address of a RAM GPA.
+    public func host(_ gpa: UInt64) -> UnsafeMutableRawPointer? {
+        guard gpa < ramTop, (priv + Int(kOffPageInfo)).load(fromByteOffset: Int(gpa >> 12), as: UInt8.self) & UInt8(PI_RAM) != 0 else { return nil }
+        return ram + Int(ramTop > options.ramBytes && gpa >= 1 << 32 ? gpa - (1 << 32) + options.ramBelow4G : gpa)
+    }
+
+    /// Before the first run: a device answers for this range, whatever RAM lies behind it.
+    public func markDevice(gpa: UInt64, bytes: UInt64) {
+        let pageInfo = (priv + Int(kOffPageInfo)).assumingMemoryBound(to: UInt8.self)
+        var at = gpa & ~0xFFF
+        while at < min(gpa + bytes, ramTop) {
+            pageInfo[Int(at >> 12)] &= ~UInt8(PI_RAM)
+            at += 4096
+        }
+    }
+
+    /// Any thread: guest RAM was written other than by this engine. See `engine_note_write`.
+    public func noteWrite(gpa: UInt64, bytes: UInt64) {
+        if engine_ctx_note_write(ctx, (priv + Int(kOffPageInfo)).assumingMemoryBound(to: UInt8.self), gpa, bytes) { interruptRequested() }
     }
 
     /// Software walk with no permission checks.
@@ -460,7 +553,8 @@ public final class Engine {
         var level = 3
         while level >= 0 {
             let index = (va >> UInt64(12 + 9 * level)) & 0x1FF
-            let entry = ram.load(fromByteOffset: Int(table + index * 8), as: UInt64.self)
+            guard let at = host(table + index * 8) else { return nil }
+            let entry = at.load(as: UInt64.self)
             if entry & 1 == 0 { return nil }
             if level == 0 || (level < 3 && entry & 0x80 != 0) {
                 let size = UInt64(1) << UInt64(12 + 9 * level)
@@ -480,7 +574,7 @@ public final class Engine {
             guard let gpa = translate(va + UInt64(done)) else { return nil }
             let chunk = min(4096 - Int((va + UInt64(done)) & 0xFFF), count - done)
             out.withUnsafeMutableBytes { dest in
-                dest.baseAddress!.advanced(by: done).copyMemory(from: ram + Int(gpa), byteCount: chunk)
+                dest.baseAddress!.advanced(by: done).copyMemory(from: host(gpa) ?? ram, byteCount: chunk)
             }
             done += chunk
         }
@@ -494,7 +588,7 @@ public final class Engine {
             guard let gpa = translate(va + UInt64(done)) else { return false }
             let chunk = min(4096 - Int((va + UInt64(done)) & 0xFFF), bytes.count - done)
             bytes.withUnsafeBytes { src in
-                (ram + Int(gpa)).copyMemory(from: src.baseAddress!.advanced(by: done), byteCount: chunk)
+                (host(gpa) ?? ram).copyMemory(from: src.baseAddress!.advanced(by: done), byteCount: chunk)
             }
             done += chunk
         }
@@ -521,6 +615,14 @@ public final class Engine {
 
     /// Continues after `.boundary`. The rip in `req_r.0` is where execution resumes.
     public func resume() throws -> RunOutcome { try runLoop() }
+
+    /// While stopped. See `engine_set_tsc`. The monitor's counter runs behind the host's by the VM's virtual timer offset.
+    public func setTSC(nsOffset: UInt64, tscOffset: UInt64, num: UInt64, den: UInt64) {
+        ctx.pointee.tsc_ns_offset = nsOffset &+ vtimerOffset &* 125 / 3
+        ctx.pointee.tsc_offset = tscOffset
+        ctx.pointee.tsc_num = num
+        ctx.pointee.tsc_den = den
+    }
 
     func mxcsr() -> UInt32 {
         var fpsr: UInt64 = 0
