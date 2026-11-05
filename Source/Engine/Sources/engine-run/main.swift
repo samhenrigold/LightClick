@@ -27,6 +27,12 @@ do {
         let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[2]))))
         exit(HybridHarness().run(image: image))
     }
+    if arguments[1] == "--smp" { // engine-run --smp <vCPUs> <image>
+        let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[3]))))
+        var smpOptions = EngineOptions()
+        smpOptions.useTSO = ProcessInfo.processInfo.environment["ENGINE_NO_TSO"] == nil
+        exit(try SMPGuest(options: smpOptions, count: UInt32(arguments[2]) ?? 2).run(image: image))
+    }
     if arguments[1] == "--kernel" {
         let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[2]))))
         var kernelOptions = EngineOptions()

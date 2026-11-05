@@ -49,9 +49,11 @@ public enum RunOutcome: Equatable, Sendable {
     case fallback(rip: UInt64)
 }
 
-/// One VM with one x86 vCPU, created and run on the calling thread.
+/// One x86 vCPU, created and run on the calling thread. The first one makes the VM; `init(secondaryOf:index:)` adds another to it, on its own thread.
 public final class Engine {
     public let options: EngineOptions
+    public let cpuIndex: UInt32
+    private let translatorLock: UnsafeMutablePointer<os_unfair_lock>
     public let ram: UnsafeMutableRawPointer
     let priv: UnsafeMutableRawPointer
     public let ctx: UnsafeMutablePointer<EngineCtx>
@@ -79,6 +81,9 @@ public final class Engine {
 
     public init(options: EngineOptions) throws {
         self.options = options
+        cpuIndex = 0
+        translatorLock = .allocate(capacity: 1)
+        translatorLock.initialize(to: os_unfair_lock())
         let below = options.ramBelow4G
         ramTop = below != 0 && options.ramBytes > below ? (1 << 32) + options.ramBytes - below : options.ramBytes
         // The monitor's per-frame tables hold 32 GB of frames; see MIRROR_HEAD_OFF and RMAP_HEAD_OFF.
@@ -126,9 +131,28 @@ public final class Engine {
         config.stub_pushf = stubs + 0x100
         config.stub_sahf = stubs + 0x180
         tr_init(&config)
+        ctx.pointee.vcpu_count = 1
         try setUpVCPU()
     }
 
+    /// Another vCPU in `first`'s VM. Call on the thread that will run it. `prepareCount` must have been called before the first vCPU ran; this one may start later.
+    public init(secondaryOf first: Engine, index: UInt32) throws {
+        options = first.options
+        cpuIndex = index
+        translatorLock = first.translatorLock
+        ram = first.ram
+        priv = first.priv
+        ramTop = first.ramTop
+        bootTTBR = first.bootTTBR
+        ctx = (priv + Int(kOffCtx + UInt64(index) * kCtxSlot)).bindMemory(to: EngineCtx.self, capacity: 1)
+        try setUpVCPU()
+        // One clock: the TSC and the APIC timer read this counter on every vCPU.
+        vtimerOffset = first.vtimerOffset
+        try hvCheck("set vtimer offset") { hv_vcpu_set_vtimer_offset(vcpu, vtimerOffset) }
+    }
+
+    /// On the first vCPU, before any vCPU runs: how many this VM will have.
+    public func prepareCount(_ count: UInt32) { ctx.pointee.vcpu_count = count }
 
     // ---- Private memory ----
     private func loadMonitor() throws {
@@ -162,8 +186,6 @@ public final class Engine {
         let bootRoot = table()
         let privL1 = table()
         let privL2 = table()
-        let rstackL2Index = Int((kOffRStacks >> 21) & 0x1FF)
-        let rstackL3 = table()
         slot(bootRoot, Int((kPrivVA >> 39) & 0x1FF)).pointee = ipa(privL1) | valid
         slot(privL1, Int((kPrivVA >> 30) & 0x1FF)).pointee = ipa(privL2) | valid
         var off: UInt64 = 0
@@ -181,15 +203,19 @@ public final class Engine {
             off += 2 << 20
         }
         // Return stacks grow down: each slot is an unmapped guard, then the writable part.
-        slot(privL2, rstackL2Index).pointee = ipa(rstackL3) | valid
-        var page: UInt64 = 0
-        while page < 2 << 20 {
-            let inSlot = page % kRStackSlot
-            if inSlot >= kRStackSlot - kRStackBytes {
-                slot(rstackL3, Int(page >> 12)).pointee =
-                    ipa(kOffRStacks + page) | valid | af | sh | apRW | uxn | pxn
+        for cpu in 0..<UInt32(MAX_VCPUS) {
+            let stacks = engine_off_rstacks(cpu)
+            let rstackL3 = table()
+            slot(privL2, Int((stacks >> 21) & 0x1FF)).pointee = ipa(rstackL3) | valid
+            var page: UInt64 = 0
+            while page < 2 << 20 {
+                let inSlot = page % kRStackSlot
+                if inSlot >= kRStackSlot - kRStackBytes {
+                    slot(rstackL3, Int(page >> 12)).pointee =
+                        ipa(stacks + page) | valid | af | sh | apRW | uxn | pxn
+                }
+                page += 4096
             }
-            page += 4096
         }
         // RAM alias for the monitor: 1 GB blocks where possible.
         let ramL1 = table()
@@ -226,20 +252,25 @@ public final class Engine {
         // MMU, caches, nAA for LSE2, RES1 bits.
         try sys(HV_SYS_REG_SCTLR_EL1, 0x30D0_0800 | 1 | 1 << 2 | 1 << 12 | 1 << 6)
         try sys(HV_SYS_REG_CPACR_EL1, 3 << 20)
-        try sys(HV_SYS_REG_SP_EL1, kPrivVA + kOffMonData + (2 << 20) - 16)
-        try hvCheck("set x18") { hv_vcpu_set_reg(vcpu, HV_REG_X18, kPrivVA + kOffCtx) }
+        let stackTop = kPrivVA + kOffMonCPU + (UInt64(cpuIndex) + 1) * kCtxSlot - 16
+        try sys(HV_SYS_REG_SP_EL1, stackTop)
+        try sys(HV_SYS_REG_TPIDR_EL1, stackTop)
+        try hvCheck("set x18") { hv_vcpu_set_reg(vcpu, HV_REG_X18, kPrivVA + kOffCtx + UInt64(cpuIndex) * kCtxSlot) }
         hv_vcpu_get_vtimer_offset(vcpu, &vtimerOffset)
         try hvCheck("unmask vtimer") { hv_vcpu_set_vtimer_mask(vcpu, false) }
+        ctx.pointee.apic_id = cpuIndex << 24
         ctx.pointee.ram_size = ramTop
         ctx.pointee.hybrid = options.hybrid ? 1 : 0
         ctx.pointee.share_user = options.hybrid && ProcessInfo.processInfo.environment["LC_HVDBT_NO_SHARE"] != "1" ? 1 : 0
         ctx.pointee.clts_on_host = options.hybrid && ProcessInfo.processInfo.environment["LC_HVDBT_CLTS_TCG"] == "1" ? 1 : 0
         ctx.pointee.tsc_den = 1
         ctx.pointee.resume_mxcsr = 0x1F80
-        let pageInfo = priv + Int(kOffPageInfo)
-        let lowFrames = Int(min(options.ramBelow4G != 0 ? options.ramBelow4G : options.ramBytes, options.ramBytes) >> 12)
-        memset(pageInfo, Int32(PI_RAM), lowFrames)
-        if ramTop > options.ramBytes { memset(pageInfo + (1 << 20), Int32(PI_RAM), Int((ramTop - (1 << 32)) >> 12)) }
+        if cpuIndex == 0 {
+            let pageInfo = priv + Int(kOffPageInfo)
+            let lowFrames = Int(min(options.ramBelow4G != 0 ? options.ramBelow4G : options.ramBytes, options.ramBytes) >> 12)
+            memset(pageInfo, Int32(PI_RAM), lowFrames)
+            if ramTop > options.ramBytes { memset(pageInfo + (1 << 20), Int32(PI_RAM), Int((ramTop - (1 << 32)) >> 12)) }
+        }
         ctx.pointee.df = 1
         ctx.pointee.rflags_sys = 0x202
         ctx.pointee.spsr = 1 << 29  // EL0t, C set: x86 CF clear
@@ -364,6 +395,10 @@ public final class Engine {
 
     private func hostCall(_ code: Int) throws -> RunOutcome? {
         let c = ctx
+        // The translator's tables are one set for the VM. Taken here, in the slow path of a host exit that costs far more.
+        let translating = code == Int(HC_TRANSLATE) || code == Int(HC_SMC) || code == Int(HC_VIEW_INVALIDATE_VA) || code == Int(HC_VIEW_DROP)
+        if translating { os_unfair_lock_lock(translatorLock) }
+        defer { if translating { os_unfair_lock_unlock(translatorLock) } }
         switch code {
         case Int(HC_TRANSLATE):
             let view = Int32(c.pointee.req_a.0)

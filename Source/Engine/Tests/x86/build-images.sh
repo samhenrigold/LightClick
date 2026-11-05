@@ -72,6 +72,11 @@ clang "${kflags[@]}" -mno-implicit-float -fno-vectorize -fno-slp-vectorize -c "$
 clang -target x86_64-apple-macos10.9 -I"$out" -c "$c/kstubs.s" -o "$out/ckstubs.o"
 ld -arch x86_64 -preload -e _kstart -no_uuid -pagezero_size 0 -segaddr __TEXT 0xFFFF800000100000 -segaddr __DATA 0xFFFF800000800000 \
     -o "$out/compat" "$out/kentry.o" "$out/ckernel.o" "$out/ckstubs.o"
+# Several vCPUs at once. No vector code of its own, as the SSE litmus says what it uses.
+clang "${kflags[@]}" -mno-implicit-float -fno-vectorize -fno-slp-vectorize -mcx16 -c "$here/kernel/smp.c" -o "$out/smp.o"
+clang -target x86_64-apple-macos10.9 -c "$here/kernel/smpstubs.s" -o "$out/smpstubs.o"
+ld -arch x86_64 -preload -e _kstart -no_uuid -pagezero_size 0 -segaddr __TEXT 0xFFFF800000100000 -segaddr __DATA 0xFFFF800000800000 \
+    -o "$out/smp" "$out/smpstubs.o" "$out/smp.o"
 
 # lc-bench's arithmetic.
 clang "${flags[@]}" -w -I"$here/../../../probes" -c "$here/t_lcbench.c" -o "$out/t_lcbench.o"

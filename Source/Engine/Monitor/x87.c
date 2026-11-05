@@ -29,7 +29,7 @@ enum {
 #define EXPMAX 0x7FFF
 #define BIAS 16383
 
-static u32 xfl; // exception flags and rounded-up (FC1) raised by the operation in progress
+// xfl: exception flags and rounded-up (FC1) raised by the operation in progress
 
 static inline u32 f_exp(F a) { return a.se & EXPMAX; }
 static inline u32 f_sign(F a) { return a.se >> 15 & 1; }
@@ -904,7 +904,7 @@ _Noreturn static void fp_cannot(u64 rip, u32 op, u32 why, u32 code) {
 }
 
 static void x87_area(u32 op, bool data16, u64 va, X87 *s, u64 rip) {
-    static u8 area[108];
+    u8 *area = me->fx_area;
     u32 reg = op >> 3 & 7;
     bool full = (op >> 8 & 7) == 5; // fnsave and frstor; D9 is the environment alone
     u32 env = data16 ? 14 : 28, n = env + (full ? 80 : 0);
@@ -1386,7 +1386,7 @@ static void x87_op(void) {
 // fxsave and fxrstor, in 64-bit (REX.W, x22 set) or 32-bit format. Leaves bytes 416 up alone, as the CPU does: software
 // may keep its own there.
 static void do_fx(bool save) {
-    static u8 area[416] __attribute__((aligned(16)));
+    u8 *area = me->fx_area;
     u64 va = c->x[R_S0], here = rip_here(c->elr - 4);
     bool wide = c->x[R_S2];
     if (c->cr0 & 0xC) {
@@ -1397,7 +1397,7 @@ static void do_fx(bool save) {
     if (c->hybrid && (!(c->cr4 & 0x200) || (c->efer & (1ULL << 14))))
         stop(STOP_FALLBACK, here, FB_FX, 0, 0); // what these leave out then is QEMU's to decide
     if (save) {
-        memset(area, 0, sizeof area);
+        memset(area, 0, 416);
         put16(area, c->fcw);
         put16(area + 2, c->fsw | (u32)(c->fp_top & 7) << 11);
         area[4] = c->fp_tags;
@@ -1421,11 +1421,11 @@ static void do_fx(bool save) {
             put16(r + 8, c->fp_exp[p]);
         }
         mon_fp_save(area + 160);
-        if (!fp_area_write(va, area, sizeof area))
+        if (!fp_area_write(va, area, 416))
             stop(c->hybrid ? STOP_FALLBACK : STOP_UNSUPPORTED, here, c->hybrid ? FB_FX : 12, va, 0);
         return;
     }
-    if (!guest_read(va, area, sizeof area, c->cpl == 3 ? 4 : 0))
+    if (!guest_read(va, area, 416, c->cpl == 3 ? 4 : 0))
         stop(c->hybrid ? STOP_FALLBACK : STOP_UNSUPPORTED, here, c->hybrid ? FB_FX : 12, va, 0);
     u32 mx = get32(area + 24);
     if (mx & 0xFFFF0000u) {

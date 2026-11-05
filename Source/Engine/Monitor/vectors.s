@@ -118,9 +118,7 @@ _mon_enter_guest:
 // A stop that came back: start over on an empty stack, whatever depth the monitor stopped at.
     .globl _mon_restart
 _mon_restart:
-    movz x0, #0xF000, lsl #32
-    movk x0, #0x003F, lsl #16
-    movk x0, #0xFFF0
+    mrs x0, tpidr_el1 // the host keeps this vCPU's stack top here
     mov sp, x0
     bl _mon_after_stop
     b _mon_enter_guest

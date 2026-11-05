@@ -38,6 +38,70 @@ void *memcpy(void *d, const void *s, unsigned long n) {
     return d;
 }
 
+// ---- One vCPU's own state ----
+// x18 picks the vCPU. EngineCtx is reachable from EL0, so what the monitor keeps for itself sits at a fixed distance from it, in EL1 memory, with the stack at the
+// slot's top. The defines keep the old names: this state was statics, and a static in this file is now shared by every vCPU, so it must either move here or be locked.
+typedef struct {
+    bool mon_resync, walk_any_tables, evicting, event_delivered, code_cache_reset;
+    u32 zap_why, deliver_depth;
+    u64 pt_step_slot, *pt_step_pte, pt_step_va;
+    u64 note_wait_cr3, note_wait_status;
+    u64 rs_saved[MAX_VIEWS]; // where this vCPU's return stack stood when it left each view. 0: not been there yet
+    u32 lock_depth, rs_epoch;
+    u64 smc_held; // frame + 1: this vCPU's one-off store to a code frame hasn't run yet, so nobody may protect that frame again
+    bool tracked_new; // a fill just started protecting a guest table, so what it read of that table may predate the protection
+    u32 pin[2]; // view index + 1 of the current address space, by CPL 0 or 3. Eviction leaves these alone, so a CPL change needs no lock
+    u32 xfl;
+    u8 fx_area[512] __attribute__((aligned(16))); // the x87 save formats, one at a time
+} MonCpu;
+_Static_assert(sizeof(MonCpu) <= CTX_SLOT / 2, "the rest of the slot is the stack");
+_Static_assert(sizeof(EngineCtx) <= CTX_SLOT, "EngineCtx outgrew its slot");
+_Static_assert(OFF_MON_CPU + MAX_VCPUS * CTX_SLOT <= OFF_STUBS, "per-vCPU slots run past monitor data");
+_Static_assert(OFF_CTX + MAX_VCPUS * CTX_SLOT <= OFF_RSTACKS, "contexts run past their region");
+#define me ((MonCpu *)((u64)c + (OFF_MON_CPU - OFF_CTX)))
+#define c0 ((EngineCtx *)(PRIV_VA + OFF_CTX)) // what the host publishes once for the VM lives in the first context
+#define cpu_index() ((u32)(((u64)c - (PRIV_VA + OFF_CTX)) / CTX_SLOT))
+#define mon_resync (me->mon_resync)
+#define walk_any_tables (me->walk_any_tables)
+#define evicting (me->evicting)
+#define event_delivered (me->event_delivered)
+#define code_cache_reset (me->code_cache_reset)
+#define zap_why (me->zap_why)
+#define deliver_depth (me->deliver_depth)
+#define pt_step_slot (me->pt_step_slot)
+#define pt_step_pte (me->pt_step_pte)
+#define pt_step_va (me->pt_step_va)
+#define note_wait_cr3 (me->note_wait_cr3)
+#define note_wait_status (me->note_wait_status)
+#define xfl (me->xfl)
+
+// ---- Shared state ----
+// One lock over views, the shadow pool, rmap, mirrors and page_info, with no cost beyond a load at one vCPU. See "Multi-vCPU" in DESIGN.md, which has the measurements
+// that justify holding it on a shadow fill or a page-table store. Nested takers just count, and `stop` lets go, since it abandons the stack that took it.
+static u32 mon_lock_word;
+#define smp (c0->vcpu_count > 1)
+static inline void mon_lock(void) {
+    if (!smp || me->lock_depth++)
+        return;
+    for (;;) {
+        if (!__atomic_load_n(&mon_lock_word, __ATOMIC_RELAXED) && !__atomic_exchange_n(&mon_lock_word, 1, __ATOMIC_ACQUIRE))
+            return;
+        __asm__ volatile("yield"); // shortcut: no limit, so a holder that loses its core makes others spin. A limit and an hvc to yield, if a boot on a full machine shows it
+    }
+}
+static inline void mon_unlock(void) {
+    if (smp && me->lock_depth && !--me->lock_depth)
+        __atomic_store_n(&mon_lock_word, 0, __ATOMIC_RELEASE);
+}
+static inline void mon_unlock_all(void) {
+    if (smp && me->lock_depth) {
+        me->lock_depth = 0;
+        __atomic_store_n(&mon_lock_word, 0, __ATOMIC_RELEASE);
+    }
+}
+// Bumped when blocks die, so that every other vCPU drops its return stacks at its next way out of the monitor, which any x86 serialising event or interrupt passes through.
+static u32 rs_epoch_shared;
+
 // ---- Host calls ----
 _Noreturn static void stop(u64 reason, u64 rip, u64 a, u64 b, u64 d);
 
@@ -98,13 +162,14 @@ typedef struct {
     u32 sees_shared, pad_shared; // sees_shared: its lookup table may hold blocks of a shared domain
     u64 root0, root1; // VA of shadow roots
     u64 ttbr0, ttbr1;
-    u64 rs_saved, rs_top;
     u64 hash_va;
     u64 last_used;
     u32 keeper, pad;
 } View;
 static View views[MAX_VIEWS];
 static u32 view_count;
+// Each view has a return stack per vCPU: two vCPUs can run one address space at once.
+static inline u64 view_rs_top(u32 idx) { return PRIV_VA + engine_off_rstacks(cpu_index()) + (u64)(idx + 1) * RSTACK_SLOT - 16; }
 
 // ---- Shadow page pool ----
 typedef struct {
@@ -185,6 +250,7 @@ typedef struct {
     u64 gpa; // of the addressed byte
     u64 *leaf; // alias pointer to the leaf entry
     u64 *chain[4]; // alias pointers to the entries used, chain[3] is the PML4E
+    u64 read[4]; // what each held
     int leaf_level;
     bool user, write, nx; // effective permissions
     bool dirty;
@@ -195,7 +261,7 @@ static inline bool canonical(u64 va) { return (u64)((i64)(va << 16) >> 16) == va
 // Permission logic mirrors the SDM for CR0.WP=1 (enforced at CR0 writes) without SMAP (not advertised, stopped at CR4 writes).
 // access: bit 1 write, bit 2 user, bit 4 fetch.
 static void track_root(View *v, u64 va, const Walk *w);
-static bool walk_any_tables; // the tables may be a dead process's, freed and poisoned: a slot pointing outside RAM just ends the walk
+// walk_any_tables: the tables may be a dead process's, freed and poisoned: a slot pointing outside RAM just ends the walk
 
 static Walk x86_walk(u64 cr3, u64 va, u32 access, bool set_ad) {
     Walk w = {0};
@@ -217,6 +283,7 @@ static Walk x86_walk(u64 cr3, u64 va, u32 access, bool set_ad) {
         u64 *ep = (u64 *)RAM(table + ((va >> (12 + 9 * level)) & 0x1ff) * 8);
         u64 e = *ep;
         w.chain[level] = ep;
+        w.read[level] = e;
         if (!(e & X_P))
             return w;
         w.user = w.user && (e & X_US);
@@ -240,13 +307,12 @@ static Walk x86_walk(u64 cr3, u64 va, u32 access, bool set_ad) {
             if ((access & 16) && !(access & 4) && w.user && (c->cr4 & (1ULL << 20)))
                 return w; // SMEP
             if (set_ad) {
-                for (int l = 3; l >= level; l--)
-                    if (!(*w.chain[l] & X_A))
-                        *w.chain[l] |= X_A;
-                if ((access & 2) && !(e & X_D)) {
-                    *ep |= X_D;
-                    w.dirty = true;
+                for (int l = 3; l >= level; l--) {
+                    u64 want = w.read[l] | X_A | (l == level && (access & 2) ? X_D : 0);
+                    if (want != w.read[l] && !__atomic_compare_exchange_n(w.chain[l], &w.read[l], want, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+                        return x86_walk(cr3, va, access, set_ad);
                 }
+                w.dirty = w.dirty || (access & 2);
             }
             w.ok = true;
             return w;
@@ -357,7 +423,7 @@ static BlockEntry *find_block(u64 pc) {
         return 0;
     u32 word = (u32)((pc - cc) >> 2);
     BlockEntry *t = (BlockEntry *)PRIV(OFF_BLOCKS);
-    u64 lo = 0, hi = c->block_count;
+    u64 lo = 0, hi = c0->block_count;
     while (lo < hi) {
         u64 mid = (lo + hi) / 2;
         if (t[mid].arm_off <= word)
@@ -413,9 +479,9 @@ static u64 rip_here(u64 pc) {
 // ---- Stops ----
 // A stop this instruction can come back from, in hybrid mode. The state is precise at every rip passed to stop: nothing guest-visible changes
 // before an instruction's last access. Stops with no rip are about the engine's own limits, and stay final.
-static bool mon_resync;
 static void irq_deliver_now(u64 rip, u32 apic_vector);
 _Noreturn static void stop(u64 reason, u64 rip, u64 a, u64 b, u64 d) {
+    mon_unlock_all();
     bool resumable = c->hybrid && rip && (reason == STOP_UNTRANSLATED || reason == STOP_UNSUPPORTED || reason == STOP_FALLBACK);
     // A vector already taken from QEMU's APIC goes first. The instruction restarts on return from the handler, and the host never sits on
     // an interrupt it cannot see through a long stay on TCG.
@@ -482,11 +548,17 @@ static void rflags_set(u64 r) {
 }
 
 // ---- Views ----
+static void view_rs_prepare(u32 idx) {
+    me->rs_saved[idx] = view_rs_top(idx);
+    u64 *sent = (u64 *)view_rs_top(idx);
+    sent[0] = ~0ULL; // never equals a canonical return address, so popping the sentinel misses
+    sent[1] = 0;
+}
+
 static void view_build(u32 idx, u64 key, u32 cpl) {
     View *v = &views[idx];
     v->cr3 = key;
     v->cpl = cpl;
-    v->valid = 1;
     u32 r0 = pool_alloc(idx, 3, key & X_ADDR, 0);
     u32 r1 = pool_alloc(idx, 3, key & X_ADDR, 0xFFFF000000000000ULL); // upper half of the same guest table
     v->root0 = (u64)pool_page(r0);
@@ -495,28 +567,33 @@ static void view_build(u32 idx, u64 key, u32 cpl) {
     ((u64 *)v->root0)[(RAM_ALIAS_VA >> 39) & 0x1ff] = hole_entry_ram;
     v->ttbr0 = VA_TO_IPA(v->root0) | (u64)view_asid(idx) << 48;
     v->ttbr1 = VA_TO_IPA(v->root1);
-    v->rs_top = PRIV_VA + OFF_RSTACKS + (u64)(idx + 1) * RSTACK_SLOT - 16;
-    v->rs_saved = v->rs_top;
     v->hash_va = PRIV_VA + OFF_HASH + (u64)idx * HASH_BYTES;
-    u64 *sent = (u64 *)v->rs_top;
-    sent[0] = ~0ULL; // never equals a canonical return address, so popping the sentinel misses
-    sent[1] = 0;
+    view_rs_prepare(idx);
     // The monitor is about to fetch through this root. Unlike a guest access, a walk that sees the private slot before these stores reach memory can't refault
     // and retry: it is a fatal instruction abort at EL1.
     __asm__ volatile("dsb ishst");
+    v->valid = 1;
 }
 
 
 static void zap_table(u32 idx);
-static bool evicting;
 static void reset_all_return_stacks(void);
 static inline u32 view_asid(u32 v);
 
 // Takes the least recently used view for reuse, or returns MAX_VIEWS if none may go. A view that keeps a shared kernel domain's marks stays.
+static bool view_pinned(u32 idx) {
+    for (u32 cpu = 0; cpu < c0->vcpu_count; cpu++) {
+        MonCpu *m = (MonCpu *)(PRIV_VA + OFF_MON_CPU + cpu * CTX_SLOT);
+        if (m->pin[0] == idx + 1 || m->pin[1] == idx + 1)
+            return true;
+    }
+    return false;
+}
+
 static u32 view_evict(void) {
     u32 best = MAX_VIEWS;
     for (u32 i = 0; i < view_count; i++)
-        if (views[i].valid && !views[i].keeper && i != c->view && (best == MAX_VIEWS || views[i].last_used < views[best].last_used))
+        if (views[i].valid && !views[i].keeper && i != c->view && !view_pinned(i) && (best == MAX_VIEWS || views[i].last_used < views[best].last_used))
             best = i;
     if (best == MAX_VIEWS)
         return best;
@@ -531,10 +608,12 @@ static u32 view_evict(void) {
     c->req_a[0] = best;
     hostcall(HC_VIEW_DROP);
     v->valid = 0;
+    if (smp)
+        reset_all_return_stacks();
     return best;
 }
 
-static u32 zap_why = KILL_RECLAIM; // for the tally: what the next zaps are for
+// zap_why, for the tally: what the next zaps are for
 static void zap_entry(u64 *e, const ShadowDesc *d);
 
 // Every path that allocates shadow tables comes through here first, while it holds no pointer into them. Old views go first; if the running
@@ -570,7 +649,7 @@ static void pool_reclaim(void) {
     }
 }
 
-static View *view_find(u64 cr3_key, u32 cpl) {
+static View *view_find_locked(u64 cr3_key, u32 cpl) {
     for (u32 i = 0; i < view_count; i++)
         if (views[i].cr3 == cr3_key && views[i].cpl == cpl && views[i].valid)
             return &views[i];
@@ -587,6 +666,25 @@ static View *view_find(u64 cr3_key, u32 cpl) {
     }
     view_build(idx, cr3_key, cpl);
     return &views[idx];
+}
+
+// A pinned view can't go away, so a CPL change in the same address space touches nothing shared: syscalls and iret stay off the lock.
+static View *view_find(u64 cr3_key, u32 cpl) {
+    u32 *pin = &me->pin[cpl == 3];
+    if (*pin) {
+        View *p = &views[*pin - 1];
+        if (p->cr3 == cr3_key && p->cpl == cpl)
+            return p;
+    }
+    mon_lock();
+    if (*pin) { // out of this CPL's old address space. The other CPL's pin moves when that CPL next comes through
+        static u64 unpin_stamp;
+        views[*pin - 1].last_used = ++unpin_stamp;
+    }
+    View *v = view_find_locked(cr3_key, cpl);
+    *pin = (u32)(v - views) + 1;
+    mon_unlock();
+    return v;
 }
 
 // The view that keeps code marks for a shared kernel domain: whichever view first translated from it. It is not evicted, so a write to a
@@ -620,11 +718,11 @@ static void view_activate(View *v) {
         return;
     if (((u64 *)v->root0)[(PRIV_VA >> 39) & 0x1ff] != hole_entry_priv) // caught here, a stomped root is a stop with a name and not an abort at EL1
         stop(STOP_UNSUPPORTED, 0, 17, v - views, ((u64 *)v->root0)[(PRIV_VA >> 39) & 0x1ff]);
-    static u64 stamp;
-    v->last_used = ++stamp;
-    old->rs_saved = c->x[R_RS];
-    c->x[R_RS] = v->rs_saved;
-    c->rs_top = v->rs_top;
+    me->rs_saved[old - views] = c->x[R_RS];
+    if (!me->rs_saved[v - views]) // built by another vCPU
+        view_rs_prepare((u32)(v - views));
+    c->x[R_RS] = me->rs_saved[v - views];
+    c->rs_top = view_rs_top((u32)(v - views));
     c->x[R_HASH] = v->hash_va;
     c->view = (u32)(v - views);
     WSR(ttbr0_el1, v->ttbr0);
@@ -632,10 +730,16 @@ static void view_activate(View *v) {
     __asm__ volatile("isb");
 }
 
-static void reset_all_return_stacks(void) {
+static void reset_my_return_stacks(void) {
     for (u32 i = 0; i < view_count; i++)
-        views[i].rs_saved = views[i].rs_top;
+        if (me->rs_saved[i])
+            me->rs_saved[i] = view_rs_top(i);
     c->x[R_RS] = c->rs_top;
+}
+static void reset_all_return_stacks(void) {
+    reset_my_return_stacks();
+    if (smp)
+        me->rs_epoch = __atomic_add_fetch(&rs_epoch_shared, 1, __ATOMIC_RELAXED);
 }
 
 // ---- Shadow fill ----
@@ -659,6 +763,7 @@ static u64 *shadow_slot(View *v, u64 va, const Walk *w, int leaf_level_target, u
             if (gt != ~0ULL && gt < c->ram_size && !(page_info[gt >> 12] & PI_PT)) {
                 page_info[gt >> 12] |= PI_PT;
                 write_protect_frame(gt);
+                me->tracked_new = true;
             }
             *e = VA_TO_IPA((u64)pool_page(idx)) | PTE_VALID;
         }
@@ -698,13 +803,13 @@ static void track_root(View *v, u64 va, const Walk *w) {
     if (gt < c->ram_size && !(page_info[gt >> 12] & PI_PT)) {
         page_info[gt >> 12] |= PI_PT;
         write_protect_frame(gt);
+        me->tracked_new = true;
     }
 }
 
 // ---- Delivering x86 events ----
 // For the tally: what processes start, how they end, and their faults. Rare, so a host call each. shortcut: one wait4 tracked per address space, and the next
 // return in that space counts as its return, which another thread of the same process could get wrong.
-static u64 note_wait_cr3, note_wait_status;
 static void note_process_syscall(u64 next) {
     u64 n = c->x[0];
     bool console_write = (n == 0x2000004 || n == 0x200018d) && c->x[7] <= 2;
@@ -740,8 +845,6 @@ static inline void note_event(u32 kind, u64 rip, u64 a, u32 vector) {
 }
 
 static u64 translate_here(u64 rip, u64 site, u32 kind, bool single);
-static bool event_delivered, code_cache_reset;
-static u32 deliver_depth;
 static void reset_all_return_stacks(void);
 static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int);
 
@@ -876,7 +979,6 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
         if (!site && !kind)
             kind = SVC_LOOKUP_MISS;
     }
-    pool_reclaim();
     Walk w = x86_walk(c->cr3, rip, 16 | (c->cpl == 3 ? 4 : 0), true);
     if (!w.ok) {
         if (w.fault_err == ~0u) {
@@ -914,6 +1016,21 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
     }
     if (single)
         return c->req_r[0]; // runs once and stays unregistered: nothing to protect, and its page must stay writable
+    mon_lock();
+    // A vCPU writing a code frame gets to finish first. Otherwise another calling into that frame translates and protects it again before the one-off store runs, and the
+    // store faults for ever. It lets go at its next monitor entry, one instruction away, so this is short and needs nothing from here.
+    for (u32 cpu = 0; smp && cpu < c0->vcpu_count; cpu++) {
+        MonCpu *m = (MonCpu *)(PRIV_VA + OFF_MON_CPU + cpu * CTX_SLOT);
+        u64 held = __atomic_load_n(&m->smc_held, __ATOMIC_ACQUIRE);
+        if (m != me && held && (held == (c->req_r[2] & ~1ULL) + 1 || held == (c->req_r[3] & ~1ULL) + 1)) {
+            mon_unlock();
+            __asm__ volatile("yield");
+            mon_lock();
+            cpu = ~0u; // and look at them all again
+        }
+    }
+    pool_reclaim();
+    bool newly_code = false;
     // Every frame code was read from is write-protected, so a later store invalidates it, and every page-table entry on the
     // way is tracked by marking the leaf slot.
     for (int i = 2; i < 4; i++) {
@@ -924,6 +1041,7 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
         if (!(page_info[gpa >> 12] & PI_CODE)) {
             page_info[gpa >> 12] |= PI_CODE;
             write_protect_frame(gpa);
+            newly_code = true;
         }
     }
     track_root(v, rip, &w);
@@ -961,6 +1079,26 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
         if (w2.ok)
             *shadow_slot(v, next, &w2, 0, 0) |= PTE_X_MARK;
     }
+    if (smp) {
+        // The host read code and tables with nothing protecting them. From here a store or remap finds this block, and anything earlier shows now: look again, and if
+        // it moved or the frame was not protected when read, what was translated may be stale. shortcut: a first block on a frame is translated twice; marking its first
+        // frame before the host call would save that, if cold code shows up in a profile.
+        Walk now = x86_walk(c->cr3, rip, 16 | (c->cpl == 3 ? 4 : 0), true);
+        if (newly_code || !now.ok || (now.gpa & ~0xfffULL) != (c->req_r[2] & ~1ULL)) {
+            u64 r2 = c->req_r[2], r3 = c->req_r[3];
+            mon_unlock();
+            c->req_a[1] = KILL_STORE;
+            c->req_a[0] = r2 & ~1ULL;
+            hostcall(HC_SMC);
+            if (r3 & 1) {
+                c->req_a[0] = r3 & ~1ULL;
+                hostcall(HC_SMC);
+            }
+            reset_all_return_stacks();
+            return translate_here(rip, 0, 0, false);
+        }
+    }
+    mon_unlock();
     return c->req_r[0];
 }
 
@@ -1406,15 +1544,12 @@ static void step_off(void) {
     }
 }
 
-static u64 pt_step_slot; // nonzero while one store runs on a temporarily writable page-table page
-static u64 *pt_step_pte;
-static u64 pt_step_va;
+// pt_step_slot: nonzero while one store runs on a temporarily writable page-table page
 
 static void shadow_write_finish(void);
 
 static void handle_data_abort(bool lower) {
     (void)lower;
-    pool_reclaim();
     u64 far = c->far, esr = c->esr;
     u32 dfsc = esr & 0x3f;
     bool write = esr & (1 << 6);
@@ -1422,7 +1557,7 @@ static void handle_data_abort(bool lower) {
     if ((dfsc & 0x3c) == 0x20 || dfsc == 0x21)
         stop(STOP_UNSUPPORTED, rip_here(c->elr), 3, far, esr); // an alignment fault: split locked access
     // The return-stack guard: drop all the entries and retry the one ARM store.
-    u64 rs_base = PRIV_VA + OFF_RSTACKS;
+    u64 rs_base = PRIV_VA + engine_off_rstacks(cpu_index());
     if (far >= rs_base && far < rs_base + MAX_VIEWS * RSTACK_SLOT) {
         c->x[R_RS] = c->rs_top;
         return;
@@ -1470,6 +1605,15 @@ static void handle_data_abort(bool lower) {
         arm_finish(&a, r);
         return;
     }
+    mon_lock();
+    pool_reclaim();
+    if (smp) { // The walk above took no lock, so nothing kept the entry from changing since. Under the lock every page-table store waits for this fill.
+        w = x86_walk(c->cr3, far, access, true);
+        if (!w.ok || !is_ram(w.gpa)) {
+            mon_unlock();
+            return; // retry the access, which sorts out which of the above it is now
+        }
+    }
     u64 gpa = w.gpa & ~0xfffULL;
     u8 pi = page_info[gpa >> 12];
     if (write && (pi & PI_CODE)) {
@@ -1483,6 +1627,9 @@ static void handle_data_abort(bool lower) {
         reset_all_return_stacks();
         shadow_install(v, far, &w, true);
         tlbi_va(view_asid(c->view), far);
+        if (smp)
+            __atomic_store_n(&me->smc_held, gpa + 1, __ATOMIC_RELEASE);
+        mon_unlock();
         c->elr = translate_here(rip_here(c->elr), 0, 0, true);
         return;
     }
@@ -1494,6 +1641,7 @@ static void handle_data_abort(bool lower) {
     if (write && (pi & PI_PT)) {
         if (in_rep_stub(c->elr)) { // 32 bytes at a time is more slots than the one-step path below resyncs: on with the plain loop, one element per store
             c->elr = c->x[R_LR];
+            mon_unlock();
             return;
         }
         c->stat_pt_writes++;
@@ -1504,16 +1652,20 @@ static void handle_data_abort(bool lower) {
             u64 ea = arm_address(*(u32 *)c->elr, &a);
             if (arm_splits(ea, &a)) {
                 pt_split_store(ea, &a, val);
+                mon_unlock();
                 return;
             }
             if (n == 8)
                 *(u64 *)RAM(w.gpa) = val;
+            else if (n == 4 && !(w.gpa & 3)) // one piece: another vCPU can read the table while this runs
+                *(u32 *)RAM(w.gpa) = (u32)val;
             else
                 memcpy(RAM(w.gpa), &val, n);
             pt_slot_changed(w.gpa & ~7ULL);
             if (((w.gpa & 7) + n) > 8)
                 pt_slot_changed((w.gpa & ~7ULL) + 8);
             arm_finish(&a, 0);
+            mon_unlock();
             return;
         }
         // Compare-and-swap and swap are how kernels update live PTEs: emulate the two forms the translator emits for them, 64-bit only.
@@ -1534,6 +1686,7 @@ static void handle_data_abort(bool lower) {
             } else if (rt != 31)
                 c->x[rt] = old;
             c->elr += 4;
+            mon_unlock();
             return;
         }
         // Other atomics and pairs: let the instruction itself run on a writable mapping for exactly one step, then resync.
@@ -1542,6 +1695,8 @@ static void handle_data_abort(bool lower) {
             step_off();
             stop(STOP_UNSUPPORTED, rip_here(c->elr), 5, far, esr);
         }
+        if (smp)
+            stop(STOP_UNSUPPORTED, rip_here(c->elr), 5, far, esr); // shortcut: one step opens the page to every vCPU in this view; the monitor should emulate these atomics before a guest can reach it
         c->stat_pt_step++;
         Walk w2 = w;
         w2.write = true;
@@ -1553,10 +1708,21 @@ static void handle_data_abort(bool lower) {
         pt_step_pte = slot;
         pt_step_va = far;
         step_on();
+        mon_unlock();
         return;
     }
     bool perm = (dfsc & 0x3c) == 0x0c;
-    shadow_install(v, far, &w, write);
+    me->tracked_new = false;
+    u64 *installed = shadow_install(v, far, &w, write);
+    if (smp && me->tracked_new) { // Protected now: drop what was read before it and let the access fault again, which reads the table again.
+        u64 old = *installed;
+        if ((old & 1) && (old & AP_RO) == AP_RW)
+            rmap_remove(old & PTE_ADDR, installed);
+        *installed = old & PTE_X_MARK;
+        tlbi_va(view_asid(c->view), far);
+        mon_unlock();
+        return;
+    }
     if (perm) {
         c->stat_dirty++;
         tlbi_va(view_asid(c->view), far);
@@ -1564,6 +1730,7 @@ static void handle_data_abort(bool lower) {
         c->stat_fills++;
         __asm__ volatile("dsb ishst");
     }
+    mon_unlock();
 }
 
 static void shadow_write_finish(void) {
@@ -1850,6 +2017,10 @@ void mon_after_stop(void) {
 // Called on every way out of the monitor. If an interrupt is due and the pc is at an x86 boundary, take it. Otherwise step ARM
 // instructions until it is: one trap per ARM word, only while an interrupt waits. Costs nothing when none does.
 static void exit_check(void) {
+    if (__atomic_load_n(&rs_epoch_shared, __ATOMIC_RELAXED) != me->rs_epoch) { // shortcut: one load, and at one vCPU it never differs
+        me->rs_epoch = __atomic_load_n(&rs_epoch_shared, __ATOMIC_RELAXED);
+        reset_my_return_stacks();
+    }
     step_off();
     if (pt_step_slot) {
         step_on();
@@ -2709,6 +2880,8 @@ static void do_cli_sti(bool sti) {
 }
 
 void mon_sync(void) {
+    if (me->smc_held)
+        __atomic_store_n(&me->smc_held, 0, __ATOMIC_RELEASE);
     u32 ec = (u32)(c->esr >> 26);
     if (ec == 0x24) {
         handle_data_abort(true);
@@ -3037,6 +3210,8 @@ void mon_sync(void) {
 }
 
 void mon_irq(void) {
+    if (me->smc_held)
+        __atomic_store_n(&me->smc_held, 0, __ATOMIC_RELEASE);
     // The host raised the virtual IRQ line: a timer expiry, new vectors in the host IRR, an ExtINT, or a request to stop.
     // The timer rearms first, because the host unmasks the virtual timer in this call and an expired compare would fire again.
     apic_timer_check();
@@ -3052,6 +3227,7 @@ void mon_fiq(void) { stop(STOP_MONITOR_FAULT, 0, 0, 0, c->elr); }
 
 // Set by the host once: runs first, on the initial entry.
 void mon_init(void) {
+    zap_why = KILL_RECLAIM;
     c->irq_shadow_rip = ~0ULL;
     WSR(cntkctl_el1, 2); // EL0VCTEN: rdtsc in translated code reads the virtual counter
     u64 *desc_hole = (u64 *)PRIV(OFF_MON_DATA + (1ULL << 20));
@@ -3059,8 +3235,10 @@ void mon_init(void) {
     hole_entry_ram = desc_hole[1];
     View *v = view_find(cr3_key(c->cr3), view_mode());
     c->view = (u32)(v - views);
-    c->x[R_RS] = v->rs_saved;
-    c->rs_top = v->rs_top;
+    if (!me->rs_saved[c->view]) // built by another vCPU
+        view_rs_prepare(c->view);
+    c->x[R_RS] = me->rs_saved[c->view];
+    c->rs_top = view_rs_top(c->view);
     c->x[R_HASH] = v->hash_va;
     c->x[R_CTX] = (u64)c;
     WSR(ttbr0_el1, v->ttbr0);

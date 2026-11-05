@@ -29,7 +29,10 @@
 #define OFF_STUBS (4ULL << 20) // EL0 execute-only: lookup and helper stubs, within bl reach of the code cache
 #define OFF_CC (6ULL << 20) // EL0 execute-only, EL1 rw: translated code
 #define CC_SIZE (118ULL << 20)
-#define OFF_CTX (124ULL << 20) // EL0 rw: EngineCtx
+#define OFF_CTX (124ULL << 20) // EL0 rw: one EngineCtx per vCPU, CTX_SLOT apart. x18 holds this vCPU's
+#define MAX_VCPUS 8
+#define CTX_SLOT (64ULL << 10)
+#define OFF_MON_CPU (OFF_MON_DATA + (3ULL << 19)) // EL1 rw: per vCPU, CTX_SLOT apart too, the monitor's own state and stack
 #define OFF_RSTACKS (126ULL << 20) // EL0 rw, per view: 16 KB guard (unmapped), then a 16 KB shadow return stack
 #define OFF_HASH (128ULL << 20) // EL0 ro, per view: indirect-branch table
 #define HASH_ENTRIES (1ULL << 16)
@@ -48,6 +51,8 @@
 #define SHADOW_POOL_BYTES (256ULL << 20)
 #define OFF_SHADOW_META (512ULL << 20) // EL1 rw: shadow page descriptors, hash, rmap
 #define OFF_PAGEINFO (768ULL << 20) // EL1 rw, one byte per guest page frame (4 GB of RAM per MB)
+#define OFF_RSTACKS_MORE (800ULL << 20) // EL0 rw: as OFF_RSTACKS, 2 MB each, for vCPUs above 0
+static inline uint64_t engine_off_rstacks(uint32_t cpu) { return cpu ? OFF_RSTACKS_MORE + (uint64_t)(cpu - 1) * (2ULL << 20) : OFF_RSTACKS; }
 
 // RAM alias, EL1 only: x86 GPA + RAM_ALIAS_VA reaches guest RAM for the monitor's walker.
 #define RAM_ALIAS_VA 0xF10000000000ULL
@@ -225,7 +230,7 @@ typedef struct {
     uint32_t mxcsr; // control bits; status bits live in FPSR
     uint32_t view; // current view index
     uint32_t model_kernel; // 0 user-mode shim: syscall and faults go to the host. 1 full x86 kernel model.
-    uint32_t pad_shadow;
+    uint32_t vcpu_count; // in the first context: how many this VM runs. Set before any of them starts
     uint64_t irq_shadow_rip; // interrupts wait until the instruction at this rip has run: the sti shadow
     uint32_t irq_pending; // host or in-VM APIC has an interrupt ready
     uint32_t halted;
