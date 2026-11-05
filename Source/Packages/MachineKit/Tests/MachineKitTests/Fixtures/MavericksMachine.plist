@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>BootMedia</key>
+	<string>Firmware/EFI.img</string>
+	<key>BootMediaKind</key>
+	<string>efi-disk</string>
+	<key>CPUCount</key>
+	<integer>4</integer>
+	<key>Disk</key>
+	<string>Disks/System.qcow2</string>
+	<key>DiskGiB</key>
+	<integer>128</integer>
+	<key>FileSharingEnabled</key>
+	<true/>
+	<key>FileSharingPort</key>
+	<integer>1445</integer>
+	<key>Firmware</key>
+	<string>Firmware/CODE.fd</string>
+	<key>FirmwareSource</key>
+	<string>application</string>
+	<key>FormatVersion</key>
+	<integer>1</integer>
+	<key>Guest</key>
+	<string>mavericks</string>
+	<key>Identifier</key>
+	<string>00000000-0000-4000-8000-000000000001</string>
+	<key>InstallState</key>
+	<string>installed</string>
+	<key>LegacyDisplayAdapter</key>
+	<string>vmware</string>
+	<key>MemoryMiB</key>
+	<integer>8192</integer>
+	<key>NVRAM</key>
+	<string>Firmware/NVRAM.fd</string>
+	<key>PassthroughOpenGLEnabled</key>
+	<true/>
+	<key>SSHEnabled</key>
+	<true/>
+	<key>SSHPort</key>
+	<integer>2222</integer>
+</dict>
+</plist>
