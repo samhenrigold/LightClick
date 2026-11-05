@@ -2,7 +2,7 @@
 // FTZ modes, with PE sticky and not, plus upper lanes, EFLAGS and shuffles. Each `op=` line names what differed.
 //   xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O1 Source/probes/tcg-sse-differential.c -o tcg-sse-differential
 // The check that matters is the same guest with the fast paths on and off, which must match exactly:
-//   PVG_TCG_INLINE_FP=0 PVG_TCG_INLINE_SSE_PACKED=0 PVG_TCG_SSE_NO_GLOBALS=0 PVG_TCG_NATIVE_EXACT_FP=0
+//   PVG_TCG_INLINE_FP=0 PVG_TCG_INLINE_SSE_PACKED=0 PVG_TCG_NATIVE_EXACT_FP=0
 //   PVG_TCG_NATIVE_PACKED_FP=0
 // Rosetta is a second opinion only. QEMU's SSE uses x87 NaN propagation (a TODO in fpu_helper.c), so it differs from
 // hardware in lines with two NaN inputs whichever path runs.
