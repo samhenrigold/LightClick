@@ -48,6 +48,18 @@ Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpen
 - Moves run deepest first. Rewriting a path uses its longest moved ancestor, at a whole path component.
 - Only `Machine.plist` and non-hidden property lists under `Installation` and `State` are rewritten.
 
+## Guest preparation (`GuestPreparationChecks`, `SupportDisc`)
+
+- Preparation needs a Metal-capable guest in its live installed system with a volume UUID, and a desktop unless it's a
+  headless repair after an update.
+- The support disc is mounted only if exactly one volume has its name, the identifier has the shape `disk1s2`, and
+  `diskutil info` says the same name and unwritable. Only a disc that hasn't appeared yet may wait.
+- A staged copy must report the directory it was given, a known archive name that's listed and not empty, and a device
+  of the shape `/dev/disk1s2`.
+- The environment check, prepared files and plan must agree with the first report on guest, volume or build, as each
+  has them. Tools claiming `Installed` or `Ready` this early are refused.
+- A payload path may come back only as itself, or as the exact `/private/var` alias of the known staging folders.
+
 ## Pending edits
 
 - Only the 20 editable keys can be queued. `Disk`, `InstallerMedia` and the like can't be redirected through an edit.
