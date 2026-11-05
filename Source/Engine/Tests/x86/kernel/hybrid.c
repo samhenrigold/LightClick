@@ -839,6 +839,21 @@ static void test_stale_table(u64 root) {
     CHECK(PHYS(table)[511] == 499 + 511);
 }
 
+// A dead process: the kernel frees its tables and poisons them while its view still holds translated code. Nothing may
+// walk those tables as though they meant something.
+static void test_poisoned_tables(u64 root) {
+    u64 va = TEST_VA + 0xE00000, code = frame(), other = frame();
+    for (int i = 0; i < 512; i++)
+        PHYS(other)[i] = PHYS(root)[i];
+    *(volatile u8 *)PHYS(code) = 0xC3; // ret
+    pte_of(root, va)[0] = code | PRESENT_RW;
+    __asm__ volatile("mov %0, %%cr3" : : "r"(other));
+    ((void (*)(void))va)();
+    CHECK(*(volatile u8 *)va == 0xC3); // translated from, and mapped for data, in that view
+    __asm__ volatile("mov %0, %%cr3" : : "r"(root));
+    PHYS(other)[(va >> 39) & 0x1ff] = 0xDEADBEEFDEADBEEFULL;
+}
+
 // MMX registers live with the engine between fallbacks, and TCG needs them, with the tags as MMX leaves them, at each
 // one.
 static void test_mmx(void) {
@@ -909,6 +924,7 @@ void kmain(void) {
     test_split_store_fault(root);
     test_mmx();
     test_stale_table(root);
+    test_poisoned_tables(root);
     test_process_log(root);
     test_view_churn(root);
     CHECK(!bad_vector);

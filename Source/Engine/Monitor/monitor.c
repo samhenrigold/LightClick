@@ -192,6 +192,8 @@ static inline bool canonical(u64 va) { return (u64)((i64)(va << 16) >> 16) == va
 
 // Permission logic mirrors the SDM for CR0.WP=1 (enforced at CR0 writes) without SMAP (not advertised, stopped at CR4 writes).
 // access: bit 1 write, bit 2 user, bit 4 fetch.
+static bool walk_any_tables; // the tables may be a dead process's, freed and poisoned: a slot pointing outside RAM just ends the walk
+
 static Walk x86_walk(u64 cr3, u64 va, u32 access, bool set_ad) {
     Walk w = {0};
     w.user = true;
@@ -204,8 +206,11 @@ static Walk x86_walk(u64 cr3, u64 va, u32 access, bool set_ad) {
     u64 table = cr3 & X_ADDR;
     bool nxe = c->efer & (1ULL << 11);
     for (int level = 3; level >= 0; level--) {
-        if (!is_ram(table))
+        if (!is_ram(table)) {
+            if (walk_any_tables)
+                return w;
             stop(STOP_UNSUPPORTED, 0, 1, table, va); // x86 page table outside RAM
+        }
         u64 *ep = (u64 *)RAM(table + ((va >> (12 + 9 * level)) & 0x1ff) * 8);
         u64 e = *ep;
         w.chain[level] = ep;
@@ -855,7 +860,9 @@ static void zap_entry(u64 *e, const ShadowDesc *d) {
                 tlbi_va(view_asid(d->view), va);
         }
         if ((v & PTE_X_MARK) && !evicting) {
+            walk_any_tables = true;
             Walk now = (v & 1) ? x86_walk(views[d->view].cr3, va, 0, false) : (Walk){0};
+            walk_any_tables = false;
             c->req_a[0] = d->view;
             c->req_a[1] = va;
             c->req_a[2] = zap_why;
