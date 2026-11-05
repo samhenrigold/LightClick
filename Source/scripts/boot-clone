@@ -5,11 +5,13 @@
 #     scripts/boot-clone <app> <machine.vintelmac> [work directory]
 #
 # Prints the app and QEMU PIDs, and writes QEMU's arguments and environment to launch.json. Stop it by
-# killing those PIDs, then delete the work directory (default Build/clone).
+# killing those PIDs, then delete the work directory (default Build/clone). Its window is titled
+# "Clone of <machine>", and anything changed in it goes with that directory.
 set -eu
 root=${0:A:h:h}
 app=${1:?usage: boot-clone <app> <machine> [work directory]}
 machine=${2:?usage: boot-clone <app> <machine> [work directory]}
+machine=${machine%/}
 work=${3:-$root/Build/clone}
 # Set BOOT_CLONE_ALLOW_RUNNING for a machine with its forwarded ports turned off.
 if [[ -z ${BOOT_CLONE_ALLOW_RUNNING:-} ]] && pgrep -x qemu-system-x86_64 >/dev/null; then
@@ -19,8 +21,12 @@ fi
 rm -rf "$work"
 library="$work/home/Library/Application Support/Light Click"
 mkdir -p "$library/Machines" "$library/Downloads" "$library/Installers"
-cp -c -R "$machine" "$library/Machines/"
-CFFIXED_USER_HOME=$work/home "$app/Contents/MacOS/Light Click" --open-vm "$library/Machines/${machine:t}" >"$work/app.log" 2>&1 &
+# The window title is the package's name, so a clone must not keep the real VM's. A pending rename would restore it.
+clone="$library/Machines/Clone of ${machine:t}"
+cp -c -R "$machine" "$clone"
+rm -f "$clone/State/PendingConfiguration.plist"
+print -u2 "WARNING: the window titled \"${clone:t:r}\" is a throwaway clone. Anything changed in it is lost."
+CFFIXED_USER_HOME=$work/home "$app/Contents/MacOS/Light Click" --open-vm "$clone" >"$work/app.log" 2>&1 &
 app_pid=$!
 for _ in {1..120}; do
     qemu_pid=$(pgrep -P $app_pid -x qemu-system-x86_64 | head -1) || true
@@ -45,4 +51,4 @@ parts = data[start:].split(b'\0')
 env = dict(p.decode().split('=', 1) for p in parts[argc:] if b'=' in p)
 json.dump({'args': [p.decode() for p in parts[:argc]], 'env': env}, open(sys.argv[2], 'w'), indent=1, sort_keys=True)
 PY
-print "app $app_pid qemu $qemu_pid log \"$library/Machines/${machine:t}/State/session.log\""
+print "app $app_pid qemu $qemu_pid log \"$clone/State/session.log\""

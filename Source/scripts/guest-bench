@@ -6,7 +6,8 @@
 
 Clones the app and machine with APFS under Build/bench/<tag>, so the real library isn't touched. A small
 wrapper replaces the clone's QEMU so experiments can set environment variables and extra QEMU arguments
-that the app wouldn't pass. Writes Build/bench/<tag>.txt.
+that the app wouldn't pass. Writes Build/bench/<tag>.txt, and the guest's stderr to Build/bench/<tag>.stderr. The
+clone's window is titled "Clone of <machine>"; anything changed in it is lost.
 """
 import argparse
 import json
@@ -42,8 +43,11 @@ shutil.rmtree(work, ignore_errors=True)
 home = work/'home'
 library = home/'Library/Application Support/Light Click/Machines'
 library.mkdir(parents=True)
-subprocess.run(['cp', '-c', '-R', str(args.machine), str(library)], check=True)
-machine = library/args.machine.name
+# The window title is the package's name, so a clone must not keep the real VM's. A pending rename would restore it.
+machine = library/f'Clone of {args.machine.name}'
+subprocess.run(['cp', '-c', '-R', str(args.machine), str(machine)], check=True)
+(machine/'State/PendingConfiguration.plist').unlink(missing_ok=True)
+print(f'WARNING: the window titled "{machine.stem}" is a throwaway clone. Anything changed in it is lost.', flush=True)
 # Forwarded ports would clash with any VM already running.
 for key in ('SSHEnabled', 'FileSharingEnabled'):
     subprocess.run(['plutil', '-replace', key, '-bool', 'NO', str(machine/'Machine.plist')], check=True)
@@ -74,6 +78,8 @@ process = subprocess.Popen([str(app/'Contents/MacOS/Light Click'), '--open-vm', 
 identifier = subprocess.check_output(['plutil', '-extract', 'Identifier', 'raw', '-o', '-', str(machine/'Machine.plist')],
                                      text=True).strip().upper()
 channel = diagnostics/identifier
+stderr_path = source/'Build/bench'/f'{args.tag}.stderr'
+stderr_path.unlink(missing_ok=True)
 
 
 def request(command, timeout):
@@ -86,7 +92,11 @@ def request(command, timeout):
         if process.poll() is not None:
             raise SystemExit(f'The app exited; see {work}/app.log')
         if (channel/'Result.json').exists():
-            return json.loads((channel/'Result.json').read_text())
+            result = json.loads((channel/'Result.json').read_text())
+            # All of it, in order: a stress program reports its failures here, and they run long.
+            with stderr_path.open('a') as file:
+                file.write(str(result.get('Stderr') or result.get('Error') or ''))
+            return result
         time.sleep(1)
     raise SystemExit(f'Timed out waiting for {command}')
 
