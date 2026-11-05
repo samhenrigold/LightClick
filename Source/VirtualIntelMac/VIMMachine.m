@@ -345,6 +345,8 @@ static BOOL RemovePreparedMedia(NSString *path, NSURL *owner) {
     return machine;
 }
 - (BOOL)requiresInstallerDisplay {
+    if (self.preMetalGuest)
+        return YES;
     return [VIMMachineModel configuration:self.configuration
         requiresInstallerDisplayWithJournal:[self plist:@"State/GuestInstallation.plist"]
                                     updater:[self plist:@"State/UpdateDisplay.plist"]
@@ -352,6 +354,9 @@ static BOOL RemovePreparedMedia(NSString *path, NSURL *owner) {
                    firmwareSelectsInstaller:self.firmwareSelectsInstaller];
 }
 - (BOOL)prepareNativeBigSurDisplayWithGuestReport:(NSDictionary *)report error:(NSError **)error {
+    // Runs on every status refresh. Other guests shouldn't read their firmware and state files for it.
+    if (![self.guest isEqual:@"bigsur"])
+        return NO;
     NSDictionary *record =
         [VIMMachineModel nativeBigSurDisplayRecordForConfiguration:self.configuration
                                                             report:report
