@@ -268,12 +268,20 @@ public final class Engine {
         return try runLoop()
     }
 
+    // For the tally: ticks inside hv_vcpu_run, and per host call their number and the ticks from the exit to the end of handling.
+    var ticksInVCPU: UInt64 = 0
+    var hostCallCount = [UInt64](repeating: 0, count: 32)
+    var hostCallTicks = [UInt64](repeating: 0, count: 32)
+
     private func runLoop() throws -> RunOutcome {
         while true {
             // The hypervisor forgets a pending interrupt at each exit, so the line is held here until the monitor takes it.
             if irqLine { hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, true) }
             inVCPURun = true
+            let entered = mach_absolute_time()
             let r = hv_vcpu_run(vcpu)
+            let left = mach_absolute_time()
+            ticksInVCPU &+= left &- entered
             inVCPURun = false
             if r != HV_SUCCESS { throw EngineError.hypervisor("hv_vcpu_run", r) }
             exitCount += 1
@@ -297,7 +305,12 @@ public final class Engine {
                                 .utf8))
                 }
                 lastHostCall = Int(code)
-                if let outcome = try hostCall(Int(code)) { return outcome }
+                let outcome = try hostCall(Int(code))
+                if code < 32 {
+                    hostCallCount[Int(code)] &+= 1
+                    hostCallTicks[Int(code)] &+= mach_absolute_time() &- left
+                }
+                if let outcome { return outcome }
             case HV_EXIT_REASON_CANCELED:
                 if watchdogFired {
                     var pc: UInt64 = 0

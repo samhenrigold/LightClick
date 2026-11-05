@@ -79,10 +79,33 @@ static void hvdbt_after_device(CPUState *cs)
     }
 }
 
+/* For the tally: what each device megabyte is, the first time it is touched. Up to 16 GB; the rest are not looked at. */
+static void hvdbt_name_device(uint64_t gpa)
+{
+    static uint64_t seen[256];
+    uint64_t mb = gpa >> 20;
+
+    if (mb >= 16384 || (seen[mb / 64] & (1ULL << (mb % 64)))) {
+        return;
+    }
+    seen[mb / 64] |= 1ULL << (mb % 64);
+    RCU_READ_LOCK_GUARD();
+    hwaddr offset, length = 1;
+    MemoryRegion *mr = address_space_translate(&address_space_memory, gpa, &offset, &length, true,
+                                               MEMTXATTRS_UNSPECIFIED);
+    char line[160];
+    snprintf(line, sizeof(line), "device memory at 0x%llx: region '%s', %llu MB, ram %d, ram_device %d, offset 0x%llx",
+             (unsigned long long)gpa, memory_region_name(mr) ? memory_region_name(mr) : "?",
+             (unsigned long long)(memory_region_size(mr) >> 20), memory_region_is_ram(mr),
+             memory_region_is_ram_device(mr), (unsigned long long)offset);
+    engine_tally_note(hv.engine, line);
+}
+
 static uint64_t hvdbt_mmio_read(void *opaque, uint64_t gpa, unsigned size)
 {
     uint64_t v = 0;
     bql_lock();
+    hvdbt_name_device(gpa);
     address_space_read(&address_space_memory, gpa, MEMTXATTRS_UNSPECIFIED, &v, size);
     hvdbt_after_device(opaque);
     bql_unlock();
@@ -92,6 +115,7 @@ static uint64_t hvdbt_mmio_read(void *opaque, uint64_t gpa, unsigned size)
 static void hvdbt_mmio_write(void *opaque, uint64_t gpa, unsigned size, uint64_t value)
 {
     bql_lock();
+    hvdbt_name_device(gpa);
     address_space_write(&address_space_memory, gpa, MEMTXATTRS_UNSPECIFIED, &value, size);
     hvdbt_after_device(opaque);
     bql_unlock();

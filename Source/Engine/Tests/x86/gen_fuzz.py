@@ -488,7 +488,7 @@ for imm in (0, 1, 0x0F, 0x10, 0x30, 0x40, 0x80, 0xC0, 0xF0, 0xE5, 0x1B):
     form(f"insertps ${imm}", f"insertps ${imm},%xmm2,%xmm1", ALL, FP)
     form(f"insertps ${imm} same", f"insertps ${imm},%xmm1,%xmm1", ALL, FP)
     form(f"insertps ${imm} m", f"insertps ${imm},33(%r15),%xmm1", ALL, FP)
-for imm in (4, 9, 10, 11, 12):  # the modes the translator takes: fixed with precision off, and MXCSR's either way
+for imm in (0, 1, 2, 3, 4, 8, 9, 10, 11, 12):
     for op, m in (("roundps", "32(%r15)"), ("roundpd", "32(%r15)"), ("roundss", "33(%r15)"), ("roundsd", "33(%r15)")):
         form(f"{op} ${imm}", f"{op} ${imm},%xmm2,%xmm1", ALL, FP)
         form(f"{op} ${imm} same", f"{op} ${imm},%xmm1,%xmm1", ALL, FP)

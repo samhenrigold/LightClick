@@ -31,6 +31,7 @@ typedef struct {
     u64 frame[2]; // ~0 when unused
     u32 next_on_frame[2]; // block index + 1
     u32 next_on_page[2]; // block index + 1: the x86 pages it was read from, for a change to their mappings
+    u32 next_in_view; // block index + 1: blocks of one view, not of a shared kernel domain
     bool dead, registered;
 } HostBlock;
 static HostBlock *hblocks;
@@ -38,6 +39,7 @@ static u32 hblock_count;
 static u32 *frame_head; // per GPA frame: block index + 1
 #define PAGE_HEADS (1u << 18)
 static u32 *page_head; // by x86 page number, modulo PAGE_HEADS: block index + 1
+static u32 view_head[MAX_VIEWS]; // block index + 1
 
 static inline u32 page_slot(u64 va) { return (u32)(va >> 12) & (PAGE_HEADS - 1); }
 
@@ -575,6 +577,10 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
             *head = idx + 1;
         }
     }
+    if (!(hb->view & KEY_DOMAIN)) {
+        hb->next_in_view = view_head[hb->view];
+        view_head[hb->view] = idx + 1;
+    }
     BlockEntry *be = &block_table[idx];
     be->rip = rip;
     be->arm_off = (u32)(start - cc_base);
@@ -998,11 +1004,12 @@ int tr_invalidate_view_va(int view, uint64_t va, uint32_t why, bool unmoved) {
 
 void tr_view_drop(int view) {
     stats.kill_calls[KILL_VIEW_DROP]++;
-    for (u32 i = 0; i < hblock_count; i++)
-        if (!hblocks[i].dead && (int)hblocks[i].view == view) {
-            kill_block(i);
+    for (u32 it = view_head[view]; it; it = hblocks[it - 1].next_in_view)
+        if (!hblocks[it - 1].dead) {
+            kill_block(it - 1);
             stats.killed[KILL_VIEW_DROP]++;
         }
+    view_head[view] = 0;
     memset(hash_table(view), 0, HASH_BYTES);
     ctx_ptr->tr_flushed = 1;
 }
@@ -1016,6 +1023,7 @@ void tr_flush_all(void) {
     memset(block_map, 0, MAP_SIZE * sizeof(MapEntry));
     memset(frame_head, 0, (cfg.ram_size >> 12) * sizeof(u32));
     memset(page_head, 0, PAGE_HEADS * sizeof(u32));
+    memset(view_head, 0, sizeof view_head);
     for (int v = 0; v <= view_high; v++)
         memset(hash_table(v), 0, HASH_BYTES);
 }

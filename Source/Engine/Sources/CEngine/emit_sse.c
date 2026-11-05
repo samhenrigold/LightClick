@@ -320,22 +320,22 @@ static void emit_sse41(const Insn *in, int live) {
             case 0x09:
             case 0x0A:
             case 0x0B: {
-                // Bit 2 takes the mode from MXCSR, which FPCR follows. Bit 3 suppresses the precision flag, and NEON's fixed-mode rounds never set
-                // it: a fixed mode that must report precision is TCG's.
+                // Bit 2 takes the mode from MXCSR, which FPCR follows. Bit 3 suppresses the precision flag. NEON's fixed-mode rounds never set it, so
+                // to report it an frintx runs first, its result unused: whether a value is whole does not depend on the mode.
                 static const u32 fixed[4] = {0, 2, 1, 3}; // x86 nearest, down, up, zero; ARM rmode N, M is 2, P is 1, Z
                 u32 rmode = (imm & 4) ? ((imm & 8) ? 7 : 6) : fixed[imm & 3];
-                if (!(imm & 4) && !(imm & 8)) {
-                    bad(in, "round: fixed mode with the precision flag");
-                    return;
-                }
-                bool dbl = opc & 1;
+                bool dbl = opc & 1, report = !(imm & 4) && !(imm & 8);
                 if (opc >= 0x0A) {
                     int s = src_op(in, dbl ? 3 : 2, false);
+                    if (report)
+                        E(0x1E244000u | (dbl ? 1u << 22 : 0) | 6u << 15 | (u32)s << 5 | V_S1);
                     E(0x1E244000u | (dbl ? 1u << 22 : 0) | rmode << 15 | (u32)s << 5 | V_S0);
                     ins_elem(d, 0, V_S0, 0, dbl ? 8 : 4);
                 } else {
                     int s = src_op(in, 4, true);
                     static const u32 packed[8] = {0x4E218800u, 0x4EA18800u, 0x4E219800u, 0x4EA19800u, 0, 0, 0x6E219800u, 0x6EA19800u};
+                    if (report)
+                        RR(packed[6] | (dbl ? 1u << 22 : 0), V_S1, s);
                     RR(packed[rmode] | (dbl ? 1u << 22 : 0), d, s);
                 }
                 return;

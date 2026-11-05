@@ -338,6 +338,26 @@ public final class Tally: @unchecked Sendable {
         }
         o += "\n"
 
+        o += "== where the time goes: 24 MHz clock, averages fine over many ==\n"
+        o += String(
+            format: "%10.1f s inside hv_vcpu_run, translated code, the monitor and the exit round trips\n",
+            seconds(engine.ticksInVCPU))
+        o += "   count        total s    us each  host call (HC_ number in engine_abi.h)\n"
+        for code in engine.hostCallCount.indices where engine.hostCallCount[code] != 0 {
+            let total = seconds(engine.hostCallTicks[code])
+            o += String(
+                format: "%12llu %10.2f %10.2f  %d\n", engine.hostCallCount[code], total,
+                total * 1e6 / Double(engine.hostCallCount[code]), code)
+        }
+        o += "monitor calls by SVC_ number in engine_abi.h, ranked:\n"
+        let svc = withUnsafeBytes(of: c.stat_svc) { Array($0.bindMemory(to: UInt64.self)) }
+        for (n, count) in svc.enumerated().sorted(by: { $0.element > $1.element }).prefix(20) where count != 0 {
+            o += String(
+                format: "%12llu, %8.0f/s  %d\n", count,
+                Double(count) / max(seconds(mach_absolute_time() &- startTicks), 1), n)
+        }
+        o += "\n"
+
         o += "== other counters ==\n"
         let counters: [(String, UInt64)] = [
             ("vm exits", engine.exitCount), ("fallbacks", fallbacks), ("boundary stops", boundaries),

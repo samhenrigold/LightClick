@@ -56,6 +56,7 @@ ld -arch x86_64 -preload -e _kstart -no_uuid -pagezero_size 0 -segaddr __TEXT 0x
 clang "${flags[@]}" -w -I"$here/../../../probes" -c "$here/t_lcbench.c" -o "$out/t_lcbench.o"
 clang "${flags[@]}" -w -c "$here/t_lcbench_stubs.c" -o "$out/t_lcbench_stubs.o"
 link t_lcbench "$out/t_lcbench.o" "$out/t_lcbench_stubs.o" "$out/flatlibc.o"
+xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 "$here/../../../probes/fork-loop.c" -o "$out/fork-loop"
 xcrun clang -arch arm64 -O2 "$here/../../../probes/lc-bench.c" -o "$out/lc-bench-arm64"
 xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -w "$here/../../../probes/lc-bench.c" -o "$out/lc-bench-x86"
 
