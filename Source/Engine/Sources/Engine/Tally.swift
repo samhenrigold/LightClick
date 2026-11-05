@@ -361,6 +361,7 @@ public final class Tally: @unchecked Sendable {
         o += "== other counters ==\n"
         let counters: [(String, UInt64)] = [
             ("vm exits", engine.exitCount), ("fallbacks", fallbacks), ("boundary stops", boundaries),
+            ("links made in the monitor", c.stat_links_here),
             ("shadow fills", c.stat_fills),
             ("dirty upgrades", c.stat_dirty), ("smc", c.stat_smc), ("page faults delivered", c.stat_pf_delivered),
             ("cr3 writes", c.stat_cr3),

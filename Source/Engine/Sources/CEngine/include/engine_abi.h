@@ -36,7 +36,7 @@
 #define HASH_BYTES (HASH_ENTRIES * 16)
 #define MAX_VIEWS 64 // two per x86 address space. shortcut: no recycling yet, a real guest needs LRU eviction
 #define OFF_BLOCKS (196ULL << 20) // EL1 ro: block table, pc maps
-#define BLOCKS_MAX (1ULL << 20)
+#define BLOCKS_MAX (1ULL << 19) // the table has 16 MB
 #define OFF_PCMAP (212ULL << 20)
 #define PCMAP_BYTES (44ULL << 20)
 #define OFF_PT (256ULL << 20) // EL1 rw: static hole tables, then the shadow pool
@@ -254,7 +254,7 @@ typedef struct {
     // Frames written behind the monitor's back (DMA, TCG), holding code or page tables. Many producers, consumed in the monitor.
     uint32_t note_head, note_tail, note_overflow, pad4;
     uint32_t note_ring[256]; // frame + 1
-    uint64_t stat_note_code, stat_note_pt, stat_nm, stat_pt_stale;
+    uint64_t stat_note_code, stat_note_pt, stat_nm, stat_pt_stale, stat_links_here;
     uint64_t stat_vector[256], vector_last_rip[256], vector_last_err[256], vector_last_cr3[256]; // every delivery, software int and #GP included
     uint64_t event_next;
     EngineEvent events[EVENT_RING];
@@ -269,6 +269,7 @@ typedef struct {
     uint32_t arm_words;
     uint32_t map_off; // index of the first PcMap in the map array
     uint32_t map_count;
+    uint32_t key, pad; // a view, or a shared domain: links stay within one
 } BlockEntry;
 
 // One x86 instruction boundary inside a block.

@@ -337,6 +337,28 @@ __asm__(".text\n.globl _enter_user_args\n_enter_user_args:\n"
 // ---- Tests ----
 #define MEASURE_NS(start, n) (rdtsc() - (start)) / (n)
 
+// What XNU's paths do between entering and leaving the kernel, each once per pass. 'nop' is the loop by itself.
+#define MEASURE_OP(name, asm_text, ...)                                                                               \
+    do {                                                                                                               \
+        u64 t = rdtsc();                                                                                               \
+        for (u32 i = 0; i < 2000000; i++)                                                                              \
+            __asm__ volatile(asm_text __VA_ARGS__);                                                                    \
+        kprintf("measure %s: %d ns\n", name, (int)((rdtsc() - t) / 2000));                                             \
+    } while (0)
+
+static void measure_kernel_ops(void) {
+    u64 a, table[2];
+    (void)a;
+    MEASURE_OP("nop x1000 (per mille)", "nop");
+    MEASURE_OP("mov cr3 read x1000", "mov %%cr3, %0", : "=r"(a));
+    MEASURE_OP("mov ds read x1000", "mov %%ds, %%ax", : : : "ax");
+    MEASURE_OP("sidt x1000", "sidt %0", : "=m"(table));
+    MEASURE_OP("rdtsc x1000", "rdtsc", : : : "rax", "rdx");
+    MEASURE_OP("cli then sti x1000", "cli\n sti");
+    MEASURE_OP("shlw flags dead x1000", "shlw $3, %%ax\n xorl %%edx, %%edx", : : : "ax", "dx", "cc");
+    MEASURE_OP("rolw flags dead x1000", "rolw $8, %%ax\n xorl %%edx, %%edx", : : : "ax", "dx", "cc");
+}
+
 static void test_syscalls(void) {
     u64 r = run_user(u_syscalls, 1000, 0);
     CHECK(r == 0, "status %x", r);
@@ -877,6 +899,7 @@ void kmain(u64 ram) {
     switch_to(a, 1, false);
     test_exception_cost();
     test_syscalls();
+    measure_kernel_ops();
     test_faults();
     test_precise();
     test_demand();

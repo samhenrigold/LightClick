@@ -384,6 +384,7 @@ public final class Engine {
                 tr_hash_insert(view, rip, result.arm)
             } else if site != 0 {
                 tr_link(site, kind, result.arm, result.key)
+                tr_hash_insert(view, rip, result.arm) // so the next site with this target links in the monitor
             }
         case Int(HC_SMC):
             _ = tr_invalidate_frame(c.pointee.req_a.0, UInt32(c.pointee.req_a.1))

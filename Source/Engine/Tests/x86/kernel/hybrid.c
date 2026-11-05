@@ -859,6 +859,45 @@ static void test_direct_map(void) {
     CHECK(direct[0] == 0xC0000000ULL * 3); // the harness's device
 }
 
+// The inlined forms: each must see what the monitor's state says, and sti must keep its one-instruction shadow with an
+// interrupt waiting.
+static void test_inline_ops(u64 root) {
+    u64 cr3, cr0, cr4;
+    __asm__ volatile("mov %%cr3, %0\n mov %%cr0, %1\n mov %%cr4, %2" : "=r"(cr3), "=r"(cr0), "=r"(cr4));
+    CHECK((cr3 & 0x000FFFFFFFFFF000ULL) == (root & 0x000FFFFFFFFFF000ULL));
+    CHECK(cr0 & 0x80000000ULL);
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 8));
+    u64 again;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(again));
+    CHECK(again == (cr0 | 8));
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
+    u16 ds;
+    __asm__ volatile("mov %%ds, %0" : "=r"(ds));
+    CHECK(ds == 0x10);
+    struct __attribute__((packed)) {
+        u16 limit;
+        u64 base;
+    } idtr;
+    __asm__ volatile("sidt %0" : "=m"(idtr));
+    CHECK(idtr.base == (u64)idt && idtr.limit == sizeof(idt) - 1);
+    u64 before, after;
+    __asm__ volatile("rdtsc\n shl $32, %%rdx\n or %%rdx, %%rax" : "=a"(before) : : "rdx");
+    __asm__ volatile("rdtsc\n shl $32, %%rdx\n or %%rdx, %%rax" : "=a"(after) : : "rdx");
+    CHECK(after > before);
+    u64 flags;
+    __asm__ volatile("cli\n pushfq\n popq %0" : "=r"(flags));
+    CHECK(!(flags & 0x200));
+    __asm__ volatile("sti\n pushfq\n popq %0" : "=r"(flags));
+    CHECK(flags & 0x200);
+    // With the line raised under cli, the vector comes after the one instruction following sti, not before it.
+    __asm__ volatile("cli");
+    u64 irqs = irq_count, seen = ~0ULL;
+    command(4);
+    __asm__ volatile("sti\n mov %1, %0\n nop" : "=r"(seen) : "m"(irq_count));
+    CHECK(seen == irqs);
+    CHECK(irq_count == irqs + 1);
+}
+
 static void test_ptest_flags(void) {
     u64 flags, set = 0xFFFFFFFFFFFFFFFFULL;
     __asm__ volatile("movq %1, %%xmm0\n movq %1, %%xmm1\n"
@@ -991,6 +1030,7 @@ void kmain(void) {
     test_poisoned_tables(root);
     test_rep_speed_under_ts();
     test_ptest_flags();
+    test_inline_ops(root);
     test_direct_map();
     test_process_log(root);
     test_view_churn(root);

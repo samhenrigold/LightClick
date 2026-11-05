@@ -775,13 +775,41 @@ static u64 view_lookup(u64 rip) {
     }
 }
 
+static inline void code_changed(u32 *word) {
+    __asm__ volatile("dc cvau, %0\n dsb ish\n ic ivau, %0\n dsb ish\n isb" : : "r"(word));
+}
+
+// tr_link, for a target this view already knows, with no way out of the VM. Half of all host calls in a fork loop did only this.
+static void link_here(u64 site, u32 kind, u64 arm) {
+    BlockEntry *from = find_block(site), *to = find_block(arm);
+    if (!from || !to || from->key != to->key)
+        return; // a link is forever, so it may only join blocks of one domain
+    u32 *s = (u32 *)site;
+    i64 d = ((i64)arm - (i64)site) >> 2;
+    *s = (kind == SVC_CALL ? 0x94000000u : 0x14000000u) | ((u32)d & 0x3ffffff);
+    code_changed(s);
+    if (kind == SVC_JCC) { // as in tr_link: straight from the conditional branch if it reaches
+        u32 *cond = s - s[3];
+        i64 off = ((i64)arm - (i64)cond) >> 2;
+        if (off >= -(1 << 18) && off < (1 << 18)) {
+            *cond = (*cond & ~(0x7ffffu << 5)) | ((u32)off & 0x7ffff) << 5;
+            code_changed(cond);
+        }
+    }
+    c->stat_links_here++;
+}
+
 static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
     View *v = view_current();
-    if (!site && !kind && !single) {
+    if (!single) {
         u64 hit = view_lookup(rip);
-        if (hit)
+        if (hit) {
+            if (site && kind)
+                link_here(site, kind, hit);
             return hit;
-        kind = SVC_LOOKUP_MISS;
+        }
+        if (!site && !kind)
+            kind = SVC_LOOKUP_MISS;
     }
     pool_reclaim();
     Walk w = x86_walk(c->cr3, rip, 16 | (c->cpl == 3 ? 4 : 0), true);
@@ -2654,6 +2682,7 @@ void mon_fiq(void) { stop(STOP_MONITOR_FAULT, 0, 0, 0, c->elr); }
 // Set by the host once: runs first, on the initial entry.
 void mon_init(void) {
     c->irq_shadow_rip = ~0ULL;
+    WSR(cntkctl_el1, 2); // EL0VCTEN: rdtsc in translated code reads the virtual counter
     u64 *desc_hole = (u64 *)PRIV(OFF_MON_DATA + (1ULL << 20));
     hole_entry_priv = desc_hole[0];
     hole_entry_ram = desc_hole[1];

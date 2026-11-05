@@ -423,6 +423,26 @@ mmx("mmx after sse", ["movq %mm1,%rcx", "movq %rcx,%xmm3", "paddq %xmm3,%xmm1", 
 mmx("all registers", ["movq %mm1,%mm0", "movq %mm2,%mm3", "movq %mm1,%mm4", "movq %mm2,%mm5", "movq %mm1,%mm6", "movq %mm2,%mm7",
                       "paddb %mm0,%mm3", "pxor %mm3,%mm4", "psubw %mm4,%mm5", "por %mm5,%mm6", "pand %mm6,%mm7", "movq %mm7,%mm1"])
 
+# ---- Narrow shifts whose flags nothing reads: the add after each overwrites them ----
+for op in ("shl", "shr", "sar", "rol", "ror"):
+    for s_, dst, high, mem in (("b", "%al", "%ah", "8(%r15)"), ("w", "%ax", None, "8(%r15)")):
+        for imm in (1, 3, 7, 8, 9, 15, 16, 17, 31):
+            form(f"{op}{s_} ${imm} dead", [f"{op}{s_} ${imm},{dst}", "addq %rbx,%rdx"], ALL)
+            form(f"{op}{s_} ${imm} m dead", [f"{op}{s_} ${imm},{mem}", "addq %rbx,%rdx"], ALL)
+            if high:
+                form(f"{op}{s_} ${imm} high dead", [f"{op}{s_} ${imm},{high}", "addq %rbx,%rdx"], ALL)
+        if op in ("shl", "shr", "sar"):
+            form(f"{op}{s_} cl dead", [f"{op}{s_} %cl,{dst}", "addq %rbx,%rdx"], ALL)
+            form(f"{op}{s_} cl m dead", [f"{op}{s_} %cl,{mem}", "addq %rbx,%rdx"], ALL)
+            form(f"{op}{s_} small cl dead", ["andl $7,%ecx", f"{op}{s_} %cl,{dst}", "addq %rbx,%rdx"], ALL)
+for sel in ("ds", "es", "ss", "fs", "gs", "cs"):
+    form(f"mov {sel} read", f"movw %{sel},%ax", ALL)
+    form(f"mov {sel} read m", f"movw %{sel},8(%r15)", ALL)
+    form(f"mov {sel} read long", f"movl %{sel},%eax", ALL)
+form("rdtsc shape", ["rdtsc", "shrq $32,%rax", "shrq $32,%rdx", "xorl %edx,%edx", "xorl %eax,%eax"], ALL)
+form("sgdt shape", ["sgdt 8(%r15)", "movq $0,8(%r15)", "movq $0,16(%r15)"], ALL)
+form("sidt shape", ["sidt 8(%r15)", "movq $0,8(%r15)", "movq $0,16(%r15)"], ALL)
+
 # ---- SSE4.1, AES, PCLMUL ----
 def bin_form(op):
     form(f"{op} x", f"{op} %xmm2,%xmm1", ALL, FP)
