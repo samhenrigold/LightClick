@@ -183,7 +183,7 @@ public final class Engine {
         try hvCheck("set x18") { hv_vcpu_set_reg(vcpu, HV_REG_X18, kPrivVA + kOffCtx) }
         ctx.pointee.ram_size = options.ramBytes
         ctx.pointee.df = 1
-        ctx.pointee.rflags_sys = 2
+        ctx.pointee.rflags_sys = 0x202
         ctx.pointee.spsr = 1 << 29  // EL0t, C set: x86 CF clear
         ctx.pointee.model_kernel = options.kernelModel ? 1 : 0
         ctx.pointee.cr0 = 0x8001_0033

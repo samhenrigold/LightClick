@@ -140,8 +140,8 @@ static void emit_shift_xmm(const Insn *in, int esize, int kind) { // kind 0 left
     umov_d(S0, s, 0);
     // Counts above the element width behave as the element width.
     movimm(S1, (u64)esize);
-    add_reg(1, 1, 0, S2, S0, S1, 0);
-    tbz(0 ^ 1, S2, 63, 2); // tbnz: below the width, keep the count
+    lsr_imm(1, S2, S0, esize == 16 ? 4 : esize == 32 ? 5 : 6);
+    cbz(0, 1, S2, 2); // below the width, keep the count
     mov_reg(1, S0, S1);
     if (kind)
         add_reg(1, 1, 0, S0, XZR, S0, 0);

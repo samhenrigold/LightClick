@@ -313,6 +313,8 @@ static void alu_flags(int alu, int sz, int live, int a, int b, int r) {
         if (live & F_C)
             cfinv();
     }
+    if (!arith && (live & F_A))
+        mov_reg(0, R_AF, r);
     if (live & F_P)
         mov_reg(0, R_PF, r);
 }
@@ -452,6 +454,8 @@ static void emit_alu(const Insn *in, int live) {
                 E((u32)sf << 31 | opc << 29 | 0x12000000u | enc | dst << 5 | d);
                 if (sets && (alu == ALU_OR || alu == ALU_XOR))
                     logic_reg(sf, 3, 0, XZR, d, d);
+                if (live & F_A)
+                    mov_reg(0, R_AF, d);
                 if (live & F_P)
                     mov_reg(0, R_PF, d);
                 if (live & F_C)
@@ -493,6 +497,8 @@ static void emit_alu(const Insn *in, int live) {
             if (sets)
                 logic_reg(sf, 3, 0, XZR, d, d);
         }
+        if (live & F_A)
+            mov_reg(0, R_AF, d);
         if (live & F_P)
             mov_reg(0, R_PF, d);
         if (live & F_C)
@@ -1320,6 +1326,8 @@ static void emit_cmpxchg(const Insn *in, int live) {
         u32 *done = tr_cc;
         b_rel(0);
         *ne |= ((u32)(tr_cc - ne) & 0x7ffff) << 5;
+        if (sz == 4)
+            mov_reg(0, in->rm, in->rm); // the destination is written back in both cases, which zero-extends it
         gpr_write(0, sz, false, S0);
         *done |= (u32)(tr_cc - done) & 0x3ffffff;
     } else {
@@ -1447,6 +1455,8 @@ static void emit_pop(const Insn *in) {
 }
 
 void emit_int(const Insn *in, int live) {
+    if (live & F_A)
+        live |= F_P; // AF is read as R_AF ^ R_PF, so R_PF must be current as well
     int sz = in->sz;
     switch (in->op) {
         case OP_NOP:

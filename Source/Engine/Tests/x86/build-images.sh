@@ -6,7 +6,7 @@ out=${1:?output directory}
 mkdir -p "$out"
 
 flags=(-target x86_64-apple-macos10.9 -march=x86-64 -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables
-    -fno-asynchronous-unwind-tables -fno-exceptions -mno-red-zone -I"$here" -Wno-incompatible-library-redeclaration)
+    -fno-asynchronous-unwind-tables -fno-exceptions -mno-red-zone -I"$here" -Wno-incompatible-library-redeclaration -Wno-format)
 
 link() { # name objects...
     local name=$1
@@ -21,3 +21,10 @@ for prog in t_sanity; do
     link "$prog" "$out/$prog.o" "$out/flatlibc.o"
 done
 clang -target x86_64-apple-macos11 -O1 "$here/flatrun.c" -o "$out/flatrun"
+
+# The differential fuzz image.
+python3 "$here/gen_fuzz.py" "$out/fuzz_forms.s"
+clang -target x86_64-apple-macos10.9 -c "$out/fuzz_forms.s" -o "$out/fuzz_forms.o"
+clang -target x86_64-apple-macos10.9 -c "$here/fuzz_support.s" -o "$out/fuzz_support.o"
+clang "${flags[@]}" -c "$here/fuzz_driver.c" -o "$out/fuzz_driver.o"
+link fuzz "$out/fuzz_driver.o" "$out/fuzz_forms.o" "$out/fuzz_support.o" "$out/flatlibc.o"
