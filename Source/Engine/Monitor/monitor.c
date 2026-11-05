@@ -575,8 +575,31 @@ static void raise_pf(u64 va, u32 err, u64 rip) {
 }
 
 // ---- Translation requests ----
+// The view's indirect-branch table answers for control transfers made here too: a hit was validated at translation time, and any later
+// change to that mapping invalidates the entry (PTE_X_MARK). No host exit, no walk.
+static u64 view_lookup(u64 rip) {
+    u64 *t = (u64 *)c->x[R_HASH];
+    u32 h;
+    __asm__ volatile(".arch_extension crc\n crc32cx %w0, wzr, %x1" : "=r"(h) : "r"(rip));
+    h &= HASH_ENTRIES - 1;
+    for (;;) {
+        u64 key = t[h * 2];
+        if (!key)
+            return 0;
+        if (key == rip)
+            return t[h * 2 + 1];
+        h = (h + 1) & (HASH_ENTRIES - 1);
+    }
+}
+
 static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
     View *v = view_current();
+    if (!site && !kind && !single) {
+        u64 hit = view_lookup(rip);
+        if (hit)
+            return hit;
+        kind = SVC_LOOKUP_MISS;
+    }
     Walk w = x86_walk(c->cr3, rip, 16 | (c->cpl == 3 ? 4 : 0), true);
     if (!w.ok) {
         if (w.fault_err == ~0u) {
@@ -709,6 +732,260 @@ static void pt_slot_changed(u64 gpa_slot) {
     }
 }
 
+// ---- ARM load and store decode, for the forms the translator emits ----
+typedef struct {
+    u8 bytes, rt, rn;
+    bool load, sign, sign32, writeback;
+    i64 wb_delta;
+} ArmAccess;
+
+static bool arm_decode(u32 w, ArmAccess *a) {
+    if ((w & 0x3B000000u) != 0x38000000u && (w & 0x3B000000u) != 0x39000000u)
+        return false; // bit 26 set is SIMD; pairs and exclusives live elsewhere
+    u32 opc = (w >> 22) & 3, size = w >> 30;
+    a->bytes = (u8)(1u << size);
+    a->rt = w & 31;
+    a->rn = (w >> 5) & 31;
+    a->load = opc != 0;
+    a->sign = opc >= 2;
+    a->sign32 = opc == 3;
+    a->writeback = false;
+    a->wb_delta = 0;
+    if (w & (1u << 24))
+        return true; // unsigned immediate
+    if (w & (1u << 21)) {
+        // Atomics share this space with register offset: only option bits 10 = 2 means a register offset.
+        return ((w >> 10) & 3) == 2;
+    }
+    u32 kind = (w >> 10) & 3;
+    if (kind == 2)
+        return false; // unprivileged forms are never emitted
+    if (kind != 0) {
+        a->writeback = true;
+        a->wb_delta = (i64)(int32_t)(w << 11) >> 23;
+    }
+    return true;
+}
+
+// Finishes an emulated access: load value into the register, writeback, skip the word.
+static void arm_finish(const ArmAccess *a, u64 r) {
+    if (a->load && a->rt != 31) {
+        if (a->sign) {
+            u32 bits = a->bytes * 8u;
+            r = (u64)((i64)(r << (64 - bits)) >> (64 - bits));
+            if (a->sign32)
+                r &= 0xffffffffULL;
+        }
+        c->x[a->rt] = r;
+    }
+    if (a->writeback)
+        c->x[a->rn] += (u64)a->wb_delta;
+    c->elr += 4;
+}
+
+// ---- Virtual local APIC ----
+// The hot registers answer here without leaving the VM. Registers that need another CPU or a level-triggered EOI go to the host.
+static inline bool vapic_owns(u64 gpa) { return c->apic_enabled && (gpa & ~0xfffULL) == c->apic_base; }
+
+static inline u32 apic_highest(const u32 *bits) {
+    for (int i = 7; i >= 0; i--)
+        if (bits[i])
+            return (u32)i * 32 + 31 - (u32)__builtin_clz(bits[i]);
+    return 0;
+}
+
+static u32 apic_ppr(void) {
+    u32 isr = apic_highest(c->apic_isr), tpr = c->apic_tpr;
+    return (tpr >> 4) >= (isr >> 4) ? tpr : (isr & 0xf0);
+}
+
+static void apic_merge_host(void) {
+    for (int i = 0; i < 8; i++) {
+        if (c->apic_host_irr[i]) {
+            u32 bits = __atomic_exchange_n(&c->apic_host_irr[i], 0, __ATOMIC_ACQ_REL);
+            c->apic_irr[i] |= bits;
+        }
+    }
+}
+
+// The vector that may be delivered now, or 0.
+static u32 apic_ready_vector(void) {
+    if (!c->apic_enabled || !(c->apic_svr & 0x100))
+        return 0;
+    u32 v = apic_highest(c->apic_irr);
+    if (!v || (v & 0xf0) <= (apic_ppr() & 0xf0))
+        return 0;
+    return v;
+}
+
+static inline void apic_set_irr(u32 vector) { c->apic_irr[vector / 32] |= 1u << (vector & 31); }
+
+static inline u64 apic_cnt(void) { return RSR(cntvct_el0); }
+// The APIC timer runs at 1 GHz before its divider, like the TSC here: 125/3 of the 24 MHz counter.
+static inline u64 apic_ticks_to_cnt(u64 ticks) { return ticks * 3 / 125; }
+
+static void apic_timer_arm(void) {
+    if (c->apic_deadline_cnt) {
+        WSR(cntv_cval_el0, c->apic_deadline_cnt);
+        WSR(cntv_ctl_el0, 1);
+    } else
+        WSR(cntv_ctl_el0, 2);
+}
+
+static void apic_timer_start(void) {
+    u32 div = c->apic_tdcr & 0xb;
+    u32 shift = ((div & 3) | ((div >> 1) & 4));
+    shift = shift == 7 ? 0 : shift + 1;
+    c->apic_timer_shift = shift;
+    c->apic_timer_start_cnt = apic_cnt();
+    c->apic_deadline_cnt = c->apic_tmict ? c->apic_timer_start_cnt + (apic_ticks_to_cnt((u64)c->apic_tmict << shift) | 1) : 0;
+    apic_timer_arm();
+}
+
+// Called when the counter passed the deadline. Sets the vector and rearms a periodic timer.
+static void apic_timer_check(void) {
+    if (!c->apic_deadline_cnt || apic_cnt() < c->apic_deadline_cnt)
+        return;
+    u32 lvt = c->apic_lvt_timer;
+    if (!(lvt & 0x10000))
+        apic_set_irr(lvt & 0xff);
+    c->stat_apic_timer++;
+    if (((lvt >> 17) & 3) == 1 && c->apic_tmict) {
+        u64 period = apic_ticks_to_cnt((u64)c->apic_tmict << c->apic_timer_shift) | 1;
+        u64 next = c->apic_deadline_cnt + period, now = apic_cnt();
+        if (next <= now) // missed ticks do not queue, as on hardware a period only fires once per IRR
+            next = now + period;
+        c->apic_timer_start_cnt = next - period;
+        c->apic_deadline_cnt = next;
+    } else
+        c->apic_deadline_cnt = 0;
+    apic_timer_arm();
+}
+
+static u32 vapic_read(u32 off) {
+    u32 reg = off & 0xff0;
+    if (reg >= 0x100 && reg < 0x180)
+        return c->apic_isr[(reg - 0x100) >> 4];
+    if (reg >= 0x180 && reg < 0x200)
+        return c->apic_tmr[(reg - 0x180) >> 4];
+    if (reg >= 0x200 && reg < 0x280) {
+        apic_merge_host();
+        return c->apic_irr[(reg - 0x200) >> 4];
+    }
+    switch (reg) {
+        case 0x20:
+            return c->apic_id;
+        case 0x30:
+            return 0x00050014;
+        case 0x80:
+            return c->apic_tpr;
+        case 0xA0:
+            return apic_ppr();
+        case 0xD0:
+            return c->apic_ldr;
+        case 0xE0:
+            return c->apic_dfr;
+        case 0xF0:
+            return c->apic_svr;
+        case 0x280:
+            return 0;
+        case 0x300:
+            return c->apic_icr_lo;
+        case 0x310:
+            return c->apic_icr_hi;
+        case 0x320:
+            return c->apic_lvt_timer;
+        case 0x330:
+        case 0x340:
+        case 0x350:
+        case 0x360:
+        case 0x370:
+            return c->apic_lvt[(reg - 0x330) >> 4];
+        case 0x380:
+            return c->apic_tmict;
+        case 0x390: {
+            if (!c->apic_deadline_cnt)
+                return 0;
+            u64 now = apic_cnt();
+            if (now >= c->apic_deadline_cnt)
+                return 0;
+            return (u32)((c->apic_deadline_cnt - now) * 125 / 3 >> c->apic_timer_shift);
+        }
+        case 0x3E0:
+            return c->apic_tdcr;
+        default:
+            return 0;
+    }
+}
+
+static void vapic_write(u32 off, u32 v) {
+    u32 reg = off & 0xff0;
+    switch (reg) {
+        case 0x20:
+            c->apic_id = v;
+            break;
+        case 0x80:
+            c->apic_tpr = v & 0xff;
+            break;
+        case 0xB0: { // EOI
+            u32 vec = apic_highest(c->apic_isr);
+            if (vec) {
+                c->apic_isr[vec / 32] &= ~(1u << (vec & 31));
+                if (c->apic_tmr[vec / 32] & (1u << (vec & 31))) { // a level-triggered source lives in the host's IO-APIC
+                    c->apic_tmr[vec / 32] &= ~(1u << (vec & 31));
+                    c->req_a[0] = vec;
+                    hostcall(HC_APIC_EOI);
+                }
+            }
+            break;
+        }
+        case 0xD0:
+            c->apic_ldr = v;
+            break;
+        case 0xE0:
+            c->apic_dfr = v;
+            break;
+        case 0xF0:
+            c->apic_svr = v;
+            break;
+        case 0x300: {
+            c->apic_icr_lo = v & ~0x1000u; // delivery status always idle
+            u32 mode = (v >> 8) & 7, shorthand = (v >> 18) & 3, vec = v & 0xff;
+            bool self = shorthand == 1 || (shorthand == 0 && (c->apic_icr_hi >> 24) == (c->apic_id >> 24));
+            if (mode == 0 && self) {
+                apic_set_irr(vec);
+                c->stat_ipi_self++;
+            } else {
+                c->req_a[0] = (u64)c->apic_icr_hi << 32 | v;
+                hostcall(HC_APIC_ICR);
+            }
+            break;
+        }
+        case 0x310:
+            c->apic_icr_hi = v;
+            break;
+        case 0x320:
+            c->apic_lvt_timer = v;
+            break;
+        case 0x330:
+        case 0x340:
+        case 0x350:
+        case 0x360:
+        case 0x370:
+            c->apic_lvt[(reg - 0x330) >> 4] = v;
+            break;
+        case 0x380:
+            c->apic_tmict = v;
+            apic_timer_start();
+            break;
+        case 0x3E0:
+            c->apic_tdcr = v;
+            break;
+        default:
+            break;
+    }
+}
+
 // ---- Faults ----
 static void step_on(void) {
     c->spsr |= SPSR_SS;
@@ -745,49 +1022,40 @@ static void handle_data_abort(bool lower) {
         c->x[R_RS] = c->rs_top;
         return;
     }
-    u64 rip;
-    {
-        bool e, f;
-        rip = rip_of_pc(c->elr, &e, &f);
-        if (!f)
-            stop(STOP_MONITOR_FAULT, 0, esr, far, c->elr);
-    }
     if (!canonical(far)) {
         if (!c->model_kernel)
-            shim_fault(13, 0, rip, far);
-        raise_gp(0, rip);
+            shim_fault(13, 0, rip_here(c->elr), far);
+        raise_gp(0, rip_here(c->elr));
         return;
     }
     u32 access = (write ? 2 : 0) | (c->cpl == 3 ? 4 : 0);
     Walk w = x86_walk(c->cr3, far, access, true);
     if (!w.ok) {
-        raise_pf(far, w.fault_err, rip);
+        raise_pf(far, w.fault_err, rip_here(c->elr));
         return;
     }
-    if (w.gpa >= c->ram_size) { // device hole: emulate the ARM access itself, so all x86 forms work.
-        u32 iss = (u32)esr;
-        if (!(iss & (1u << 24)))
-            stop(STOP_UNSUPPORTED, rip, 4, far, esr); // pair, atomic or SIMD access to a device
-        u32 sas = (iss >> 22) & 3, srt = (iss >> 16) & 31;
-        u64 val = srt == 31 ? 0 : c->x[srt];
-        c->req_a[0] = w.gpa;
-        c->req_a[1] = 1u << sas;
-        c->req_a[2] = write;
-        c->req_a[3] = val;
-        c->stat_mmio++;
-        hostcall(HC_MMIO);
-        if (!write && srt != 31) {
-            u64 r = c->req_r[0];
-            bool sf = iss & (1u << 15), sse = iss & (1u << 21);
-            if (sse) { // sign-extending load
-                u32 b = 8u << sas;
-                r = (u64)((i64)(r << (64 - b)) >> (64 - b));
-                if (!sf)
-                    r &= 0xffffffffULL;
-            }
-            c->x[srt] = r;
+    if (w.gpa >= c->ram_size) { // device hole: emulate the ARM access itself, so all x86 forms of a move or RMW work
+        ArmAccess a;
+        if (!arm_decode(*(u32 *)c->elr, &a))
+            stop(STOP_UNSUPPORTED, rip_here(c->elr), 4, far, esr); // pair, atomic or SIMD access to a device
+        u64 val = a.rt == 31 ? 0 : c->x[a.rt];
+        u64 r = 0;
+        if (vapic_owns(w.gpa)) {
+            if (a.load)
+                r = vapic_read((u32)(w.gpa & 0xfff));
+            else
+                vapic_write((u32)(w.gpa & 0xfff), (u32)val);
+            c->stat_mmio_vm++;
+        } else {
+            c->req_a[0] = w.gpa;
+            c->req_a[1] = a.bytes;
+            c->req_a[2] = !a.load;
+            c->req_a[3] = val;
+            c->stat_mmio++;
+            hostcall(HC_MMIO);
+            r = c->req_r[0];
         }
-        c->elr += 4;
+        arm_finish(&a, r);
         return;
     }
     u64 gpa = w.gpa & ~0xfffULL;
@@ -802,25 +1070,48 @@ static void handle_data_abort(bool lower) {
         reset_all_return_stacks();
         shadow_install(v, far, &w, true);
         tlbi_va(view_asid(c->view), far);
-        c->elr = translate_here(rip, 0, 0, true);
+        c->elr = translate_here(rip_here(c->elr), 0, 0, true);
         return;
     }
     if (write && (pi & PI_PT)) {
         c->stat_pt_writes++;
-        u32 iss = (u32)esr;
-        if (iss & (1u << 24)) { // single register store with full syndrome
-            u32 sas = (iss >> 22) & 3, srt = (iss >> 16) & 31, n = 1u << sas;
-            u64 val = srt == 31 ? 0 : c->x[srt];
+        ArmAccess a;
+        if (arm_decode(*(u32 *)c->elr, &a) && !a.load) { // a stage-1 fault has no register syndrome here, so decode the word
+            u64 val = a.rt == 31 ? 0 : c->x[a.rt];
+            u32 n = a.bytes;
             if ((far & 0xfff) + n > 4096)
-                stop(STOP_UNSUPPORTED, rip, 5, far, esr); // split store on a page table
-            memcpy(RAM(w.gpa), &val, n);
+                stop(STOP_UNSUPPORTED, rip_here(c->elr), 5, far, esr); // split store on a page table
+            if (n == 8)
+                *(u64 *)RAM(w.gpa) = val;
+            else
+                memcpy(RAM(w.gpa), &val, n);
             pt_slot_changed(w.gpa & ~7ULL);
             if (((w.gpa & 7) + n) > 8)
                 pt_slot_changed((w.gpa & ~7ULL) + 8);
+            arm_finish(&a, 0);
+            return;
+        }
+        // Compare-and-swap and swap are how kernels update live PTEs: emulate the two forms the translator emits for them, 64-bit only.
+        u32 word = *(u32 *)c->elr;
+        if ((far & 7) == 0 && ((word & 0xFFE0FC00u) == 0xC8E0FC00u || (word & 0xFFE0FC00u) == 0xF8E08000u)) {
+            u32 rs = (word >> 16) & 31, rt = word & 31;
+            u64 *slot = (u64 *)RAM(w.gpa), old = *slot;
+            u64 rs_v = rs == 31 ? 0 : c->x[rs], rt_v = rt == 31 ? 0 : c->x[rt];
+            bool is_cas = (word & 0xFFE0FC00u) == 0xC8E0FC00u;
+            u64 next = is_cas ? (old == rs_v ? rt_v : old) : rs_v;
+            if (next != old) {
+                *slot = next;
+                pt_slot_changed(w.gpa & ~7ULL);
+            }
+            if (is_cas) {
+                if (rs != 31)
+                    c->x[rs] = old;
+            } else if (rt != 31)
+                c->x[rt] = old;
             c->elr += 4;
             return;
         }
-        // Atomics and pairs: let the instruction itself run on a writable mapping for exactly one step, then resync.
+        // Other atomics and pairs: let the instruction itself run on a writable mapping for exactly one step, then resync.
         c->stat_pt_step++;
         Walk w2 = w;
         w2.write = true;
@@ -970,9 +1261,18 @@ static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int)
     c->elr = translate_here(target, 0, 0, false);
 }
 
-static void irq_deliver_now(u64 rip) {
-    u32 vector = c->irq_pending - 1;
-    c->irq_pending = 0;
+static void irq_deliver_now(u64 rip, u32 apic_vector) {
+    u32 vector;
+    if (apic_vector) {
+        vector = apic_vector;
+        c->apic_irr[vector / 32] &= ~(1u << (vector & 31));
+        c->apic_isr[vector / 32] |= 1u << (vector & 31);
+        if (c->apic_host_level[vector / 32] & (1u << (vector & 31)))
+            c->apic_tmr[vector / 32] |= 1u << (vector & 31);
+    } else {
+        vector = c->irq_pending - 1;
+        c->irq_pending = 0;
+    }
     c->stat_irq++;
     deliver(vector, 0, false, rip, false);
 }
@@ -985,13 +1285,29 @@ static void exit_check(void) {
         step_on();
         return;
     }
-    if (!c->irq_pending || !(c->rflags_sys & RF_IF))
+    bool stop_now = c->stop_requested;
+    u32 apic_vector = 0;
+    if (c->rflags_sys & RF_IF)
+        apic_vector = apic_ready_vector();
+    if (!stop_now && !apic_vector && (!c->irq_pending || !(c->rflags_sys & RF_IF)))
         return; // none waiting, or masked: sti, popf and iret come back through here
     bool exact, found;
     u64 rip = rip_of_pc(c->elr, &exact, &found);
     if (found && exact) {
+        if (stop_now) { // the host wants the vCPU at an x86 boundary, with all state in place
+            c->stop_requested = 0;
+            c->req_a[0] = rip;
+            c->req_r[0] = rip;
+            hostcall(HC_BOUNDARY);
+            if (c->req_r[0] != rip) { // the host moved the x86 pc
+                event_delivered = false;
+                c->elr = translate_here(c->req_r[0], 0, 0, false);
+            }
+            exit_check();
+            return;
+        }
         if (rip != c->irq_shadow_rip) {
-            irq_deliver_now(rip);
+            irq_deliver_now(rip, apic_vector);
             exit_check();
             return;
         }
@@ -1160,8 +1476,7 @@ static void do_mov_cr_write(void) {
             c->cr4 = v;
             break;
         case 8:
-            c->req_a[0] = 0x80B;
-            c->req_a[1] = v;
+            c->apic_tpr = (u32)(v & 15) << 4;
             break;
     }
 }
@@ -1175,6 +1490,8 @@ static void do_mov_cr_write(void) {
 #define MSR_GS 0xC0000101u
 #define MSR_KGS 0xC0000102u
 #define MSR_TSC 0x10u
+#define MSR_APIC_BASE 0x1Bu
+#define MSR_TSC_DEADLINE 0x6E0u
 
 static inline u64 tsc_now(void) { return RSR(cntvct_el0) * 125 / 3 + c->tsc_offset; } // 24 MHz counter shown as 1 GHz
 
@@ -1206,6 +1523,12 @@ static bool rdmsr(u32 m, u64 *v) {
             return true;
         case MSR_TSC:
             *v = tsc_now();
+            return true;
+        case MSR_APIC_BASE:
+            *v = c->apic_base | (c->apic_enabled ? 1ULL << 11 : 0) | 1ULL << 8;
+            return true;
+        case MSR_TSC_DEADLINE:
+            *v = c->apic_tsc_deadline;
             return true;
     }
     c->req_a[0] = m;
@@ -1240,6 +1563,19 @@ static bool wrmsr(u32 m, u64 v) {
         case MSR_KGS:
             c->kernel_gs_base = v;
             return true;
+        case MSR_APIC_BASE:
+            c->apic_base = v & 0xFFFFF000ULL;
+            c->apic_enabled = (v >> 11) & 1;
+            return true;
+        case MSR_TSC_DEADLINE: {
+            c->apic_tsc_deadline = v;
+            if (((c->apic_lvt_timer >> 17) & 3) == 2) {
+                u64 now = tsc_now();
+                c->apic_deadline_cnt = !v ? 0 : apic_cnt() + (v > now ? (v - now) * 3 / 125 : 0) + 1;
+                apic_timer_arm();
+            }
+            return true;
+        }
     }
     c->req_a[0] = m;
     c->req_a[1] = v;
@@ -1613,17 +1949,18 @@ void mon_sync(void) {
                     stop(STOP_GUEST_HALT, rip_here(c->elr - 4), c->x[0], 0, 0);
                 }
                 u64 next = next_rip_lit();
-                c->halted = !(c->irq_pending && (c->rflags_sys & RF_IF));
-                while (c->halted) {
+                for (;;) {
+                    apic_merge_host();
+                    apic_timer_check();
+                    bool ready = apic_ready_vector() || c->irq_pending;
+                    if (ready && (c->rflags_sys & RF_IF))
+                        break;
                     c->req_a[0] = next;
+                    // How long the host may sleep: until the APIC timer, in counter ticks. 0 means no deadline.
+                    c->req_a[1] = c->apic_deadline_cnt;
                     hostcall(HC_HLT); // returns when an interrupt may be pending
-                    if (c->req_r[0] != ~0ULL) {
+                    if (c->req_r[0] != ~0ULL)
                         c->irq_pending = (u32)c->req_r[0] + 1;
-                        if (c->rflags_sys & RF_IF)
-                            c->halted = 0;
-                    }
-                    if (c->irq_pending && (c->rflags_sys & RF_IF))
-                        c->halted = 0;
                     else if (c->req_r[1])
                         stop(STOP_GUEST_HALT, next, c->x[0], 0, 0);
                 }
@@ -1684,6 +2021,9 @@ void mon_sync(void) {
                         break;
                     case 4:
                         c->x[R_S0] = c->cr4;
+                        break;
+                    case 8:
+                        c->x[R_S0] = c->apic_tpr >> 4;
                         break;
                     default:
                         c->x[R_S0] = 0;
@@ -1819,11 +2159,14 @@ void mon_sync(void) {
 }
 
 void mon_irq(void) {
-    // The host raised the virtual IRQ line. It clears the line and tells us the vector.
+    // The host raised the virtual IRQ line: a timer expiry, new vectors in the host IRR, an ExtINT, or a request to stop.
+    // The timer rearms first, because the host unmasks the virtual timer in this call and an expired compare would fire again.
+    apic_timer_check();
     c->req_a[0] = c->elr;
     hostcall(HC_IRQ);
     if (c->req_r[0] != ~0ULL)
         c->irq_pending = (u32)c->req_r[0] + 1;
+    apic_merge_host();
     exit_check();
 }
 

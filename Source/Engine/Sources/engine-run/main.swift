@@ -19,6 +19,21 @@ func number(_ s: String) -> UInt64 {
 }
 
 do {
+    if arguments[1] == "--kernel-capi" {
+        let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[2]))))
+        exit(CAPIHarness().run(image: image))
+    }
+    if arguments[1] == "--kernel" {
+        let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[2]))))
+        var kernelOptions = EngineOptions()
+        kernelOptions.useTSO = ProcessInfo.processInfo.environment["ENGINE_NO_TSO"] == nil
+        let guest = try KernelGuest(options: kernelOptions)
+        let code = try guest.run(image: image)
+        if ProcessInfo.processInfo.environment["ENGINE_STATS"] != nil {
+            FileHandle.standardError.write(Data((guest.engine.stats() + "\n").utf8))
+        }
+        exit(code)
+    }
     let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[1]))))
     var options = EngineOptions()
     options.preciseFlags = ProcessInfo.processInfo.environment["ENGINE_FAST_FLAGS"] == nil

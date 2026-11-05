@@ -8,7 +8,7 @@ out=$here/.build/images
 mkdir -p "$gen" "$out"
 
 # ---- Monitor: freestanding arm64, linked at its private VA ----
-cc=(clang -target arm64-apple-macos13 -O2 -ffreestanding -fno-builtin -fno-stack-protector -mgeneral-regs-only
+cc=(clang -target arm64-apple-macos13 -march=armv8.5-a+crc -O2 -ffreestanding -fno-builtin -fno-stack-protector -mgeneral-regs-only
     -fno-unwind-tables -fno-asynchronous-unwind-tables -ffixed-x18 -Wall -Wextra -Wno-unused-function
     -I"$here/Sources/CEngine/include")
 "${cc[@]}" -c "$here/Monitor/monitor.c" -o "$out/monitor.o"

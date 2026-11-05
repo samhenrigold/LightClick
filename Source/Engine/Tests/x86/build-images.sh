@@ -30,6 +30,15 @@ clang "${flags[@]}" -w -I"$out" -I"$qemu_tests" -c "$here/t_i386.c" -o "$out/t_i
 clang "${flags[@]}" -w -c "$here/t_i386_stubs.c" -o "$out/t_i386_stubs.o"
 link t_i386 "$out/t_i386.o" "$out/t_i386_stubs.o" "$out/flatlibc.o"
 
+# The freestanding kernel, linked in the high half.
+kflags=(-target x86_64-apple-macos10.9 -march=x86-64 -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables
+    -fno-asynchronous-unwind-tables -mno-red-zone -static -w)
+clang "${kflags[@]}" -c "$here/kernel/kernel.c" -o "$out/kernel.o"
+clang -target x86_64-apple-macos10.9 -c "$here/kernel/kstubs.s" -o "$out/kstubs.o"
+clang -target x86_64-apple-macos10.9 -c "$here/kernel/kentry.s" -o "$out/kentry.o"
+ld -arch x86_64 -preload -e _kstart -no_uuid -pagezero_size 0 -segaddr __TEXT 0xFFFF800000100000 -segaddr __DATA 0xFFFF800000800000 \
+    -o "$out/kernel" "$out/kentry.o" "$out/kernel.o" "$out/kstubs.o"
+
 # lc-bench's arithmetic.
 clang "${flags[@]}" -w -I"$here/../../../probes" -c "$here/t_lcbench.c" -o "$out/t_lcbench.o"
 clang "${flags[@]}" -w -c "$here/t_lcbench_stubs.c" -o "$out/t_lcbench_stubs.o"

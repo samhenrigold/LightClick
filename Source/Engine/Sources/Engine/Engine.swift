@@ -15,12 +15,19 @@ public protocol EngineMachine: AnyObject {
     /// Returns the next external interrupt vector the local APIC model would deliver, if any.
     func acknowledgeInterrupt() -> UInt8?
     /// The guest ran `hlt`. Blocks until an interrupt may be pending. False: nothing can ever wake it, the run ends.
-    func waitForInterrupt() -> Bool
+    func waitForInterrupt(deadlineNanos: UInt64) -> Bool
+    /// EOI of a level-triggered vector, for the IO-APIC model.
+    func apicEOI(vector: UInt8)
+    /// An IPI the local APIC model cannot finish alone. High word in bits 63:32.
+    func apicICR(_ icr: UInt64)
+    /// True when an interrupt wants delivering; the engine then raises the guest's IRQ line on the vCPU thread.
+    func hasInterruptWaiting() -> Bool
     /// User-mode shim only: an x86 `syscall` with no kernel model. Registers are in `state`.
     func syscall(_ state: UnsafeMutablePointer<EngineCtx>, engine: Engine) throws
 }
 
-public struct EngineOptions: Sendable {
+public struct EngineOptions {
+    public var hostRAM: UnsafeMutableRawPointer?
     public var ramBytes: UInt64 = 2 << 30
     public var preciseFlags = true
     public var useTSO = true
@@ -30,6 +37,7 @@ public struct EngineOptions: Sendable {
 }
 
 public enum RunOutcome: Equatable, Sendable {
+    case boundary(rip: UInt64)
     case halted(rax: UInt64)
     case exited(code: Int32)
 }
@@ -47,6 +55,12 @@ public final class Engine {
     private nonisolated(unsafe) var watchdogFired = false
     private var trace = Int(ProcessInfo.processInfo.environment["ENGINE_TRACE"] ?? "") ?? 0
     public var exitCode: Int32?
+    public var requestStop = false
+    public internal(set) var boundaryRIP: UInt64 = 0
+    private var vtimerMasked = false
+    private var vtimerExits = 0
+    private var irqLine = false
+    private var vtimerOffset: UInt64 = 0
 
     public init(options: EngineOptions) throws {
         self.options = options
@@ -62,7 +76,7 @@ public final class Engine {
             guard let p, p != MAP_FAILED else { throw EngineError.stop("mmap failed") }
             return p
         }
-        ram = try anon(options.ramBytes)
+        ram = try options.hostRAM ?? anon(options.ramBytes)
         priv = try anon(kPrivSize)
         ctx = (priv + Int(kOffCtx)).bindMemory(to: EngineCtx.self, capacity: 1)
         let rwx = hv_memory_flags_t(HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC)
@@ -183,6 +197,8 @@ public final class Engine {
         try sys(HV_SYS_REG_CPACR_EL1, 3 << 20)
         try sys(HV_SYS_REG_SP_EL1, kPrivVA + kOffMonData + (2 << 20) - 16)
         try hvCheck("set x18") { hv_vcpu_set_reg(vcpu, HV_REG_X18, kPrivVA + kOffCtx) }
+        hv_vcpu_get_vtimer_offset(vcpu, &vtimerOffset)
+        try hvCheck("unmask vtimer") { hv_vcpu_set_vtimer_mask(vcpu, false) }
         ctx.pointee.ram_size = options.ramBytes
         ctx.pointee.df = 1
         ctx.pointee.rflags_sys = 0x202
@@ -215,6 +231,8 @@ public final class Engine {
 
     private func runLoop() throws -> RunOutcome {
         while true {
+            // The hypervisor forgets a pending interrupt at each exit, so the line is held here until the monitor takes it.
+            if irqLine { hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, true) }
             let r = hv_vcpu_run(vcpu)
             if r != HV_SUCCESS { throw EngineError.hypervisor("hv_vcpu_run", r) }
             exitCount += 1
@@ -249,13 +267,27 @@ public final class Engine {
                     hv_vcpu_get_sys_reg(vcpu, HV_SYS_REG_ESR_EL1, &esr)
                     hv_vcpu_get_sys_reg(vcpu, HV_SYS_REG_FAR_EL1, &far)
                     let regs = withUnsafeBytes(of: &ctx.pointee.x) { Array($0.bindMemory(to: UInt64.self)) }
+                    var ctl: UInt64 = 0
+                    var cval: UInt64 = 0
+                    hv_vcpu_get_sys_reg(vcpu, HV_SYS_REG_CNTV_CTL_EL0, &ctl)
+                    hv_vcpu_get_sys_reg(vcpu, HV_SYS_REG_CNTV_CVAL_EL0, &cval)
+                    FileHandle.standardError.write(
+                        Data(
+                            "vtimer ctl \(ctl) cval \(hex(cval)) deadline \(hex(ctx.pointee.apic_deadline_cnt)) now \(hex(mach_absolute_time() &- vtimerOffset)) lvt \(hex(UInt64(ctx.pointee.apic_lvt_timer))) vtexits \(vtimerExits) masked \(vtimerMasked) irqs \(ctx.pointee.stat_irq) apictimer \(ctx.pointee.stat_apic_timer) rf \(hex(ctx.pointee.rflags_sys))\n"
+                                .utf8))
                     throw EngineError.stop(
                         "watchdog: pc \(hex(pc)) elr \(hex(elr)) esr \(hex(esr)) far \(hex(far)) exits \(exitCount) "
                             + "ctx.elr \(hex(ctx.pointee.elr)) x16 \(hex(regs[16])) x30 \(hex(regs[30]))")
                 }
+                // A kick means a device interrupt, a posted vector or a stop request: the monitor sorts out which.
+                irqLine = true
                 continue
             case HV_EXIT_REASON_VTIMER_ACTIVATED:
+                // The APIC timer's compare fired. The monitor rearms it during the IRQ it now takes, then HC_IRQ unmasks.
                 hv_vcpu_set_vtimer_mask(vcpu, true)
+                vtimerMasked = true
+                vtimerExits += 1
+                irqLine = true
                 continue
             default:
                 throw EngineError.stop("unexpected exit reason \(vcpuExit.pointee.reason)")
@@ -325,6 +357,7 @@ public final class Engine {
                 c.pointee.req_r.0 = UInt64(
                     machine.portRead(port: UInt16(truncatingIfNeeded: c.pointee.req_a.0), size: Int(c.pointee.req_a.1)))
             }
+            if requestStop { return .exited(code: exitCode ?? 0) }
         case Int(HC_RDMSR):
             let v = machine?.readMSR(UInt32(truncatingIfNeeded: c.pointee.req_a.0))
             c.pointee.req_r.0 = v ?? 0
@@ -341,15 +374,32 @@ public final class Engine {
             c.pointee.req_r = (UInt64(v.0), UInt64(v.1), UInt64(v.2), UInt64(v.3))
         case Int(HC_HLT):
             guard let machine else { throw EngineError.stop("hlt with no machine attached") }
-            let wake = machine.waitForInterrupt()
+            // The APIC deadline arrives in guest counter ticks. It stays in the virtual counter's terms, which track the host's.
+            var deadlineNanos: UInt64 = 0
+            if c.pointee.req_a.1 != 0 {
+                let now = mach_absolute_time() &- vtimerOffset
+                deadlineNanos = c.pointee.req_a.1 > now ? (c.pointee.req_a.1 - now) * 125 / 3 : 1
+            }
+            let wake = machine.waitForInterrupt(deadlineNanos: deadlineNanos)
             if let vector = machine.acknowledgeInterrupt() {
                 c.pointee.req_r.0 = UInt64(vector)
             } else {
                 c.pointee.req_r.0 = ~0
             }
-            c.pointee.req_r.1 = wake ? 0 : 1
+            c.pointee.req_r.1 = wake || deadlineNanos != 0 ? 0 : 1
+        case Int(HC_APIC_EOI):
+            machine?.apicEOI(vector: UInt8(truncatingIfNeeded: c.pointee.req_a.0))
+        case Int(HC_APIC_ICR):
+            machine?.apicICR(c.pointee.req_a.0)
+        case Int(HC_BOUNDARY):
+            boundaryRIP = c.pointee.req_a.0
+            return .boundary(rip: boundaryRIP)
         case Int(HC_IRQ):
-            hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, false)
+            irqLine = false
+            if vtimerMasked {
+                vtimerMasked = false
+                hv_vcpu_set_vtimer_mask(vcpu, false)
+            }
             if let vector = machine?.acknowledgeInterrupt() {
                 c.pointee.req_r.0 = UInt64(vector)
             } else {
@@ -447,14 +497,59 @@ public final class Engine {
         return true
     }
 
-    public func injectInterruptLine() {
-        hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, true)
-    }
-    public func kick() {
+    /// Any thread: forces a VM exit, after which the run loop asks the machine about pending interrupts.
+    public func interruptRequested() {
         var v = vcpu
         hv_vcpus_exit(&v, 1)
     }
-    public func cancelFromOtherThread() { kick() }
+
+    /// Any thread: `run` returns `.boundary` at the next x86 instruction boundary.
+    public func requestBoundary() {
+        engine_ctx_set_stop(ctx)
+        interruptRequested()
+    }
+
+    /// Any thread: a vector for the virtual APIC's IRR, as an IO-APIC or MSI would deliver.
+    public func postVector(_ vector: UInt8, level: Bool) {
+        engine_ctx_post_vector(ctx, vector, level)
+        interruptRequested()
+    }
+
+    /// Continues after `.boundary`. The rip in `req_r.0` is where execution resumes.
+    public func resume() throws -> RunOutcome { try runLoop() }
+
+    func mxcsr() -> UInt32 {
+        var fpsr: UInt64 = 0
+        hv_vcpu_get_reg(vcpu, HV_REG_FPSR, &fpsr)
+        var v = ctx.pointee.mxcsr
+        if fpsr & 1 != 0 { v |= 1 }
+        if fpsr & 2 != 0 { v |= 4 }
+        if fpsr & 4 != 0 { v |= 8 }
+        if fpsr & 8 != 0 { v |= 16 }
+        if fpsr & 16 != 0 { v |= 32 }
+        if fpsr & 128 != 0 { v |= 2 }
+        return v
+    }
+
+    func readXMM(into s: inout EngineX86State) {
+        withUnsafeMutableBytes(of: &s.xmm) { out in
+            for i in 0..<16 {
+                var value = hv_simd_fp_uchar16_t()
+                hv_vcpu_get_simd_fp_reg(vcpu, hv_simd_fp_reg_t(rawValue: HV_SIMD_FP_REG_Q0.rawValue + UInt32(i)), &value)
+                withUnsafeBytes(of: value) { (out.baseAddress! + i * 16).copyMemory(from: $0.baseAddress!, byteCount: 16) }
+            }
+        }
+    }
+
+    func writeXMM(from s: EngineX86State) {
+        var copy = s
+        withUnsafeBytes(of: &copy.xmm) { input in
+            for i in 0..<16 {
+                let value = input.loadUnaligned(fromByteOffset: i * 16, as: hv_simd_fp_uchar16_t.self)
+                hv_vcpu_set_simd_fp_reg(vcpu, hv_simd_fp_reg_t(rawValue: HV_SIMD_FP_REG_Q0.rawValue + UInt32(i)), value)
+            }
+        }
+    }
 }
 
 func hvCheck(_ what: String, _ call: () -> hv_return_t) throws {

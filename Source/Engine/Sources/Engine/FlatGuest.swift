@@ -97,6 +97,7 @@ public final class FlatGuest: EngineMachine {
         switch try engine.run(entry: entry) {
         case .exited(let code): return code
         case .halted(let rax): throw EngineError.stop("guest halted, rax \(rax)")
+        case .boundary: throw EngineError.stop("unexpected boundary stop")
         }
     }
 
@@ -161,7 +162,10 @@ public final class FlatGuest: EngineMachine {
     public func readMSR(_ msr: UInt32) -> UInt64? { nil }
     public func writeMSR(_ msr: UInt32, value: UInt64) -> Bool { false }
     public func acknowledgeInterrupt() -> UInt8? { nil }
-    public func waitForInterrupt() -> Bool { false }
+    public func waitForInterrupt(deadlineNanos: UInt64) -> Bool { false }
+    public func apicEOI(vector: UInt8) {}
+    public func apicICR(_ icr: UInt64) {}
+    public func hasInterruptWaiting() -> Bool { false }
 
     public func cpuid(leaf: UInt32, subleaf: UInt32) -> (eax: UInt32, ebx: UInt32, ecx: UInt32, edx: UInt32) {
         CPUIDModel.answer(leaf: leaf, subleaf: subleaf)

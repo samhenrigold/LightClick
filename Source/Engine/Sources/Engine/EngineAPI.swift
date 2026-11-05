@@ -1,0 +1,234 @@
+import CEngine
+import Foundation
+
+/// Forwards `EngineMachine` to the C callback table of `engine_api.h`.
+final class CMachine: EngineMachine {
+    let ops: EngineMachineOps
+    init(ops: EngineMachineOps) { self.ops = ops }
+
+    func mmioRead(address: UInt64, size: Int) -> UInt64 { ops.mmio_read(ops.opaque, address, UInt32(size)) }
+    func mmioWrite(address: UInt64, size: Int, value: UInt64) { ops.mmio_write(ops.opaque, address, UInt32(size), value) }
+    func portRead(port: UInt16, size: Int) -> UInt32 { ops.port_read(ops.opaque, port, UInt32(size)) }
+    func portWrite(port: UInt16, size: Int, value: UInt32) { ops.port_write(ops.opaque, port, UInt32(size), value) }
+    func readMSR(_ msr: UInt32) -> UInt64? {
+        var v: UInt64 = 0
+        return ops.read_msr(ops.opaque, msr, &v) ? v : nil
+    }
+    func writeMSR(_ msr: UInt32, value: UInt64) -> Bool { ops.write_msr(ops.opaque, msr, value) }
+    func cpuid(leaf: UInt32, subleaf: UInt32) -> (eax: UInt32, ebx: UInt32, ecx: UInt32, edx: UInt32) {
+        var out: [UInt32] = [0, 0, 0, 0]
+        ops.cpuid(ops.opaque, leaf, subleaf, &out)
+        return (out[0], out[1], out[2], out[3])
+    }
+    func acknowledgeInterrupt() -> UInt8? {
+        let v = ops.acknowledge_interrupt(ops.opaque)
+        return v < 0 ? nil : UInt8(truncatingIfNeeded: v)
+    }
+    func hasInterruptWaiting() -> Bool { ops.has_interrupt_waiting(ops.opaque) }
+    func waitForInterrupt(deadlineNanos: UInt64) -> Bool { ops.wait_for_interrupt(ops.opaque, deadlineNanos) }
+    func apicEOI(vector: UInt8) { ops.apic_eoi(ops.opaque, vector) }
+    func apicICR(_ icr: UInt64) { ops.apic_icr(ops.opaque, icr) }
+    func syscall(_ state: UnsafeMutablePointer<EngineCtx>, engine: Engine) throws {
+        throw EngineError.stop("syscall with no shim: the C API is the kernel model")
+    }
+}
+
+private final class Handle {
+    let engine: Engine
+    let machine: CMachine
+    var error: UnsafeMutablePointer<CChar>?
+    var started = false
+    var entry: UInt64 = 0
+    init(engine: Engine, machine: CMachine) {
+        self.engine = engine
+        self.machine = machine
+    }
+}
+
+private func handle(_ h: OpaquePointer) -> Handle { Unmanaged<Handle>.fromOpaque(UnsafeRawPointer(h)).takeUnretainedValue() }
+
+@_cdecl("engine_create")
+public func engine_create(_ config: UnsafePointer<EngineConfig>, _ ops: UnsafePointer<EngineMachineOps>) -> OpaquePointer? {
+    var options = EngineOptions()
+    options.ramBytes = config.pointee.ram_bytes
+    options.kernelModel = config.pointee.kernel_model
+    options.preciseFlags = config.pointee.precise_flags
+    options.useTSO = config.pointee.tso
+    options.tzcntLzcnt = config.pointee.tzcnt_lzcnt
+    options.hostRAM = config.pointee.ram_host
+    guard let engine = try? Engine(options: options) else { return nil }
+    let machine = CMachine(ops: ops.pointee)
+    engine.machine = machine
+    return OpaquePointer(Unmanaged.passRetained(Handle(engine: engine, machine: machine)).toOpaque())
+}
+
+@_cdecl("engine_destroy")
+public func engine_destroy(_ h: OpaquePointer) { Unmanaged<Handle>.fromOpaque(UnsafeRawPointer(h)).release() }
+
+@_cdecl("engine_ram")
+public func engine_ram(_ h: OpaquePointer) -> UnsafeMutableRawPointer { handle(h).engine.ram }
+
+@_cdecl("engine_run")
+public func engine_run(_ h: OpaquePointer) -> UInt32 {
+    let box = handle(h)
+    do {
+        let outcome = box.started ? try box.engine.resume() : try box.engine.run(entry: box.entry)
+        box.started = true
+        switch outcome {
+        case .exited: return ENGINE_RUN_EXIT.rawValue
+        case .halted: return ENGINE_RUN_HALTED.rawValue
+        case .boundary: return ENGINE_RUN_BOUNDARY.rawValue
+        }
+    } catch {
+        free(box.error)
+        box.error = strdup("\(error)")
+        return ENGINE_RUN_ERROR.rawValue
+    }
+}
+
+@_cdecl("engine_error_text")
+public func engine_error_text(_ h: OpaquePointer) -> UnsafePointer<CChar>? { UnsafePointer(handle(h).error) }
+
+@_cdecl("engine_get_state")
+public func engine_get_state(_ h: OpaquePointer, _ out: UnsafeMutablePointer<EngineX86State>) {
+    out.pointee = handle(h).engine.state()
+    if !handle(h).started { out.pointee.rip = handle(h).entry }
+}
+
+@_cdecl("engine_set_state")
+public func engine_set_state(_ h: OpaquePointer, _ state: UnsafePointer<EngineX86State>) {
+    let box = handle(h)
+    box.engine.setState(state.pointee)
+    if !box.started { box.entry = state.pointee.rip }
+}
+
+@_cdecl("engine_request_exit")
+public func engine_request_exit(_ h: OpaquePointer) { handle(h).engine.requestStop = true }
+
+@_cdecl("engine_request_boundary")
+public func engine_request_boundary(_ h: OpaquePointer) { handle(h).engine.requestBoundary() }
+
+@_cdecl("engine_kick")
+public func engine_kick(_ h: OpaquePointer) { handle(h).engine.interruptRequested() }
+
+@_cdecl("engine_post_vector")
+public func engine_post_vector(_ h: OpaquePointer, _ vector: UInt8, _ level: Bool) {
+    handle(h).engine.postVector(vector, level: level)
+}
+
+extension Engine {
+    /// The x86 CPU state at a boundary, in QEMU's terms.
+    public func state() -> EngineX86State {
+        var s = EngineX86State()
+        let c = ctx
+        withUnsafeBytes(of: &c.pointee.x) { src in
+            withUnsafeMutableBytes(of: &s.gpr) { $0.copyMemory(from: UnsafeRawBufferPointer(rebasing: src[0..<128])) }
+        }
+        s.rip = boundaryRIP
+        s.rflags = rflags()
+        s.cr0 = c.pointee.cr0
+        s.cr2 = c.pointee.cr2
+        s.cr3 = c.pointee.cr3
+        s.cr4 = c.pointee.cr4
+        s.cr8 = UInt64(c.pointee.apic_tpr >> 4)
+        s.efer = c.pointee.efer
+        s.star = c.pointee.star
+        s.lstar = c.pointee.lstar
+        s.cstar = c.pointee.cstar
+        s.sfmask = c.pointee.sfmask
+        s.fs_base = c.pointee.x.28
+        s.gs_base = c.pointee.x.27
+        s.kernel_gs_base = c.pointee.kernel_gs_base
+        s.gdt_base = c.pointee.gdtr_base
+        s.gdt_limit = c.pointee.gdtr_limit
+        s.idt_base = c.pointee.idtr_base
+        s.idt_limit = c.pointee.idtr_limit
+        s.tss_base = c.pointee.tss_base
+        s.tss_limit = c.pointee.tss_limit
+        s.sel = c.pointee.seg_sel
+        s.tr = c.pointee.tr
+        s.ldtr = c.pointee.ldtr
+        s.cpl = c.pointee.cpl
+        s.mxcsr = mxcsr()
+        readXMM(into: &s)
+        s.apic_base = c.pointee.apic_base | (c.pointee.apic_enabled != 0 ? 1 << 11 : 0)
+        s.apic_tpr = c.pointee.apic_tpr
+        s.apic_svr = c.pointee.apic_svr
+        s.apic_id = c.pointee.apic_id
+        s.apic_ldr = c.pointee.apic_ldr
+        s.apic_dfr = c.pointee.apic_dfr
+        s.apic_lvt_timer = c.pointee.apic_lvt_timer
+        s.apic_lvt = c.pointee.apic_lvt
+        s.apic_tmict = c.pointee.apic_tmict
+        s.apic_tdcr = c.pointee.apic_tdcr
+        s.apic_irr = c.pointee.apic_irr
+        s.apic_isr = c.pointee.apic_isr
+        s.apic_tmr = c.pointee.apic_tmr
+        return s
+    }
+
+    /// Writes CPU state back at a boundary. Control registers that select a view take effect through the monitor's next path.
+    public func setState(_ s: EngineX86State) {
+        let c = ctx
+        var input = s
+        withUnsafeBytes(of: &input.gpr) { src in
+            withUnsafeMutableBytes(of: &c.pointee.x) { dst in
+                dst.baseAddress!.copyMemory(from: src.baseAddress!, byteCount: 128)
+            }
+        }
+        setRFlags(s.rflags)
+        c.pointee.cr0 = s.cr0
+        c.pointee.cr2 = s.cr2
+        c.pointee.cr3 = s.cr3
+        c.pointee.cr4 = s.cr4
+        c.pointee.efer = s.efer
+        c.pointee.star = s.star
+        c.pointee.lstar = s.lstar
+        c.pointee.cstar = s.cstar
+        c.pointee.sfmask = s.sfmask
+        c.pointee.x.28 = s.fs_base
+        c.pointee.x.27 = s.gs_base
+        c.pointee.kernel_gs_base = s.kernel_gs_base
+        c.pointee.gdtr_base = s.gdt_base
+        c.pointee.gdtr_limit = s.gdt_limit
+        c.pointee.idtr_base = s.idt_base
+        c.pointee.idtr_limit = s.idt_limit
+        c.pointee.tss_base = s.tss_base
+        c.pointee.tss_limit = s.tss_limit
+        c.pointee.seg_sel = s.sel
+        c.pointee.tr = s.tr
+        c.pointee.ldtr = s.ldtr
+        c.pointee.cpl = s.cpl
+        c.pointee.mxcsr = s.mxcsr & 0xFFC0
+        writeXMM(from: s)
+        c.pointee.req_r.0 = s.rip
+    }
+
+    func rflags() -> UInt64 {
+        let c = ctx
+        let nz = c.pointee.spsr
+        var r = c.pointee.rflags_sys
+        if nz & (1 << 29) == 0 { r |= 1 }
+        if nz & (1 << 30) != 0 { r |= 0x40 }
+        if nz & (1 << 31) != 0 { r |= 0x80 }
+        if nz & (1 << 28) != 0 { r |= 0x800 }
+        if (c.pointee.x.21 & 0xFF).nonzeroBitCount & 1 == 0 { r |= 4 }
+        if (c.pointee.x.25 ^ c.pointee.x.21) & 0x10 != 0 { r |= 0x10 }
+        if c.pointee.df < 0 { r |= 0x400 }
+        return r
+    }
+
+    func setRFlags(_ r: UInt64) {
+        let c = ctx
+        var s = c.pointee.spsr & ~(0xF << 28)
+        if r & 1 == 0 { s |= 1 << 29 }
+        if r & 0x40 != 0 { s |= 1 << 30 }
+        if r & 0x80 != 0 { s |= 1 << 31 }
+        if r & 0x800 != 0 { s |= 1 << 28 }
+        c.pointee.spsr = s
+        c.pointee.x.21 = r & 4 != 0 ? 0 : 1
+        c.pointee.x.25 = c.pointee.x.21 ^ (r & 0x10)
+        c.pointee.df = r & 0x400 != 0 ? -1 : 1
+        c.pointee.rflags_sys = (r & ~0xCD5) | 2
+    }
+}

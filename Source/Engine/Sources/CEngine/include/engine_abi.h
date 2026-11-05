@@ -134,6 +134,9 @@ enum {
     HC_HLT, // guest halted with interrupts possibly enabled. Host returns when an interrupt may be pending.
     HC_IRQ, // host-injected IRQ arrived; a[0] arm pc. Asks the host for an external vector. r[0] vector or -1
     HC_FLUSH_VIEWS, // shadow pool wrapped: drop all translations
+    HC_APIC_EOI, // a[0] vector: EOI of a level-triggered vector, for the host's IO-APIC
+    HC_APIC_ICR, // a[0] icr: an IPI the monitor cannot finish itself
+    HC_BOUNDARY, // a[0] x86 rip: the vCPU stopped at an instruction boundary on request. r[0] rip to continue at
     HC_DEBUG, // a[0] a[1] printable
 };
 
@@ -186,6 +189,14 @@ typedef struct {
     uint32_t pad2;
     uint64_t ram_size;
     uint64_t kernel_view_tag;
+
+    // Virtual local APIC. The host sets bits in apic_host_irr atomically from any thread and raises the IRQ line.
+    uint64_t apic_base;
+    uint32_t apic_enabled, apic_id, apic_tpr, apic_ldr, apic_dfr, apic_svr, apic_icr_lo, apic_icr_hi;
+    uint32_t apic_lvt_timer, apic_lvt[5], apic_tmict, apic_tdcr, apic_timer_shift, stop_requested;
+    uint32_t apic_irr[8], apic_isr[8], apic_tmr[8], apic_host_irr[8], apic_host_level[8];
+    uint64_t apic_deadline_cnt, apic_timer_start_cnt, apic_tsc_deadline;
+    uint64_t stat_apic_timer, stat_ipi_self;
 
     // Blocks, published by the host.
     uint64_t block_count;
