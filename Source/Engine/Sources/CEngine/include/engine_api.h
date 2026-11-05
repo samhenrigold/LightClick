@@ -56,6 +56,8 @@ typedef enum {
 } EngineRunResult;
 
 // CPU state in QEMU's terms, to fill CPUX86State at a boundary. Segment bases beyond fs and gs are always zero in long mode.
+enum { ENGINE_MMX_ENTERED = 1, ENGINE_MMX_EMMS = 2 };
+
 typedef struct {
     uint64_t gpr[16], rip, rflags;
     uint64_t cr0, cr2, cr3, cr4, cr8, efer;
@@ -66,7 +68,7 @@ typedef struct {
     uint32_t cpl, mxcsr;
     uint64_t xmm[16][2];
     uint64_t mm[8]; // the low 64 bits of the x87 registers, by physical number
-    uint32_t mmx_event; // from engine_get_state: MMX_ENTERED, MMX_EMMS or 0, and cleared there
+    uint32_t mmx_event; // from engine_get_state: an ENGINE_MMX_ value or 0, and cleared there
     uint64_t apic_base;
     uint32_t apic_tpr, apic_svr, apic_id, apic_ldr, apic_dfr, apic_lvt_timer, apic_lvt[5], apic_tmict, apic_tdcr;
     uint32_t apic_irr[8], apic_isr[8], apic_tmr[8];

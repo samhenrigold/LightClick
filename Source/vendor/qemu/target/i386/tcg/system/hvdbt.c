@@ -384,10 +384,10 @@ static void hvdbt_get_state(CPUState *cs)
     }
     /* As helper_enter_mmx and helper_emms do. */
     if (s.mmx_event) {
-        if (s.mmx_event == MMX_ENTERED) {
+        if (s.mmx_event == ENGINE_MMX_ENTERED) {
             env->fpstt = 0;
         }
-        memset(env->fptags, s.mmx_event == MMX_EMMS, sizeof(env->fptags));
+        memset(env->fptags, s.mmx_event == ENGINE_MMX_EMMS, sizeof(env->fptags));
     }
     /* shortcut: a whole TLB flush at every return to TCG, since guest tables changed unseen. Measure before narrowing it. */
     tlb_flush(cs);

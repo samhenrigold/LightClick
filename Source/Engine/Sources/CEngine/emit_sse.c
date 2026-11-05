@@ -1,6 +1,7 @@
 // SSE and SSE2 to NEON. FPCR runs with AH=1 and NEP=1 (FEAT_AFP, measured available in the guest): min/max and NaN handling
 // follow x86, and scalar operations keep the upper lanes of their first source, so most instructions map one to one.
 // MXCSR status lives in FPSR. Unmasked FP exceptions cannot be trapped on this hardware, so the monitor stops on them.
+#include "engine_api.h"
 #include "tr_internal.h"
 
 // kind: 2 s, 3 d, 4 q
@@ -327,7 +328,7 @@ static void emit_mmx(const Insn *in, int live) {
     switch (opc) {
         case 0x77:
             mm_ldst(true, A, 0);
-            mmx_event(MMX_EMMS);
+            mmx_event(ENGINE_MMX_EMMS);
             return;
         case 0xF7:
             bad(in, "maskmovq (MMX)");
@@ -346,7 +347,7 @@ static void emit_mmx(const Insn *in, int live) {
             mm_ldst(true, A, dm);
             t.reg = A;
             emit_sse(&t, live);
-            mmx_event(MMX_ENTERED);
+            mmx_event(ENGINE_MMX_ENTERED);
             return;
         case 0x6F:
             if (in->rm_reg)
@@ -366,7 +367,7 @@ static void emit_mmx(const Insn *in, int live) {
             } else {
                 vldst(3, false, A, addr_prepare(in, 8));
             }
-            mmx_event(MMX_ENTERED);
+            mmx_event(ENGINE_MMX_ENTERED);
             return;
         case 0x71:
         case 0x72:
@@ -396,7 +397,7 @@ static void emit_mmx(const Insn *in, int live) {
             t.rm = B;
             t.imm &= 3;
             emit_sse(&t, live); // the destination is a general register
-            mmx_event(MMX_ENTERED);
+            mmx_event(ENGINE_MMX_ENTERED);
             return;
         default: { // two operands, the second register or memory
             mm_ldst(true, A, dm);
@@ -420,7 +421,7 @@ static void emit_mmx(const Insn *in, int live) {
         }
     }
     mm_ldst(false, A, write);
-    mmx_event(MMX_ENTERED);
+    mmx_event(ENGINE_MMX_ENTERED);
 }
 
 void emit_sse(const Insn *in, int live) {
