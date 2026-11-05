@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Run probes/lc-bench inside a clone of a VM and save its results.
+
+    scripts/guest-bench <app> <machine.vintelmac> <tag> [--env K=V ...] [--qemu ARG ...] [-t SECONDS]
+
+Clones the app and machine with APFS under Build/bench/<tag>, so the real library isn't touched. A small
+wrapper replaces the clone's QEMU so experiments can set environment variables and extra QEMU arguments
+that the app wouldn't pass. Writes Build/bench/<tag>.txt.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import signal
+import subprocess
+import time
+
+source = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('app', type=Path)
+parser.add_argument('machine', type=Path)
+parser.add_argument('tag')
+parser.add_argument('--env', action='append', default=[])
+parser.add_argument('--qemu', action='append', default=[])
+parser.add_argument('-t', default='1')
+parser.add_argument('--boot-wait', type=int, default=45)
+args = parser.parse_args()
+bench = source/'Build/bench/lc-bench'
+work = source/'Build/bench'/args.tag
+shutil.rmtree(work, ignore_errors=True)
+home = work/'home'
+library = home/'Library/Application Support/Light Click/Machines'
+library.mkdir(parents=True)
+subprocess.run(['cp', '-c', '-R', str(args.machine), str(library)], check=True)
+machine = library/args.machine.name
+# Forwarded ports would clash with any VM already running.
+for key in ('SSHEnabled', 'FileSharingEnabled'):
+    subprocess.run(['plutil', '-replace', key, '-bool', 'NO', str(machine/'Machine.plist')], check=True)
+app = work/args.app.name
+subprocess.run(['cp', '-c', '-R', str(args.app), str(app)], check=True)
+binary = app/'Contents/Resources/Runtime/bin'
+real = binary/'qemu-system-x86_64.real'
+(binary/'qemu-system-x86_64').rename(real)
+exports = ' '.join(shlex.quote(item) for item in args.env)
+extra = ' '.join(shlex.quote(item) for item in args.qemu)
+(binary/'qemu-system-x86_64').write_text(f'#!/bin/sh\nexec env {exports} {shlex.quote(str(real))} {extra} "$@"\n')
+(binary/'qemu-system-x86_64').chmod(0o755)
+diagnostics = work/'diagnostics'
+diagnostics.mkdir(mode=0o700)
+env = dict(os.environ, CFFIXED_USER_HOME=str(home))
+process = subprocess.Popen([str(app/'Contents/MacOS/Light Click'), '--open-vm', str(machine), '--guest-diagnostics-root',
+                            str(diagnostics)], env=env, stdout=(work/'app.log').open('w'), stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL)
+identifier = subprocess.check_output(['plutil', '-extract', 'Identifier', 'raw', '-o', '-', str(machine/'Machine.plist')],
+                                     text=True).strip().upper()
+channel = diagnostics/identifier
+
+
+def request(command, timeout):
+    (channel/'Result.json').unlink(missing_ok=True)
+    temporary = channel/'Request.tmp'
+    temporary.write_text(json.dumps(command))
+    temporary.rename(channel/'Request.json')
+    deadline = time.time()+timeout
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise SystemExit(f'The app exited; see {work}/app.log')
+        if (channel/'Result.json').exists():
+            return json.loads((channel/'Result.json').read_text())
+        time.sleep(1)
+    raise SystemExit(f'Timed out waiting for {command}')
+
+
+try:
+    time.sleep(args.boot_wait)
+    deadline = time.time()+300
+    while not channel.is_dir():
+        if time.time() > deadline:
+            raise SystemExit('The diagnostics channel never appeared')
+        time.sleep(1)
+    shutil.copyfile(bench, channel/'Transfer.bin')
+    start = time.time()
+    staged = request({'Action': 'stage-probe'}, 900)
+    if 'Error' in staged:
+        raise SystemExit(f'Staging failed: {staged}')
+    print(f'staged in {time.time()-start:.0f}s', flush=True)
+    program = staged['Transfer']['Directory']+'/Transfer.bin'
+    print(request({'Executable': '/bin/chmod', 'Arguments': ['0755', program]}, 120).get('ExitCode'), flush=True)
+    result = request({'Executable': program, 'Arguments': ['-t', args.t]}, 900)
+    if result.get('ExitCode') != 0:
+        raise SystemExit(f'Benchmark failed: {str(result)[:400]}')
+    (source/'Build/bench'/f'{args.tag}.txt').write_text(result['Stdout'])
+    print(result['Stdout'])
+finally:
+    process.send_signal(signal.SIGTERM)
+    time.sleep(6)
+    if process.poll() is None:
+        process.kill()
+    subprocess.run(['pkill', '-f', str(real)], check=False)  # the clone's own QEMU, by its unique path
+    time.sleep(1)
+    shutil.rmtree(work, ignore_errors=True)
