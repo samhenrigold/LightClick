@@ -8,8 +8,8 @@ if [[ -z $qemu && -f $root/Build/RuntimeLocation.plist ]]; then
 fi
 [[ -x $qemu ]] || { print -u2 'Pass the universal qemu-system-x86_64 executable as the first argument.'; exit 64; }
 mkdir -p "$root/Build/Probes"
-xcrun clang -fobjc-arc -fmodules -Wall -mmacosx-version-min=11.0 -arch x86_64 -arch arm64 \
+"$root/scripts/clang-with-swift-packages" GuestControl -- -fobjc-arc -fmodules -Wall -mmacosx-version-min=15.0 \
     -I "$root/VirtualIntelMac" -framework Foundation \
-    "$root/probes/app-qmp-control.m" "$root/VirtualIntelMac/VIMQMPConnection.m" \
+    "$root/probes/app-qmp-control.m" \
     -o "$root/Build/Probes/app-qmp-control"
 exec "$root/Build/Probes/app-qmp-control" "$qemu"

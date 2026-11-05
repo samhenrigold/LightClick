@@ -5,6 +5,6 @@ work=$(mktemp -d /tmp/vim-boot-policy-tests.XXXXXX)
 xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-deprecated-declarations -framework Foundation \
     "$root/probes/guest-boot-policy.m" "$root/tools/VIMFileTransaction.m" -o "$work/guest"
 "$work/guest"
-xcrun clang -fobjc-arc -O2 -Wall -Wextra -framework Foundation -I "$root/VirtualIntelMac" \
-    "$root/probes/guest-boot-policy-host.m" "$root/VirtualIntelMac/VIMGuestBootPolicy.m" -o "$work/host"
+"$root/scripts/clang-with-swift-packages" GuestControl -- -fobjc-arc -O2 -Wall -Wextra -framework Foundation \
+    -mmacosx-version-min=15.0 -I "$root/VirtualIntelMac" "$root/probes/guest-boot-policy-host.m" "$root/VirtualIntelMac/VIMGuestBootPolicy.m" -o "$work/host"
 "$work/host"

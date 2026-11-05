@@ -6,6 +6,10 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		EA155B22309C391300B82F7C /* GuestControl in Frameworks */ = {isa = PBXBuildFile; productRef = EA155B21309C391300B82F7C /* GuestControl */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		048FCBA1307E95CF00AECB5D /* Light Click.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Light Click.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		EA155B00309C391300B82F7C /* Light Click.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Light Click.entitlements"; sourceTree = "<group>"; };
@@ -27,6 +31,7 @@
 		048FCB9E307E95CF00AECB5D /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
+				EA155B22309C391300B82F7C /* GuestControl in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -79,6 +84,9 @@
 				048FCBA3307E95CF00AECB5D /* VirtualIntelMac */,
 			);
 			name = "Light Click";
+			packageProductDependencies = (
+				EA155B21309C391300B82F7C /* GuestControl */,
+			);
 			productName = "Light Click";
 			productReference = 048FCBA1307E95CF00AECB5D /* Light Click.app */;
 			productType = "com.apple.product-type.application";
@@ -106,6 +114,9 @@
 			);
 			mainGroup = 048FCB98307E95CF00AECB5D;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				EA155B20309C391300B82F7C /* XCLocalSwiftPackageReference "Packages/GuestControl" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 048FCBA2307E95CF00AECB5D /* Products */;
 			projectDirPath = "";
@@ -193,6 +204,20 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		EA155B20309C391300B82F7C /* XCLocalSwiftPackageReference "Packages/GuestControl" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/GuestControl;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		EA155B21309C391300B82F7C /* GuestControl */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = GuestControl;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 048FCB99307E95CF00AECB5D /* Project object */;
 	validationLevel = 1;
