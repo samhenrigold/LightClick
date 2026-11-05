@@ -37,7 +37,8 @@ Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpen
 - The standard library's path can't be saved: `.standard` has no path, and `.chosen` only comes from comparing a root
   with this instance's standard root. Preferences stay shared under `CFFIXED_USER_HOME`, so a saved default would pin
   every other instance to this home.
-- `VIMLibraryPath` is written only by `LibrarySelection`. The migration's sweep of `VIM…` preferences skips it.
+- `VIMLibraryPath` is written only by `LibrarySelection`. The migration's sweep of `VIM…` preferences skips it. A value
+  from the command line is never saved, and doesn't remove the saved one.
 - A migration runs only with the library lock, every machine's `Session.lock` and `Configuration.lock`, and no active
   creation job for this library. All of these refusals use `EBUSY`, which the app retries next launch.
 - A package without a `State` folder can't be locked, so it defers the migration as if it were running.

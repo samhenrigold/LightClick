@@ -86,6 +86,24 @@ private let key = "VIMLibraryPath"
         #expect(fixture.preferences.string(forKey: key) == saved)
     }
 
+    /// The real argument domain is global to this process, so the other tests would see a real one.
+    private final class Shadowed: UserDefaults {
+        override func volatileDomain(forName domainName: String) -> [String: Any] {
+            domainName == UserDefaults.argumentDomain ? [key: "/from/the/command/line"] : [:]
+        }
+    }
+
+    @Test func aLibraryFromTheCommandLineIsNeitherSavedNorRemoved() throws {
+        let fixture = try LibraryFixture()
+        let shadowed = try #require(Shadowed(suiteName: fixture.suite))
+        let standard = URL(filePath: "/Home/Light Click")
+        LibrarySelection(root: URL(filePath: "/Clone"), standardRoot: standard).save(to: shadowed)
+        #expect(fixture.preferences.object(forKey: key) == nil)
+        fixture.preferences.set("/Real/Choice", forKey: key)
+        LibrarySelection(root: standard, standardRoot: standard).save(to: shadowed)
+        #expect(fixture.preferences.string(forKey: key) == "/Real/Choice")
+    }
+
     /// `private` keeps this true within the package. This keeps it true for the app's code outside it.
     @Test func onlyLibrarySelectionNamesThePreference() throws {
         var mentions: [String] = []

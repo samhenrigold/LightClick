@@ -25,8 +25,13 @@ public enum LibrarySelection: Equatable, Sendable {
         self = root.path == standardRoot.path ? .standard : .chosen(ChosenLibrary(path: root.path))
     }
 
-    /// Replaces the saved choice. The saved value is what `configuredLibrary(in:)` reads back.
+    /// Replaces the saved choice. The saved value is what `configuredLibrary(in:)` reads back. A library given on the
+    /// command line lasts only for this run: saving it would pin the real app, and removing it would lose the real
+    /// app's choice.
     public func save(to preferences: UserDefaults) {
+        guard preferences.volatileDomain(forName: UserDefaults.argumentDomain)[Self.preferenceKey] == nil else {
+            return
+        }
         switch self {
         case .standard: preferences.removeObject(forKey: Self.preferenceKey)
         case .chosen(let library): preferences.set(library.path, forKey: Self.preferenceKey)
