@@ -62,6 +62,16 @@ import Testing
         #expect(policy(report.setting("ConsoleUID", true)).reportedConsoleUID == nil)
     }
 
+    @Test func aConsoleIDAboveInt32StaysTheSameUser() {
+        let uid: NSNumber = 3_000_000_000
+        let high = report.setting("ConsoleUID", .number(uid))
+        #expect(!policy(high) { $0.consoleUID = uid }.consoleUserChanged)
+        #expect(GuestReport.consoleUsername(statOutput: "3000000000 someone", expectedUID: uid.intValue) == "someone")
+        // What `finishGuestStatus` must not store: the clamped ID reads as a new user on every report.
+        let clamped = NSNumber(value: ("3000000000 someone" as NSString).intValue)
+        #expect(policy(high) { $0.consoleUID = clamped }.consoleUserChanged)
+    }
+
     // MARK: Addresses
 
     private func addresses(

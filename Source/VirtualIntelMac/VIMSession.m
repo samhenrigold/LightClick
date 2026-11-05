@@ -3712,7 +3712,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                               [NSUserDefaults.standardUserDefaults
                                   setObject:username
                                      forKey:[@"VIMGuestUsername-" stringByAppendingString:session.machine.URL.path]];
-                              session.clipboardUID = @(text.intValue);
                               [session updateClipboardForBoot:boot];
                             }];
     }
