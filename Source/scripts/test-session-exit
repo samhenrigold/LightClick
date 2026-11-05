@@ -1,0 +1,8 @@
+#!/bin/zsh
+# Checks what a session decides when its emulator exits against tests/session-exit/main.swift.
+set -euo pipefail
+root=${0:A:h:h}
+mkdir -p "$root/Build/Probes"
+xcrun swiftc -swift-version 6 "$root/VirtualIntelMac/VIMSessionExit.swift" "$root/tests/session-exit/main.swift" \
+    -o "$root/Build/Probes/session-exit-tests"
+exec "$root/Build/Probes/session-exit-tests"

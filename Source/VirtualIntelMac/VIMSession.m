@@ -1603,32 +1603,24 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         if (!session || session.task != task)
             return;
         [session.control drainLifecycleEventsAfterExitWithCompletion:^{
-          session.status.stringValue = [NSString stringWithFormat:@"Stopped (exit %d)", task.terminationStatus];
+          SessionExitInput *exitInput = [SessionExitInput new];
+          exitInput.relaunchForGuestReboot = session.relaunchForGuestReboot;
+          exitInput.relaunchForGraphics = session.relaunchForGraphics;
+          exitInput.forceResetRequested = session.forceResetRequested;
+          exitInput.shutdownRequested = session.shutdownRequested;
+          exitInput.closeAfterShutdown = session.closeAfterShutdown;
+          exitInput.exited = task.terminationReason == NSTaskTerminationReasonExit;
+          exitInput.terminationStatus = task.terminationStatus;
+          exitInput.recentGuestReboots = session.recentGuestReboots ?: @[];
+          exitInput.now = NSDate.date;
+          SessionExitPlan *exitPlan = [[SessionExitPlan alloc] initWithInput:exitInput];
+          BOOL relaunch = exitPlan.relaunch;
+          session.status.stringValue = exitPlan.statusText;
           session.displayView.displaySleeping = YES;
-          session.stateLabel.stringValue =
-              task.terminationStatus == 0
-                  ? @"This Mac is shut down."
-                  : @"This Mac stopped unexpectedly. You can start it again or inspect Session Details.";
+          session.stateLabel.stringValue = exitPlan.stateText;
           session.statePanel.hidden = NO;
           session.stateAction.hidden = NO;
-          BOOL forcedReset = session.forceResetRequested;
-          BOOL guestReboot = (session.relaunchForGuestReboot || forcedReset) && !session.shutdownRequested &&
-                             !session.closeAfterShutdown;
-          NSMutableArray *recent = [NSMutableArray array];
-          for (NSDate *date in session.recentGuestReboots)
-              if (-date.timeIntervalSinceNow < 60)
-                  [recent addObject:date];
-          BOOL rebootLoop = guestReboot && !forcedReset && recent.count >= 6;
-          if (rebootLoop)
-              guestReboot = NO;
-          if (guestReboot)
-              [recent addObject:NSDate.date];
-          session.recentGuestReboots = recent;
-          BOOL graphicsRestart =
-              session.relaunchForGraphics && !session.shutdownRequested && !session.closeAfterShutdown;
-          BOOL relaunch =
-              (graphicsRestart || guestReboot) &&
-              (forcedReset || (task.terminationReason == NSTaskTerminationReasonExit && task.terminationStatus == 0));
+          session.recentGuestReboots = exitPlan.recentGuestReboots;
           session.forceResetRequested = NO;
           session.relaunchForGraphics = NO;
           session.relaunchForGuestReboot = NO;
@@ -1640,14 +1632,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           }
           session.shutdownButton.enabled = NO;
           [session cleanUp];
-          if (!relaunch && task.terminationReason == NSTaskTerminationReasonExit && task.terminationStatus == 0)
+          if (exitPlan.showStoppedScreen)
               [session showStoppedScreen];
-          if (rebootLoop)
+          if (exitPlan.rebootLoop)
               VIMPresentError(VIMSessionError(@"This Mac restarted repeatedly and was stopped. Open Session Details to "
                                               @"check its boot log, then try starting it again."),
                               session.window);
-          if (session.closeAfterShutdown && task.terminationReason == NSTaskTerminationReasonExit &&
-              task.terminationStatus == 0)
+          if (exitPlan.closeWindow)
               [session.window close];
           // Successful openMachine publishes its own library notification once
           // the replacement owns the session lock. Do not invite background
@@ -1666,8 +1657,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                   VIMSession *replacement = sessions[SessionKey(fresh)];
                   replacement.pendingHostConnectionURL = waitingURL;
                   replacement.pendingHostConnectionCompletion = waitingCompletion;
-                  if (guestReboot)
-                      replacement.recentGuestReboots = recent;
+                  if (exitPlan.guestReboot)
+                      replacement.recentGuestReboots = exitPlan.recentGuestReboots;
                   [replacement.window setFrame:previousFrame display:YES];
                   if (replacement.window != previousWindow)
                       [previousWindow close];
