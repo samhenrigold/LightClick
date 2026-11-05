@@ -179,6 +179,19 @@ The split-store fix took 40 boots' 20 halts to 0 of 32, with no FIPS failures, f
 
 Frames that stopped being tables no longer trap (measured in a test, 271,673 stores down to about 15,700). How much of a boot's 256,000 stores a second that explains is not measured. The tally's `why blocks died` section answers the invalidation question. Direct cost so far: translation was 8.3 s of a 232 s run.
 
+The boots on 2c7c5e1d measured: 8 of 8 clean, staging in 29 to 37 s, and page-table stores down from 256,559/s to 2,245/s (different runs and workloads, so the size is rough). lc-bench then sat in its `rep movsb` test past guest-bench's 900 s. The likely reason: the rep stub used NEON, which traps under CR0.TS, once per byte, with nothing in a plain copy to clear TS. A test measured a megabyte at about 2,100 times the cost. Not measured: that this was what lc-bench hit, as that needs a boot.
+
+### Translated blocks: what the numbers say, and a proposal
+
+From that 1,109 s run: 13.57M cold blocks, 16.65 s translating, so translation itself is 1.5% of the run. Blocks died: 6,900,496 in 9,714 view evictions (about 710 each), 3,490,815 in 205,657 stores higher in the tables (about 17 each), 234,246 from leaf stores, 30,489 from flood. Only 170 of the higher-table kills had the page still on the same frame, so a check for an unchanged mapping would save almost nothing there: those mappings really went, as when a process exits. (The count only sees entries valid at the time, so it runs low.) At least 5.56M cold blocks, 41%, repeated a rip and frame some other block had covered, 3.54M of them live in another view at the time.
+
+Proposal, in order, each to be justified by the tally before the next:
+
+1. More views. 64 views is 32 address spaces, against 367 process rows in that run, which is what makes evictions a steady 9/s. Hash tables take 1 MB per view and fill 128 to 192 MB of the private layout, and the return stacks fill 126 to 128 MB. With tables of 2^14 entries, 256 views need 64 MB of hash and 8 MB of return stacks, so the stacks have to move. Cost: a layout change, and more collisions per view. Gain: no eviction of live processes while under 128 address spaces. Bound: part of 1.5% for translation, plus refills and return-stack misses, which nothing here measures.
+2. User translations shared by rip and frame, as kernel-half blocks already are by domain. Block validity is then per view but the code is shared, so a direct link between blocks on different pages is only valid in a view whose mapping of both pages matches. Either links stay within a page, with others through the view's table, or each view keeps its own links. Removing a view's mapping takes the block out of that view's table without killing it. Gain bound: the same 41% of 1.5%, so this is not worth building until something shows the indirect cost is large.
+
+Larger costs show in that run. Device accesses at 25,315/s: 15.4M of 28.1M are two 4-byte writes by one kext to 0xa0000000, at rips 0x...4c2c and 0x...4c3b, about 7.7M each, and rep movs reads frame memory at 0x90000000 one element per exit. Device-specific fast paths would come before any of the above. Not measured: their cost per access.
+
 Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bitmap interplay beyond those few fallbacks. Cost per fallback is unknown; the tally's `tcg_ms` column gives it. Writes by a separate process into guest RAM (the OOP graphics helper) are not noted. Reset after hand-off is unexamined: firmware in 64-bit mode would run on the engine.
 
 ## Not exact, known
