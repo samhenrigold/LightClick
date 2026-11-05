@@ -212,6 +212,9 @@ extension Engine {
         s.cpl = c.pointee.cpl
         s.mxcsr = mxcsr()
         readXMM(into: &s)
+        s.mm = c.pointee.mm
+        s.mmx_event = c.pointee.mmx_event
+        c.pointee.mmx_event = 0
         s.apic_base = c.pointee.apic_base | (c.pointee.apic_enabled != 0 ? 1 << 11 : 0)
         s.apic_tpr = c.pointee.apic_tpr
         s.apic_svr = c.pointee.apic_svr
@@ -263,6 +266,7 @@ extension Engine {
         c.pointee.mxcsr = s.mxcsr & 0xFFC0
         c.pointee.resume_mxcsr = s.mxcsr
         writeXMM(from: s)
+        c.pointee.mm = s.mm
         c.pointee.req_r.0 = s.rip
     }
 

@@ -182,6 +182,8 @@ typedef struct {
 } EngineEvent;
 #define EVENT_RING 128
 
+enum { MMX_ENTERED = 1, MMX_EMMS = 2 };
+
 typedef struct {
     uint64_t x[31]; // +0: x0-x30, saved on every monitor entry
     uint64_t elr; // +248
@@ -218,7 +220,8 @@ typedef struct {
     uint32_t stepping; // walking to an x86 boundary with the software step
     uint32_t pool_limit; // shadow pool pages, 0 for all of them; tests shrink it
     uint32_t tr_flushed; // the translator reset the code cache; every return stack is stale
-    uint32_t pad2;
+    uint32_t mmx_event; // what MMX last did to the x87 tags here: 0 nothing, MMX_ENTERED, MMX_EMMS. The host applies it to state it owns.
+    uint64_t mm[8]; // translated code loads and stores these
     uint64_t ram_size;
     uint64_t kernel_view_tag;
 

@@ -86,6 +86,13 @@ final class HybridHarness {
             }
             engine_note_write(handle, mailbox(1) + UInt64(4096 - first), UInt64(first))
             engine_note_write(handle, mailbox(2), UInt64(width - first))
+        case 9:
+            if s.mmx_event != 1 || s.mm.3 != 0x1122_3344_5566_7788 {
+                failed = "MMX state at a fallback: event \(s.mmx_event), mm3 \(s.mm.3)"
+            }
+            s.mm.3 = ~s.mm.3
+        case 10:
+            if s.mmx_event != 2 { failed = "emms at a fallback: event \(s.mmx_event)" }
         case 6, 7:
             let image = host(s.gpr.12 &- 0xFFFF_8800_0000_0000) + 160
             withUnsafeMutableBytes(of: &s.xmm) { registers in

@@ -65,6 +65,8 @@ typedef struct {
     uint16_t sel[6], tr, ldtr;
     uint32_t cpl, mxcsr;
     uint64_t xmm[16][2];
+    uint64_t mm[8]; // the low 64 bits of the x87 registers, by physical number
+    uint32_t mmx_event; // from engine_get_state: MMX_ENTERED, MMX_EMMS or 0, and cleared there
     uint64_t apic_base;
     uint32_t apic_tpr, apic_svr, apic_id, apic_ldr, apic_dfr, apic_lvt_timer, apic_lvt[5], apic_tmict, apic_tdcr;
     uint32_t apic_irr[8], apic_isr[8], apic_tmr[8];

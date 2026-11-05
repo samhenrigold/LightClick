@@ -312,6 +312,9 @@ static void hvdbt_put_state(CPUState *cs)
         s.xmm[i][0] = env->xmm_regs[i].ZMM_Q(0);
         s.xmm[i][1] = env->xmm_regs[i].ZMM_Q(1);
     }
+    for (int i = 0; i < 8; i++) {
+        s.mm[i] = env->fpregs[i].mmx.MMX_Q(0);
+    }
     engine_set_state(hv.engine, &s);
 
     /* The TSC is the same clock on both sides, cpu_get_tsc's steps with cpu_get_tsc's offsets. */
@@ -375,6 +378,16 @@ static void hvdbt_get_state(CPUState *cs)
     for (int i = 0; i < 16; i++) {
         env->xmm_regs[i].ZMM_Q(0) = s.xmm[i][0];
         env->xmm_regs[i].ZMM_Q(1) = s.xmm[i][1];
+    }
+    for (int i = 0; i < 8; i++) {
+        env->fpregs[i].mmx.MMX_Q(0) = s.mm[i];
+    }
+    /* As helper_enter_mmx and helper_emms do. */
+    if (s.mmx_event) {
+        if (s.mmx_event == MMX_ENTERED) {
+            env->fpstt = 0;
+        }
+        memset(env->fptags, s.mmx_event == MMX_EMMS, sizeof(env->fptags));
     }
     /* shortcut: a whole TLB flush at every return to TCG, since guest tables changed unseen. Measure before narrowing it. */
     tlb_flush(cs);

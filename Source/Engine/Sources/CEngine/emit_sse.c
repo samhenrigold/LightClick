@@ -307,6 +307,122 @@ static void emit_addsub(const Insn *in) {
     vmov(d, 27);
 }
 
+// MMX: the operands in vectors whose upper halves are zero, the xmm form of the operation on those, and the low half written back. Every
+// path touches NEON first, so CR0.TS gives #NM as it does for SSE. Like TCG this raises no #MF for a pending x87 exception.
+static void mm_ldst(bool load, int v, int mm) {
+    Addr a = {.base = CTX, .imm = (i64)__builtin_offsetof(EngineCtx, mm) + mm * 8};
+    vldst(3, load, v, a);
+}
+static void mmx_event(int event) {
+    Addr a = {.base = CTX, .imm = __builtin_offsetof(EngineCtx, mmx_event)};
+    movimm(S1, (u64)event);
+    ldst(0, 4, S1, a);
+}
+void emit_sse(const Insn *in, int live);
+static void emit_mmx(const Insn *in, int live) {
+    enum { A = 28, B = 29 }; // the operations use v24-v27 and V_MEM
+    int opc = in->opc, dm = in->reg & 7, sm = in->rm & 7, write = dm;
+    Insn t = *in;
+    t.pfx = 0x66;
+    switch (opc) {
+        case 0x77:
+            mm_ldst(true, A, 0);
+            mmx_event(MMX_EMMS);
+            return;
+        case 0xF7:
+            bad(in, "maskmovq (MMX)");
+            return;
+        case 0x6C:
+        case 0x6D:
+        case 0xD6:
+        case 0xF0:
+            svc(SVC_UD);
+            return;
+        case 0x6E:
+            t.reg = A;
+            emit_sse(&t, live);
+            break;
+        case 0x7E:
+            mm_ldst(true, A, dm);
+            t.reg = A;
+            emit_sse(&t, live);
+            mmx_event(MMX_ENTERED);
+            return;
+        case 0x6F:
+            if (in->rm_reg)
+                mm_ldst(true, A, sm);
+            else
+                vldst(3, true, A, addr_prepare(in, 8));
+            break;
+        case 0xE7:
+        case 0x7F:
+            if (opc == 0xE7 && in->rm_reg) {
+                svc(SVC_UD);
+                return;
+            }
+            mm_ldst(true, A, dm);
+            if (in->rm_reg) {
+                mm_ldst(false, A, sm);
+            } else {
+                vldst(3, false, A, addr_prepare(in, 8));
+            }
+            mmx_event(MMX_ENTERED);
+            return;
+        case 0x71:
+        case 0x72:
+        case 0x73:
+            if (opc == 0x73 && ((in->reg & 7) == 3 || (in->reg & 7) == 7)) { // psrldq and pslldq have no MMX form
+                svc(SVC_UD);
+                return;
+            }
+            mm_ldst(true, A, sm);
+            t.rm = A;
+            emit_sse(&t, live);
+            write = sm;
+            break;
+        case 0xC4:
+            mm_ldst(true, A, dm);
+            t.reg = A;
+            t.imm &= 3;
+            emit_sse(&t, live);
+            break;
+        case 0xC5:
+        case 0xD7:
+            if (!in->rm_reg) {
+                svc(SVC_UD);
+                return;
+            }
+            mm_ldst(true, B, sm);
+            t.rm = B;
+            t.imm &= 3;
+            emit_sse(&t, live); // the destination is a general register
+            mmx_event(MMX_ENTERED);
+            return;
+        default: { // two operands, the second register or memory
+            mm_ldst(true, A, dm);
+            if (in->rm_reg)
+                mm_ldst(true, B, sm);
+            else
+                vldst(3, true, B, addr_prepare(in, 8));
+            t.reg = A;
+            t.rm = B;
+            t.rm_reg = true;
+            if (opc == 0x70) {
+                t.pfx = 0xF2; // pshuflw treats the low half as pshufw does
+            } else if (opc >= 0x68 && opc <= 0x6A) { // the 64-bit "high half" is what punpckl takes after a shift
+                E(0x7F600400u | A << 5 | A);
+                E(0x7F600400u | B << 5 | B);
+                t.opc = opc - 8;
+            } else if (opc == 0x63 || opc == 0x67 || opc == 0x6B) { // the xmm form packs each register apart: pack them as one
+                ins_elem(A, 1, B, 0, 8);
+            }
+            emit_sse(&t, live);
+        }
+    }
+    mm_ldst(false, A, write);
+    mmx_event(MMX_ENTERED);
+}
+
 void emit_sse(const Insn *in, int live) {
     int opc = in->opc, pfx = in->pfx, d = in->reg;
     if (in->op == OP_SSE && in->sub) {
@@ -327,8 +443,8 @@ void emit_sse(const Insn *in, int live) {
     }
     // Integer vector opcodes without a 66 prefix are MMX.
     bool intop = (opc >= 0x60 && opc <= 0x76) || (opc >= 0xD1 && opc <= 0xFE && opc != 0xE6);
-    if (intop && pfx == 0 && opc != 0x70 && opc != 0x6F) {
-        bad(in, "MMX instruction");
+    if (pfx == 0 && (intop || opc == 0x77 || opc == 0x7E || opc == 0x7F || opc == 0xC4 || opc == 0xC5)) {
+        emit_mmx(in, live);
         return;
     }
     if (intop && pfx != 0x66 && !(opc == 0x6F || opc == 0x70 || opc == 0xD6 || opc == 0xF0)) {

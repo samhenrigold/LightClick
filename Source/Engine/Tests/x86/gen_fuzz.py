@@ -378,6 +378,51 @@ for imm in (0, 1, 7, 15, 16, 17, 31, 32, 200):
     form(f"palignr ${imm} same", f"palignr ${imm},%xmm1,%xmm1", ALL, FP)
     form(f"palignr ${imm} m", f"palignr ${imm},32(%r15),%xmm1", ALL, FP)
 
+# ---- MMX ---- mm1 and mm2 from random memory; both end up in rax and rbx, where the transcript shows them.
+def mmx(name, body):
+    form(name, ["movq 32(%r15),%mm1", "movq 40(%r15),%mm2"] + (body if isinstance(body, list) else [body]) + ["movq %mm1,%rax", "movq %mm2,%rbx", "emms"], ALL, FP)
+
+for op in ["paddb", "paddw", "paddd", "paddq", "psubb", "psubw", "psubd", "psubq", "paddsb", "paddsw", "paddusb", "paddusw", "psubsb", "psubsw",
+           "psubusb", "psubusw", "pand", "pandn", "por", "pxor", "pcmpeqb", "pcmpeqw", "pcmpeqd", "pcmpgtb", "pcmpgtw", "pcmpgtd", "pmullw", "pmulhw",
+           "pmulhuw", "pmuludq", "pmaddwd", "pavgb", "pavgw", "pminub", "pmaxub", "pminsw", "pmaxsw", "psadbw", "packsswb", "packssdw", "packuswb",
+           "punpcklbw", "punpcklwd", "punpckldq", "punpckhbw", "punpckhwd", "punpckhdq"]:
+    mmx(f"{op} mm", f"{op} %mm2,%mm1")
+    mmx(f"{op} same", f"{op} %mm1,%mm1")
+    mmx(f"{op} m", f"{op} 48(%r15),%mm1")
+    mmx(f"{op} unaligned", f"{op} 51(%r15),%mm1")
+for op in ["psllw", "pslld", "psllq", "psrlw", "psrld", "psrlq", "psraw", "psrad"]:
+    mmx(f"{op} mm", f"{op} %mm2,%mm1")
+    mmx(f"{op} m", f"{op} 48(%r15),%mm1")
+    mmx(f"{op} small", ["andq $63,%rax", "movq %rax,%mm2", f"{op} %mm2,%mm1"])
+    for imm in (0, 1, 7, 8, 15, 16, 31, 32, 63, 64, 200):
+        mmx(f"{op} ${imm}", f"{op} ${imm},%mm1")
+for imm in (0, 0xFF, 0x1B, 0xE4, 0x39, 0x93):
+    mmx(f"pshufw ${imm}", f"pshufw ${imm},%mm2,%mm1")
+    mmx(f"pshufw ${imm} same", f"pshufw ${imm},%mm1,%mm1")
+    mmx(f"pshufw ${imm} m", f"pshufw ${imm},48(%r15),%mm1")
+for imm in (0, 1, 2, 3, 7, 0xF8):
+    mmx(f"pinsrw ${imm} r", f"pinsrw ${imm},%eax,%mm1")
+    mmx(f"pinsrw ${imm} m", f"pinsrw ${imm},48(%r15),%mm1")
+    mmx(f"pextrw ${imm}", f"pextrw ${imm},%mm1,%ecx")
+    mmx(f"pextrw ${imm} high", f".byte 0x44, 0x0F, 0xC5, 0xC9, {imm}")  # pextrw $imm,%mm1,%r9d
+mmx("pmovmskb", "pmovmskb %mm1,%ecx")
+mmx("pmovmskb high", ".byte 0x44, 0x0F, 0xD7, 0xC9")  # pmovmskb %mm1,%r9d
+mmx("movq mm,mm", "movq %mm2,%mm1")
+mmx("movq high regs ignored", ".byte 0x4D, 0x0F, 0x6F, 0xCA")  # rex.WRB movq %mm2,%mm1: REX means nothing to an mm register
+mmx("movq m,mm", "movq 51(%r15),%mm1")
+mmx("movq mm,m", "movq %mm1,51(%r15)")
+mmx("movntq", "movntq %mm1,51(%r15)")
+mmx("movd r,mm", "movd %ebx,%mm1")
+mmx("movq r,mm", "movq %rbx,%mm1")
+mmx("movq high r,mm", "movq %r9,%mm1")
+mmx("movd m,mm", "movd 48(%r15),%mm1")
+mmx("movd mm,r", "movd %mm1,%ecx")
+mmx("movq mm,r", "movq %mm1,%rcx")
+mmx("movd mm,m", "movd %mm1,51(%r15)")
+mmx("mmx after sse", ["movq %mm1,%rcx", "movq %rcx,%xmm3", "paddq %xmm3,%xmm1", "movq %xmm1,%rcx", "movq %rcx,%mm2"])
+mmx("all registers", ["movq %mm1,%mm0", "movq %mm2,%mm3", "movq %mm1,%mm4", "movq %mm2,%mm5", "movq %mm1,%mm6", "movq %mm2,%mm7",
+                      "paddb %mm0,%mm3", "pxor %mm3,%mm4", "psubw %mm4,%mm5", "por %mm5,%mm6", "pand %mm6,%mm7", "movq %mm7,%mm1"])
+
 out = [".text", ".globl _fuzz_forms", ".p2align 4"]
 for i, (name, body, mask, kind) in enumerate(forms):
     out.append(f"Lf{i}:")

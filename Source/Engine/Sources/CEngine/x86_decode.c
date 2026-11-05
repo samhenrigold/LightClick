@@ -505,7 +505,12 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
             SSE_FORM();
             if (opc >= 0x2E)
                 in->writes = F_ARITH; // ucomis, comis
-        } else if (opc >= 0x50 && opc <= 0x7F && opc != 0x77) {
+        } else if (opc == 0x77) {
+            in->op = OP_SSE;
+            in->opc = opc;
+            in->pfx = mand;
+            in->rep = 0;
+        } else if (opc >= 0x50 && opc <= 0x7F) {
             SSE_FORM();
             if ((opc >= 0x71 && opc <= 0x73) || opc == 0x70) {
                 in->has_imm = true;

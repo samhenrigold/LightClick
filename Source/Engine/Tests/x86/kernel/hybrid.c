@@ -822,6 +822,33 @@ static void test_process_log(u64 root) {
     // The harness checks the log. The gate needs putting back for nothing else: nothing here takes a breakpoint again.
 }
 
+// MMX registers live with the engine between fallbacks, and TCG needs them, with the tags as MMX leaves them, at each
+// one.
+static void test_mmx(void) {
+    u64 value = 0x1122334455667788ULL, out = 0, after = 0;
+    // Action 9 checks and swaps what TCG would see: mm3 holds value, MMX has entered; it hands back ~value.
+    __asm__ volatile(
+        "movq %1, %%mm3\n mov $9, %%r13\n mov $5, %%r14\n .byte 0x66, 0x0F, 0x38, 0x40, 0xC1\n movq %%mm3, %0\n"
+        : "=r"(out)
+        : "r"(value)
+        : "r13", "r14", "xmm0", "memory");
+    CHECK(out == ~value);
+    __asm__ volatile("emms\n mov $10, %%r13\n mov $5, %%r14\n .byte 0x66, 0x0F, 0x38, 0x40, 0xC1\n"
+                     :
+                     :
+                     : "r13", "r14", "xmm0", "memory");
+    // TS: #NM for each form, including those that need no vector register to do their job.
+    u64 nm = nm_count, cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 8));
+    __asm__ volatile("movq %1, %%mm3\n movq %%mm3, %0\n" : "=r"(after) : "r"(value) : "memory");
+    CHECK(nm_count == nm + 1);
+    CHECK(after == value);
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 8));
+    __asm__ volatile("emms");
+    CHECK(nm_count == nm + 2);
+}
+
 // A split store onto a tracked frame whose second page is missing: the fault names that page, and the store then
 // finishes.
 static void test_split_store_fault(u64 root) {
@@ -863,6 +890,7 @@ void kmain(void) {
     test_rep_into_table(root);
     test_lazy_fp(root);
     test_split_store_fault(root);
+    test_mmx();
     test_process_log(root);
     test_view_churn(root);
     CHECK(!bad_vector);
