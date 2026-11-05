@@ -42,7 +42,7 @@ typedef struct {
     bool tzcnt_lzcnt;
     // Nonzero: ram_host holds this many bytes at GPA 0 and the rest (ram_bytes minus this) at GPA 4 GB. Zero: all of it at GPA 0.
     uint64_t ram_below_4g;
-    // Another CPU emulator owns the machine, and takes single instructions back on ENGINE_RUN_FALLBACK: hlt, x87, unknown opcodes, far control
+    // Another CPU emulator owns the machine, and takes single instructions back on ENGINE_RUN_FALLBACK: hlt, rare x87, unknown opcodes, far control
     // flow, any MSR outside the syscall family, the APIC. In-VM APIC is off, interrupts come through has_interrupt_waiting and acknowledge_interrupt.
     bool hybrid;
 } EngineConfig;
@@ -56,8 +56,6 @@ typedef enum {
 } EngineRunResult;
 
 // CPU state in QEMU's terms, to fill CPUX86State at a boundary. Segment bases beyond fs and gs are always zero in long mode.
-enum { ENGINE_MMX_ENTERED = 1, ENGINE_MMX_EMMS = 2 };
-
 typedef struct {
     uint64_t gpr[16], rip, rflags;
     uint64_t cr0, cr2, cr3, cr4, cr8, efer;
@@ -68,7 +66,10 @@ typedef struct {
     uint32_t cpl, mxcsr;
     uint64_t xmm[16][2];
     uint64_t mm[8]; // the low 64 bits of the x87 registers, by physical number
-    uint32_t mmx_event; // from engine_get_state: an ENGINE_MMX_ value or 0, and cleared there
+    uint16_t fp_exp[8]; // their sign and exponent
+    uint8_t fp_top, fp_tags; // fp_tags: bit set means in use, QEMU's fptags inverted
+    uint16_t fcw, fsw, fop, fcs, fds; // fsw with the TOP bits clear
+    uint64_t fip, fdp;
     uint64_t apic_base;
     uint32_t apic_tpr, apic_svr, apic_id, apic_ldr, apic_dfr, apic_lvt_timer, apic_lvt[5], apic_tmict, apic_tdcr;
     uint32_t apic_irr[8], apic_isr[8], apic_tmr[8];
@@ -79,6 +80,11 @@ void engine_destroy(EngineHandle *engine);
 // Host pointer to RAM, for loaders and DMA.
 void *engine_ram(EngineHandle *engine);
 // Before the first run: this guest-physical range belongs to a device, though RAM lies behind it. Accesses reach mmio_read and mmio_write.
+// Maps device memory that is plain host RAM into the VM, so that guest access needs no exit. The caller keeps it coherent with anything that watches
+// it, such as a display's dirty log. Page-aligned to the host's page. False if it cannot be done, and the device path goes on serving it.
+bool engine_map_direct(EngineHandle *engine, uint64_t gpa, void *host, uint64_t bytes);
+// Takes it out again, while no guest code is running on the vCPU.
+void engine_unmap_direct(EngineHandle *engine, uint64_t gpa, uint64_t bytes);
 void engine_mark_device(EngineHandle *engine, uint64_t gpa, uint64_t bytes);
 // Runs until something needs the host's attention. The first call starts at state.rip after engine_set_state.
 EngineRunResult engine_run(EngineHandle *engine);

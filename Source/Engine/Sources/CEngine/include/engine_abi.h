@@ -39,7 +39,7 @@
 #define HASH_BYTES (HASH_ENTRIES * 16)
 #define MAX_VIEWS 64 // two per x86 address space. shortcut: no recycling yet, a real guest needs LRU eviction
 #define OFF_BLOCKS (196ULL << 20) // EL1 ro: block table, pc maps
-#define BLOCKS_MAX (1ULL << 20)
+#define BLOCKS_MAX (1ULL << 19) // the table has 16 MB
 #define OFF_PCMAP (212ULL << 20)
 #define PCMAP_BYTES (44ULL << 20)
 #define OFF_PT (256ULL << 20) // EL1 rw: static hole tables, then the shadow pool
@@ -67,6 +67,7 @@ static inline uint64_t engine_off_rstacks(uint32_t cpu) { return cpu ? OFF_RSTAC
 #define PI_CODE 1 // blocks were translated from this frame
 #define PI_PT 2 // a shadow page tracks this frame as a guest page table
 #define PI_RAM 4 // RAM, as opposed to a device hole
+#define PI_DIRECT 8 // device memory mapped straight into the VM: shadows may point at it, and nothing else about RAM holds
 
 // svc immediates from translated code and stubs. Translator requests come first, then x86 events and helpers.
 enum {
@@ -120,6 +121,7 @@ enum {
     SVC_FXRSTOR,
     SVC_MFENCE_UNUSED,
     SVC_CLTS,
+    SVC_X87, // literal: u32 op, u64 rip. x20 the effective address, x16 and x17 a value loaded. Stores: x16 and x17 the value, x23 the state word to commit after it
     // Helpers: operands in x16, x17, x22, x23. Results as documented in monitor.c. Flags come back in x22 (nzcv), x23 (pf), x24 (aux).
     SVC_H_SHIFT = 64, // narrow and rotate-through-carry shifts: x16 value, x17 count, x22 kind|size<<8. x16 result
     SVC_H_SHD, // shld/shrd: x16 dst, x17 src, x22 count, x23 size|isright<<8. x16 result
@@ -171,13 +173,14 @@ enum {
 enum {
     FB_UD, // the decoder knows no such instruction; only the host's CPU model can say whether it exists
     FB_HLT,
-    FB_FX, // fxsave, fxrstor: x87 state is QEMU's
+    FB_FX, // fxsave or fxrstor on a device or tracked frame, with an unmasked MXCSR, or under CR4 and EFER settings the monitor leaves to QEMU
     FB_CR8, // the TPR is in QEMU's APIC
     FB_RDMSR, // a[3] msr
     FB_WRMSR, // a[3] msr
     FB_FETCH_NOT_RAM, // a[3] gpa
     FB_CLTS, // only with LC_HVDBT_CLTS_TCG=1, to compare
     FB_VMPORT, // the VMware backdoor port: its device model reads and writes the CPU's registers, which only TCG's CPU can show it
+    FB_X87, // an x87 operation with an exception unmasked or pending, a[3] its opcode: only TCG raises #MF
 };
 
 // What the kernel model just did, for a person reading the tally: delivery, iret, syscall, sysret, CR3 writes, oldest overwritten. Hybrid only.
@@ -226,8 +229,16 @@ typedef struct {
     uint32_t stepping; // walking to an x86 boundary with the software step
     uint32_t pool_limit; // shadow pool pages, 0 for all of them; tests shrink it
     uint32_t tr_flushed; // the translator reset the code cache; every return stack is stale
-    uint32_t mmx_event; // what MMX last did to the x87 tags here: 0 or an ENGINE_MMX_ value. The host applies it to state it owns.
-    uint64_t mm[8]; // translated code loads and stores these
+    uint32_t direct_flush; // device memory left the VM: shadows may still point at it, drop them before running on
+    // x87 and MMX state, by physical register. mm holds the significands, and translated code loads and stores them.
+    uint64_t mm[8];
+    uint16_t fp_exp[8]; // sign and exponent
+    // One word, so that an x87 store commits with one ARM store once its memory operand is written. MMX writes the first two bytes alone.
+    uint8_t fp_top;
+    uint8_t fp_tags; // bit set: register in use, as FXSAVE's abridged tag
+    uint16_t fsw; // the TOP bits stay zero, TOP is fp_top
+    uint16_t fcw, fop, fcs, fds;
+    uint64_t fip, fdp;
     uint64_t ram_size;
     uint64_t kernel_view_tag;
 
@@ -257,7 +268,7 @@ typedef struct {
     // Frames written behind the monitor's back (DMA, TCG), holding code or page tables. Many producers, consumed in the monitor.
     uint32_t note_head, note_tail, note_overflow, pad4;
     uint32_t note_ring[256]; // frame + 1
-    uint64_t stat_note_code, stat_note_pt, stat_nm, stat_pt_stale;
+    uint64_t stat_note_code, stat_note_pt, stat_nm, stat_pt_stale, stat_links_here;
     uint64_t stat_vector[256], vector_last_rip[256], vector_last_err[256], vector_last_cr3[256]; // every delivery, software int and #GP included
     uint64_t event_next;
     EngineEvent events[EVENT_RING];
@@ -272,6 +283,7 @@ typedef struct {
     uint32_t arm_words;
     uint32_t map_off; // index of the first PcMap in the map array
     uint32_t map_count;
+    uint32_t key, pad; // a view, or a shared domain: links stay within one
 } BlockEntry;
 
 // One x86 instruction boundary inside a block.

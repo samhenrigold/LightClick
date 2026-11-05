@@ -100,6 +100,16 @@ public func engine_run(_ h: OpaquePointer) -> UInt32 {
 @_cdecl("engine_error_text")
 public func engine_error_text(_ h: OpaquePointer) -> UnsafePointer<CChar>? { UnsafePointer(handle(h).error) }
 
+@_cdecl("engine_map_direct")
+public func engine_map_direct(_ h: OpaquePointer, _ gpa: UInt64, _ host: UnsafeMutableRawPointer, _ bytes: UInt64) -> Bool {
+    handle(h).engine.mapDirect(gpa: gpa, host: host, bytes: bytes)
+}
+
+@_cdecl("engine_unmap_direct")
+public func engine_unmap_direct(_ h: OpaquePointer, _ gpa: UInt64, _ bytes: UInt64) {
+    handle(h).engine.unmapDirect(gpa: gpa, bytes: bytes)
+}
+
 @_cdecl("engine_mark_device")
 public func engine_mark_device(_ h: OpaquePointer, _ gpa: UInt64, _ bytes: UInt64) { handle(h).engine.markDevice(gpa: gpa, bytes: bytes) }
 
@@ -213,8 +223,16 @@ extension Engine {
         s.mxcsr = mxcsr()
         readXMM(into: &s)
         s.mm = c.pointee.mm
-        s.mmx_event = c.pointee.mmx_event
-        c.pointee.mmx_event = 0
+        s.fp_exp = c.pointee.fp_exp
+        s.fp_top = c.pointee.fp_top
+        s.fp_tags = c.pointee.fp_tags
+        s.fcw = c.pointee.fcw
+        s.fsw = c.pointee.fsw
+        s.fop = c.pointee.fop
+        s.fcs = c.pointee.fcs
+        s.fds = c.pointee.fds
+        s.fip = c.pointee.fip
+        s.fdp = c.pointee.fdp
         s.apic_base = c.pointee.apic_base | (c.pointee.apic_enabled != 0 ? 1 << 11 : 0)
         s.apic_tpr = c.pointee.apic_tpr
         s.apic_svr = c.pointee.apic_svr
@@ -267,6 +285,16 @@ extension Engine {
         c.pointee.resume_mxcsr = s.mxcsr
         writeXMM(from: s)
         c.pointee.mm = s.mm
+        c.pointee.fp_exp = s.fp_exp
+        c.pointee.fp_top = s.fp_top & 7
+        c.pointee.fp_tags = s.fp_tags
+        c.pointee.fcw = s.fcw
+        c.pointee.fsw = s.fsw & ~0x3800
+        c.pointee.fop = s.fop
+        c.pointee.fcs = s.fcs
+        c.pointee.fds = s.fds
+        c.pointee.fip = s.fip
+        c.pointee.fdp = s.fdp
         c.pointee.req_r.0 = s.rip
     }
 

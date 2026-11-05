@@ -124,6 +124,7 @@ enum {
     OP_STMXCSR,
     OP_FXSAVE,
     OP_FXRSTOR,
+    OP_X87, // sub: low three bits of the escape byte, 8 for fwait. opc: the modrm byte
     OP_RDFSGS_UNUSED,
 };
 
@@ -278,6 +279,7 @@ void emit_stop(u64 rip, const char *why);
 
 void emit_int(const Insn *in, int live); // every non-control x86 op
 void emit_sse(const Insn *in, int live); // OP_SSE, ldmxcsr, stmxcsr
+void emit_x87(const Insn *in); // OP_X87
 
 // Stub entry points, relative to the stubs region. Filled in by the Swift loader from the monitor image's symbols.
 extern u64 tr_stub_lookup, tr_stub_ret_miss, tr_stub_pushf, tr_stub_sahf;

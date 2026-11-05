@@ -404,7 +404,9 @@ public final class Engine {
             let rip = c.pointee.req_a.1
             let site = c.pointee.req_a.2
             let kind = Int32(c.pointee.req_a.3)
+            let coldBefore = tally != nil ? tr_stats().blocks : 0
             let result = tr_translate(view, c.pointee.req_a.5, Int32(c.pointee.cpl), rip, c.pointee.req_a.4 != 0)
+            if let tally, c.pointee.cpl == 3, tr_stats().blocks != coldBefore { tally.coldUserBlock(rip: rip, cr3: c.pointee.req_a.5) }
             if result.fetch_fault_va != 0 {
                 c.pointee.req_r.1 = result.fetch_fault_va + 1
                 return nil
@@ -419,6 +421,7 @@ public final class Engine {
                 tr_hash_insert(view, rip, result.arm)
             } else if site != 0 {
                 tr_link(site, kind, result.arm, result.key)
+                tr_hash_insert(view, rip, result.arm) // so the next site with this target links in the monitor
             }
         case Int(HC_SMC):
             _ = tr_invalidate_frame(c.pointee.req_a.0, UInt32(c.pointee.req_a.1))
@@ -540,14 +543,15 @@ public final class Engine {
                 3: "split locked access", 4: "mmio form: pair, atomic or SIMD to a device", 5: "split store on a page table",
                 6: "sysret to compatibility mode", 7: "16 or 32-bit iret", 8: "iret to compatibility mode", 9: "TF set",
                 10: "CR0 write: paging, protection or WP off", 11: "CR4 write: unsupported bit", 13: "non-flat fs or gs",
-                14: "unmasked SSE exceptions", 15: "split access across a device page",
+                14: "unmasked SSE exceptions", 15: "split access across a device page", 16: "x87 with an exception unmasked or pending", 17: "x87 area on a device",
             ]
             return names[a.2] ?? "unsupported case \(a.2)"
         default:
             switch Int(a.2) {
             case Int(FB_UD): return "unknown opcode: #UD or a feature only TCG has"
             case Int(FB_HLT): return "hlt"
-            case Int(FB_FX): return "fxsave, fxrstor: x87 state is TCG's"
+            case Int(FB_FX): return "fxsave, fxrstor: a device, a tracked frame, an unmasked MXCSR or no OSFXSR"
+            case Int(FB_X87): return "x87 with an exception unmasked or pending"
             case Int(FB_CR8): return "mov cr8: the TPR is in QEMU's APIC"
             case Int(FB_RDMSR): return "rdmsr \(hex(a.3))"
             case Int(FB_WRMSR): return "wrmsr \(hex(a.3))"
@@ -602,6 +606,24 @@ public final class Engine {
     public func host(_ gpa: UInt64) -> UnsafeMutableRawPointer? {
         guard gpa < ramTop, (priv + Int(kOffPageInfo)).load(fromByteOffset: Int(gpa >> 12), as: UInt8.self) & UInt8(PI_RAM) != 0 else { return nil }
         return ram + Int(ramTop > options.ramBytes && gpa >= 1 << 32 ? gpa - (1 << 32) + options.ramBelow4G : gpa)
+    }
+
+    public func mapDirect(gpa: UInt64, host: UnsafeMutableRawPointer, bytes: UInt64) -> Bool {
+        // A frame must be describable to the monitor, and must not be RAM already.
+        guard gpa + bytes <= ramTop else { return false }
+        let pageInfo = (priv + Int(kOffPageInfo)).assumingMemoryBound(to: UInt8.self)
+        for frame in stride(from: gpa >> 12, to: (gpa + bytes) >> 12, by: 1) where pageInfo[Int(frame)] & UInt8(PI_RAM) != 0 { return false }
+        let rwx = hv_memory_flags_t(HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC)
+        guard hv_vm_map(host, gpa, Int(bytes), rwx) == HV_SUCCESS else { return false }
+        for frame in stride(from: gpa >> 12, to: (gpa + bytes) >> 12, by: 1) { pageInfo[Int(frame)] |= UInt8(PI_DIRECT) }
+        return true
+    }
+
+    public func unmapDirect(gpa: UInt64, bytes: UInt64) {
+        let pageInfo = (priv + Int(kOffPageInfo)).assumingMemoryBound(to: UInt8.self)
+        for frame in stride(from: gpa >> 12, to: (gpa + bytes) >> 12, by: 1) { pageInfo[Int(frame)] &= ~UInt8(PI_DIRECT) }
+        ctx.pointee.direct_flush = 1
+        hv_vm_unmap(gpa, Int(bytes))
     }
 
     /// Before the first run: a device answers for this range, whatever RAM lies behind it.

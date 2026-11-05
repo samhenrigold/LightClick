@@ -486,6 +486,9 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
             case OP_STMXCSR:
                 emit_sse(in, live_after[i]);
                 break;
+            case OP_X87:
+                emit_x87(in);
+                break;
             case OP_SYSCALL:
             case OP_SYSRET:
             case OP_IRET:
@@ -583,6 +586,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     }
     BlockEntry *be = &block_table[idx];
     be->rip = rip;
+    be->key = hb->view;
     be->arm_off = (u32)(start - cc_base);
     be->arm_words = (u32)(tr_cc - start);
     be->map_off = map0;
@@ -657,9 +661,31 @@ static void emit_monitor_op(const Insn *in) {
         case OP_CPUID:
             svc(SVC_CPUID);
             break;
-        case OP_RDTSC:
-            svc(SVC_RDTSC);
+        case OP_RDTSC: {
+            // tsc_now(), in place. CNTKCTL lets EL0 read the virtual counter, and nothing else runs ARM at EL0.
+            Addr a = {.base = CTX};
+            E(0xD53BE040u | S0); // mrs x, cntvct_el0
+            movimm(S1, 125);
+            mul(1, S0, S0, S1);
+            movimm(S1, 3);
+            udiv(1, S0, S0, S1);
+            a.imm = __builtin_offsetof(EngineCtx, tsc_ns_offset);
+            ldst(1, 8, S1, a);
+            add_reg(1, 0, 0, S0, S0, S1, 0);
+            a.imm = __builtin_offsetof(EngineCtx, tsc_num);
+            ldst(1, 8, S1, a);
+            mul(1, S1, S0, S1);
+            a.imm = __builtin_offsetof(EngineCtx, tsc_den);
+            ldst(1, 8, S2, a);
+            udiv(1, S1, S1, S2);
+            add_reg(1, 0, 0, S0, S0, S1, 0);
+            a.imm = __builtin_offsetof(EngineCtx, tsc_offset);
+            ldst(1, 8, S1, a);
+            add_reg(1, 0, 0, S0, S0, S1, 0);
+            mov_reg(0, 0, S0);
+            lsr_imm(1, 2, S0, 32);
             break;
+        }
         case OP_RDTSCP:
             svc(SVC_RDTSCP);
             break;
@@ -669,16 +695,60 @@ static void emit_monitor_op(const Insn *in) {
         case OP_WRMSR:
             svc(SVC_WRMSR);
             break;
-        case OP_CLI:
-            svc(SVC_CLI);
+        case OP_CLI: {
+            if (tr_cpl != 0) { // IOPL is the monitor's to check
+                svc(SVC_CLI);
+                break;
+            }
+            Addr a = {.base = CTX, .imm = __builtin_offsetof(EngineCtx, rflags_sys)};
+            ldst(1, 8, S0, a);
+            movimm(S1, 0x200);
+            logic_sh(1, 0, 1, S0, S0, S1, 0, 0); // bic
+            ldst(0, 8, S0, a);
             break;
-        case OP_STI:
+        }
+        case OP_STI: {
+            if (tr_cpl != 0 || !tr_hybrid) { // the in-VM APIC's vectors are the monitor's to look at
+                svc(SVC_STI);
+                break;
+            }
+            // Opens IF and the one-instruction shadow, as the monitor does. With an interrupt already waiting it goes on through the monitor, whose
+            // way out takes it; one that arrives later raises an IRQ here, which goes there too.
+            Addr a = {.base = CTX, .imm = __builtin_offsetof(EngineCtx, rflags_sys)};
+            ldst(1, 8, S0, a);
+            u32 *already = tr_cc;
+            E(0x37000000u | 9u << 19 | S0); // tbnz x, #9
+            movimm(S1, 0x200);
+            logic_sh(1, 1, 0, S0, S0, S1, 0, 0);
+            ldst(0, 8, S0, a);
+            movimm(S1, in->next);
+            a.imm = __builtin_offsetof(EngineCtx, irq_shadow_rip);
+            ldst(0, 8, S1, a);
+            a.imm = __builtin_offsetof(EngineCtx, irq_pending);
+            ldst(1, 4, S0, a);
+            a.imm = __builtin_offsetof(EngineCtx, irq_line);
+            ldst(1, 4, S1, a);
+            logic_sh(0, 1, 0, S0, S0, S1, 0, 0);
+            u32 *quiet = tr_cc;
+            cbz(0, 0, S0, 0);
             svc(SVC_STI);
+            *already |= ((u32)(tr_cc - already) & 0x3fff) << 5;
+            *quiet |= ((u32)(tr_cc - quiet) & 0x7ffff) << 5;
             break;
+        }
         case OP_MOV_CR: {
             int cr = in->reg;
             if (cr != 0 && cr != 2 && cr != 3 && cr != 4 && cr != 8) {
                 svc(SVC_UD);
+                break;
+            }
+            if (in->to_reg && cr != 8) { // the context holds them, and only the monitor changes them
+                Addr a = {.base = CTX};
+                a.imm = cr == 0   ? __builtin_offsetof(EngineCtx, cr0)
+                        : cr == 2 ? __builtin_offsetof(EngineCtx, cr2)
+                        : cr == 3 ? __builtin_offsetof(EngineCtx, cr3)
+                                  : __builtin_offsetof(EngineCtx, cr4);
+                ldst(1, 8, in->rm, a);
                 break;
             }
             movimm(S0, (u64)cr);
@@ -720,7 +790,10 @@ static void emit_monitor_op(const Insn *in) {
                 svc(in->sub == 0 ? SVC_LGDT : SVC_LIDT);
             } else {
                 mov_reg(1, S2, r);
-                svc(in->sub == 2 ? SVC_SGDT : SVC_SIDT);
+                Addr from = {.base = CTX, .imm = in->sub == 2 ? __builtin_offsetof(EngineCtx, gdtr_base) : __builtin_offsetof(EngineCtx, idtr_base)};
+                ldst(1, 8, S0, from);
+                from.imm = in->sub == 2 ? __builtin_offsetof(EngineCtx, gdtr_limit) : __builtin_offsetof(EngineCtx, idtr_limit);
+                ldst(1, 4, S1, from);
                 Addr a = {.base = S2};
                 ldst(0, 2, S1, a);
                 a.imm = 2;
@@ -748,14 +821,15 @@ static void emit_monitor_op(const Insn *in) {
             break;
         }
         case OP_MOV_SEG: {
-            movimm(S0, in->sub);
             if (in->to_reg) {
-                svc(SVC_MOV_SEG_READ);
+                Addr from = {.base = CTX, .imm = (i64)__builtin_offsetof(EngineCtx, seg_sel) + in->sub * 2};
+                ldst(1, 2, S0, from);
                 if (in->rm_reg)
                     gpr_write(in->rm, in->sz == 2 ? 2 : in->sz, false, S0);
                 else
                     ldst(0, 2, S0, addr_prepare(in, 2));
             } else {
+                movimm(S0, in->sub);
                 if (in->rm_reg)
                     mov_reg(1, S1, in->rm);
                 else
@@ -787,10 +861,12 @@ static void emit_monitor_op(const Insn *in) {
             break;
         case OP_FXSAVE:
         case OP_FXRSTOR: {
-            // Probe both ends, so the monitor's access cannot fault for the guest's reasons.
+            // Probe both ends, so the monitor's access cannot fault for the guest's reasons. TS comes before any fault, hence the NEON word first.
+            E(0x4F00E400u | V_MEM);
             int r = addr_reg(in);
             if (r != S0)
                 mov_reg(1, S0, r);
+            movimm(S2, in->sz == 8);
             ubfx(1, S1, S0, 0, 4);
             cbz(0, 1, S1, 2);
             svc(SVC_GP0);
