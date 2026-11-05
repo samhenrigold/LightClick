@@ -1,4 +1,5 @@
 #import "VIMGuestBootPolicy.h"
+#import "VIMGuestProfile.h"
 #import "VIMGuestAgent.h"
 #include <fcntl.h>
 #include <unistd.h>
@@ -49,7 +50,7 @@ static BOOL SavePolicy(NSDictionary *record,NSURL *file,NSError **error) {
 + (void)prepareWithAgent:(VIMGuestAgent *)agent report:(NSDictionary *)report identifier:(NSString *)identifier
                 journal:(NSURL *)journal tools:(NSURL *)tools completion:(void (^)(BOOL,NSError *))completion {
     VIMGuestBootPolicy *operation=[self new];operation.agent=agent;operation.report=[report copy];operation.journal=journal;operation.tools=tools;operation.completion=completion;
-    if(![@[@"mojave",@"catalina",@"bigsur"] containsObject:report[@"Guest"]]||
+    if(!VIMGuestHasTrait(report[@"Guest"],VIMGuestTraitParavirtualizedGraphics)||
        ![report[@"InstalledSystemCandidate"] isEqual:@YES]||![report[@"LiveRoot"] isEqual:@YES]||
        ![report[@"KernelMatchesSystem"] isEqual:@YES]||!identifier.length) {
         completion(NO,PolicyError(@"Guest boot-policy preparation requires a matching installed system."));return;

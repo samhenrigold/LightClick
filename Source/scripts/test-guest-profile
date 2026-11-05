@@ -1,0 +1,7 @@
+#!/bin/zsh
+set -euo pipefail
+root=${0:A:h:h}
+mkdir -p "$root/Build/Probes"
+xcrun clang -fobjc-arc -fmodules -Wall -I "$root/VirtualIntelMac" -framework Foundation \
+    "$root/probes/guest-profile-tests.m" -o "$root/Build/Probes/guest-profile-tests"
+exec "$root/Build/Probes/guest-profile-tests"

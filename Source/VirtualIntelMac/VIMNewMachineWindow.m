@@ -1,4 +1,5 @@
 #import "VIMNewMachineWindow.h"
+#import "VIMGuestProfile.h"
 #import "VIMMachine.h"
 #import "VIMLibraryLocation.h"
 #import "VIMSession.h"
@@ -19,7 +20,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-static NSArray<NSString *> *CreationGuests(void) {return @[@"tiger",@"leopard",@"snowleopard",@"lion",@"mountainlion",@"mavericks",@"yosemite",@"elcapitan",@"sierra",@"highsierra",@"mojave",@"catalina",@"bigsur"];}
+static NSArray<NSString *> *CreationGuests(void) {return VIMGuestIdentifiers();}
 static NSArray<NSString *> *CreationNames(void) {return @[@"Tiger",@"Leopard",@"Snow Leopard",@"Lion",@"Mountain Lion",@"Mavericks",@"Yosemite",@"El Capitan",@"Sierra",@"High Sierra",@"Mojave",@"Catalina",@"Big Sur"];}
 
 // Keep linked alert prose in AppKit's informative-text column, not a separately
@@ -249,7 +250,7 @@ static VIMNewMachineWindow *creationController;
     // Volatile launch defaults can exercise the real recovery sheet without
     // downloading, overwriting a saved job or creating another VM.
     if([NSUserDefaults.standardUserDefaults boolForKey:@"VIMSimulateArchiveDownloadFailure"]&&
-       [@[@"tiger",@"leopard",@"snowleopard"] containsObject:guest]) {
+       VIMGuestHasTrait(guest,VIMGuestTraitRestoreDVD)) {
         NSURL *source=[NSURL URLWithString:[VIMInstallerCatalog fileForGuest:guest role:@"diskimage"][@"URL"]];
         [creationController presentDownloadFailure:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorNotConnectedToInternet userInfo:nil] source:source];
     }
@@ -715,7 +716,7 @@ static VIMNewMachineWindow *creationController;
     for(VIMSystemOption *option in self.systemOptions)option.state=option.tag==sender.tag?NSControlStateValueOn:NSControlStateValueOff;
     NSString *guest=CreationGuests()[self.system.indexOfSelectedItem];
     self.mediaLabel.stringValue=[NSString stringWithFormat:@"%@ will be downloaded from %@ and prepared automatically.",
-        VIMOperatingSystemName(guest),[@[@"tiger",@"leopard",@"snowleopard"] containsObject:guest]?@"the Internet Archive":@"Apple"];
+        VIMOperatingSystemName(guest),VIMGuestHasTrait(guest,VIMGuestTraitRestoreDVD)?@"the Internet Archive":@"Apple"];
 }
 - (void)continueToConfiguration:(id)sender {
     self.showingProgress=NO;
@@ -881,7 +882,7 @@ static VIMNewMachineWindow *creationController;
     }
     self.job[@"Name"]=self.nameField.stringValue;self.job[@"CPU"]=@(self.cpuField.integerValue);
     self.job[@"Memory"]=@(self.memoryField.integerValue);self.job[@"Disk"]=@(self.diskField.integerValue);
-    BOOL restoreSource=[@[@"tiger",@"leopard",@"snowleopard"] containsObject:guest]&&[self.installer.pathExtension.lowercaseString isEqual:@"dmg"];
+    BOOL restoreSource=VIMGuestHasTrait(guest,VIMGuestTraitRestoreDVD)&&[self.installer.pathExtension.lowercaseString isEqual:@"dmg"];
     if([self.installer.pathExtension.lowercaseString isEqual:@"app"]||restoreSource){self.job[@"SourceInstaller"]=self.installer.path;[self.job removeObjectForKey:@"Media"];}
     else if(self.installer){self.job[@"Media"]=self.installer.path;[self.job removeObjectForKey:@"SourceInstaller"];}
     [self saveJob];
@@ -917,10 +918,10 @@ static VIMNewMachineWindow *creationController;
     NSStackView *heading=[self headingWithTitle:title guest:self.job[@"Guest"]];
     NSString *os=VIMOperatingSystemName(self.job[@"Guest"]);
     NSString *preparation=existing?[NSString stringWithFormat:@"We’ll prepare your %@ installer.",os]:
-        [@[@"tiger",@"leopard",@"snowleopard"] containsObject:self.job[@"Guest"]]?[NSString stringWithFormat:@"We’ll download Mac OS X %@ from the Internet Archive and prepare its installer.",CreationNames()[[CreationGuests() indexOfObject:self.job[@"Guest"]]]]:
+        VIMGuestHasTrait(self.job[@"Guest"],VIMGuestTraitRestoreDVD)?[NSString stringWithFormat:@"We’ll download Mac OS X %@ from the Internet Archive and prepare its installer.",CreationNames()[[CreationGuests() indexOfObject:self.job[@"Guest"]]]]:
         [NSString stringWithFormat:@"We’ll download %@ from Apple and prepare its installer.",os];
     NSString *instructions=[self.job[@"AutomaticSetup"][@"Enabled"] boolValue]?@"Your virtual Mac will install and set itself up automatically.":
-        [@[@"tiger",@"leopard",@"snowleopard"] containsObject:self.job[@"Guest"]]?@"When the installer opens, follow the onscreen instructions and install on Macintosh HD.":
+        VIMGuestHasTrait(self.job[@"Guest"],VIMGuestTraitRestoreDVD)?@"When the installer opens, follow the onscreen instructions and install on Macintosh HD.":
         [NSString stringWithFormat:@"When %@ Utilities appears, choose Reinstall %@ and install on Macintosh HD.",os,os];
     NSTextField *intro=AssistantText([NSString stringWithFormat:@"%@ %@ Installation may take up to 2 hours.",preparation,instructions],13,NSFontWeightRegular);
     NSMutableParagraphStyle *paragraph=[NSMutableParagraphStyle new];paragraph.lineSpacing=4;paragraph.lineBreakMode=NSLineBreakByWordWrapping;
@@ -1018,7 +1019,7 @@ static VIMNewMachineWindow *creationController;
     }
     NSURL *source=[NSURL URLWithString:self.files[self.fileIndex][@"URL"]];
     if([NSUserDefaults.standardUserDefaults boolForKey:@"VIMSimulateArchiveDownloadFailure"]&&
-       [@[@"tiger",@"leopard",@"snowleopard"] containsObject:self.job[@"Guest"]]){
+       VIMGuestHasTrait(self.job[@"Guest"],VIMGuestTraitRestoreDVD)){
         [self stopLengthProbes];[self setPhase:@"failed"];
         [self presentDownloadFailure:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorNotConnectedToInternet userInfo:nil] source:source];return;
     }

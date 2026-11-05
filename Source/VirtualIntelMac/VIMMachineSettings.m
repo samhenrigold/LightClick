@@ -1,4 +1,5 @@
 #import "VIMMachineSettings.h"
+#import "VIMGuestProfile.h"
 #import "VIMSettingsIcon.h"
 #import "VIMMachine.h"
 #import "VIMSession.h"
@@ -226,7 +227,7 @@ static void VIMAlignFormBaselines(NSView *view) {
     return [NSButton buttonWithTitle:title target:self action:action];
 }
 - (NSView *)general {
-    NSString *system=@{@"tiger":@"Mac OS X Tiger 10.4",@"leopard":@"Mac OS X Leopard 10.5",@"snowleopard":@"Mac OS X Snow Leopard 10.6",@"lion":@"Mac OS X Lion 10.7",@"mountainlion":@"OS X Mountain Lion 10.8",@"mavericks":@"OS X Mavericks 10.9",@"yosemite":@"OS X Yosemite 10.10",@"elcapitan":@"OS X El Capitan 10.11",@"sierra":@"macOS Sierra 10.12",@"highsierra":@"macOS High Sierra 10.13",@"mojave":@"macOS Mojave 10.14",@"catalina":@"macOS Catalina 10.15",@"bigsur":@"macOS Big Sur 11"}[self.machine.guest]?:@"Mac OS";
+    NSString *system=VIMGuestSystemName(self.machine.guest)?:@"Mac OS";
     NSTextField *name=[self field:@"Name" value:self.machine.pendingName?:self.machine.name];
     NSImage *identityImage=[NSImage imageNamed:[self.machine.guest stringByAppendingString:@"Roundel"]]?:
         [NSImage imageNamed:[self.machine.guest stringByAppendingString:@"ProductIcon"]]?:
@@ -414,7 +415,7 @@ static void VIMAlignFormBaselines(NSView *view) {
     NSString *hostSettings=hostVersion>=13?@"System Settings → General → Sharing":@"System Preferences → Sharing";
     if(host) {
         BOOL windowsFileSharing=files&&
-            [@[@"tiger",@"leopard",@"snowleopard"] containsObject:self.machine.guest];
+            VIMGuestHasTrait(self.machine.guest,VIMGuestTraitWindowsFileSharing);
         NSString *sharingInstructions=windowsFileSharing?
             @"1. On this Mac, go to System Settings → General → Sharing. Click the info button next to File Sharing and turn it on. Click Options, turn on SMB sharing, then select your account under Windows File Sharing and enter its password.":
             [NSString stringWithFormat:@"1. On this Mac, open %@ and enable %@.",hostSettings,files?@"File Sharing":@"Remote Login"];

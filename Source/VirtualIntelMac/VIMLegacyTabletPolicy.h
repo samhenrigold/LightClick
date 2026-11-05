@@ -1,8 +1,9 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "VIMGuestProfile.h"
 
 static inline BOOL VIMUsesLegacyTabletCalibration(NSString *guest) {
-    return [@[@"tiger",@"leopard",@"snowleopard",@"lion",@"mountainlion",@"mavericks"] containsObject:guest];
+    return VIMGuestHasTrait(guest,VIMGuestTraitLegacyTabletCalibration);
 }
 
 static inline NSUInteger VIMInitialTabletTrim(NSString *guest, BOOL installer) {

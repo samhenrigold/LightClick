@@ -1,4 +1,5 @@
 #import "VIMSession.h"
+#import "VIMGuestProfile.h"
 #import "VIMSymbolImages.h"
 #import "AppDelegate.h"
 #import "VIMMachine.h"
@@ -141,7 +142,7 @@ static NSString *VIMMultiMachineDiagnosticDirectory(NSArray<NSString *> *argumen
         self.playButton.toolTip=@"Start this Mac";self.playButton.accessibilityLabel=[@"Start " stringByAppendingString:name];self.playButton.keyEquivalent=@"\r";
         [self addSubview:self.playButton];
         NSImage *product=[NSImage imageNamed:[guest stringByAppendingString:@"ProductIcon"]];
-        if(!product&&![@[@"tiger",@"leopard",@"snowleopard"] containsObject:guest])
+        if(!product&&!VIMGuestHasTrait(guest,VIMGuestTraitNoRoundelArtwork))
             product=[NSImage imageNamed:[guest stringByAppendingString:@"Roundel"]];
         self.mark=[NSImageView imageViewWithImage:product?:NSApp.applicationIconImage];
         self.mark.imageScaling=NSImageScaleProportionallyUpOrDown;[self addSubview:self.mark];
@@ -633,7 +634,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     [self.guestAgent connectWithCompletion:^(NSError *error){if(error){finish(error);return;}[self.guestAgent openHostConnection:URL completion:finish];}];
 }
 + (BOOL)prepareMachineAfterHostCheck:(VIMMachine *)machine error:(NSError **)error {
-    if(![@[@"mojave",@"catalina",@"bigsur"] containsObject:machine.guest]) {
+    if(!VIMGuestHasTrait(machine.guest,VIMGuestTraitParavirtualizedGraphics)) {
         if(error)*error=VIMSessionError(@"Guest preparation supports Mojave, Catalina and Big Sur.");return NO;
     }
     if(![self openMachineAfterHostCheck:machine error:error])return NO;
@@ -668,7 +669,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     return YES;
 }
 + (BOOL)repairMachineAfterHostCheck:(VIMMachine *)machine error:(NSError **)error {
-    if(![@[@"mojave",@"catalina",@"bigsur"] containsObject:machine.guest]) {
+    if(!VIMGuestHasTrait(machine.guest,VIMGuestTraitParavirtualizedGraphics)) {
         if(error)*error=VIMSessionError(@"Repair supports Mojave, Catalina and Big Sur.");return NO;
     }
     if(![self openMachineAfterHostCheck:machine error:error])return NO;
@@ -2630,7 +2631,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     BOOL idle=self.task.running&&!self.preparing&&!self.preparationRequested&&!self.guestPending&&!self.relaunchForGraphics;
     BOOL recorded=[NSFileManager.defaultManager fileExistsAtPath:[self.machine.URL URLByAppendingPathComponent:@"State/GuestInstallation.plist"].path];
     if(item.action==@selector(checkGraphicsSetup:))return idle&&recorded;
-    if(item.action==@selector(finishGraphicsSetup:))return idle&&[@[@"mojave",@"catalina",@"bigsur"] containsObject:self.machine.guest];
+    if(item.action==@selector(finishGraphicsSetup:))return idle&&VIMGuestHasTrait(self.machine.guest,VIMGuestTraitParavirtualizedGraphics);
     return YES;
 }
 - (void)menuWillOpen:(NSMenu *)menu {
@@ -2796,7 +2797,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
 - (void)ensureUSBClient {
     if(!self.usbClient) {
         self.usbClient=[VIMUSBClient new];
-        self.usbClient.useUSB2Storage=[@[@"tiger",@"leopard",@"snowleopard"] containsObject:self.machine.guest];
+        self.usbClient.useUSB2Storage=VIMGuestHasTrait(self.machine.guest,VIMGuestTraitUSB2StoragePassthrough);
     }
 }
 - (void)toggleUSBDevice:(NSMenuItem *)sender {
@@ -3367,7 +3368,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     NSDictionary *setup=[NSDictionary dictionaryWithContentsOfURL:[self.machine.URL URLByAppendingPathComponent:@"State/AutomaticSetup.plist"]];
     BOOL automatic=[setup[@"Enabled"] boolValue];
     NSString *instructions=automatic?@"Your virtual Mac will install the operating system and create your account automatically. You don’t need to erase the disk or choose Reinstall.":
-        [@[@"tiger",@"leopard",@"snowleopard"] containsObject:self.machine.guest]?@"Follow the installer’s onscreen instructions and select Macintosh HD as the destination.":
+        VIMGuestHasTrait(self.machine.guest,VIMGuestTraitRestoreDVD)?@"Follow the installer’s onscreen instructions and select Macintosh HD as the destination.":
         [NSString stringWithFormat:@"In %@ Utilities, choose Reinstall %@, then select Macintosh HD as the destination. Don’t select the Base System; it contains the installer.",os,os];
     alert.informativeText=[instructions stringByAppendingString:@"\n\nYour Mac may restart several times. Graphics support is installed automatically after setup. Keep this Mac running while setup finishes. Installation may take up to 2 hours."];
     [alert beginSheetModalForWindow:self.window completionHandler:nil];

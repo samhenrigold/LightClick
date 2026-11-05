@@ -1,4 +1,5 @@
 #import "VIMGuestPreparation.h"
+#import "VIMGuestProfile.h"
 #import "VIMGuestAgent.h"
 #import "VIMQMPConnection.h"
 #import "VIMGuestProgress.h"
@@ -96,7 +97,7 @@ static NSDictionary *CommandJSON(NSDictionary *r) {
 - (void)start {
     NSAssert(NSThread.isMainThread,@"Guest preparation is main-thread owned");
     NSDictionary *report=self.initialReport;NSString *guest=report[@"Guest"];
-    if(![@[@"mojave",@"catalina",@"bigsur"] containsObject:guest]||![report[@"LiveRoot"] isEqual:@YES]||
+    if(!VIMGuestHasTrait(guest,VIMGuestTraitParavirtualizedGraphics)||![report[@"LiveRoot"] isEqual:@YES]||
        ![report[@"KernelMatchesSystem"] isEqual:@YES]||![report[@"InstalledSystemCandidate"] isEqual:@YES]||
        (!self.headlessRepair&&![report[@"DesktopRunning"] isEqual:@YES])||
        ![report[@"VolumeUUID"] isKindOfClass:NSString.class]||![report[@"VolumeUUID"] length]) {

@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import "VIMGuestProfile.h"
 @import CoreAudio;
 #include <stddef.h>
 #include <math.h>
@@ -60,7 +61,7 @@ static inline NSString *VIMAudioSelection(NSDictionary *configuration,BOOL input
     return configuration[input?@"AudioInputDevice":@"AudioOutputDevice"]?:@"default";
 }
 static inline BOOL VIMGuestSupportsRetinaDisplay(NSDictionary *configuration) {
-    return ![@[@"tiger",@"leopard",@"snowleopard"] containsObject:configuration[@"Guest"]?:@""];
+    return !VIMGuestHasTrait(configuration[@"Guest"],VIMGuestTraitNoBackingScale);
 }
 static inline NSString *VIMDisplayMode(NSDictionary *configuration) {
     NSString *mode=configuration[@"DisplayMode"];

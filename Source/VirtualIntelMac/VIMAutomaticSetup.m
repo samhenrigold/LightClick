@@ -1,4 +1,5 @@
 #import "VIMAutomaticSetup.h"
+#import "VIMGuestProfile.h"
 #import "VIMMachine.h"
 #import <Security/Security.h>
 #include <sys/stat.h>
@@ -30,7 +31,7 @@ static int CredentialDirectory(BOOL create,NSError **error) {
 }
 static BOOL PrivateCredential(struct stat *st) {return S_ISREG(st->st_mode)&&st->st_uid==getuid()&&st->st_nlink==1&&!(st->st_mode&0077)&&st->st_size<=511;}
 @implementation VIMAutomaticSetup
-+ (BOOL)supportsGuest:(NSString *)guest {return [@[@"tiger",@"leopard",@"snowleopard",@"lion",@"mountainlion",@"mavericks",@"yosemite",@"elcapitan",@"sierra",@"highsierra",@"mojave",@"catalina",@"bigsur"] containsObject:guest];}
++ (BOOL)supportsGuest:(NSString *)guest {return VIMGuestIsSupported(guest);}
 + (NSDictionary *)installerConfigurationForVolumeUUID:(NSString *)UUID error:(NSError **)error {
     if(![UUID isKindOfClass:NSString.class]||![[NSUUID alloc] initWithUUIDString:UUID]||
        [UUID isEqual:@"00000000-0000-0000-0000-000000000000"]){SetupFailure(error,@"The new Macintosh HD could not be identified safely.");return nil;}

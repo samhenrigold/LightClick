@@ -1,4 +1,5 @@
 #import "VIMInstallerCatalog.h"
+#import "VIMGuestProfile.h"
 #import "VIMInstallerSource.h"
 static NSError *CatalogError(NSString *text) {
     return [NSError errorWithDomain:@"VirtualIntelMac.Installers" code:1 userInfo:@{NSLocalizedDescriptionKey:text}];
@@ -36,7 +37,7 @@ static NSError *CatalogError(NSString *text) {
     if(valid)for(id entry in object[@"Installers"]) {
         if(![entry isKindOfClass:NSDictionary.class]) { valid=NO;break; }
         NSString *guest=entry[@"Guest"],*assembly=entry[@"Assembly"];
-        if(![@[@"tiger",@"leopard",@"snowleopard",@"lion",@"mountainlion",@"mavericks",@"yosemite",@"elcapitan",@"sierra",@"highsierra",@"mojave",@"catalina",@"bigsur"] containsObject:guest?:@""] || [guests containsObject:guest] ||
+        if(!VIMGuestIsSupported(guest) || [guests containsObject:guest] ||
             ![entry[@"Name"] isKindOfClass:NSString.class] || ![entry[@"Name"] length] || [entry[@"Name"] length]>80 ||
             ![entry[@"Version"] isKindOfClass:NSString.class] || [entry[@"Version"] length]>30 ||
             ![@[@"split-legacy",@"assistant-pkg",@"installer-dmg",@"recovery-esd",@"restore-dvd"] containsObject:assembly?:@""] || ![entry[@"Files"] isKindOfClass:NSArray.class]) { valid=NO;break; }

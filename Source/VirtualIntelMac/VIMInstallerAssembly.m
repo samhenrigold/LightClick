@@ -1,4 +1,5 @@
 #import "VIMInstallerAssembly.h"
+#import "VIMGuestProfile.h"
 #include "../tools/opengl-installer-paths.h"
 #import <signal.h>
 #import <fcntl.h>
@@ -132,7 +133,7 @@ static NSDictionary<NSString *,NSString *> *InstallerIdentifiers(void) {
 }
 static BOOL InstallerVersionMatches(id version,NSString *guest) {
     if(![version isKindOfClass:NSString.class])return NO;
-    NSString *family=@{@"tiger":@"10.4",@"leopard":@"10.5",@"snowleopard":@"10.6",@"lion":@"10.7",@"mountainlion":@"10.8",@"mavericks":@"10.9",@"yosemite":@"10.10",@"elcapitan":@"10.11",@"sierra":@"10.12",@"highsierra":@"10.13",@"mojave":@"10.14",@"catalina":@"10.15",@"bigsur":@"11"}[guest];
+    NSString *family=VIMGuestVersion(guest);
     if(!family)return NO;
     NSArray *components=[version componentsSeparatedByString:@"."];
     for(NSString *component in components)
@@ -297,7 +298,7 @@ static bool HFSExtractionProgress(uint64_t completed,uint64_t total,void *contex
     if(![info[@"FormatVersion"] isEqual:@1]||![info[@"Stage"] isEqual:@"media-created"]||
        ![info[@"Guest"] isEqual:guest]||![info[@"Media"] isEqual:URL.lastPathComponent]||
        ![info[@"Size"] isKindOfClass:NSNumber.class]||[info[@"Size"] longLongValue]!=image.st_size||
-       ([@[@"tiger",@"leopard",@"snowleopard"] containsObject:guest]&&![info[@"PartitionedInstaller"] isEqual:@YES])||
+       (VIMGuestHasTrait(guest,VIMGuestTraitRestoreDVD)&&![info[@"PartitionedInstaller"] isEqual:@YES])||
        ([guest isEqual:@"tiger"]&&(![info[@"TigerRestorePolicyVersion"] isEqual:@1]||![info[@"TigerControlBootstrapVersion"] isEqual:@8]||![info[@"DiscTwoExcluded"] isEqual:@YES]||![info[@"RestoreModelRestrictionRemoved"] isEqual:@YES])))
         return AssemblyError(error,@"The prepared installer is incomplete or has changed. Prepare it again from the original installer. Your virtual Mac and downloaded installer haven’t been changed.");
     if(!PreparedImageHasBootBlocks(URL))
@@ -347,7 +348,7 @@ static bool HFSExtractionProgress(uint64_t completed,uint64_t total,void *contex
            (!SerialRecovery(guest)||[media[@"SerialRecoveryVersion"] isEqual:@2])&&
            (![guest isEqual:@"leopard"]||[media[@"LeopardRecoveryMemoryVersion"] isEqual:@1])&&
            (!NativeAutomatedRecovery(guest)||[media[@"NativeRecoverySystemVersion"] isEqual:([guest isEqual:@"highsierra"]?@6:@1)])&&
-           (![@[@"tiger",@"leopard",@"snowleopard"] containsObject:guest]||[media[@"PartitionedInstaller"] isEqual:@YES])&&
+           (!VIMGuestHasTrait(guest,VIMGuestTraitRestoreDVD)||[media[@"PartitionedInstaller"] isEqual:@YES])&&
            (![guest isEqual:@"tiger"]||([media[@"TigerRestorePolicyVersion"] isEqual:@1]&&[media[@"TigerControlBootstrapVersion"] isEqual:@8]&&
              [media[@"DiscTwoExcluded"] isEqual:@YES]&&[media[@"RestoreModelRestrictionRemoved"] isEqual:@YES]&&[media[@"ReadbackVerified"] isEqual:@YES]))&&
            [@[@"Installer.iso",@"Installer.img"] containsObject:media[@"Media"]]&&[media[@"Size"] isKindOfClass:NSNumber.class]) {
@@ -401,7 +402,7 @@ static bool HFSExtractionProgress(uint64_t completed,uint64_t total,void *contex
     return [self validateInstallerApplication:URL guest:guest error:error]?guest:nil;
 }
 + (BOOL)validateInstallerApplication:(NSURL *)URL guest:(NSString *)guest error:(NSError **)error {
-    if([@[@"tiger",@"leopard",@"snowleopard"] containsObject:guest]) {
+    if(VIMGuestHasTrait(guest,VIMGuestTraitRestoreDVD)) {
         // Resume gate only: media creation mounts the original read-only and
         // verifies 10.6, boot.efi, packages and the measured restore policy.
         // Snow's complete source is a DVD, not an InstallAssistant bundle.
@@ -737,7 +738,7 @@ static bool HFSExtractionProgress(uint64_t completed,uint64_t total,void *contex
     // A restore DVD is already a complete bootable installation system. It
     // has no InstallAssistant to manufacture or extract. Keep the completed
     // original until its generated replacement has been verified.
-    if([@[@"tiger",@"leopard",@"snowleopard"] containsObject:guest]) {
+    if(VIMGuestHasTrait(guest,VIMGuestTraitRestoreDVD)) {
         if(!NonemptyFile(files[@"diskimage"])) {AssemblyError(error,@"Choose the complete Mac OS X restore DVD image.");return nil;}
         return files[@"diskimage"];
     }

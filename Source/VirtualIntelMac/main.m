@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import "VIMMachine.h"
+#import "VIMGuestProfile.h"
 #import "VIMLibraryLocation.h"
 #import "VIMInstallerAssembly.h"
 #import "VIMAutomaticSetup.h"
@@ -106,7 +107,7 @@ int main(int argc, const char * argv[]) {
                 options[args[i]]=args[i+1];
             }
             BOOL legacy=options[@"--create-recovery-media"]!=nil;
-            if(!options[@"--job"]||(legacy&&(![@[@"tiger",@"leopard",@"snowleopard",@"lion",@"mountainlion",@"mavericks",@"yosemite",@"elcapitan",@"sierra",@"highsierra",@"mojave",@"catalina"] containsObject:options[@"--guest"]]||options[@"--create-bigsur-media"]))) {
+            if(!options[@"--job"]||(legacy&&(!VIMGuestIsSupported(options[@"--guest"])||[options[@"--guest"] isEqual:@"bigsur"]||options[@"--create-bigsur-media"]))) {
                 fprintf(stderr,"Required: --create-bigsur-media installer.app --job new-directory OR --create-recovery-media installer --guest tiger|leopard|snowleopard|lion|mountainlion|mavericks|yosemite|elcapitan|sierra|highsierra|mojave|catalina --job new-directory\n");return 64;
             }
             __block NSURL *result=nil;__block NSError *error=nil;

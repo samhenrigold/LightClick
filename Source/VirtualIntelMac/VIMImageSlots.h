@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "VIMGuestProfile.h"
 
 // Retain the existing primary optical/disk slot. Additional ISO/DMG images
 // use independent USB Bulk-Only devices, created only when used. Three extra
@@ -8,7 +9,7 @@
 // keep older guests on the proven EHCI path.
 static const NSUInteger VIMImageSlotCount=4;
 static inline BOOL VIMImageUsesUSB3(NSString *guest) {
-    return [@[@"elcapitan",@"sierra",@"highsierra",@"mojave",@"catalina",@"bigsur"] containsObject:guest];
+    return VIMGuestHasTrait(guest,VIMGuestTraitUSB3Images);
 }
 static inline NSString *VIMImageUSBBus(NSString *guest) {
     return VIMImageUsesUSB3(guest)?@"xhci.0":@"usb.0";

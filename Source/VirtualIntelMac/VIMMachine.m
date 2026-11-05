@@ -1,4 +1,5 @@
 #import "VIMMachine.h"
+#import "VIMGuestProfile.h"
 #import "VIMImageSlots.h"
 #import "VIMNetworkDefaults.h"
 #import "VIMLibraryLocation.h"
@@ -35,7 +36,7 @@ static BOOL OpenGLResearchEnabled(void) {
     return index!=NSNotFound&&index+1<arguments.count&&[arguments[index+1] isEqual:@"1"];
 }
 static BOOL Supported(NSString *guest) {
-    return [@[@"tiger",@"leopard",@"snowleopard",@"lion",@"mountainlion",@"mavericks",@"yosemite",@"elcapitan",@"sierra",@"highsierra",@"mojave",@"catalina",@"bigsur"] containsObject:guest];
+    return VIMGuestIsSupported(guest);
 }
 static BOOL NameValid(NSString *name) {
     return [name isKindOfClass:NSString.class] && name.length && name.length <= 128 && [name stringByTrimmingCharactersInSet:
@@ -509,7 +510,7 @@ static BOOL RemovePreparedMedia(NSString *path,NSURL *owner) {
     } @finally {close(edit);flock(fd,LOCK_UN);close(fd);}
 }
 - (BOOL)claimAutomaticInstallationWithGuestReport:(NSDictionary *)report error:(NSError **)error {
-    if(![@[@"mojave",@"catalina",@"bigsur"] containsObject:self.guest]||
+    if(!VIMGuestHasTrait(self.guest,VIMGuestTraitParavirtualizedGraphics)||
        ![self.configuration[@"InstallState"] isEqual:@"installing"]||
        !self.configuration[@"InstallerMedia"]||
        ![report[@"Guest"] isEqual:self.guest]||![report[@"InstalledSystemCandidate"] isEqual:@YES]||

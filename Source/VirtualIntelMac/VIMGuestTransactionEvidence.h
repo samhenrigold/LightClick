@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import "VIMGuestProfile.h"
 
 // Pure evidence checks shared by update authorization and journal retirement.
 // An old *verified* transaction is not an uncertain new write merely because
@@ -21,7 +22,7 @@ static inline BOOL VIMVerifiedInstallationSuperseded(NSDictionary *state,NSDicti
        ![verified[@"MetalCommandVerified"] isEqual:@YES])return NO;
     if(![report[@"InstalledSystemCandidate"] isEqual:@YES]||![report[@"LiveRoot"] isEqual:@YES]||
        ![report[@"KernelMatchesSystem"] isEqual:@YES]||
-       ![@[@"mojave",@"catalina",@"bigsur"] containsObject:report[@"Guest"]]||
+       !VIMGuestHasTrait(report[@"Guest"],VIMGuestTraitParavirtualizedGraphics)||
        ![prepared[@"GuestReport"][@"Guest"] isEqual:report[@"Guest"]])return NO;
     for(NSString *key in @[@"VolumeUUID",@"BootSessionUUID",@"ProductBuildVersion"])
         if(![report[key] isKindOfClass:NSString.class]||![report[key] length])return NO;

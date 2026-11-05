@@ -1,4 +1,5 @@
 #import "VIMInstallerSource.h"
+#import "VIMGuestProfile.h"
 #import "VIMInstallerCatalog.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
@@ -39,7 +40,7 @@ static NSData *RecoveryRequest(NSURLSession *session,NSMutableURLRequest *reques
 @implementation VIMInstallerSource
 + (BOOL)shouldExplainArchiveFailure:(NSError *)error source:(NSURL *)URL guest:(NSString *)guest
     region:(NSString *)region timeZone:(NSString *)timeZone {
-    if(![@[@"tiger",@"leopard",@"snowleopard"] containsObject:guest]||
+    if(!VIMGuestHasTrait(guest,VIMGuestTraitRestoreDVD)||
        !([URL.host.lowercaseString isEqual:@"archive.org"]||[URL.host.lowercaseString hasSuffix:@".archive.org"]))return NO;
     BOOL mainland=[region.uppercaseString isEqual:@"CN"]||
         [@[@"Asia/Shanghai",@"Asia/Chongqing",@"Asia/Chungking",@"Asia/Harbin",@"Asia/Urumqi",@"Asia/Kashgar",@"PRC"] containsObject:timeZone];
@@ -61,7 +62,7 @@ static NSData *RecoveryRequest(NSURLSession *session,NSMutableURLRequest *reques
     return [self isRestoreDVDAsset:URL forGuest:@"snowleopard"];
 }
 + (BOOL)isRestoreDVDAsset:(NSURL *)URL forGuest:(NSString *)guest {
-    return [@[@"tiger",@"leopard",@"snowleopard"] containsObject:guest]&&
+    return VIMGuestHasTrait(guest,VIMGuestTraitRestoreDVD)&&
         [[VIMInstallerCatalog fileForGuest:guest role:@"diskimage"][@"URL"] isEqual:URL.absoluteString];
 }
 + (BOOL)isMavericksRecoveryAsset:(NSURL *)URL {
