@@ -863,6 +863,59 @@ static int apic_register_read(APICCommonState *s, int index, uint64_t *value)
     return ret;
 }
 
+/*
+ * Paths that skip the BQL. A vCPU thread alone changes its own TPR, ISR and ICR, and alone turns IRR
+ * into CPU_INTERRUPT_HARD: other threads only set an IRR bit under the BQL, then send
+ * CPU_INTERRUPT_POLL (apic_update_irq), so an IRR bit we miss here gets polled afterward.
+ */
+static bool apic_fast_read(APICCommonState *s, int index, uint64_t *value)
+{
+    if (s->vapic_paddr || apic_report_tpr_access) {
+        return false;
+    }
+    switch (index) {
+    case 0x08:
+        *value = s->tpr;
+        break;
+    case 0x0a:
+        *value = apic_get_ppr(s);
+        break;
+    case 0x10 ... 0x17:
+        *value = s->isr[index & 7];
+        break;
+    case 0x20 ... 0x27:
+        *value = qatomic_read(&s->irr[index & 7]);
+        break;
+    case 0x30:
+    case 0x31:
+        *value = s->icr[index & 1];
+        break;
+    default:
+        return false;
+    }
+    trace_apic_register_read(index, *value);
+    return true;
+}
+
+/* False when the EOI could unmask a pending vector or reach the I/O APIC: those need the BQL. */
+static bool apic_fast_eoi(APICCommonState *s)
+{
+    int isrv = get_highest_priority_int(s->isr);
+
+    if (s->vapic_paddr) {
+        return false;
+    }
+    if (isrv < 0) {
+        return true;
+    }
+    if ((!(s->spurious_vec & APIC_SV_DIRECTED_IO) && apic_get_bit(s->tmr, isrv)) ||
+        get_highest_priority_int(s->irr) >= 0) {
+        return false;
+    }
+    apic_reset_bit(s->isr, isrv);
+    return true;
+}
+
 static uint64_t apic_mem_read(void *opaque, hwaddr addr, unsigned size)
 {
     APICCommonState *s = cpu_get_current_apic();
@@ -887,7 +940,10 @@ static uint64_t apic_mem_read(void *opaque, hwaddr addr, unsigned size)
     }
 
     index = (addr >> 4) & 0xff;
-    apic_register_read(s, index, &val);
+    if (!apic_fast_read(s, index, &val)) {
+        BQL_LOCK_GUARD();
+        apic_register_read(s, index, &val);
+    }
 
     return val;
 }
@@ -902,6 +958,10 @@ int apic_msr_read(APICCommonState *s, int index, uint64_t *val)
         return -1;
     }
 
+    if (apic_fast_read(s, index, val)) {
+        return 0;
+    }
+    BQL_LOCK_GUARD();
     return apic_register_read(s, index, val);
 }
 
@@ -1074,6 +1134,7 @@ static void apic_mem_write(void *opaque, hwaddr addr, uint64_t val,
          * MSI registers are reserved in APIC MMIO and vice versa.
          */
         MSIMessage msi = { .address = addr, .data = val };
+        BQL_LOCK_GUARD();
         apic_send_msi(&msi);
         return;
     }
@@ -1082,6 +1143,15 @@ static void apic_mem_write(void *opaque, hwaddr addr, uint64_t val,
         return;
     }
 
+    if (index == 0x0b && apic_fast_eoi(s)) {
+        return;
+    }
+    /* The destination half of an IPI: nothing happens until the ICR write that follows. */
+    if (index == 0x31 && !is_x2apic_mode(s)) {
+        s->icr[1] = val;
+        return;
+    }
+    BQL_LOCK_GUARD();
     apic_register_write(s, index, val);
 }
 
@@ -1095,6 +1165,10 @@ int apic_msr_write(APICCommonState *s, int index, uint64_t val)
         return -1;
     }
 
+    if (index == 0x0b && apic_fast_eoi(s)) {
+        return 0;
+    }
+    BQL_LOCK_GUARD();
     return apic_register_write(s, index, val);
 }
 
@@ -1140,6 +1214,9 @@ static void apic_realize(DeviceState *dev, Error **errp)
      * safe.
      */
     s->io_memory.disable_reentrancy_guard = true;
+
+    /* apic_mem_read and apic_mem_write take the BQL themselves off their fast paths. */
+    memory_region_enable_lockless_io(&s->io_memory);
 
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, apic_timer, s);
 
