@@ -207,6 +207,13 @@ static void DNI tcg_gen_op4i_i64(TCGOpcode opc, TCGv_i64 a1, TCGv_i64 a2,
                 tcgv_i64_arg(a3), a4);
 }
 
+#if defined(__aarch64__)
+void tcg_gen_aa64_fp(TCGv_i64 ret, TCGv_i64 a, TCGv_i64 b, TCGAa64Fp kind)
+{
+    tcg_gen_op4i_i64(INDEX_op_aa64_fp, ret, a, b, kind);
+}
+#endif
+
 static TCGOp * DNI tcg_gen_op4ii_i32(TCGOpcode opc, TCGv_i32 a1, TCGv_i32 a2,
                                      TCGArg a3, TCGArg a4)
 {

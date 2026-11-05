@@ -45,6 +45,29 @@ void gen_set_label(TCGLabel *l);
 void tcg_gen_br(TCGLabel *l);
 void tcg_gen_mb(TCGBar);
 
+#if defined(__aarch64__)
+/*
+ * Local experiment. One host FP instruction with FPCR as it stands, on raw bits
+ * in i64 temps. Results narrower than 64 bits are zero-extended. It sets only
+ * FPSR's cumulative flags, which nothing reads, so callers must prove any guest
+ * flag themselves. Unary kinds ignore the second input.
+ */
+typedef enum TCGAa64Fp {
+    TCG_AA64_FADD_S, TCG_AA64_FADD_D,
+    TCG_AA64_FSUB_S, TCG_AA64_FSUB_D,
+    TCG_AA64_FMUL_S, TCG_AA64_FMUL_D,
+    TCG_AA64_FDIV_S, TCG_AA64_FDIV_D,
+    TCG_AA64_FSQRT_S, TCG_AA64_FSQRT_D,
+    TCG_AA64_FCVT_S_FROM_D, TCG_AA64_FCVT_D_FROM_S,
+    TCG_AA64_SCVTF_S_FROM_W, TCG_AA64_SCVTF_S_FROM_X,
+    TCG_AA64_SCVTF_D_FROM_W, TCG_AA64_SCVTF_D_FROM_X,
+    TCG_AA64_FCVTZS_W_FROM_S, TCG_AA64_FCVTZS_X_FROM_S,
+    TCG_AA64_FCVTZS_W_FROM_D, TCG_AA64_FCVTZS_X_FROM_D,
+} TCGAa64Fp;
+
+void tcg_gen_aa64_fp(TCGv_i64 ret, TCGv_i64 a, TCGv_i64 b, TCGAa64Fp kind);
+#endif
+
 /**
  * tcg_gen_exit_tb() - output exit_tb TCG operation
  * @tb: The TranslationBlock from which we are exiting
