@@ -75,7 +75,8 @@ Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpen
   the expected UID.
 - Status pass (`GuestStatusPolicy`, `GuestSessionState`): each step `finishGuestStatus` and `refreshGuestStatus` may take,
   once-per-boot steps, at most three reconciliations a boot, and when the next pass runs. A failed report passes
-  nothing. Doing the work, and asking the disk, stays in `VIMSession.m`.
+  nothing. A failed repair check or archive holds automatic repair claims until the guest next starts, and each modern
+  setup failure gets one alert in that time. Doing the work, and asking the disk, stays in `VIMSession.m`.
 
 ## Left in Objective-C
 
