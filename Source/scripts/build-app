@@ -324,6 +324,9 @@ else:
                     deployment_target.check_weak_libsystem_imports(path)
             except RuntimeError as error:
                 sys.exit(f'Package refused: {error}')
+    # After the checks above, which need to see each guest binary.
+    subprocess.run([sys.executable,str(source/'scripts/pack-guest-files.py'),'--app',str(args.output),
+                    '--signing-identity',args.signing_identity],check=True)
     if args.runtime_bin:
         if not runtime_matches_checkout(runtime_receipt,args.qemu,args.runtime_bin):
             sys.exit('Runtime inputs or compiled outputs changed during packaging; rerun.')

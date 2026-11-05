@@ -1,4 +1,5 @@
 #import "VIMOpenGLSetup.h"
+#import "VIMGuestFiles.h"
 #import "VIMMachine.h"
 #import "VIMGuestAgent.h"
 #import "VIMAutomaticSetup.h"
@@ -84,8 +85,7 @@ static NSDictionary *BundledGraphics(NSURL *support, NSError **error) {
                                    @"existing system was not changed."));
         return;
     }
-    NSURL *support = [NSBundle.mainBundle.resourceURL
-        URLByAppendingPathComponent:@"Runtime/OpenGLGuests/snowleopard/opengl-install-bootstrap"];
+    NSURL *support = VIMGuestFileURL(@"OpenGLGuests/snowleopard/opengl-install-bootstrap");
     [self.agent
         stageFiles:@{@"opengl-install-bootstrap" : support}
           progress:nil
@@ -125,8 +125,7 @@ static NSDictionary *BundledGraphics(NSURL *support, NSError **error) {
         }];
 }
 - (NSURL *)bundledSupport {
-    return [NSBundle.mainBundle.resourceURL
-        URLByAppendingPathComponent:[@"Runtime/OpenGLGuests/" stringByAppendingString:self.machine.guest]];
+    return VIMGuestFileURL([@"OpenGLGuests/" stringByAppendingString:self.machine.guest]);
 }
 - (void)checkBundledGraphics:(NSDictionary *)report completion:(void (^)(NSDictionary *, NSError *))completion {
     if (!self.bundledGraphics) {
@@ -485,7 +484,7 @@ static NSDictionary *BundledGraphics(NSURL *support, NSError **error) {
 - (void)prepareTigerGraphics:(void (^)(NSDictionary *, NSError *))completion {
     // Use the same private, root-owned control transfer as later
     // guests. Native10.4 executables only; no network relay or guest Xcode.
-    NSURL *support = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime/OpenGLGuests/tiger"];
+    NSURL *support = VIMGuestFileURL(@"OpenGLGuests/tiger");
     NSDictionary *relative = @{
         @"opengl-tiger-graphics" : @"opengl-tiger-graphics",
         @"BuildReceipt.plist" : @"Graphics.plist",
@@ -591,7 +590,7 @@ static NSDictionary *BundledGraphics(NSURL *support, NSError **error) {
         }];
 }
 - (void)stageTigerAudio:(void (^)(NSDictionary *, NSError *))completion {
-    NSURL *support = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime/OpenGLGuests/tiger"];
+    NSURL *support = VIMGuestFileURL(@"OpenGLGuests/tiger");
     NSDictionary *files = @{
         @"opengl-tiger-audio" : [support URLByAppendingPathComponent:@"opengl-tiger-audio"],
         @"opengl-audio-defaults" : [support URLByAppendingPathComponent:@"opengl-audio-defaults"],
@@ -665,7 +664,7 @@ static NSDictionary *BundledGraphics(NSURL *support, NSError **error) {
     // control instead of invoking a new argument on that stale executable.
     // Only the requested non-secret helper enters the private root-owned directory;
     // account credentials remain standard-input data, never staged files.
-    NSURL *tools = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime/OpenGLGuests/leopard"];
+    NSURL *tools = VIMGuestFileURL(@"OpenGLGuests/leopard");
     [self.agent stageFiles:@{@"opengl-create-account" : [tools URLByAppendingPathComponent:@"opengl-create-account"]}
                   progress:nil
                 completion:^(NSDictionary *receipt, NSError *failure) {
@@ -893,9 +892,8 @@ static NSDictionary *BundledGraphics(NSURL *support, NSError **error) {
           @"snowleopard" : @"SnowLeopardSMB.plist"}[guest];
     if (!metadata)
         return nil;
-    NSString *path = [NSString stringWithFormat:@"Runtime/OpenGLGuests/%@/%@", guest, metadata];
-    id value = [NSDictionary dictionaryWithContentsOfURL:[NSBundle.mainBundle.resourceURL
-                                                             URLByAppendingPathComponent:path]][@"PolicyVersion"];
+    NSString *path = [NSString stringWithFormat:@"OpenGLGuests/%@/%@", guest, metadata];
+    id value = [NSDictionary dictionaryWithContentsOfURL:VIMGuestFileURL(path)][@"PolicyVersion"];
     return [value isKindOfClass:NSNumber.class] && [value integerValue] > 0 ? value : nil;
 }
 - (void)finishFileSharing:(NSDictionary *)reply
@@ -942,8 +940,7 @@ static NSDictionary *BundledGraphics(NSURL *support, NSError **error) {
     }
     BOOL tiger = [self.machine.guest isEqual:@"tiger"];
     BOOL snow = [self.machine.guest isEqual:@"snowleopard"];
-    NSURL *tools = [NSBundle.mainBundle.resourceURL
-        URLByAppendingPathComponent:[@"Runtime/OpenGLGuests" stringByAppendingPathComponent:self.machine.guest]];
+    NSURL *tools = VIMGuestFileURL([@"OpenGLGuests" stringByAppendingPathComponent:self.machine.guest]);
     NSMutableDictionary *files = [NSMutableDictionary new];
     NSArray *names=tiger?@[@"opengl-file-sharing",@"tiger-smbd",@"tiger-opendirectory.so",@"TigerSMB.plist",@"Samba-COPYING.txt",
                               @"tiger-smbfs",@"TigerSMBClient-Info.plist",@"TigerSMBClient.plist",@"SMB-COPYRIGHT.txt",@"SMB-VIM-LICENSE.txt"]:

@@ -1,4 +1,5 @@
 #import "VIMModernSetup.h"
+#import "VIMGuestFiles.h"
 #import "VIMMachine.h"
 #import "VIMGuestAgent.h"
 #import "VIMAutomaticSetup.h"
@@ -48,7 +49,7 @@ static NSError *SetupError(NSString *text) {
         completion(nil);
         return;
     }
-    NSURL *tools = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime/GuestTools"];
+    NSURL *tools = VIMGuestFileURL(@"GuestTools");
     [self.agent stageFiles:@{
         @"guest-native-installer" : [tools URLByAppendingPathComponent:@"guest-native-installer"],
         @"guest-create-account" : [tools URLByAppendingPathComponent:@"guest-create-account"]

@@ -1,4 +1,5 @@
 #import "VIMInstallerAssembly.h"
+#import "VIMGuestFiles.h"
 #import "VIMGuestProfile.h"
 #include "../tools/opengl-installer-paths.h"
 #import <signal.h>
@@ -326,9 +327,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
 }
 - (BOOL)prepareSerialRecoveryAtMount:(NSURL *)mount error:(NSError **)error {
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSURL *tool =
-        self.recoveryControlTool
-            ?: [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime/GuestTools/guest-recovery-agent"];
+    NSURL *tool = self.recoveryControlTool ?: VIMGuestFileURL(@"GuestTools/guest-recovery-agent");
     if (!NonemptyFile(tool))
         return AssemblyError(error,
                              @"This app is missing its installer support. Reinstall the complete app and try again.");
@@ -1510,9 +1509,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     // the Darwin9/x64 bootstrap or scoped Installer injection below.
     BOOL bootstrap = classic && !tiger;
     NSURL *openGLSupport =
-        self.openGLSupportDirectory
-            ?: [NSBundle.mainBundle.resourceURL
-                   URLByAppendingPathComponent:[@"Runtime/OpenGLGuests/" stringByAppendingString:guest]];
+        self.openGLSupportDirectory ?: VIMGuestFileURL([@"OpenGLGuests/" stringByAppendingString:guest]);
     if (bootstrap && !VerifyOpenGLSupport(openGLSupport, guest, error))
         return nil;
     if (tiger && (!VIMTigerControlPayload(openGLSupport, error) || !VIMTigerInstallerGraphics(openGLSupport, error) ||

@@ -1,4 +1,5 @@
 #import "VIMGuestPreparation.h"
+#import "VIMGuestFiles.h"
 #import "VIMGuestProfile.h"
 #import "VIMGuestAgent.h"
 #import "VIMQMPConnection.h"
@@ -249,7 +250,7 @@ static NSDictionary *CommandJSON(NSDictionary *r) {
     if (![self phase:@"transferring" message:@"Making guest setup files available…"])
         return;
     self.transferStarted = NSProcessInfo.processInfo.systemUptime;
-    NSURL *tools = [self.runtime URLByAppendingPathComponent:@"GuestTools"];
+    NSURL *tools = VIMGuestFileURL(@"GuestTools");
     NSURL *media = [payloads URLByAppendingPathComponent:[guest stringByAppendingString:@".iso"]];
     if (![fm fileExistsAtPath:media.path]) {
         [self
@@ -517,9 +518,8 @@ static NSDictionary *CommandJSON(NSDictionary *r) {
                                         self.state[@"Preparation"] = result;
                                         if (![self phase:@"verifying-guest" message:@"Verifying the prepared guest…"])
                                             return;
-                                        NSData *status = [NSData
-                                            dataWithContentsOfURL:
-                                                [self.runtime URLByAppendingPathComponent:@"GuestTools/guest-status"]];
+                                        NSData *status =
+                                            [NSData dataWithContentsOfURL:VIMGuestFileURL(@"GuestTools/guest-status")];
                                         [self.agent
                                             collectStatusWithTool:status
                                                        completion:^(NSDictionary *report, NSError *statusError) {

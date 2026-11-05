@@ -1,4 +1,5 @@
 #import "VIMSession.h"
+#import "VIMGuestFiles.h"
 #import "VIMGuestProfile.h"
 #import "VIMSymbolImages.h"
 #import "AppDelegate.h"
@@ -1344,17 +1345,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.developmentSetupDeferred =
         [NSProcessInfo.processInfo.arguments containsObject:@"--development-defer-guest-setup"];
     NSString *statusTool =
-        self.guestAgent.tigerGuest
-            ? [NSBundle.mainBundle.resourcePath
-                  stringByAppendingPathComponent:@"Runtime/OpenGLGuests/tiger/opengl-desktop-status"]
+        self.guestAgent.tigerGuest ? VIMGuestFileURL(@"OpenGLGuests/tiger/opengl-desktop-status").path
         : self.machine.preMetalGuest
-            ? [NSBundle.mainBundle.resourcePath
-                  stringByAppendingPathComponent:[NSString
-                                                     stringWithFormat:@"Runtime/OpenGLGuests/%@/opengl-desktop-status",
-                                                                      self.machine.guest]]
-        : root.length
-            ? [root stringByAppendingPathComponent:@"prebuilt/tools/guest-status"]
-            : [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Runtime/GuestTools/guest-status"];
+            ? VIMGuestFileURL([NSString stringWithFormat:@"OpenGLGuests/%@/opengl-desktop-status", self.machine.guest])
+                  .path
+        : root.length ? [root stringByAppendingPathComponent:@"prebuilt/tools/guest-status"]
+                      : VIMGuestFileURL(@"GuestTools/guest-status").path;
     self.guestStatusTool = [NSData dataWithContentsOfFile:statusTool];
     NSDictionary *config = self.machine.configuration;
     self.shutdownRequested = NO;
@@ -3382,10 +3378,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         self.shutdownRequested)
         return NO;
     self.mavericksSMBCheckedBoot = boot;
-    NSURL *tool = [NSBundle.mainBundle.resourceURL
-        URLByAppendingPathComponent:@"Runtime/OpenGLGuests/mavericks/mavericks-smb-compat"];
-    NSURL *allocator =
-        [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime/GuestTools/codesign_allocate"];
+    NSURL *tool = VIMGuestFileURL(@"OpenGLGuests/mavericks/mavericks-smb-compat");
+    NSURL *allocator = VIMGuestFileURL(@"GuestTools/codesign_allocate");
     if (![tool checkResourceIsReachableAndReturnError:nil] || ![allocator checkResourceIsReachableAndReturnError:nil])
         return NO;
     self.guestPending = YES;
@@ -3660,7 +3654,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                       report:report
                   identifier:self.machine.configuration[@"Identifier"]
                      journal:[self.machine.URL URLByAppendingPathComponent:@"State/BootPolicy.plist"]
-                       tools:[NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime/GuestTools"]
+                       tools:VIMGuestFileURL(@"GuestTools")
                   completion:^(BOOL ready, NSError *failure) {
                     VIMSession *session = weakSelf;
                     if (!session.task.running || ![session.runtimeDirectory isEqual:runtime])
@@ -4911,10 +4905,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         selectMode();
         return;
     }
-    NSURL *tools = [NSBundle.mainBundle.resourceURL
-        URLByAppendingPathComponent:self.machine.preMetalGuest
-                                        ? [@"Runtime/OpenGLGuests/" stringByAppendingString:self.machine.guest]
-                                        : @"Runtime/GuestTools"];
+    NSURL *tools = VIMGuestFileURL(
+        self.machine.preMetalGuest ? [@"OpenGLGuests/" stringByAppendingString:self.machine.guest] : @"GuestTools");
     [self.guestAgent
         stageFiles:@{@"guest-display" : [tools URLByAppendingPathComponent:@"guest-display"]}
           progress:nil
@@ -5083,10 +5075,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions : @0600}
                                    ofItemAtPath:configuration.path
                                           error:NULL];
-    NSURL *tools = [NSBundle.mainBundle.resourceURL
-        URLByAppendingPathComponent:self.machine.preMetalGuest
-                                        ? [@"Runtime/OpenGLGuests/" stringByAppendingString:self.machine.guest]
-                                        : @"Runtime/GuestTools"];
+    NSURL *tools = VIMGuestFileURL(
+        self.machine.preMetalGuest ? [@"OpenGLGuests/" stringByAppendingString:self.machine.guest] : @"GuestTools");
     self.clipboardPending = YES;
     if (powerOnly)
         self.powerRetryAfter = [NSDate dateWithTimeIntervalSinceNow:60];

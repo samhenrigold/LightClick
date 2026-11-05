@@ -6,6 +6,7 @@ from pathlib import Path
 import plistlib
 import runpy
 import subprocess
+import tempfile
 
 
 def run(*command):
@@ -60,7 +61,7 @@ def verify_unified_firmware(runtime, source, receipt):
         raise RuntimeError('Shared EFI profile inventory differs from the packaging output')
 
 
-def verify_opengl_runtime(runtime, source, receipt):
+def verify_opengl_runtime(runtime, guest_files, source, receipt):
     """Verify the installed-guest inputs, not a boot/conformance claim."""
     guests = {'leopard': (10, 5, 0), 'snowleopard': (10, 6, 0), 'lion': (10, 7, 0),
               'mountainlion': (10, 8, 0), 'mavericks': (10, 9, 0), 'yosemite': (10, 10, 0),
@@ -78,7 +79,7 @@ def verify_opengl_runtime(runtime, source, receipt):
               b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xfe\xed\xfa\xce'}
     for guest, minimum in guests.items():
         record = records[guest]
-        support = runtime/'OpenGLGuests'/guest
+        support = guest_files/'OpenGLGuests'/guest
         manifest = verify(support, source)
         if manifest.get('RequiresGuestDeveloperTools') is not False:
             raise RuntimeError('Guest support receipt mismatch: '+guest)
@@ -195,8 +196,14 @@ def main():
     if list((runtime/'GuestPayloads').glob('*.plist')):
         raise RuntimeError('Redundant outer guest support manifests in runtime')
     verify_unified_firmware(runtime, args.source, receipt)
-    verify_opengl_runtime(runtime, args.source, receipt)
-    tiger=runpy.run_path(str(args.source/'scripts/package-tiger-guest-support.py'))['verify'](runtime/'OpenGLGuests/tiger',args.source,packaged=True)
+    archive = runtime/'GuestFiles.tar.xz'
+    if (runtime/'OpenGLGuests').exists() or (runtime/'GuestTools').exists() or not archive.is_file():
+        raise RuntimeError('Guest files must ship only in GuestFiles.tar.xz')
+    unpacked = tempfile.TemporaryDirectory(prefix='vim-guest-files-')
+    guest_files = Path(unpacked.name)
+    subprocess.run(['/usr/bin/tar', '-xpf', str(archive), '-C', str(guest_files)], check=True)
+    verify_opengl_runtime(runtime, guest_files, args.source, receipt)
+    tiger=runpy.run_path(str(args.source/'scripts/package-tiger-guest-support.py'))['verify'](guest_files/'OpenGLGuests/tiger',args.source,packaged=True)
     if receipt.get('TigerGuestSupport')!=tiger:
         raise RuntimeError('Tiger native support packaging receipt mismatch')
     # A build must not accidentally copy the private key or local receipts into
