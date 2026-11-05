@@ -6,8 +6,37 @@
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#include <os/lock.h>
 #include <stdint.h>
 #include <string.h>
+#include "apple-gfx-oop-timing.h"
+
+/* Opt-in shadow cost counters (VIM_PVG_TIMING; the launch plan strips PVG_*).
+ * Off, each site costs one predicted branch. Stderr only, at most once per 5s. */
+static bool shadow_timing;
+static os_unfair_lock shadow_timing_lock = OS_UNFAIR_LOCK_INIT;
+static AppleGFXOOPTiming import_time, exec_encode_time, exec_complete_time, scatter_gpu_time;
+static uint64_t count_exec, count_barrier, count_zero_copy, bytes_zero_copy, count_shadow,
+    bytes_shadow, count_runs, bytes_small_runs, bytes_upload, bytes_baseline, bytes_scatter;
+static void shadow_time(AppleGFXOOPTiming *metric, const char *name, uint64_t start)
+{
+    os_unfair_lock_lock(&shadow_timing_lock);
+    apple_gfx_oop_timing(metric, name, start);
+    os_unfair_lock_unlock(&shadow_timing_lock);
+}
+#define SHADOW_ADD(counter, value) \
+    (shadow_timing ? (void)__atomic_fetch_add(&(counter), (value), __ATOMIC_RELAXED) : (void)0)
+static void shadow_report(void)
+{
+    static uint64_t reported;
+    uint64_t now = apple_gfx_oop_now(), last = __atomic_load_n(&reported, __ATOMIC_RELAXED);
+    if (now - last < 5000000000ULL ||
+        !__atomic_compare_exchange_n(&reported, &last, now, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
+    fprintf(stderr, "PVG shadow exec=%llu barriers=%llu zero_copy=%llu/%lluB shadow=%llu/%lluB "
+        "runs=%llu small_run_bytes=%llu upload=%llu baseline=%llu scatter=%llu\n",
+        count_exec, count_barrier, count_zero_copy, bytes_zero_copy, count_shadow, bytes_shadow,
+        count_runs, bytes_small_runs, bytes_upload, bytes_baseline, bytes_scatter);
+}
 
 /* Local Intel-on-Apple-GPU compatibility experiment. Catalina's incremental
  * scanout passes can request DontCare while relying on untouched pixels.
@@ -78,6 +107,7 @@ static char pipeline_key;
 @interface AppleGFXShadowCompletion : NSObject {
 @public
     BOOL donorDone, gpuDone;
+    uint64_t started;
     uint32_t result;
     NSError *failure;
     void (^callback)(uint32_t, NSError *);
@@ -93,7 +123,11 @@ static char pipeline_key;
         if (error && !failure) failure = [error retain];
         if (donorDone && gpuDone) { ready = callback; callback = nil; }
     }
-    if (ready) { ready(result, failure); [ready release]; }
+    if (ready) {
+        if (started) shadow_time(&exec_complete_time, "shadow-exec-to-complete", started);
+        ready(result, failure);
+        [ready release];
+    }
 }
 - (void)dealloc { [callback release]; [failure release]; [super dealloc]; }
 @end
@@ -116,8 +150,23 @@ static id send_id(id obj, const char *name)
     return ((id (*)(id, SEL))objc_msgSend)(obj, sel_registerName(name));
 }
 
+/* Only the shared-buffer scatter reads a baseline, and only that resource's
+ * ensurePhysical creates its buffer. Others would just double memory and blits. */
+static __thread bool shadow_wants_baseline;
+static IMP original_shared_physical;
+static void shared_physical(id self, SEL cmd)
+{
+    shadow_wants_baseline = true;
+    @try {
+        ((void (*)(id, SEL))original_shared_physical)(self, cmd);
+    } @finally {
+        shadow_wants_baseline = false;
+    }
+}
+
 static id legacy_buffer(id self, SEL cmd, uint32_t page, uint64_t length)
 {
+    uint64_t started = shadow_timing ? apple_gfx_oop_now() : 0;
     void *bytes = ((void *(*)(id, SEL, uint32_t, uint64_t))objc_msgSend)(
         self, sel_registerName("mappedAddressForPageNumber:length:"), page, length);
     if (!bytes) [NSException raise:NSInternalInconsistencyException
@@ -125,7 +174,11 @@ static id legacy_buffer(id self, SEL cmd, uint32_t page, uint64_t length)
     id<MTLDevice> device = send_id(self, "mtlDevice");
     id<MTLBuffer> buffer = [device newBufferWithBytesNoCopy:bytes length:length
         options:MTLResourceStorageModeShared deallocator:nil];
-    if (buffer) return buffer;
+    if (buffer) {
+        SHADOW_ADD(count_zero_copy, 1);
+        SHADOW_ADD(bytes_zero_copy, length);
+        return buffer;
+    }
     buffer = [device newBufferWithBytes:bytes length:length
         options:MTLResourceStorageModeShared];
     if (!buffer) [NSException raise:NSMallocException
@@ -133,9 +186,11 @@ static id legacy_buffer(id self, SEL cmd, uint32_t page, uint64_t length)
     AppleGFXLegacyShadow *shadow = [AppleGFXLegacyShadow new];
     shadow->guest = bytes;
     shadow->length = length;
-    shadow->baseline = [device newBufferWithBytes:bytes length:length
-        options:MTLResourceStorageModeShared];
-    if (!shadow->baseline) abort();
+    if (shadow_wants_baseline) {
+        shadow->baseline = [device newBufferWithBytes:bytes length:length
+            options:MTLResourceStorageModeShared];
+        if (!shadow->baseline) abort();
+    }
     NSMutableArray *pages = [NSMutableArray array];
     BOOL coalesce = getenv("PVG_SHADOW_COALESCE") != NULL;
     NSUInteger maximumChunk = 65536;
@@ -164,6 +219,7 @@ static id legacy_buffer(id self, SEL cmd, uint32_t page, uint64_t length)
             format:@"PVG single-page Metal import failed"];
         [pages addObject:pageBuffer];
         [pageBuffer release];
+        if (chunk < 16384) SHADOW_ADD(bytes_small_runs, chunk);
         offset += chunk;
         /* Probe growth after a success, but do not retry all large sizes
          * for every 4K page in a persistently fractured region. */
@@ -172,7 +228,11 @@ static id legacy_buffer(id self, SEL cmd, uint32_t page, uint64_t length)
     shadow->pages = [pages copy];
     objc_setAssociatedObject(buffer, &shadow_key, shadow,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    SHADOW_ADD(count_shadow, 1);
+    SHADOW_ADD(bytes_shadow, length);
+    SHADOW_ADD(count_runs, pages.count);
     [shadow release];
+    if (started) shadow_time(&import_time, "shadow-import", started);
     static unsigned count;
     if (__atomic_fetch_add(&count, 1, __ATOMIC_RELAXED) < 12)
         fprintf(stderr, "PVG legacy shadow: page=%u length=%llu runs=%lu coalesce=%d\n",
@@ -200,8 +260,12 @@ static void transfer(id<MTLBuffer> buffer, id<MTLBlitCommandEncoder> encoder, BO
             destinationOffset:0 size:size];
         offset += size;
     }
-    if (upload) [encoder copyFromBuffer:buffer sourceOffset:0
-        toBuffer:shadow->baseline destinationOffset:0 size:shadow->length];
+    if (upload) SHADOW_ADD(bytes_upload, shadow->length);
+    if (upload && shadow->baseline) {
+        [encoder copyFromBuffer:buffer sourceOffset:0
+            toBuffer:shadow->baseline destinationOffset:0 size:shadow->length];
+        SHADOW_ADD(bytes_baseline, shadow->length);
+    }
 }
 
 static BOOL cpu_paging(id self, SEL cmd) { return NO; }
@@ -341,6 +405,7 @@ static void execute(id self, SEL cmd, uint32_t count, void *commands,
                     LegacyResourceList *resources, id event, uint64_t *value,
                     void (^completion)(uint32_t, NSError *))
 {
+    uint64_t started = shadow_timing ? apple_gfx_oop_now() : 0;
     uint64_t (*vtable[])(void *, uint64_t) = {get_entry};
     ShadowResourceList list = {{vtable, resources->count}, resources, self};
     @synchronized (self) {
@@ -360,6 +425,7 @@ static void execute(id self, SEL cmd, uint32_t count, void *commands,
             /* Donor FIFO event signals rendering completion, not completion
              * of our additional scatter on blitDownQueue. Fence both paging
              * and execution before the next submission touches shadow data. */
+            SHADOW_ADD(count_barrier, 1);
             Ivar paging = class_getInstanceVariable(object_getClass(self), "_pagingQueue");
             if (!paging) abort();
             id<MTLCommandQueue> queues[] = {object_getIvar(self, paging),
@@ -372,6 +438,7 @@ static void execute(id self, SEL cmd, uint32_t count, void *commands,
         }
         AppleGFXShadowCompletion *done = [AppleGFXShadowCompletion new];
         done->callback = [completion copy];
+        done->started = started;
         guest_render_depth++;
         @try {
         ((void (*)(id, SEL, uint32_t, void *, void *, id, uint64_t *, id))
@@ -381,6 +448,11 @@ static void execute(id self, SEL cmd, uint32_t count, void *commands,
                 });
         } @finally {
             guest_render_depth--;
+        }
+        if (started) {
+            shadow_time(&exec_encode_time, "shadow-exec-encode", started);
+            SHADOW_ADD(count_exec, 1);
+            shadow_report();
         }
         NSMutableSet *buffers = [NSMutableSet set];
         for (uint64_t i = 0; i < resources->count; i++) {
@@ -412,6 +484,7 @@ static void execute(id self, SEL cmd, uint32_t count, void *commands,
                     [compute setBuffer:buffer offset:offset atIndex:0];
                     [compute setBuffer:shadow->baseline offset:offset atIndex:1];
                     [compute setBuffer:page offset:0 atIndex:2];
+                    SHADOW_ADD(bytes_scatter, size);
                     [compute dispatchThreads:MTLSizeMake(size, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
                     offset += size;
@@ -422,6 +495,10 @@ static void execute(id self, SEL cmd, uint32_t count, void *commands,
         uint64_t submitted = ++order->value;
         [tail encodeSignalEvent:order->event value:submitted];
         [tail addCompletedHandler:^(id<MTLCommandBuffer> command) {
+            if (started && command.GPUEndTime > command.GPUStartTime) {
+                shadow_time(&scatter_gpu_time, "shadow-scatter-gpu", apple_gfx_oop_now() -
+                    (uint64_t)((command.GPUEndTime - command.GPUStartTime) * 1e9));
+            }
             /* Only successful GPU completion retires a dependency. The
              * callback retains order; publish under its own short lock, not
              * the task lock held by submission. Never erase an in-flight
@@ -456,6 +533,7 @@ void apple_gfx_legacy_shadow_install(void)
     Class task = NSClassFromString(@"PGLocalTask");
     Class shared = NSClassFromString(@"PGSharedBufferResource");
     if (!getenv("PVG_LEGACY_SHADOW")) return;
+    shadow_timing = getenv("VIM_PVG_TIMING") != NULL;
     if (getenv("PVG_CAPTURE_LIBRARIES") || (PVGHostRepairLibrary && getenv("PVG_HOST_AIR_LLVM"))) {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         original_library_data = replace(object_getClass(device),
@@ -481,6 +559,7 @@ void apple_gfx_legacy_shadow_install(void)
     shared_buffer = class_getInstanceVariable(shared, "_buffer");
     if (!shared_buffer) abort();
     replace(task, "newLegacyBufferForVirtualPage:length:", (IMP)legacy_buffer);
+    original_shared_physical = replace(shared, "ensurePhysical", (IMP)shared_physical);
     replace(shared, "prepareInEncoder:", (IMP)prepare);
     replace(shared, "synchronizeInEncoder:", (IMP)synchronize);
     /* macOS 26 adds CPU paging for shared buffers; keep the encoder path we

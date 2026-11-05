@@ -54,6 +54,33 @@ static PGTask_t *helper_task_create(uint64_t length, void **base)
     *base = (void *)task->address;
     return task;
 }
+/* VIM_PVG_TIMING: how fragmented is mapped guest memory? Metal imports a range
+ * no-copy only if every internal join lands on a host 16K page boundary on both
+ * sides (host-shadow-import-rules.m), so bad_joins bounds what a shadow must do.
+ * Joins between separate map calls are not seen. Metal's actual verdict is the
+ * zero_copy/shadow count in "PVG shadow". */
+static bool helper_timing;
+static void helper_map_stats(const PGPhysicalMemoryRange_t *ranges, uint32_t count)
+{
+    static uint64_t calls, listed, bytes, bad_joins, reported;
+    uint64_t call_bytes = 0, call_bad = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        call_bytes += ranges[i].physicalLength;
+        uint64_t end = i ? ranges[i - 1].physicalAddress + ranges[i - 1].physicalLength : 0;
+        if (i && end != ranges[i].physicalAddress &&
+            ((end | ranges[i].physicalAddress) & 16383)) { call_bad++; }
+    }
+    __atomic_fetch_add(&calls, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&listed, count, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&bytes, call_bytes, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&bad_joins, call_bad, __ATOMIC_RELAXED);
+    uint64_t now = apple_gfx_oop_now(), last = __atomic_load_n(&reported, __ATOMIC_RELAXED);
+    if (now - last >= 5000000000ULL &&
+        __atomic_compare_exchange_n(&reported, &last, now, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        fprintf(stderr, "PVG map calls=%llu ranges=%llu bytes=%llu bad_joins=%llu\n",
+                calls, listed, bytes, bad_joins);
+    }
+}
 static bool helper_task_map(PGTask_t *task, uint64_t offset, bool read_only,
                             PGPhysicalMemoryRange_t *ranges, uint32_t count,
                             HelperRAM *ram, uint32_t ram_count)
@@ -69,6 +96,7 @@ static bool helper_task_map(PGTask_t *task, uint64_t offset, bool read_only,
             !helper_resolve(ram, ram_count, address, length)) { return false; }
         total += length;
     }
+    if (helper_timing) { helper_map_stats(ranges, count); }
     pthread_mutex_lock(&task->lock);
     for (uint32_t i = 0; i < count; i++) {
         mach_vm_address_t target = task->address + offset;
@@ -235,7 +263,9 @@ static int helper_main(int argc, char **argv)
         __block BOOL power_sleeping = NO;
         __block BOOL frame_busy = NO;
         __block BOOL frame_dirty = NO;
-        BOOL timing = getenv("PVG_OOP_TIMING") != NULL;
+        /* The app's launch plan strips PVG_*, so it can only set the VIM_ name. */
+        BOOL timing = getenv("PVG_OOP_TIMING") != NULL || getenv("VIM_PVG_TIMING") != NULL;
+        helper_timing = getenv("VIM_PVG_TIMING") != NULL;
         __block AppleGFXOOPTiming render_time = {}, ack_time = {};
         __block uint64_t frame_sent = 0;
         __block id<PGDisplay> display = nil;
@@ -458,6 +488,10 @@ static int helper_main(int argc, char **argv)
                     if (message.operation == APPLE_GFX_APP_ACK && !message.width && !message.height) {
                         dispatch_async(frames, ^{
                             if (!frame_busy || message.sequence != app_sequence) { _exit(49); }
+                            if (timing && frame_sent) {
+                                apple_gfx_oop_timing(&ack_time, "helper-frame-to-ack", frame_sent);
+                                frame_sent = 0;
+                            }
                             frame_busy = NO;
                             if (frame_dirty) { frame_dirty = NO; display_desc.newFrameEventHandler(); }
                         });

@@ -1184,7 +1184,7 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
         GArray *ranges = apple_gfx_oop_ram_ranges(errp);
         if (!ranges) { return false; }
         AppleGFXOOPClient *c = g_new0(AppleGFXOOPClient, 1);
-        c->timing_enabled = getenv("PVG_OOP_TIMING") != NULL;
+        c->timing_enabled = getenv("PVG_OOP_TIMING") != NULL || getenv("VIM_PVG_TIMING") != NULL;
         if (!apple_gfx_oop_bootstrap(ranges, oop_helper, getenv("PVG_OOP_DONOR"),
                                       &c->fd, &c->pid, &c->frame, errp)) {
             apple_gfx_oop_free_ranges(ranges); g_free(c); return false;
