@@ -60,8 +60,9 @@ int main(void) {
         for (size_t count = 1; count <= 40; count++)
             for (int pattern = 0; pattern < 3; pattern++) {
                 size_t size = sizes[s], n = count * size;
-                uint64_t value = pattern == 0 ? 0 : pattern == 1 ? UINT64_C(0xabababababababab) :
-                                                                   UINT64_C(0x8877665544332211);
+                uint64_t value = pattern == 0   ? 0
+                                 : pattern == 1 ? UINT64_C(0xabababababababab)
+                                                : UINT64_C(0x8877665544332211);
                 reset();
                 rep_bulk_fill(real + 3, n, value, size);
                 for (size_t e = 0; e < count; e++)
