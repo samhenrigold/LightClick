@@ -265,6 +265,16 @@ final class HybridHarness {
                     FileHandle.standardError.write(Data("no directory was shared\n".utf8))
                     return 6
                 }
+                // 300 processes ran kernel code and exited, which must not cost the kernel its translations each time.
+                let higher =
+                    tally.split(separator: "\n").first { $0.hasSuffix("a store higher in the tables") }?.split(
+                        separator: " "
+                    ).dropFirst(2).first.flatMap { Int($0) } ?? .max
+                if ProcessInfo.processInfo.environment["LC_HVDBT_NO_SHARE"] != "1", higher > 300 {
+                    FileHandle.standardError.write(
+                        Data("kernel blocks died with exiting processes: \\(higher) times\n".utf8))
+                    return 6
+                }
                 // 250,000 stores go to a frame that stopped being a table: only the first may trap.
                 let stores = tally.split(separator: "\n").first { $0.hasPrefix("page-table stores") }?.split(
                     separator: " "

@@ -1108,8 +1108,7 @@ int tr_invalidate_view_va(int view, uint64_t va, uint32_t why, bool unmoved, boo
         }
         u64 first = hb->rip & ~0xfffULL;
         bool here = first == page || (hb->frame[1] != ~0ULL && first + 4096 == page);
-        bool shared_user = (hb->view & KEY_DOMAIN) && !(hb->rip >> 47);
-        if (here && shared_user && !keeper) { // only this view's sight of it changed: the block stands for the others
+        if (here && (hb->view & KEY_DOMAIN) && !keeper) { // only this view's sight of it changed: the block stands for the others
             hash_remove(view, hb->rip);
         } else if (here && ((int)hb->view == view || (hb->view & KEY_DOMAIN))) {
             kill_block(*link - 1);

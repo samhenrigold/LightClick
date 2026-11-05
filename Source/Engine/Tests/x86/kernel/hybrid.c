@@ -1002,6 +1002,66 @@ static void test_shared_return(u64 root) {
     CHECK(shared_run_with_stack(b, root) == 21);
 }
 
+// Kernel code, shared by every address space. A process exiting must leave its translations for the rest, and changes
+// to it must still reach them all.
+#define KERNEL_SHARED_VA 0xFFFF960000000000ULL
+
+static u32 kernel_shared_run(u64 r, u64 home) {
+    write_cr3(r);
+    u32 value = ((u32 (*)(void))KERNEL_SHARED_VA)();
+    write_cr3(home);
+    return value;
+}
+
+static void test_kernel_domain(u64 root) {
+    enum { SLOT = (KERNEL_SHARED_VA >> 39) & 0x1ff };
+    u64 code = frame(), code2 = frame();
+    put_function(code, 1);
+    u64 *slot = pte_of(root, KERNEL_SHARED_VA);
+    *slot = code | PRESENT_RW;
+    u64 a = root_copy(root), b = root_copy(root);
+    for (int i = 0; i < 3; i++) {
+        CHECK(kernel_shared_run(a, root) == 1);
+        CHECK(kernel_shared_run(b, root) == 1);
+    }
+    put_function(code2, 2);
+    *slot = code2 | PRESENT_RW;
+    __asm__ volatile("invlpg (%0)" : : "r"(KERNEL_SHARED_VA));
+    CHECK(kernel_shared_run(a, root) == 2);
+    CHECK(kernel_shared_run(b, root) == 2);
+    put_function(code2, 3);
+    CHECK(kernel_shared_run(b, root) == 3);
+    CHECK(kernel_shared_run(a, root) == 3);
+    // One space alone changes its slot: it sees its own, and the other is not disturbed. Not the first to run this
+    // code, as that one holds the marks.
+    u64 own = frame();
+    put_function(own, 4);
+    PHYS(b)[SLOT] = 0;
+    *pte_of(b, KERNEL_SHARED_VA) = own | PRESENT_RW;
+    for (int i = 0; i < 2; i++) {
+        CHECK(kernel_shared_run(b, root) == 4);
+        CHECK(kernel_shared_run(a, root) == 3);
+    }
+    PHYS(b)[SLOT] = PHYS(root)[SLOT];
+    CHECK(kernel_shared_run(b, root) == 3);
+    // Processes exit, each after running kernel code: the harness checks that this does not keep killing blocks.
+    for (int i = 0; i < 300; i++) {
+        u64 child = root_copy(root);
+        write_cr3(child);
+        for (int n = 0; n < 8; n++)
+            CHECK(((u32 (*)(void))KERNEL_SHARED_VA)() == 3);
+        CHECK(pte_of(child, TEST_VA) != 0);
+        puts_("");
+        write_cr3(root);
+        for (int k = 256; k < 512; k++)
+            PHYS(child)[k] = 0;
+    }
+    CHECK(kernel_shared_run(b, root) == 3);
+    put_function(code2, 5);
+    CHECK(kernel_shared_run(b, root) == 5);
+    CHECK(kernel_shared_run(a, root) == 5);
+}
+
 // More blocks than a view's lookup table holds, each reached by a link. A full table left the monitor's lookup
 // searching forever for an empty slot.
 static void test_many_blocks(u64 root) {
@@ -1523,6 +1583,7 @@ void kmain(void) {
     test_ptest_flags();
     test_inline_ops(root);
     test_direct_map();
+    test_kernel_domain(root);
     test_many_blocks(root);
     test_linked_loop();
     test_process_log(root);

@@ -933,6 +933,20 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
             shared_mark(shared, (rip & ~0xfffULL) + 4096, v);
         return c->req_r[0];
     }
+    if (c->share_user && c->cpl == 0 && (rip >> 47)) {
+        // As for a shared user domain: only the keeper's marks kill, as this view may well be a process about to exit, which would take the kernel's translations with it.
+        shadow_slot(v, rip, &w, 0, 0);
+        v->sees_shared = 1;
+        View *keeper = domain_keeper(*w.chain[3] & X_ADDR, v);
+        *shadow_slot(keeper, rip, &w, 0, 0) |= PTE_X_MARK;
+        if (c->req_r[3]) {
+            u64 next = (rip & ~0xfffULL) + 4096;
+            Walk w2 = x86_walk(c->cr3, next, 0, false);
+            if (w2.ok)
+                *shadow_slot(keeper, next, &w2, 0, 0) |= PTE_X_MARK;
+        }
+        return c->req_r[0];
+    }
     *shadow_slot(v, rip, &w, 0, 0) |= PTE_X_MARK;
     if (c->cpl == 0 && (rip >> 47)) { // shared with other views: the domain's keeper must see writes to this mapping too
         View *keeper = domain_keeper(*w.chain[3] & X_ADDR, v);
@@ -972,12 +986,13 @@ static void zap_entry(u64 *e, const ShadowDesc *d) {
             c->req_a[1] = va;
             c->req_a[2] = zap_why;
             c->req_a[3] = now.ok && (now.gpa & ~0xfffULL) == (v & PTE_ADDR); // the guest's mapping of this page has not moved
-            c->req_a[4] = views[d->view].keeper;
+            c->req_a[4] = views[d->view].keeper || !c->share_user;
             hostcall(HC_VIEW_INVALIDATE_VA);
             reset_all_return_stacks();
         }
     } else if (v & 1) {
-        if (d->level == 2 && views[d->view].sees_shared && !evicting && pte_va(e, d) == SHARED_USER_BASE) { // what its lookups mean may have changed
+        bool kernel_slot = d->level == 3 && (((u64)e & 0xfff) >> 3) >= 256;
+        if ((kernel_slot || (d->level == 2 && pte_va(e, d) == SHARED_USER_BASE)) && views[d->view].sees_shared && !evicting) { // what its lookups mean may have changed
             views[d->view].sees_shared = 0;
             c->req_a[0] = d->view;
             hostcall(HC_VIEW_FORGET);
