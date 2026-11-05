@@ -239,6 +239,8 @@ static bool sse_needs_alignment(DisasContext *s, X86DecodedInsn *decode, MemOp o
     }
 }
 
+static void gen_MOVDQ(DisasContext *s, X86DecodedInsn *decode);
+
 static void gen_load(DisasContext *s, X86DecodedInsn *decode, int opn, TCGv v)
 {
     X86DecodedOp *op = &decode->op[opn];
@@ -303,6 +305,16 @@ static void gen_load(DisasContext *s, X86DecodedInsn *decode, int opn, TCGv v)
 
     case X86_OP_SSE:
         compute_xmm_offset(op);
+        /*
+         * A load into xmm_t0 is two 8-byte stores that gen_MOVDQ reads back as one 16-byte
+         * load, which store forwarding cannot serve. Load into the destination instead; it
+         * is written only after the access succeeds, so a fault still leaves it unchanged.
+         */
+        if (emit_sse_direct_load && decode->e.gen == gen_MOVDQ && opn == 2 && op->has_ea &&
+            op->ot == MO_128 && decode->op[0].unit == X86_OP_SSE &&
+            !decode->op[0].has_ea && decode->op[0].ot == MO_128) {
+            op->offset = decode->op[0].offset;
+        }
     load_vector:
         if (op->has_ea) {
             bool aligned = sse_needs_alignment(s, decode, op->ot);

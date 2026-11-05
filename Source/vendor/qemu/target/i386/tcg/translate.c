@@ -45,6 +45,7 @@ static bool emit_inline_jmp_cache_cpl0;
 static bool emit_bulk_rep;
 static bool emit_inline_fp;
 static bool emit_inline_sse_packed;
+static bool emit_sse_direct_load;
 bool x86_tcg_chain_sys_return;
 static bool dispatch_acquire_barrier;
 static bool dispatch_relaxed;
@@ -66,6 +67,7 @@ static void __attribute__((constructor)) init_inline_jmp_cache(void)
         pvg_tcg_fast_path("PVG_TCG_INLINE_JMP_CACHE_CPL0");
     emit_bulk_rep = pvg_tcg_fast_path("PVG_TCG_BULK_REP");
     emit_inline_sse_packed = pvg_tcg_fast_path("PVG_TCG_INLINE_SSE_PACKED");
+    emit_sse_direct_load = pvg_tcg_fast_path("PVG_TCG_SSE_DIRECT_LOAD");
     x86_tcg_chain_sys_return = pvg_tcg_fast_path("PVG_TCG_CHAIN_SYS_RETURN");
 
     /* The guard loads this bitfield directly, so prove where it lives. */
