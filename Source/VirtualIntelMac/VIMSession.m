@@ -3553,6 +3553,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         }
         if (nativeError) {
             self.guestStatus.stringValue = nativeError.localizedDescription;
+            // The save can succeed once the library has room again, and nothing else restarts this loop.
+            __weak VIMSession *weakSelf = self;
+            self.guestTimer = [NSTimer scheduledTimerWithTimeInterval:15
+                                                              repeats:NO
+                                                                block:^(NSTimer *timer) {
+                                                                  [weakSelf refreshGuestStatus];
+                                                                }];
             return;
         }
     }
