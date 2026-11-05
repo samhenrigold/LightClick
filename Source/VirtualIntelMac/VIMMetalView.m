@@ -438,6 +438,12 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
         self.presentationLayer.opaque = YES;
         self.presentationLayer.presentsWithTransaction = NO;
         self.presentationLayer.allowsNextDrawableTimeout = YES;
+        // The producer is only held until GPU completion, so a guest at or above the display's rate fills the swap
+        // queue, and each queued frame adds a refresh of latency. A shorter queue makes nextDrawable wait more often,
+        // which must not happen on the thread that delivers input. VIM_DISPLAY_LEGACY_QUEUE=1 restores both defaults.
+        BOOL legacyQueue = [NSProcessInfo.processInfo.environment[@"VIM_DISPLAY_LEGACY_QUEUE"] isEqualToString:@"1"];
+        self.presentationLayer.maximumDrawableCount = legacyQueue ? 3 : 2;
+        self.asynchronousDrawableAcquisition = !legacyQueue;
         [self.layer addSublayer:self.presentationLayer];
         __weak VIMMetalView *weakSelf = self;
         self.keyMonitor = [NSEvent
