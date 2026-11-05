@@ -360,6 +360,13 @@ static void test_faults(void) {
     CHECK(r == 0x103 && last_rip == user_rip(u_int3) + 1, "int3 status %x rip %x", r, last_rip);
     r = run_user(u_noncanon, 0, 0);
     CHECK(r == 0x10D, "noncanonical status %x", r);
+    // Engine-private memory in the non-canonical window: monitor text, data and shadow tables, the RAM alias and the code cache are out of reach
+    // from translated code, so x86 sees the #GP it expects.
+    static const u64 hidden[] = {0xF00000000000ULL, 0xF00000200000ULL, 0xF00000400000ULL, 0xF00000600000ULL, 0xF00010000000ULL, 0xF10000000000ULL};
+    for (unsigned i = 0; i < sizeof hidden / sizeof hidden[0]; i++) {
+        r = run_user(u_kernel_read, hidden[i], 0);
+        CHECK(r == 0x10D, "private address %x readable from ring 3: status %x", hidden[i], r);
+    }
     r = run_user(u_kernel_read, (u64)&ticks, 0);
     CHECK(r == 0x10E && last_err == 5 && last_cr2 == (u64)&ticks, "kernel read status %x err %x cr2 %x", r, last_err, last_cr2);
     r = run_user(u_int80, 0, 0);

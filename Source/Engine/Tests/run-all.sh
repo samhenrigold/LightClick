@@ -30,4 +30,5 @@ ENGINE_FAST_FLAGS=1 check_same fuzz-fast-flags fuzz
 zsh "$here/diff-i386.sh" 4 | tail -1 | grep -q 'differences: 0$' && echo "pass test-i386" || { echo "FAIL test-i386"; fail=1; }
 
 "$engine" --kernel "$images/kernel" > /dev/null && echo "pass kernel" || { echo "FAIL kernel"; fail=1; }
+"$engine" --kernel-capi "$images/kernel" > /dev/null 2>&1 && echo "pass kernel through the C API" || { echo "FAIL kernel through the C API"; fail=1; }
 exit $fail
