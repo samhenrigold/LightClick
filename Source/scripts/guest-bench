@@ -126,7 +126,7 @@ try:
         if args.program:
             result = request({'Executable': program, 'Arguments': []}, 900)
             (source/'Build/bench'/f'{args.tag}.txt').write_text(result.get('Stdout', ''))
-            print(f'program exit {result.get("ExitCode")} {str(result.get("Stderr"))[:200]}')
+            print(f'program exit {result.get("ExitCode")} {str(result.get("Stderr"))[:200]}{" "+str(result.get("Error")) if "Error" in result else ""}')
             raise SystemExit(0)
         best = {}
         order = []
@@ -168,6 +168,8 @@ finally:
         time.sleep(1)
     else:
         print(f'WARNING: processes from {work} are still running')
+    if (machine/'State/session.log').exists():
+        shutil.copyfile(machine/'State/session.log', source/'Build/bench'/f'{args.tag}.session.log')
     shutil.rmtree(work, ignore_errors=True)
     # CFFIXED_USER_HOME doesn't redirect preferences: remove what this clone's paths left in them.
     listing = subprocess.run(['defaults', 'read', 'gold.samhenri.LightClick'], capture_output=True, text=True).stdout
