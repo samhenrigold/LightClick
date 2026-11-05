@@ -43,6 +43,37 @@ Tried and dropped, with the code reverted:
 - **16 KB-aligned task base in the helper.** [measured] `mach_vm_allocate` returned an off-phase base 41 of 64 times, but
   VA phase doesn't affect import.
 
+## Gather and scatter results
+
+`probes/host-shadow-gather.m` runs the real shadow code. Same caveats as above: host only, M4 Max, 5 trials, no guest.
+16 MB in shuffled 4 KB pages across two 64 MB windows, upload including the baseline blit:
+
+| Path | Create | Upload wall (encode) | Scatter wall (encode) |
+| --- | --- | --- | --- |
+| Per-run imports (`VIM_PVG_SLAB=0`) | 25.30 ms | 3.45 ms (1.50) | 7.73 ms (0.74) |
+| One dispatch per window | 16.84 ms | 0.50 ms (0.05) | 0.42 ms (0.02) |
+| Slab blits, page scatter (`VIM_PVG_GATHER=0`, `VIM_PVG_SCATTER=0`) | same | 3.04 ms (1.71) | 7.50 ms (0.45) |
+
+Create still includes the `newBufferWithBytes` copies. All paths were byte exact, and scatter kept bytes the CPU wrote
+during the dispatch. Metal API and shader validation ran clean.
+
+What the probes settled [measured]:
+
+- **A no-copy view isn't cheap to hold.** Import takes under 1 ms even at 8 GB, but first GPU use makes the whole range
+  resident: 1 GB took 37 ms, 8 GB took 368 ms and left 8.6 GB resident. One view of all guest RAM would commit all of it,
+  so views are 64 MB windows imported on demand, and "single dispatch" means one per window a shadow touches. Windows are
+  never evicted, so a guest that touches every window ends up fully committed.
+- **Tracked hazards don't cross queues.** A reader on one queue finished while a writer on another waited on an event.
+  Windows are untracked; within a queue, each shadow's own tracked buffer orders its transfers. Making that buffer
+  untracked fails the probe's ordering check, so the check does detect a lost dependency.
+- **An encoder swap costs about 24 single-page blits** (16.6 us against 0.69 us of encoding), so shadows under 32 pages stay
+  in the blit encoder. Only uploads inside `prepareResources:event:value:` get the adapter and a compute pass; every other
+  path, and frameworks with a different task ABI, use blits from the window.
+
+Shadows stay on per-run imports if a page is unmapped, read-only or mapped twice, if the length isn't whole pages or is
+4 GB or more, or if a window import fails. Read-only matters because a window is writable. Whether the donor's blit
+encoder use survives the adapter (`updateFence:`, for example) needs a real guest; it has only run on the Intel MSAA path.
+
 ## 1. Trace
 
 ### One Metal command buffer (Apple silicon path)
@@ -216,9 +247,14 @@ Likely slowest, in order:
 
 Quick wins to try, in order:
 
-- Replace the PBO `glFinish` with a fence recorded when the PBO write ends, waiting only for that work. Needs a check of
-  why this is arm64-only before touching it.
-- Cache common `glGet*` state on the client after profiling shows which queries dominate.
+- **Don't replace the PBO `glFinish` with a fence.** The idea above this list was wrong: `GL_SYNC_GPU_COMMANDS_COMPLETE`
+  covers every earlier command in the context, not just the write, so a fence can only skip work issued after the write.
+  [measured, core and legacy, 256x256, 300 rounds] Write to upload took 112 us with `glFinish` and 108 us with a fence at
+  the write, or 208 us and 217 us with clears in between, which is no gain. The stale-byte bug also didn't reproduce in
+  that shape, with or without any sync, so there's no evidence yet about which repairs still work or whether the wait
+  is still needed. A profile showing `glFinish` here plus a reproducer should come first.
+- Query caching already exists for common state (`passthrough-opengl-common-state-client.c`, with audited invalidation).
+  Extending it needs a profile showing which queries dominate; none exists, so nothing was added.
 - Qualify the existing `VIM_BACKING_ASYNC_EXPERIMENT`, `VIM_BACKING_CANONICAL_EXPERIMENT` and
   `VIM_VRAM_COMPLETION_EXPERIMENT` code rather than writing new async paths.
 
@@ -230,25 +266,30 @@ if `PVG shadow` shows little shadowed traffic, skip them.
 | # | Change | Expected gain | Difficulty | Status |
 | --- | --- | --- | --- | --- |
 | 0 | Baseline only for shared buffers | Up to half of shadow memory, one blit per texture upload | Tiny | **Done** |
-| 1 | Gather and scatter by one dispatch over a no-copy RAM view plus a page table, through the paging adapter | Most of a 15 ms per 16 MB per submission cost; [measured] upload 12x host-only | Medium, about 150-300 lines | Next |
-| 1a | Fallback: blit from the RAM view, keeping the blit encoder | [measured] upload 2.7x, no per-run imports | Small | If 1 stalls |
-| 2 | Posted MMIO writes: don't wait for the reply (`apple-gfx.m:916-919`). Socket order still serializes with later reads | Removes BQL hold per doorbell, maybe 30-100 us each, helps all vCPUs | Small; needs a check that nothing relies on the sync | Measure `rpc-write` |
-| 3 | Exact run building from known GPAs, no probing, no 1 MB cap | Fewer runs and imports; much of it subsumed by 1 | Small | After 1 |
+| 1 | Gather and scatter by one dispatch per RAM window plus a page table, through the paging adapter | [measured, host only] upload 7x, scatter 18x | Medium | **Done, on; needs a guest** |
+| 1a | Fallback: blit from the RAM window, keeping the blit encoder | No per-run imports, little per-submission gain | Small | **Done**, used off the adapter path |
+| 2 | Posted MMIO writes (`VIM_PVG_POSTED_MMIO`). Queue and socket order still serialize with later reads | Removes BQL hold per doorbell, maybe 30-100 us each, helps all vCPUs | Small | **Done, off**: pick offsets from `PVG mmio writes`, compare `mmio-write-bql` |
+| 3 | Exact run building from known GPAs, no probing, no 1 MB cap | Only for shadows that can't use a table | Small | **Done, on** |
 | 4 | Pacing: async acquisition on, drawable count 2 vs 3, helper QoS, host-rate mode | Up to one refresh of latency, fewer drops | Tiny each, needs A/B runs | Measure first |
 | 5 | IOSurface frame handoff, reusing `presentSurface` and the GL transport (`VIMDisplayConnection.m:120`) so frames queue without the ACK loop | 1-5 ms latency, steadier pacing under main-thread load | Medium | |
 | 6 | Guest 16 KB allocator for pool memory | Removes shadows for most resources (60-90%), but after item 1 the remaining gain is small | Hard, every guest kext version, purgeable semantics | Probably skip if item 1 works |
-| 7 | OpenGL: PBO fence, query caching | Large only for apps that hit them | Small to medium | Profile first |
+| 7 | OpenGL: PBO fence, query caching | [measured] Fence: none. Caching: unknown | Small to medium | Fence dropped; profile first |
 | 8 | Translate to arm64e | 1.2-1.6x on one CPU term | Very hard | No |
 
 Biggest risk to the whole goal: guest CPU work under TCG (step 1 of both traces) probably dwarfs all of this for many
 workloads. It should be measured before GPU-side work is credited with any frame-time improvement.
 
-Open questions for item 1:
+Switches for items 1 to 3, read at launch. `VIM_` names because the launch plan strips `PVG_*`:
 
-- Whether a no-copy view of many GB is allowed (`maxBufferLength`) and how much it wires. The probe used 64 MB. Windows of
-  about 1 GB imported on demand are the fallback.
-- The helper must keep a task-offset to GPA table; `helper_task_map` already sees every range.
-- Concurrent guest CPU writes during a gather are no worse than today's blits. Scatter must keep byte-granular writes.
+| Variable | Default | `0` means |
+| --- | --- | --- |
+| `VIM_PVG_SLAB` | on | Per-run imports for everything, the old path |
+| `VIM_PVG_GATHER` | on | Uploads blit from the window |
+| `VIM_PVG_SCATTER` | on | Scatter dispatches once per page |
+| `VIM_PVG_EXACT_RUNS` | on | Per-run imports go back to size probing |
+| `VIM_PVG_POSTED_MMIO` | off | Takes `all` or hex offsets, such as `0x40,0x80` |
+
+`PVG shadow` gained `table`, `windows`, `gather`, `slab_blit` and `table_scatter`.
 
 Correctness note, unrelated to speed: `PGLegacyHeapResource` and the compute-paged dual-plane class also reach
 `newBufferForVirtualPage` [read], but have no `transfer` hook. If their import fails they'd get a shadow that never syncs.
@@ -260,5 +301,5 @@ couldn't confirm either way.
     xcrun clang -arch x86_64 -O2 -fno-objc-arc -undefined dynamic_lookup -I vendor/qemu/hw/display \
         -framework Foundation -framework Metal probes/host-shadow-import-rules.m -o /tmp/rules && /tmp/rules
 
-Use `-arch arm64` for the Rosetta comparison. Then launch a VM with `VIM_PVG_TIMING=1` in the app's environment, and
+Use `-arch arm64` for the Rosetta comparison. `probes/host-shadow-gather.m` builds the same way, x86_64 only. Then launch a VM with `VIM_PVG_TIMING=1` in the app's environment, and
 `VIM_DISPLAY_TIMING=1` for the present histograms.
