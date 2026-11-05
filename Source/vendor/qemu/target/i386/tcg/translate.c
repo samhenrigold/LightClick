@@ -42,6 +42,7 @@ static bool emit_inline_jmp_cache;
 static bool emit_inline_jmp_cache_32;
 static bool emit_inline_jmp_cache_cpl0;
 static bool dispatch_acquire_barrier;
+static bool dispatch_relaxed;
 static bool shared_dispatch;
 #if defined(__APPLE__) && defined(__aarch64__) && !defined(CONFIG_USER_ONLY)
 void pvg_tcg_dispatch_tail(void);
@@ -57,6 +58,7 @@ static void __attribute__((constructor)) init_inline_jmp_cache(void)
         pvg_tcg_fast_path("PVG_TCG_INLINE_JMP_CACHE_CPL0");
     const char *value = getenv("PVG_TCG_DISPATCH_ACQUIRE");
     dispatch_acquire_barrier = value && !strcmp(value, "1");
+    dispatch_relaxed = pvg_tcg_fast_path("PVG_TCG_DISPATCH_RELAXED");
     value = getenv("PVG_TCG_SHARED_DISPATCH");
     shared_dispatch = value && !strcmp(value, "1");
 #if defined(__APPLE__) && defined(__aarch64__) && !defined(CONFIG_USER_ONLY)
@@ -2068,14 +2070,26 @@ static void gen_cached_indirect_jump(DisasContext *s)
         tcg_gen_ld_ptr(cache, tcg_env,
                        cpu_off + offsetof(CPUState, tb_jmp_cache));
         tcg_gen_ld_i64(generation, cache, offsetof(CPUJumpCache, generation));
-        /* Match the acquire load in tb_lookup, including on non-TSO hosts. */
-        /* This is an acquire of generation, not a guest full fence.
-         * Order its load before subsequent loads/stores; prior stores need
-         * not be drained before later loads. Keep the full-barrier baseline
-         * available while qualifying this local experiment. */
-        tcg_gen_mb((dispatch_acquire_barrier ?
-                    TCG_MO_LD_LD | TCG_MO_LD_ST : TCG_MO_ALL) |
-                   TCG_BAR_LDAQ);
+        /* No barrier is needed here, with or without hardware TSO:
+         * - Entry fields are written only by this vCPU, so reordering the
+         *   generation load against them can only turn a hit into a miss.
+         * - Remote writers only clear entry.tb, bump generation or set
+         *   CF_INVALID. Missing one in flight means running a just-invalidated
+         *   TB, the window goto_tb chaining and stock tb_lookup already have.
+         *   A barrier placed AFTER this load would not close it anyway, since
+         *   it cannot order the guest load that preceded it.
+         * - TB storage is reclaimed only by tb_flush, in an exclusive section.
+         *   This vCPU's exit and re-entry synchronize with it, so a load after
+         *   resuming sees the new generation (coherence needs no barrier).
+         * - tb is dereferenced through an address dependency and this vCPU
+         *   already read that TB when it filled the entry.
+         * Filling an entry still needs tb_lookup's acquire, which is unchanged.
+         * The other settings keep the earlier baselines for comparison. */
+        if (!dispatch_relaxed) {
+            tcg_gen_mb((dispatch_acquire_barrier ?
+                        TCG_MO_LD_LD | TCG_MO_LD_ST : TCG_MO_ALL) |
+                       TCG_BAR_LDAQ);
+        }
 
         /* System-mode tb_jmp_cache_hash_func, derived from its constants. */
         const unsigned page_bits = TB_JMP_CACHE_BITS / 2;
