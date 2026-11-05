@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Print a table of lc-bench result files, with each file's speed relative to the first."""
+import os
+import sys
+
+
+def parse(path):
+    results = {}
+    with open(path) as file:
+        for number, line in enumerate(file, 1):
+            if not line.strip() or line.startswith('#'):
+                continue
+            fields = line.split()
+            try:
+                if len(fields) != 3:
+                    raise ValueError
+                results[fields[0]] = (float(fields[1]), fields[2])
+            except ValueError:
+                sys.exit(f'{path}:{number}: expected "name value unit": {line.strip()}')
+    return results
+
+
+def speed(base, other):
+    """How many times faster other is than base, or None when they cannot be compared."""
+    if base is None or other is None or base[1] != other[1] or base[0] <= 0 or other[0] <= 0:
+        return None
+    # Units such as MB/s are rates; everything else is a cost.
+    return other[0] / base[0] if base[1].endswith('/s') else base[0] / other[0]
+
+
+def main():
+    paths = sys.argv[1:]
+    if len(paths) < 2:
+        sys.exit('usage: lc-bench-compare BASE RESULT [RESULT...]')
+    runs = [parse(path) for path in paths]
+    names = list(dict.fromkeys(name for run in runs for name in run))
+    header = ['test', 'unit', os.path.basename(paths[0])]
+    for path in paths[1:]:
+        header += [os.path.basename(path), 'speed']
+    rows = [header]
+    for name in names:
+        base = runs[0].get(name)
+        first = next(run[name] for run in runs if name in run)
+        row = [name, first[1], f'{base[0]:.3f}' if base else '-']
+        for run in runs[1:]:
+            other = run.get(name)
+            ratio = speed(base, other)
+            row += [f'{other[0]:.3f}' if other else '-', f'{ratio:.3f}x' if ratio else '-']
+        rows.append(row)
+    widths = [max(len(row[i]) for row in rows) for i in range(len(header))]
+    for row in rows:
+        cells = [row[i].ljust(widths[i]) if i < 2 else row[i].rjust(widths[i]) for i in range(len(row))]
+        print('  '.join(cells).rstrip())
+    print(f'speed: times faster than {os.path.basename(paths[0])}; below 1 is slower.')
+
+
+main()
