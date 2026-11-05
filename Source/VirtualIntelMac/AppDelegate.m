@@ -221,6 +221,12 @@
     NSUInteger installerDownload = [arguments indexOfObject:@"--download-installer"];
     if (installerDownload != NSNotFound && installerDownload + 1 < arguments.count)
         [VIMNewMachineWindow downloadInstallerForGuest:arguments[installerDownload + 1]];
+    if (VIMCreatingGuestFromArguments()) {
+        atexit_b(^{
+          [VIMSession stopAll]; // a failed run mustn't leave its QEMU behind
+        });
+        [VIMNewMachineWindow createGuestFromArguments:arguments];
+    }
     self.updateTimer = [NSTimer scheduledTimerWithTimeInterval:3600
                                                        repeats:YES
                                                          block:^(NSTimer *timer) {

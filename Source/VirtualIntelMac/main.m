@@ -4,12 +4,58 @@
 #import "VIMLibraryLocation.h"
 #import "VIMInstallerAssembly.h"
 #import "VIMAutomaticSetup.h"
+#include <objc/runtime.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
+
+// CFFIXED_USER_HOME doesn't redirect preferences, so every standardUserDefaults caller in a --create-guest run gets a
+// suite of its own instead of the real app's domain: nothing reads or writes VIMCreationJob, VIMLibraryPath and the
+// rest.
+static void UsePrivateDefaults(void) {
+    NSString *suite = @"LightClick.create-guest";
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    [defaults removePersistentDomainForName:suite]; // a killed run can't clean up after itself
+    [defaults setBool:NO forKey:@"VIMAutomaticUpdateChecks"]; // a new-version alert would end the run
+    method_setImplementation(class_getClassMethod(NSUserDefaults.class, @selector(standardUserDefaults)),
+                             imp_implementationWithBlock(^NSUserDefaults *(id self) {
+                               return defaults;
+                             }));
+    atexit_b(^{
+      [defaults removePersistentDomainForName:suite];
+      [defaults synchronize];
+    });
+}
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         NSArray<NSString *> *args = NSProcessInfo.processInfo.arguments;
+        if ([args containsObject:@"--create-guest"]) {
+            NSSet *allowed = [NSSet setWithArray:@[
+                @"--create-guest", @"--name", @"--cpu", @"--memory-gb", @"--disk-gb", @"--account-name",
+                @"--account-password", @"--guest-diagnostics-root"
+            ]];
+            NSMutableSet *seen = [NSMutableSet new];
+            BOOL valid = args.count % 2 == 1;
+            // Single-dash pairs are NSUserDefaults arguments, such as -VIMKeepInstallers YES.
+            for (NSUInteger i = 1; i + 1 < args.count; i += 2) {
+                valid = valid && [args[i] hasPrefix:@"-"] && ![seen containsObject:args[i]] &&
+                        (![args[i] hasPrefix:@"--"] || [allowed containsObject:args[i]]);
+                [seen addObject:args[i]];
+            }
+            // No argument is echoed: a misplaced one could be the password.
+            if (!valid || ![seen containsObject:@"--name"]) {
+                fprintf(stderr, "Use --create-guest guest --name name [--cpu n] [--memory-gb n] [--disk-gb n] "
+                                "[--account-name name] --account-password password.\n");
+                return 64;
+            }
+            // The private home is what keeps this run away from the real library.
+            if (!getenv("CFFIXED_USER_HOME")) {
+                fprintf(stderr, "--create-guest needs CFFIXED_USER_HOME set to a private home.\n");
+                return 64;
+            }
+            UsePrivateDefaults();
+        }
         if (args.count == 3 && [args[1] isEqual:@"--identify-installer"]) {
             NSError *error = nil;
             NSString *guest = [VIMInstallerAssembly guestForInstallerApplication:[NSURL fileURLWithPath:args[2]]
