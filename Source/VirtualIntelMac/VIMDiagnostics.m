@@ -1,4 +1,5 @@
 #import "VIMDiagnostics.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "VIMLibraryLocation.h"
 #import "VIMAlerts.h"
 
@@ -51,7 +52,7 @@ static BOOL WriteRecord(NSDictionary *record,NSURL *URL,NSError **error) {
     NSSavePanel *panel=[NSSavePanel savePanel];panel.title=@"Export Diagnostics";
     panel.nameFieldStringValue=@"Light Click Diagnostics.zip";
     panel.message=@"Includes app and virtual Mac configuration summaries and recent logs. Review the archive before sharing it.";
-    panel.allowedFileTypes=@[@"zip"];panel.canCreateDirectories=YES;
+    panel.allowedContentTypes=@[UTTypeZIP];panel.canCreateDirectories=YES;
     NSURL *library=VIMLibraryLocation.machinesURL;
     void (^complete)(NSModalResponse)=^(NSModalResponse response){
         if(response!=NSModalResponseOK)return;

@@ -1532,7 +1532,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     }
     if([command[@"Action"] isEqual:@"force-stop-vm"]) {
         if(!VIMSkipsDevelopmentPowerConfirmation()){finish(@{@"Error":@"Force-stop diagnostics require VIMSkipPowerConfirmation or --development-no-power-confirmation."});return;}
-        [self forceStop:nil];finish(@{@"Requested":@YES});return;
+        [self forceStop:self];finish(@{@"Requested":@YES});return;
     }
     if([command[@"Action"] isEqual:@"status-probe"]) {
         // Time the exact read-only production status path without creating a

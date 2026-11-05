@@ -1,7 +1,6 @@
 #import "VIMAutomaticSetup.h"
 #import "VIMGuestProfile.h"
 #import "VIMMachine.h"
-#import <Security/Security.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -9,11 +8,8 @@
 static BOOL SetupFailure(NSError **error,NSString *message) {
     if(error)*error=[NSError errorWithDomain:@"VirtualIntelMac.AutomaticSetup" code:1 userInfo:@{NSLocalizedDescriptionKey:message}];return NO;
 }
-static NSDictionary *Credential(NSString *identifier) {
-    if(![identifier isKindOfClass:NSString.class]||![[NSUUID alloc] initWithUUIDString:identifier])return nil;
-    return @{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService:@"gold.samhenri.LightClick.automatic-setup",
-        (__bridge id)kSecAttrAccount:identifier};
+static BOOL ValidCredentialIdentifier(NSString *identifier) {
+    return [identifier isKindOfClass:NSString.class]&&[[NSUUID alloc] initWithUUIDString:identifier];
 }
 static int CredentialDirectory(BOOL create,NSError **error) {
     NSURL *support=[NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
@@ -57,7 +53,7 @@ static BOOL PrivateCredential(struct stat *st) {return S_ISREG(st->st_mode)&&st-
 }
 + (BOOL)savePassword:(NSString *)password identifier:(NSString *)identifier error:(NSError **)error {
     if(![self validatePassword:password error:error])return NO;
-    if(!Credential(identifier))return SetupFailure(error,@"This setup session has no valid credential identifier.");
+    if(!ValidCredentialIdentifier(identifier))return SetupFailure(error,@"This setup session has no valid credential identifier.");
     int directory=CredentialDirectory(YES,error);if(directory<0)return NO;
     struct stat st;BOOL exists=fstatat(directory,identifier.UTF8String,&st,AT_SYMLINK_NOFOLLOW)==0;
     if((exists&&!PrivateCredential(&st))||(!exists&&errno!=ENOENT)){close(directory);return SetupFailure(error,@"The saved setup password has unexpected permissions. It was not replaced.");}
@@ -73,7 +69,7 @@ static BOOL PrivateCredential(struct stat *st) {return S_ISREG(st->st_mode)&&st-
     close(directory);return success||SetupFailure(error,@"The temporary setup password could not be saved privately on this Mac. Try again.");
 }
 + (NSString *)passwordForIdentifier:(NSString *)identifier error:(NSError **)error {
-    NSDictionary *identity=Credential(identifier);if(!identity){SetupFailure(error,@"This setup session has no valid credential identifier.");return nil;}
+    if(!ValidCredentialIdentifier(identifier)){SetupFailure(error,@"This setup session has no valid credential identifier.");return nil;}
     NSError *failure=nil;int directory=CredentialDirectory(NO,&failure);
     if(failure){if(error)*error=failure;return nil;}
     if(directory>=0){
@@ -87,26 +83,16 @@ static BOOL PrivateCredential(struct stat *st) {return S_ISREG(st->st_mode)&&st-
         }
         if(openError!=ENOENT){SetupFailure(error,@"The saved setup password could not be read safely. Enter it again.");return nil;}
     }
-    // Compatibility only: migrate a previously approved Keychain item without
-    // ever presenting an authorization dialog. New setups do not use Keychain.
-    NSMutableDictionary *query=[identity mutableCopy];query[(__bridge id)kSecReturnData]=@YES;query[(__bridge id)kSecMatchLimit]=(__bridge id)kSecMatchLimitOne;
-    query[(__bridge id)kSecUseAuthenticationUI]=(__bridge id)kSecUseAuthenticationUIFail;
-    CFTypeRef result=NULL;OSStatus status=SecItemCopyMatching((__bridge CFDictionaryRef)query,&result);
-    if(status!=errSecSuccess){SetupFailure(error,@"Enter the virtual Mac’s setup password again. Its saved credential is not available on this Mac.");return nil;}
-    NSData *data=CFBridgingRelease(result);NSString *password=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if(!password||![self savePassword:password identifier:identifier error:error])return nil;
-    NSMutableDictionary *cleanup=[identity mutableCopy];cleanup[(__bridge id)kSecUseAuthenticationUI]=(__bridge id)kSecUseAuthenticationUIFail;
-    SecItemDelete((__bridge CFDictionaryRef)cleanup);return password;
+    SetupFailure(error,@"Enter the virtual Mac’s setup password again. Its saved credential is not available on this Mac.");return nil;
 }
 + (BOOL)removePasswordForIdentifier:(NSString *)identifier error:(NSError **)error {
-    NSDictionary *query=Credential(identifier);if(!query)return SetupFailure(error,@"This setup session has no valid credential identifier.");
+    if(!ValidCredentialIdentifier(identifier))return SetupFailure(error,@"This setup session has no valid credential identifier.");
     NSError *failure=nil;int directory=CredentialDirectory(NO,&failure);if(failure){if(error)*error=failure;return NO;}
     if(directory>=0){struct stat st;int found=fstatat(directory,identifier.UTF8String,&st,AT_SYMLINK_NOFOLLOW);
         BOOL safe=found==0?PrivateCredential(&st):errno==ENOENT;
         BOOL removed=safe&&(found!=0||unlinkat(directory,identifier.UTF8String,0)==0);close(directory);
         if(!removed)return SetupFailure(error,@"The temporary setup password could not be retired safely. Its record was retained.");}
-    NSMutableDictionary *cleanup=[query mutableCopy];cleanup[(__bridge id)kSecUseAuthenticationUI]=(__bridge id)kSecUseAuthenticationUIFail;
-    SecItemDelete((__bridge CFDictionaryRef)cleanup);return YES;
+    return YES;
 }
 + (NSURL *)configurationMediaForMachine:(VIMMachine *)machine error:(NSError **)error {
     if(!machine.preMetalGuest||!machine.configuration[@"InstallerMedia"])return nil;

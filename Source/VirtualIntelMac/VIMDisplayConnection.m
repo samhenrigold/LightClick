@@ -8,6 +8,11 @@
 #include <errno.h>
 #include <servers/bootstrap.h>
 #include "../PassthroughOpenGL/display-surface-message.h"
+// Give up the receive right and, when it was created, the send right beside it.
+static void ReleaseSurfacePort(mach_port_t port) {
+    mach_port_mod_refs(mach_task_self(),port,MACH_PORT_RIGHT_RECEIVE,-1);
+    mach_port_deallocate(mach_task_self(),port);
+}
 
 // Matches QEMU hw/display/apple-gfx-app-wire.h, private same-host ABI v1.
 typedef struct {
@@ -66,19 +71,19 @@ static NSError *VIMDisplayError(NSString *message) {
     NSString *name=[@"gold.samhenri.LightClick.surface." stringByAppendingString:NSUUID.UUID.UUIDString];
     if(!kr)kr=bootstrap_register(bootstrap_port,(char *)name.UTF8String,port);
     if(kr){
-        if(port)mach_port_destroy(mach_task_self(),port);
+        if(port)ReleaseSurfacePort(port);
         if(error)*error=VIMDisplayError(@"The GPU display connection could not be created.");
         return nil;
     }
     self.surfaceRendererPID=pid;self.surfaceServiceName=name;
     self.surfaceListener=dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV,port,0,dispatch_get_main_queue());
-    if(!self.surfaceListener){mach_port_destroy(mach_task_self(),port);return nil;}
+    if(!self.surfaceListener){ReleaseSurfacePort(port);return nil;}
     __weak VIMDisplayConnection *weakSelf=self;
     NSUInteger endpointEpoch=self.surfaceEndpointEpoch;
     self.surfaceProcessMonitor=dispatch_source_create(DISPATCH_SOURCE_TYPE_PROC,(uintptr_t)pid,
         DISPATCH_PROC_EXIT,dispatch_get_main_queue());
     if(!self.surfaceProcessMonitor){
-        dispatch_source_set_cancel_handler(self.surfaceListener,^{mach_port_destroy(mach_task_self(),port);});
+        dispatch_source_set_cancel_handler(self.surfaceListener,^{ReleaseSurfacePort(port);});
         dispatch_resume(self.surfaceListener);[self disableSurfaceTransport];return nil;
     }
     dispatch_source_set_event_handler(self.surfaceProcessMonitor,^{
@@ -87,7 +92,7 @@ static NSError *VIMDisplayError(NSString *message) {
     });
     dispatch_resume(self.surfaceProcessMonitor);
     dispatch_source_set_event_handler(self.surfaceListener,^{[weakSelf receiveSurface:port];});
-    dispatch_source_set_cancel_handler(self.surfaceListener,^{mach_port_destroy(mach_task_self(),port);});
+    dispatch_source_set_cancel_handler(self.surfaceListener,^{ReleaseSurfacePort(port);});
     dispatch_resume(self.surfaceListener);return name;
 }
 - (void)receiveSurface:(mach_port_t)port {
