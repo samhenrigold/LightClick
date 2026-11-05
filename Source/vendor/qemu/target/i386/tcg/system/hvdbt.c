@@ -58,7 +58,7 @@ static struct {
     unsigned written_count;
     bool protect_all;
     char refused[64]; /* why the vCPU is on TCG, while it is */
-    uint64_t kernel_base, kernel_slide;
+    uint64_t kernel_base, kernel_slide, kernel_data, kernel_data_bytes;
     bool shutdown_dumped;
     bool dump_done;
 } hv;
@@ -122,8 +122,22 @@ static void hvdbt_watch_power_ports(CPUState *cs, uint16_t port, unsigned size, 
     engine_tally_port_write(hv.engine, port, size, value, hv.kernel_slide);
     if ((off || reset) && kernel && !hv.shutdown_dumped) { /* the kernel's data as it stands now: its message buffer, and any panic string */
         g_autofree char *path = g_strdup_printf("%s.shutdown", kernel);
+        g_autofree char *data_path = g_strdup_printf("%s.shutdown.data", kernel);
+        FILE *data = fopen(data_path, "wb");
+        uint8_t page[4096];
+
         hv.shutdown_dumped = true;
         hvdbt_dump_kernel(cs, path);
+        /* All of __DATA from its load address, its zero-fill too, which a Mach-O doesn't hold: that is where the message buffer and panic string live. */
+        for (uint64_t done = 0; data && done < hv.kernel_data_bytes; done += sizeof page) {
+            if (cpu_memory_rw_debug(cs, hv.kernel_data + done, page, sizeof page, false)) {
+                memset(page, 0, sizeof page);
+            }
+            fwrite(page, 1, sizeof page, data);
+        }
+        if (data) {
+            fclose(data);
+        }
     }
 }
 
@@ -751,6 +765,10 @@ static void hvdbt_dump_kernel(CPUState *cs, const char *path)
     for (uint32_t i = 0; i < head[4] && offset + 8 <= head[5]; i++) {
         uint32_t cmd = ldl_le_p(commands + offset), size = ldl_le_p(commands + offset + 4);
         if (cmd == 0x19 /* LC_SEGMENT_64 */ && size >= 72) {
+            if (!strncmp((char *)commands + offset + 8, "__DATA", 16)) {
+                hv.kernel_data = ldq_le_p(commands + offset + 24) + delta;
+                hv.kernel_data_bytes = ldq_le_p(commands + offset + 32);
+            }
             uint64_t vmaddr = ldq_le_p(commands + offset + 24), fileoff = ldq_le_p(commands + offset + 40), filesize = ldq_le_p(commands + offset + 48);
             fprintf(stderr, "hvdbt: segment %.16s at 0x%" PRIx64 " file 0x%" PRIx64 " size 0x%" PRIx64 "\n", (char *)commands + offset + 8, vmaddr, fileoff, filesize);
             for (uint64_t done = 0; done < filesize; done += sizeof page) {
