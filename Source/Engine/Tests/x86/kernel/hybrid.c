@@ -1127,6 +1127,40 @@ static void test_x87(void) {
     __asm__ volatile("fninit");
 }
 
+// x87 operands go through translated loads and stores, so devices and tracked frames work as for any move. fxsave, written from the monitor, goes to TCG for a tracked frame.
+static void test_x87_memory(u64 root) {
+    u64 got = 0;
+    __asm__ volatile("fninit\n fldl (%0)\n fstpl (%1)" : : "r"(PHYS(MARKED)), "r"(&got) : "memory");
+    CHECK(got == MARKED * 3);
+    u64 writes = 0x1234;
+    __asm__ volatile("fildq (%1)\n fistpq (%0)" : : "r"(PHYS(MARKED)), "r"(&writes) : "memory");
+    CHECK(MAILBOX[0] == 0x1234);
+    __asm__ volatile("fldpi\n fstpt (%0)" : : "r"(PHYS(MARKED)) : "memory");
+    CHECK(MAILBOX[0] == 0xC90FDAA22168C235ULL);
+
+    u64 va = TEST_VA + 0x800000;
+    u64 *slots = pte_of(root, va);
+    u64 table = ((u64)slots - PHYSMAP) & ~0xFFFULL;
+    slots[0] = frame() | PRESENT_RW;
+    slots[1] = table | PRESENT_RW;
+    volatile u8 *high = (volatile u8 *)va + 4096;
+    CHECK(high[9] == (u8)(table >> 8));
+    u64 target = frame();
+    PHYS(target)[0] = 0x77;
+    u64 entry = target | PRESENT_RW;
+    __asm__ volatile("fildq (%1)\n fistpq (%0)" : : "r"(high + 64), "r"(&entry) : "memory");
+    CHECK(*(volatile u64 *)(va + (8ULL << 12)) == 0x77);
+    u64 rax = 0;
+    __asm__ volatile("mov %2, %%r12\n mov $5, %%r13\n mov $5, %%r14\n .byte 0x49, 0x0F, 0xAE, 0x04, 0x24\n"
+                     : "=a"(rax)
+                     : "a"(rax), "r"(high + 1024)
+                     : "r12", "r13", "r14", "memory");
+    CHECK(rax == 7);
+    slots[1] = 0;
+    slots[8] = 0;
+    __asm__ volatile("mov %%cr3, %%rax\n mov %%rax, %%cr3" : : : "rax");
+}
+
 void kmain(void) {
     __asm__ volatile("mov $0x10, %%ax\n mov %%ax, %%ds\n mov %%ax, %%es\n mov %%ax, %%ss\n" : : : "ax");
     tables();
@@ -1148,6 +1182,7 @@ void kmain(void) {
     test_split_store_fault(root);
     test_mmx();
     test_x87();
+    test_x87_memory(root);
     test_stale_table(root);
     test_poisoned_tables(root);
     test_rep_speed_under_ts();

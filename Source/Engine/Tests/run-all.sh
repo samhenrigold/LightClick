@@ -19,6 +19,7 @@ check_same() { # name image [args]
 check_same sanity t_sanity
 check_same smc t_smc
 check_same rep t_rep
+check_same x87 t_x87
 check_same corpus-O0 t_corpus_O0
 check_same corpus-O1 t_corpus_O1
 check_same corpus-O2 t_corpus_O2

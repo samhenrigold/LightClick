@@ -984,7 +984,7 @@ static void x87_op(void) {
         c->fip = rip;
         c->fcs = c->seg_sel[1];
         if (mem) {
-            c->fdp = c->x[R_AD];
+            c->fdp = c->x[R_AD]; // shortcut: holds an fs or gs base too, which a CPU's offset wouldn't. Nothing reads it for meaning; upgrade if something does.
             u32 seg = lit0 >> 16 & 3;
             c->fds = c->seg_sel[seg == 1 ? 4 : seg == 2 ? 5 : 3];
         }
