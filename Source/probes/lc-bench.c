@@ -247,6 +247,30 @@ static NOINLINE uint64_t movups_copy_chunk(uint64_t n) {
                              : "memory", "xmm0", "xmm1", "xmm2", "xmm3");
     return copy_target[n % COPY_BYTES];
 }
+
+// Integer and shuffle SSE on registers, so softmmu is not in it. punpck, pshuflw, pshufhw and pshufd test
+// PVG_TCG_INLINE_SSE_PACKED; pmaddwd, packuswb and psadbw test PVG_TCG_SSE_NO_GLOBALS, with mask, sum and i live across
+// their helpers. The asm fixes the instructions, which intrinsics would let the compiler merge.
+typedef long long int2 __attribute__((vector_size(16)));
+
+static NOINLINE uint64_t sse_int_shuffle_chunk(uint64_t n) {
+    uint64_t sum = opaque_seed;
+    int2 a = {(long long)sum, (long long)~sum}, b = {(long long)(sum * 3), (long long)(sum * 5)}, t;
+    const int2 step = {(long long)(sum | 1), (long long)((sum << 1) | 1)}, keep = {-1LL ^ 0x0100, -1LL ^ 0x0100};
+    uint32_t mask;
+    for (uint64_t i = 0; i < n; i++) {
+        __asm__ volatile("movdqa %[a],%[t]\n\tpunpcklbw %[b],%[a]\n\tpunpckhwd %[b],%[t]\n\t"
+                         "pshuflw $0x1b,%[a],%[a]\n\tpshufhw $0xb1,%[t],%[t]\n\tpshufd $0x4e,%[t],%[t]\n\t"
+                         "paddd %[t],%[a]\n\tpand %[keep],%[a]\n\tmovdqa %[a],%[t]\n\t"
+                         "pcmpeqb %[b],%[t]\n\tpmovmskb %[t],%[mask]\n\t"
+                         "movdqa %[a],%[t]\n\tpmaddwd %[b],%[t]\n\tpackuswb %[a],%[t]\n\tpsadbw %[b],%[t]\n\t"
+                         "paddd %[t],%[a]\n\tpaddd %[step],%[b]"
+                         : [a] "+x"(a), [b] "+x"(b), [t] "=&x"(t), [mask] "=&r"(mask)
+                         : [keep] "x"(keep), [step] "x"(step));
+        sum += mask + i;
+    }
+    return sum ^ (uint64_t)a[0] ^ (uint64_t)b[1];
+}
 #endif
 
 // Floating point: the a and c sequences settle on ordinary normal values, so neither overflows nor goes denormal.
@@ -483,6 +507,9 @@ int main(int argc, char **argv) {
 
     measure("sse_float", "ns/iter", 1e9, 0, sse_float_chunk);
     measure("scalar_double", "ns/iter", 1e9, 0, scalar_double_chunk);
+#if defined(__x86_64__)
+    measure("sse_int_shuffle", "ns/iter", 1e9, 0, sse_int_shuffle_chunk);
+#endif
     measure("cas_uncontended", "ns/op", 1e9, 0, cas_uncontended_chunk);
     measure("cas_contended", "ns/op", 1e9, 0, cas_contended_chunk);
     measure("syscall", "ns/call", 1e9, 0, syscall_chunk);
