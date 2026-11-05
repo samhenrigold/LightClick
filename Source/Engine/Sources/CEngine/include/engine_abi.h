@@ -30,7 +30,7 @@
 #define OFF_CC (6ULL << 20) // EL0 execute-only, EL1 rw: translated code
 #define CC_SIZE (118ULL << 20)
 #define OFF_CTX (124ULL << 20) // EL0 rw: EngineCtx
-#define OFF_RSTACKS (126ULL << 20) // EL0 rw, per view: 16 KB shadow return stack + 16 KB guard (unmapped)
+#define OFF_RSTACKS (126ULL << 20) // EL0 rw, per view: 16 KB guard (unmapped), then a 16 KB shadow return stack
 #define OFF_HASH (128ULL << 20) // EL0 ro, per view: indirect-branch table
 #define HASH_ENTRIES (1ULL << 16)
 #define HASH_BYTES (HASH_ENTRIES * 16)

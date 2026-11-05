@@ -459,7 +459,7 @@ static View *view_find(u64 cr3_key, u32 cpl) {
     ((u64 *)v->root0)[(RAM_ALIAS_VA >> 39) & 0x1ff] = hole_entry_ram;
     v->ttbr0 = VA_TO_IPA(v->root0) | (u64)view_asid(idx) << 48;
     v->ttbr1 = VA_TO_IPA(v->root1);
-    v->rs_top = PRIV_VA + OFF_RSTACKS + (u64)idx * RSTACK_SLOT + RSTACK_BYTES - 16;
+    v->rs_top = PRIV_VA + OFF_RSTACKS + (u64)(idx + 1) * RSTACK_SLOT - 16;
     v->rs_saved = v->rs_top;
     v->hash_va = PRIV_VA + OFF_HASH + (u64)idx * HASH_BYTES;
     u64 *sent = (u64 *)v->rs_top;
@@ -602,6 +602,12 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
         raise_pf(fault - 1, f.fault_err, rip);
         return c->elr;
     }
+    if (c->tr_flushed) {
+        c->tr_flushed = 0;
+        reset_all_return_stacks();
+    }
+    if (single)
+        return c->req_r[0]; // runs once and stays unregistered: nothing to protect, and its page must stay writable
     // Every frame code was read from is write-protected, so a later store invalidates it, and every page-table entry on the
     // way is tracked by marking the leaf slot.
     for (int i = 2; i < 4; i++) {
@@ -613,10 +619,6 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
             page_info[gpa >> 12] |= PI_CODE;
             write_protect_frame(gpa);
         }
-    }
-    if (c->tr_flushed) {
-        c->tr_flushed = 0;
-        reset_all_return_stacks();
     }
     track_root(v, rip, &w);
     *shadow_slot(v, rip, &w, 0, 0) |= PTE_X_MARK;

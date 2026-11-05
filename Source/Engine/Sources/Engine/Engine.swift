@@ -135,12 +135,12 @@ public final class Engine {
             slot(privL2, Int(off >> 21)).pointee = ipa(off) | block | attrs
             off += 2 << 20
         }
-        // Return stacks: a writable run with an unmapped guard below each.
+        // Return stacks grow down: each slot is an unmapped guard, then the writable part.
         slot(privL2, rstackL2Index).pointee = ipa(rstackL3) | valid
         var page: UInt64 = 0
         while page < 2 << 20 {
             let inSlot = page % kRStackSlot
-            if inSlot < kRStackBytes {
+            if inSlot >= kRStackSlot - kRStackBytes {
                 slot(rstackL3, Int(page >> 12)).pointee =
                     ipa(kOffRStacks + page) | valid | af | sh | apRW | uxn | pxn
             }
