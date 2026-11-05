@@ -1,5 +1,6 @@
-// x87 in the monitor: 80-bit arithmetic on integers, included by monitor.c. Every exception here is masked: an operation with one unmasked, or one
-// pending, goes to TCG before it starts (see x87_op), since only TCG raises #MF. So each response below is the SDM's masked one, and all state is in EngineCtx.
+// x87 in the monitor: 80-bit arithmetic on integers, included by monitor.c. Every exception here is masked: an
+// operation with one unmasked, or one pending, goes to TCG before it starts (see x87_op), since only TCG raises #MF. So
+// each response below is the SDM's masked one, and all state is in EngineCtx.
 typedef unsigned __int128 u128;
 typedef int32_t i32;
 
@@ -8,7 +9,21 @@ typedef struct {
     u32 se; // sign and exponent, 16 bits
 } F;
 
-enum { FE_I = 1, FE_D = 2, FE_Z = 4, FE_O = 8, FE_U = 0x10, FE_P = 0x20, FE_SF = 0x40, FE_ES = 0x80, FC0 = 0x100, FC1 = 0x200, FC2 = 0x400, FC3 = 0x4000, FB = 0x8000 };
+enum {
+    FE_I = 1,
+    FE_D = 2,
+    FE_Z = 4,
+    FE_O = 8,
+    FE_U = 0x10,
+    FE_P = 0x20,
+    FE_SF = 0x40,
+    FE_ES = 0x80,
+    FC0 = 0x100,
+    FC1 = 0x200,
+    FC2 = 0x400,
+    FC3 = 0x4000,
+    FB = 0x8000
+};
 #define BIT63 (1ULL << 63)
 #define BIT62 (1ULL << 62)
 #define EXPMAX 0x7FFF
@@ -18,7 +33,9 @@ static u32 xfl; // exception flags and rounded-up (FC1) raised by the operation 
 
 static inline u32 f_exp(F a) { return a.se & EXPMAX; }
 static inline u32 f_sign(F a) { return a.se >> 15 & 1; }
-static inline bool f_unsupported(F a) { return f_exp(a) && !(a.m & BIT63); } // unnormals, pseudo-NaNs, pseudo-infinities
+static inline bool f_unsupported(F a) {
+    return f_exp(a) && !(a.m & BIT63);
+} // unnormals, pseudo-NaNs, pseudo-infinities
 static inline bool f_isnan(F a) { return f_exp(a) == EXPMAX && (a.m << 1); }
 static inline bool f_issnan(F a) { return f_isnan(a) && !(a.m & BIT62); }
 static inline bool f_isinf(F a) { return f_exp(a) == EXPMAX && !(a.m << 1); }
@@ -45,7 +62,8 @@ static inline i32 f_unpack(F a, u64 *m) {
     return e;
 }
 
-// Rounds at 24, 53 or 64 bits by RC and packs: the masked responses for overflow and underflow included. Tiny is judged after rounding, as x87 does.
+// Rounds at 24, 53 or 64 bits by RC and packs: the masked responses for overflow and underflow included. Tiny is judged
+// after rounding, as x87 does.
 static F round_pack(u32 sign, i32 e, u64 s0, u64 s1, int prec) {
     u32 rc = c->fcw >> 10 & 3;
     u64 orig;
@@ -179,7 +197,8 @@ static F quiet(F a) {
     return a;
 }
 
-// The rules of SDM table 4-7: a QNaN beats an SNaN, the larger significand beats the smaller, and on a tie the positive sign wins.
+// The rules of SDM table 4-7: a QNaN beats an SNaN, the larger significand beats the smaller, and on a tie the positive
+// sign wins.
 static F pick_nan(F a, F b) {
     if (!f_isnan(a))
         return quiet(b);
@@ -364,7 +383,8 @@ static F f_sqrt(F a) {
     return round_pack(0, e / 2 + BIAS, s0, s1, fcw_prec());
 }
 
-// fprem and fprem1. *cc: the condition codes, from the low quotient bits or C2 for a partial remainder. How far a partial one goes is what QEMU does, and it says Intel does too.
+// fprem and fprem1. *cc: the condition codes, from the low quotient bits or C2 for a partial remainder. How far a
+// partial one goes is what QEMU does, and it says Intel does too.
 static F f_rem(F a, F b, bool nearest, u32 *cc) {
     *cc = 0;
     if (f_unsupported(a) || f_unsupported(b))
@@ -691,7 +711,8 @@ static inline void st_pop(X87 *s) {
 }
 static inline void underflow(void) { xfl |= FE_I | FE_SF; }
 
-// Stack overflow: register 7 from TOP is in use. The masked response loads the indefinite instead of the value, in place.
+// Stack overflow: register 7 from TOP is in use. The masked response loads the indefinite instead of the value, in
+// place.
 static inline bool st_push(X87 *s, F v) {
     s->top = (s->top - 1) & 7;
     bool over = s->tags >> s->top & 1;
@@ -750,8 +771,7 @@ static bool rflags_cond(u32 which) { // 0 CF, 1 ZF, 2 CF or ZF, 3 PF
             return zf;
         case 2:
             return cf || zf;
-        default:
-        {
+        default: {
             u32 p = (u32)c->x[R_PF] & 0xFF;
             p ^= p >> 4;
             p ^= p >> 2;
@@ -865,7 +885,8 @@ static void env_get(const u8 *p, X87 *s, bool data16) {
             s->tags |= 1u << i;
 }
 
-// Writing guest memory from here sees past the store traps that keep translations and shadow tables honest, so a frame holding either goes to TCG, which notes its writes.
+// Writing guest memory from here sees past the store traps that keep translations and shadow tables honest, so a frame
+// holding either goes to TCG, which notes its writes.
 static bool fp_area_write(u64 va, const void *in, u32 n) {
     u32 access = (c->cpl == 3 ? 4 : 0) | 2;
     for (int end = 0; c->hybrid && end < 2; end++) {
@@ -976,7 +997,8 @@ static void x87_op(void) {
     }
     u32 esc = op >> 8 & 7, m = op & 0xFF, reg = m >> 3 & 7, rm = m & 7;
     bool mem = m < 0xC0;
-    bool control = mem ? (esc == 1 && reg >= 4) || (esc == 5 && reg >= 4) : (esc == 3 && (m == 0xE2 || m == 0xE3)) || (esc == 7 && m == 0xE0);
+    bool control = mem ? (esc == 1 && reg >= 4) || (esc == 5 && reg >= 4)
+                       : (esc == 3 && (m == 0xE2 || m == 0xE3)) || (esc == 7 && m == 0xE0);
     if (!control) {
         if ((c->fcw & 0x3F) != 0x3F || (c->fsw & FE_ES))
             fp_cannot(rip, op, FB_X87, 16);
@@ -984,7 +1006,8 @@ static void x87_op(void) {
         c->fip = rip;
         c->fcs = c->seg_sel[1];
         if (mem) {
-            c->fdp = c->x[R_AD]; // shortcut: holds an fs or gs base too, which a CPU's offset wouldn't. Nothing reads it for meaning; upgrade if something does.
+            c->fdp = c->x[R_AD]; // shortcut: holds an fs or gs base too, which a CPU's offset wouldn't. Nothing reads
+                                 // it for meaning; upgrade if something does.
             u32 seg = lit0 >> 16 & 3;
             c->fds = c->seg_sel[seg == 1 ? 4 : seg == 2 ? 5 : 3];
         }
@@ -1040,11 +1063,17 @@ static void x87_op(void) {
             case 0x2E:
                 x87_area(op, lit0 >> 18 & 1, c->x[R_AD], s, rip);
                 break;
-            case 0x0A: case 0x0B: // fst, fstp m32
-            case 0x2A: case 0x2B: // m64
-            case 0x19: case 0x1A: case 0x1B: // fisttp, fist, fistp m32
+            case 0x0A:
+            case 0x0B: // fst, fstp m32
+            case 0x2A:
+            case 0x2B: // m64
+            case 0x19:
+            case 0x1A:
+            case 0x1B: // fisttp, fist, fistp m32
             case 0x29: // fisttp m64
-            case 0x39: case 0x3A: case 0x3B: // fisttp, fist, fistp m16
+            case 0x39:
+            case 0x3A:
+            case 0x3B: // fisttp, fist, fistp m16
             case 0x3F: // fistp m64
             case 0x1F: // fstp m80
             case 0x3E: { // fbstp
@@ -1057,16 +1086,19 @@ static void x87_op(void) {
                     underflow();
                 u32 rc = c->fcw >> 10 & 3;
                 switch (form) {
-                    case 0x0A: case 0x0B:
+                    case 0x0A:
+                    case 0x0B:
                         out = to_fp(a, 23, 8);
                         break;
-                    case 0x2A: case 0x2B:
+                    case 0x2A:
+                    case 0x2B:
                         out = to_fp(a, 52, 11);
                         break;
                     case 0x19:
                         out = to_int(a, 32, 3);
                         break;
-                    case 0x1A: case 0x1B:
+                    case 0x1A:
+                    case 0x1B:
                         out = to_int(a, 32, rc);
                         break;
                     case 0x29:
@@ -1075,7 +1107,8 @@ static void x87_op(void) {
                     case 0x39:
                         out = to_int(a, 16, 3);
                         break;
-                    case 0x3A: case 0x3B:
+                    case 0x3A:
+                    case 0x3B:
                         out = to_int(a, 16, rc);
                         break;
                     case 0x3F:
@@ -1092,7 +1125,10 @@ static void x87_op(void) {
                 break;
             }
             default: { // the arithmetic group, D8, DA, DC, DE
-                F b = esc == 0 ? from_fp(v, 23, 8) : esc == 4 ? from_fp(v, 52, 11) : esc == 2 ? from_int((int32_t)v) : from_int((int16_t)v);
+                F b = esc == 0   ? from_fp(v, 23, 8)
+                      : esc == 4 ? from_fp(v, 52, 11)
+                      : esc == 2 ? from_int((int32_t)v)
+                                 : from_int((int16_t)v);
                 bool empty = st_empty(s, 0);
                 if (!empty && (f_isnan(st_get(s, 0)) || f_unsupported(st_get(s, 0))))
                     xfl &= ~(u32)FE_D; // these come ahead of a denormal operand
@@ -1347,7 +1383,8 @@ static void x87_op(void) {
     }
 }
 
-// fxsave and fxrstor, in 64-bit (REX.W, x22 set) or 32-bit format. Leaves bytes 416 up alone, as the CPU does: software may keep its own there.
+// fxsave and fxrstor, in 64-bit (REX.W, x22 set) or 32-bit format. Leaves bytes 416 up alone, as the CPU does: software
+// may keep its own there.
 static void do_fx(bool save) {
     static u8 area[416] __attribute__((aligned(16)));
     u64 va = c->x[R_S0], here = rip_here(c->elr - 4);

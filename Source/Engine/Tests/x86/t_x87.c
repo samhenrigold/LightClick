@@ -1,4 +1,5 @@
-// Compiled long double code, whose result is compared with Rosetta's, then what each x87 path costs (lines starting "time", which the comparison drops).
+// Compiled long double code, whose result is compared with Rosetta's, then what each x87 path costs (lines starting
+// "time", which the comparison drops).
 #include "flatlibc.h"
 
 static double now(void) {

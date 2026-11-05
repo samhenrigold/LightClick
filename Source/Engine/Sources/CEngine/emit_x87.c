@@ -1,5 +1,6 @@
-// x87: each operation is one monitor call, with its memory operand moved here at EL0, so that a fault on it takes the ordinary path: shadow fills, devices and all.
-// Nothing commits before the last access that can fault. A store gets its value and the new state word from the monitor, writes memory, then writes the word.
+// x87: each operation is one monitor call, with its memory operand moved here at EL0, so that a fault on it takes the
+// ordinary path: shadow fills, devices and all. Nothing commits before the last access that can fault. A store gets its
+// value and the new state word from the monitor, writes memory, then writes the word.
 #include <stddef.h>
 #include "tr_internal.h"
 
@@ -59,7 +60,8 @@ void emit_x87(const Insn *in) {
             break;
         case AREA_READ:
         case AREA_WRITE: {
-            // fldenv, fnstenv, frstor, fnsave: the monitor copies these through its walker, so make sure both ends are there and writable.
+            // fldenv, fnstenv, frstor, fnsave: the monitor copies these through its walker, so make sure both ends are
+            // there and writable.
             int bytes = in->sub == 1 ? (in->pfx == 0x66 ? 14 : 28) : (in->pfx == 0x66 ? 94 : 108);
             Addr last = {.base = AD, .imm = bytes - 1};
             ldst(1, 1, S0, a);
@@ -87,7 +89,8 @@ void emit_x87(const Insn *in) {
             ldst(0, 8, S0, a);
             break;
         default:
-            // A fault on either page must leave both as they were: write the first eight bytes back, then the last two, then the first eight for real.
+            // A fault on either page must leave both as they were: write the first eight bytes back, then the last two,
+            // then the first eight for real.
             ldst(1, 8, S2, a);
             ldst(0, 8, S2, a);
             ldst(0, 2, S1, hi);
