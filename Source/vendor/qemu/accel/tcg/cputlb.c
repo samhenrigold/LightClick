@@ -432,6 +432,22 @@ static void tlb_context_invalidate_locked(CPUState *cpu, bool forget_active)
     }
 }
 
+void tlb_context_rekey(CPUState *cpu, uint64_t key)
+{
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    CPUTLBContextCache *cache = cpu->neg.tlb.c.contexts;
+    if (cache) {
+        cache->known = true;
+        cache->bank[cache->active].key = key;
+        cache->bank[cache->active].valid = true;
+    }
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+    /* The flush emptied the jump cache; label what refills it the same way. */
+    if (pvg_context_jump_cache) {
+        cpu->tb_jmp_cache->context_key = key;
+    }
+}
+
 void tlb_context_switch(CPUState *cpu, uint64_t key, uint64_t tag_mask,
                         bool preserve, MMUIdxMap keep)
 {

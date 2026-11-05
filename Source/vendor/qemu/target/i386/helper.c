@@ -235,7 +235,23 @@ void cpu_x86_update_cr4(CPUX86State *env, uint32_t new_cr4)
     if ((new_cr4 ^ env->cr[4]) &
         (CR4_PGE_MASK | CR4_PAE_MASK | CR4_PSE_MASK |
          CR4_SMEP_MASK | CR4_SMAP_MASK | CR4_LA57_MASK | CR4_PCIDE_MASK)) {
-        tlb_flush(env_cpu(env));
+        /* None of these bits affect MMU_PHYS_IDX; see cpu_x86_update_cr3 for
+         * why SMM keeps its full flush. XNU toggles PGE for each global
+         * invalidation, so the page walker would otherwise go cold each time. */
+        if (x86_tcg_keep_phys_tlb && !(env->hflags & HF_SMM_MASK)) {
+            tlb_flush_by_mmuidx(env_cpu(env),
+                ((1u << NB_MMU_MODES) - 1) & ~(1u << MMU_PHYS_IDX));
+        } else {
+            tlb_flush(env_cpu(env));
+        }
+#ifndef CONFIG_USER_ONLY
+        /* Everything context-dependent is now empty, and refills come from the
+         * current CR3. Naming it spares the next CR3 write from flushing again. */
+        if (x86_tcg_pcid_contexts && (new_cr4 & CR4_PCIDE_MASK) &&
+            !(env->hflags & (HF_SMM_MASK | HF_GUEST_MASK))) {
+            tlb_context_rekey(env_cpu(env), env->cr[3]);
+        }
+#endif
     }
 
     /* Clear bits we're going to recompute.  */

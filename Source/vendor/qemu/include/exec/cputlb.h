@@ -35,6 +35,8 @@ void tlb_reset_dirty_range_all(ram_addr_t start, ram_addr_t length);
  * Modes in keep don't depend on the context: they survive and aren't banked. */
 void tlb_context_switch(CPUState *cpu, uint64_t key, uint64_t tag_mask,
                         bool preserve, MMUIdxMap keep);
+/* Owner vCPU only, right after a flush of every context-dependent mode. */
+void tlb_context_rekey(CPUState *cpu, uint64_t key);
 /* Snapshot: switches, bank hits, misses, flushing writes, same-key keeps. */
 void tlb_context_counts(CPUState *cpu, uint64_t counts[5]);
 bool tlb_context_jump_cache_enabled(void);
