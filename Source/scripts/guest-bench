@@ -30,6 +30,7 @@ parser.add_argument('--boot-wait', type=int, default=45)
 parser.add_argument('--repeat', type=int, default=1, help='benchmark runs in the same boot; results are the fastest of each test')
 parser.add_argument('--events', action='store_true', help='record guest event counts in Build/bench/<tag>.events')
 parser.add_argument('--workload', help='run this in the guest with /bin/sh instead of lc-bench')
+parser.add_argument('--sample', type=int, help='sample QEMU for this many seconds during the workload, into Build/bench/<tag>.sample')
 args = parser.parse_args()
 bench = source/'Build/bench/lc-bench'
 events = source/'Build/bench'/f'{args.tag}.events'
@@ -50,6 +51,15 @@ subprocess.run(['cp', '-c', '-R', str(args.app), str(app)], check=True)
 binary = app/'Contents/Resources/Runtime/bin'
 real = binary/'qemu-system-x86_64.real'
 (binary/'qemu-system-x86_64').rename(real)
+if args.sample:
+    # sample(1) needs get-task-allow; only this throwaway clone gets it.
+    entitlements = work/'sample.entitlements'
+    entitlements.write_text('<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+                            '<key>com.apple.security.cs.allow-jit</key><true/>'
+                            '<key>com.apple.security.cs.disable-library-validation</key><true/>'
+                            '<key>com.apple.security.get-task-allow</key><true/></dict></plist>')
+    subprocess.run(['codesign', '-f', '-s', '-', '--options', 'runtime', '--entitlements', str(entitlements), str(real)],
+                   check=True, stderr=subprocess.DEVNULL)
 exports = ' '.join(shlex.quote(item) for item in args.env)
 extra = ' '.join(shlex.quote(item) for item in args.qemu)
 (binary/'qemu-system-x86_64').write_text(f'#!/bin/sh\nexec env {exports} {shlex.quote(str(real))} {extra} "$@"\n')
@@ -90,7 +100,15 @@ try:
     if args.workload:
         phases = source/'Build/bench'/f'{args.tag}.phases'
         lines = sum(1 for _ in events.open()) if events.exists() else 0
+        sampler = None
+        if args.sample:
+            pid = subprocess.check_output(['pgrep', '-f', str(real)], text=True).split()[0]
+            sampler = subprocess.Popen(['/usr/bin/sample', pid, str(args.sample), '10', '-mayDie', '-file',
+                                        str(source/'Build/bench'/f'{args.tag}.sample')], stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL)
         result = request({'Executable': '/bin/sh', 'Arguments': ['-c', args.workload]}, 1200)
+        if sampler:
+            sampler.wait()
         after = sum(1 for _ in events.open()) if events.exists() else 0
         phases.write_text(f'{lines} {after}\n')
         print(f'workload exit {result.get("ExitCode")}, event seconds {lines} to {after}')
@@ -131,3 +149,9 @@ finally:
     subprocess.run(['pkill', '-f', str(real)], check=False)  # the clone's own QEMU, by its unique path
     time.sleep(1)
     shutil.rmtree(work, ignore_errors=True)
+    # CFFIXED_USER_HOME doesn't redirect preferences: remove what this clone's paths left in them.
+    listing = subprocess.run(['defaults', 'read', 'gold.samhenri.LightClick'], capture_output=True, text=True).stdout
+    for line in listing.splitlines():
+        key = line.strip().split(' = ')[0].strip('"')
+        if str(work) in key:
+            subprocess.run(['defaults', 'delete', 'gold.samhenri.LightClick', key], check=False)
