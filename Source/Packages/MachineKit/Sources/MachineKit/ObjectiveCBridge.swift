@@ -106,6 +106,11 @@ public final class MachineModelBridge: NSObject {
         machineConfiguration(object).removingLegacyName().foundationObject
     }
 
+    @objc(passthroughOpenGLEnabled:)
+    public class func passthroughOpenGLEnabled(_ object: Any?) -> Bool {
+        machineConfiguration(object).passthroughOpenGLEnabled
+    }
+
     // MARK: Install state
 
     @objc(configurationRestartingForOpenGLSetup:)

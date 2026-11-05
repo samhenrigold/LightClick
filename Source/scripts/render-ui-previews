@@ -5,7 +5,7 @@
 set -euo pipefail
 source_dir="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$source_dir/Build/UIReview"
-"$source_dir/scripts/clang-with-swift-packages" GuestControl InstallerKit -- \
+"$source_dir/scripts/clang-with-swift-packages" GuestControl InstallerKit MachineKit -- \
   -fobjc-arc -fmodules -Wno-incomplete-implementation -mmacosx-version-min=15.0 \
   -I "$source_dir/VirtualIntelMac" \
   "$source_dir/tools/ui-previews.m" \
