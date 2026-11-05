@@ -21,6 +21,7 @@ public final class Tally: @unchecked Sendable {
     private var reasons: [String: Row] = [:]
     private var sites: [String: Site] = [:]
     private var mmioPages: [UInt64: UInt64] = [:]
+    private var mmioSites: [String: UInt64] = [:]
     private var ports: [UInt16: UInt64] = [:]
     private var boundaries: UInt64 = 0
     private var samples: [String] = []
@@ -220,6 +221,14 @@ public final class Tally: @unchecked Sendable {
         addSample("engine", rip, cpl, cr3)
     }
 
+    func mmioSample(rip: UInt64, gpa: UInt64, size: UInt64, write: Bool) {
+        let bytes =
+            engine.readGuest(rip, count: 8).map { $0.map { String(format: "%02x", $0) }.joined(separator: " ") }
+            ?? "unreadable"
+        // The device by its megabyte, so a loop over a frame buffer is one row.
+        mmioSites["\(hex(rip)) \(write ? "w" : "r") \(size) \(hex(gpa & ~0xF_FFFF))  \(bytes)", default: 0] += 1
+    }
+
     func mmio(_ gpa: UInt64) {
         lock.lock()
         mmioPages[gpa & ~0xFFF, default: 0] += 1
@@ -373,6 +382,11 @@ public final class Tally: @unchecked Sendable {
         o += "\n== mmio by page ==\n"
         for (page, count) in mmioPages.sorted(by: { $0.value > $1.value }).prefix(40) {
             o += String(format: "%12d  ", count) + hex(page) + "\n"
+        }
+        o +=
+            "\n== mmio by site: 1 in 256 sampled, so counts are approximate. rip, read or write, size, device's megabyte, bytes at rip ==\n"
+        for (site, count) in mmioSites.sorted(by: { $0.value > $1.value }).prefix(30) {
+            o += String(format: "%12d  ", count &* 256) + site + "\n"
         }
         o += "\n== ports ==\n"
         for (port, count) in ports.sorted(by: { $0.value > $1.value }).prefix(40) {

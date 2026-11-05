@@ -385,6 +385,9 @@ public final class Engine {
         case Int(HC_MMIO):
             guard let machine else { throw EngineError.stop("device access with no machine attached") }
             tally?.mmio(c.pointee.req_a.0)
+            if c.pointee.req_a.4 != 0 {
+                tally?.mmioSample(rip: c.pointee.req_a.4, gpa: c.pointee.req_a.0, size: c.pointee.req_a.1, write: c.pointee.req_a.2 != 0)
+            }
             if c.pointee.req_a.2 != 0 {
                 machine.mmioWrite(address: c.pointee.req_a.0, size: Int(c.pointee.req_a.1), value: c.pointee.req_a.3)
             } else {

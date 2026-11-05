@@ -1326,6 +1326,7 @@ static void handle_data_abort(bool lower) {
             c->req_a[1] = a.bytes;
             c->req_a[2] = !a.load;
             c->req_a[3] = val;
+            c->req_a[4] = (c->stat_mmio & 255) ? 0 : rip_here(c->elr); // a sample for the tally: finding the rip costs a search
             c->stat_mmio++;
             hostcall(HC_MMIO);
             r = c->req_r[0];
