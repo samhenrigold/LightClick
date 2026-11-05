@@ -11,7 +11,8 @@ root=${0:A:h:h}
 app=${1:?usage: boot-clone <app> <machine> [work directory]}
 machine=${2:?usage: boot-clone <app> <machine> [work directory]}
 work=${3:-$root/Build/clone}
-if pgrep -x qemu-system-x86_64 >/dev/null; then
+# Set BOOT_CLONE_ALLOW_RUNNING for a machine with its forwarded ports turned off.
+if [[ -z ${BOOT_CLONE_ALLOW_RUNNING:-} ]] && pgrep -x qemu-system-x86_64 >/dev/null; then
     print -u2 'A VM is already running; its forwarded ports would clash.'
     exit 3
 fi
