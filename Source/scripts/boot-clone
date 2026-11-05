@@ -1,0 +1,46 @@
+#!/bin/zsh
+# Boots an APFS clone of a VM from a private home, leaving the real library and preferences alone.
+#
+#     scripts/boot-clone <app> <machine.vintelmac> [work directory]
+#
+# Prints the app and QEMU PIDs, and writes QEMU's arguments and environment to launch.json. Stop it by
+# killing those PIDs, then delete the work directory (default Build/clone).
+set -eu
+root=${0:A:h:h}
+app=${1:?usage: boot-clone <app> <machine> [work directory]}
+machine=${2:?usage: boot-clone <app> <machine> [work directory]}
+work=${3:-$root/Build/clone}
+if pgrep -x qemu-system-x86_64 >/dev/null; then
+    print -u2 'A VM is already running; its forwarded ports would clash.'
+    exit 3
+fi
+rm -rf "$work"
+library="$work/home/Library/Application Support/Light Click"
+mkdir -p "$library/Machines" "$library/Downloads" "$library/Installers"
+cp -c -R "$machine" "$library/Machines/"
+CFFIXED_USER_HOME=$work/home "$app/Contents/MacOS/Light Click" --open-vm "$library/Machines/${machine:t}" >"$work/app.log" 2>&1 &
+app_pid=$!
+for _ in {1..120}; do
+    qemu_pid=$(pgrep -P $app_pid -x qemu-system-x86_64 | head -1) || true
+    [[ -n $qemu_pid ]] && break
+    kill -0 $app_pid 2>/dev/null || { print -u2 "The app exited; see $work/app.log"; exit 4; }
+    sleep 0.5
+done
+[[ -n ${qemu_pid:-} ]] || { print -u2 "No QEMU after a minute; see $work/app.log"; exit 5; }
+sleep 1
+python3 - "$qemu_pid" "$work/launch.json" <<'PY'
+import ctypes, json, struct, sys
+n = ctypes.c_size_t(1 << 20)
+buffer = ctypes.create_string_buffer(n.value)
+if ctypes.CDLL(None).sysctl((ctypes.c_int*3)(1, 49, int(sys.argv[1])), 3, buffer, ctypes.byref(n), None, 0):
+    raise OSError('sysctl failed')
+data = buffer.raw[:n.value]
+argc = struct.unpack('i', data[:4])[0]
+start = data.index(b'\0', 4)
+while data[start] == 0:
+    start += 1
+parts = data[start:].split(b'\0')
+env = dict(p.decode().split('=', 1) for p in parts[argc:] if b'=' in p)
+json.dump({'args': [p.decode() for p in parts[:argc]], 'env': env}, open(sys.argv[2], 'w'), indent=1, sort_keys=True)
+PY
+print "app $app_pid qemu $qemu_pid log \"$library/Machines/${machine:t}/State/session.log\""
