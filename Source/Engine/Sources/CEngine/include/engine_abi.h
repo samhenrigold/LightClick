@@ -62,6 +62,7 @@
 #define PI_CODE 1 // blocks were translated from this frame
 #define PI_PT 2 // a shadow page tracks this frame as a guest page table
 #define PI_RAM 4 // RAM, as opposed to a device hole
+#define PI_DIRECT 8 // device memory mapped straight into the VM: shadows may point at it, and nothing else about RAM holds
 
 // svc immediates from translated code and stubs. Translator requests come first, then x86 events and helpers.
 enum {
@@ -221,6 +222,7 @@ typedef struct {
     uint32_t stepping; // walking to an x86 boundary with the software step
     uint32_t pool_limit; // shadow pool pages, 0 for all of them; tests shrink it
     uint32_t tr_flushed; // the translator reset the code cache; every return stack is stale
+    uint32_t direct_flush; // device memory left the VM: shadows may still point at it, drop them before running on
     uint32_t mmx_event; // what MMX last did to the x87 tags here: 0 or an ENGINE_MMX_ value. The host applies it to state it owns.
     uint64_t mm[8]; // translated code loads and stores these
     uint64_t ram_size;

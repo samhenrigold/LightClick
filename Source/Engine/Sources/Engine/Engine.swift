@@ -569,6 +569,24 @@ public final class Engine {
         return ram + Int(ramTop > options.ramBytes && gpa >= 1 << 32 ? gpa - (1 << 32) + options.ramBelow4G : gpa)
     }
 
+    public func mapDirect(gpa: UInt64, host: UnsafeMutableRawPointer, bytes: UInt64) -> Bool {
+        // A frame must be describable to the monitor, and must not be RAM already.
+        guard gpa + bytes <= ramTop else { return false }
+        let pageInfo = (priv + Int(kOffPageInfo)).assumingMemoryBound(to: UInt8.self)
+        for frame in stride(from: gpa >> 12, to: (gpa + bytes) >> 12, by: 1) where pageInfo[Int(frame)] & UInt8(PI_RAM) != 0 { return false }
+        let rwx = hv_memory_flags_t(HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC)
+        guard hv_vm_map(host, gpa, Int(bytes), rwx) == HV_SUCCESS else { return false }
+        for frame in stride(from: gpa >> 12, to: (gpa + bytes) >> 12, by: 1) { pageInfo[Int(frame)] |= UInt8(PI_DIRECT) }
+        return true
+    }
+
+    public func unmapDirect(gpa: UInt64, bytes: UInt64) {
+        let pageInfo = (priv + Int(kOffPageInfo)).assumingMemoryBound(to: UInt8.self)
+        for frame in stride(from: gpa >> 12, to: (gpa + bytes) >> 12, by: 1) { pageInfo[Int(frame)] &= ~UInt8(PI_DIRECT) }
+        ctx.pointee.direct_flush = 1
+        hv_vm_unmap(gpa, Int(bytes))
+    }
+
     /// Before the first run: a device answers for this range, whatever RAM lies behind it.
     public func markDevice(gpa: UInt64, bytes: UInt64) {
         let pageInfo = (priv + Int(kOffPageInfo)).assumingMemoryBound(to: UInt8.self)

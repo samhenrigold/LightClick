@@ -12,6 +12,7 @@ final class HybridHarness {
     var ram: UnsafeMutableRawPointer!
     var exitCode: UInt32 = 255
     var failed: String?
+    var direct: UnsafeMutableRawPointer?
     var deviceWrites: UInt64 = 0
     var pendingVector = false
     var acks = 0
@@ -48,6 +49,24 @@ final class HybridHarness {
             // Every frame of low RAM, far more than the ring holds. Few are marked, so write far more notes than that: all of the kernel image.
             for _ in 0..<600 { engine_note_write(handle, 1 << 20, 16 << 20) }
         case 12: failed = "rep movsb under CR0.TS took \(mailbox(2)) ticks, against \(mailbox(1)) without"
+        case 13:
+            var buffer: UnsafeMutableRawPointer?
+            posix_memalign(&buffer, 1 << 14, 1 << 16)
+            memset(buffer, 0, 1 << 16)
+            buffer!.storeBytes(of: 0x0123_4567_89AB_CDEF as UInt64, as: UInt64.self)
+            (buffer! + 8191 * 8).storeBytes(of: 0xFEDC_BA98_7654_3210 as UInt64, as: UInt64.self)
+            direct = buffer
+            if !engine_map_direct(handle, 0xC000_0000, buffer!, 1 << 16) {
+                failed = "could not map device memory directly"
+            }
+        case 14:
+            let at = direct!.assumingMemoryBound(to: UInt64.self)
+            if at[1] != 0x1111_2222_3333_4444 || at[64] != 0xA5A5_0000_0000_0000 || at[79] != 0xA5A5_0000_0000_000F
+                || at[2] != 7
+            {
+                failed = "the guest's writes are not in the directly mapped memory"
+            }
+            engine_unmap_direct(handle, 0xC000_0000, 1 << 16)
         case 10: timerOn = true
         case 11: timerOn = false
         case 9:

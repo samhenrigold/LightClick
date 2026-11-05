@@ -79,6 +79,59 @@ static void hvdbt_after_device(CPUState *cs)
     }
 }
 
+/*
+ * Device memory that is plain RAM to QEMU goes straight into the VM. By name, as each must be known to stay coherent this way. vmsvga reads its FIFO and scanout
+ * from these pointers, and only legacy VGA mode watches a dirty log, which log_sync feeds. A PVG guest has neither region, and nothing here touches it.
+ */
+static bool hvdbt_direct_section(MemoryRegionSection *section)
+{
+    const char *name = memory_region_name(section->mr);
+
+    if (!name || (strcmp(name, "vga.vram") && strcmp(name, "vmsvga.fifo")) || !memory_region_is_ram(section->mr)) {
+        return false;
+    }
+    /* Whole, aligned and at its BAR: the low VGA window is an alias of the same RAM, and it keeps its device path. */
+    return section->offset_within_region == 0 && section->offset_within_address_space >= (1ULL << 20) &&
+           int128_get64(section->size) == memory_region_size(section->mr) &&
+           QEMU_IS_ALIGNED(section->offset_within_address_space | int128_get64(section->size), qemu_real_host_page_size());
+}
+
+static void hvdbt_direct_add(MemoryListener *listener, MemoryRegionSection *section)
+{
+    if (hvdbt_direct_section(section)) {
+        bool done = engine_map_direct(hv.engine, section->offset_within_address_space,
+                                      memory_region_get_ram_ptr(section->mr), int128_get64(section->size));
+        char line[120];
+        snprintf(line, sizeof(line), "direct map of '%s' at 0x%llx: %s", memory_region_name(section->mr),
+                 (unsigned long long)section->offset_within_address_space, done ? "done" : "refused");
+        engine_tally_note(hv.engine, line);
+    }
+}
+
+static void hvdbt_direct_del(MemoryListener *listener, MemoryRegionSection *section)
+{
+    if (hvdbt_direct_section(section)) {
+        engine_unmap_direct(hv.engine, section->offset_within_address_space, int128_get64(section->size));
+    }
+}
+
+/* shortcut: everything counts as written at each sync, so legacy VGA redraws whole frames. It is only the boot screens; narrow it with write protection if they ever matter. */
+static void hvdbt_direct_sync(MemoryListener *listener, MemoryRegionSection *section)
+{
+    if (hvdbt_direct_section(section)) {
+        physical_memory_set_dirty_range(memory_region_get_ram_addr(section->mr), int128_get64(section->size),
+                                        1 << DIRTY_MEMORY_VGA);
+    }
+}
+
+static MemoryListener hvdbt_direct_listener = {
+    .name = "hvdbt-direct",
+    .region_add = hvdbt_direct_add,
+    .region_del = hvdbt_direct_del,
+    .log_sync = hvdbt_direct_sync,
+    .priority = MEMORY_LISTENER_PRIORITY_ACCEL,
+};
+
 /* For the tally: what each device megabyte is, the first time it is touched. Up to 16 GB; the rest are not looked at. */
 static void hvdbt_name_device(uint64_t gpa)
 {
@@ -533,6 +586,10 @@ static bool hvdbt_create(CPUState *cs)
         flatview_for_each_range(address_space_to_flatview(&address_space_memory), hvdbt_mark_device, ms);
     }
     __atomic_store_n(&hv.engine, engine, __ATOMIC_RELEASE);
+    if (!getenv("LC_HVDBT_NO_DIRECT")) {
+        BQL_LOCK_GUARD();
+        memory_listener_register(&hvdbt_direct_listener, &address_space_memory);
+    }
     if (tally) {
         engine_tally_start(engine, tally);
         atexit(hvdbt_write_tally_at_exit);

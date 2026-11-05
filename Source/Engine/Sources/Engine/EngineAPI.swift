@@ -100,6 +100,16 @@ public func engine_run(_ h: OpaquePointer) -> UInt32 {
 @_cdecl("engine_error_text")
 public func engine_error_text(_ h: OpaquePointer) -> UnsafePointer<CChar>? { UnsafePointer(handle(h).error) }
 
+@_cdecl("engine_map_direct")
+public func engine_map_direct(_ h: OpaquePointer, _ gpa: UInt64, _ host: UnsafeMutableRawPointer, _ bytes: UInt64) -> Bool {
+    handle(h).engine.mapDirect(gpa: gpa, host: host, bytes: bytes)
+}
+
+@_cdecl("engine_unmap_direct")
+public func engine_unmap_direct(_ h: OpaquePointer, _ gpa: UInt64, _ bytes: UInt64) {
+    handle(h).engine.unmapDirect(gpa: gpa, bytes: bytes)
+}
+
 @_cdecl("engine_mark_device")
 public func engine_mark_device(_ h: OpaquePointer, _ gpa: UInt64, _ bytes: UInt64) { handle(h).engine.markDevice(gpa: gpa, bytes: bytes) }
 

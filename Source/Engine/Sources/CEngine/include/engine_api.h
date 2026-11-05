@@ -79,6 +79,11 @@ void engine_destroy(EngineHandle *engine);
 // Host pointer to RAM, for loaders and DMA.
 void *engine_ram(EngineHandle *engine);
 // Before the first run: this guest-physical range belongs to a device, though RAM lies behind it. Accesses reach mmio_read and mmio_write.
+// Maps device memory that is plain host RAM into the VM, so that guest access needs no exit. The caller keeps it coherent with anything that watches
+// it, such as a display's dirty log. Page-aligned to the host's page. False if it cannot be done, and the device path goes on serving it.
+bool engine_map_direct(EngineHandle *engine, uint64_t gpa, void *host, uint64_t bytes);
+// Takes it out again, while no guest code is running on the vCPU.
+void engine_unmap_direct(EngineHandle *engine, uint64_t gpa, uint64_t bytes);
 void engine_mark_device(EngineHandle *engine, uint64_t gpa, uint64_t bytes);
 // Runs until something needs the host's attention. The first call starts at state.rip after engine_set_state.
 EngineRunResult engine_run(EngineHandle *engine);

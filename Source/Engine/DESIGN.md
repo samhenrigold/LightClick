@@ -192,6 +192,10 @@ Proposal, in order, each to be justified by the tally before the next:
 
 Larger costs show in that run. Device accesses at 25,315/s: 15.4M of 28.1M are two 4-byte writes by one kext to 0xa0000000, at rips 0x...4c2c and 0x...4c3b, about 7.7M each, and rep movs reads frame memory at 0x90000000 one element per exit. Device-specific fast paths would come before any of the above. Not measured: their cost per access.
 
+Device memory: `vga.vram` (512 MB at 0x80000000) and `vmsvga.fifo` (64 KB at 0xa0060000) are plain RAM to QEMU, and they took most of a boot's device exits. They now go straight into the VM, by name, with a `log_sync` listener marking them dirty for legacy VGA. vmsvga in SVGA mode reads both through pointers, from reading its code, so it needs no log. Measured in a test: each side sees the other's bytes with no exit, and the device answers again once the mapping is gone. Not measured: the exits saved in a boot, or that the display updates. `LC_HVDBT_NO_DIRECT=1` turns it off. Machines whose RAM stops below these addresses are refused, and keep the device path.
+
+Fork, from a 60 s loop of 6,575 forks at 9.1 ms each: 2,430 cold blocks, 53,204 cold instructions and 2.84 ms translating per fork, 697 page-table stores, 38.8 CR3 writes. In that run HC_TRANSLATE was 57.8M calls and 46.4 s of host time, against 27.9M cold blocks, so about half the calls only link an existing block. Each also costs a round trip out of the VM, not separated here. At least 56% of those cold blocks repeated a rip and frame some block already covered. That changes the proposal above: sharing translations of the shared region is now where the largest measured cost goes.
+
 Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bitmap interplay beyond those few fallbacks. Cost per fallback is unknown; the tally's `tcg_ms` column gives it. Writes by a separate process into guest RAM (the OOP graphics helper) are not noted. Reset after hand-off is unexamined: firmware in 64-bit mode would run on the engine.
 
 ## Not exact, known

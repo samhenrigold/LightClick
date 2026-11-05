@@ -839,6 +839,26 @@ static void test_stale_table(u64 root) {
     CHECK(PHYS(table)[511] == 499 + 511);
 }
 
+// Device memory mapped into the VM: no exit for it, each side sees the other's bytes, and once it is gone the device
+// answers again.
+static void test_direct_map(void) {
+    volatile u64 *direct = PHYS(0xC0000000ULL);
+    command(13); // the host maps it, with a pattern in place
+    CHECK(direct[0] == 0x0123456789ABCDEFULL);
+    CHECK(direct[8191] == 0xFEDCBA9876543210ULL);
+    direct[1] = 0x1111222233334444ULL;
+    static u64 from[16];
+    for (int i = 0; i < 16; i++)
+        from[i] = 0xA5A5000000000000ULL + (u64)i;
+    u64 count = 16, *s = from;
+    u64 *d = (u64 *)&direct[64];
+    __asm__ volatile("cld\n rep movsq" : "+S"(s), "+D"(d), "+c"(count) : : "memory");
+    u64 old = __sync_val_compare_and_swap(&direct[2], 0, 7ULL);
+    CHECK(old == 0);
+    command(14); // the host checks those and takes it away
+    CHECK(direct[0] == 0xC0000000ULL * 3); // the harness's device
+}
+
 static void test_ptest_flags(void) {
     u64 flags, set = 0xFFFFFFFFFFFFFFFFULL;
     __asm__ volatile("movq %1, %%xmm0\n movq %1, %%xmm1\n"
@@ -971,6 +991,7 @@ void kmain(void) {
     test_poisoned_tables(root);
     test_rep_speed_under_ts();
     test_ptest_flags();
+    test_direct_map();
     test_process_log(root);
     test_view_churn(root);
     CHECK(!bad_vector);
