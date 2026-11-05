@@ -88,6 +88,54 @@ static void fp_pair(uint64_t out[2]) {
     }
 }
 
+// Specials, then normals near the ends of the range and around one, so that overflow, underflow and cancellation all come up.
+static void x87_pattern(uint64_t out[2], bool unsupported) {
+    static const uint64_t v[][2] = {
+        {0, 0},                                                     {0, 0x8000},
+        {0x8000000000000000, 0x3FFF},                               {0x8000000000000000, 0xBFFF},
+        {0x8000000000000000, 0x7FFF},                               {0x8000000000000000, 0xFFFF}, // infinities
+        {0xC000000000000000, 0x7FFF},                               {0xC000000000000000, 0xFFFF}, // indefinite
+        {0xC000000000000123, 0x7FFF},                               {0x8000000000000123, 0x7FFF}, // QNaN, SNaN
+        {0xFFFFFFFFFFFFFFFF, 0xFFFF},                               {0xBFFFFFFFFFFFFFFF, 0x7FFF},
+        {1, 0},                                                     {0x7FFFFFFFFFFFFFFF, 0x8000}, // denormals
+        {0x8000000000000000, 1},                                    {0xFFFFFFFFFFFFFFFF, 0x7FFE}, // smallest normal, largest
+        {0x8000000000000000, 0x403E},                               {0xFFFFFFFFFFFFFFFF, 0x403D}, // 2^63, under it
+        {0x8000000000000000, 0xC03E},                               {0xC90FDAA22168C235, 0x4000},
+    };
+    static const uint64_t bad[][2] = {
+        {0x8000000000000000, 0},      {0x8000000000000001, 0x8000}, // pseudo-denormals
+        {0x4000000000000000, 0x3FFF}, {0, 0x4000},                  // unnormal, pseudo-zero
+        {0x4000000000000000, 0x7FFF}, {0, 0x7FFF},                  {1, 0xFFFF}, // pseudo-NaN, pseudo-infinity
+    };
+    uint64_t p = rnd();
+    if (unsupported && (p & 3) == 0) {
+        out[0] = bad[(p >> 8) % (sizeof bad / sizeof bad[0])][0];
+        out[1] = bad[(p >> 8) % (sizeof bad / sizeof bad[0])][1];
+        return;
+    }
+    if ((p & 3) <= 1) {
+        out[0] = v[(p >> 8) % (sizeof v / sizeof v[0])][0];
+        out[1] = v[(p >> 8) % (sizeof v / sizeof v[0])][1];
+        return;
+    }
+    uint64_t sign = rnd() & 0x8000, e = rnd() % 8, m = rnd() | 0x8000000000000000;
+    uint64_t low = (p >> 16) & 3; // short significands make exact results and ties
+    if (low == 1)
+        m &= 0xFFFFFFFFFF000000;
+    else if (low == 2)
+        m &= 0xFFFFFFFFFFFFF800;
+    uint64_t exp = e == 0 ? rnd() % 96 + 1 : e == 1 ? 0x7FFE - rnd() % 96 : e == 2 ? 0x3FFF - 16445 + rnd() % 128 + 16383 - 16383 : 0x3FFF - 32 + rnd() % 64;
+    out[0] = m;
+    out[1] = sign | (exp & 0x7FFF);
+}
+
+extern struct {
+    uint16_t cw;
+    uint8_t depth, pad[13];
+    uint64_t regs[8][2];
+} fuzz_x87_in;
+extern uint8_t fuzz_x87_out[512];
+
 static uint64_t hash;
 static void mix(uint64_t v) {
     hash ^= v;
@@ -106,6 +154,23 @@ static void run_round(const Form *f, bool verbose) {
     uint64_t mem[2];
     fp_pair(mem);
     if (f->fp) {
+        buffer[4] = mem[0];
+        buffer[5] = mem[1];
+    }
+    if (f->fp >= 2) {
+        static const uint16_t pc[4] = {0, 0x200, 0x300, 0x300};
+        fuzz_x87_in.cw = (uint16_t)(0x7F | pc[rnd() & 3] | (rnd() & 3) << 10);
+        uint64_t depth = rnd() % 12;
+        fuzz_x87_in.depth = (uint8_t)(depth > 8 ? 3 : depth);
+        for (int i = 0; i < 8; i++)
+            x87_pattern(fuzz_x87_in.regs[i], f->fp == 3);
+        uint64_t k = rnd() & 3;
+        if (k == 0)
+            x87_pattern(mem, f->fp == 3);
+        else if (k == 3) {
+            mem[0] = special_int();
+            mem[1] = rnd();
+        }
         buffer[4] = mem[0];
         buffer[5] = mem[1];
     }
@@ -137,10 +202,40 @@ static void run_round(const Form *f, bool verbose) {
         }
         mix(fuzz_st.mxcsr);
     }
+    if (f->fp >= 2) {
+        for (int i = 0; i < 6; i++)
+            mix(fuzz_x87_out[i]);
+        // Empty registers: Rosetta's FXSAVE shows them as the indefinite, a CPU's keeps what was there, so only registers in use count.
+        int top = fuzz_x87_out[3] >> 3 & 7;
+        for (int i = 0; i < 8; i++)
+            if (fuzz_x87_out[4] >> ((top + i) & 7) & 1) {
+                // After a stack fault Rosetta treats the empty operand as a NaN and applies the NaN rules, where a CPU's masked response is the indefinite: hybrid.c checks that.
+                bool stack_nan = (fuzz_x87_out[2] & 0x40) && (*(uint16_t *)(fuzz_x87_out + 40 + i * 16) & 0x7FFF) == 0x7FFF;
+                if (stack_nan)
+                    continue;
+                mix(*(uint64_t *)(fuzz_x87_out + 32 + i * 16));
+                mix(*(uint16_t *)(fuzz_x87_out + 40 + i * 16));
+            }
+    }
     mix(fuzz_st.rsp_delta);
     for (int i = 0; i < BUF_BYTES / 8; i++)
         mix(buffer[i]);
     if (verbose) {
+        if (f->fp >= 2) {
+            printf(" x87 in cw=%04x depth=%d mem=%016lx%016lx\n", fuzz_x87_in.cw, fuzz_x87_in.depth, mem[1], mem[0]);
+            for (int i = 0; i < fuzz_x87_in.depth; i++)
+                printf("  load%d %04lx %016lx\n", i, fuzz_x87_in.regs[i][1], fuzz_x87_in.regs[i][0]);
+            printf(" x87 out cw=%02x%02x sw=%02x%02x tag=%02x", fuzz_x87_out[1], fuzz_x87_out[0], fuzz_x87_out[3], fuzz_x87_out[2], fuzz_x87_out[4]);
+            for (int i = 0; i < 8; i++)
+                printf(" %04x:%016lx", *(uint16_t *)(fuzz_x87_out + 40 + i * 16), *(uint64_t *)(fuzz_x87_out + 32 + i * 16));
+            printf("\n");
+        }
+        if (f->fp >= 2) {
+            printf(" area");
+            for (int i = 64; i < 176; i += 8)
+                printf(" %016lx", *(uint64_t *)((char *)buffer + i));
+            printf("\n");
+        }
         printf(" regs");
         for (int i = 0; i < 16; i++)
             printf(" %016lx", fuzz_st.r[i] >= base && fuzz_st.r[i] < base + BUF_BYTES ? fuzz_st.r[i] - base : fuzz_st.r[i]);
@@ -164,6 +259,7 @@ int flat_main(unsigned long a0, unsigned long a1) {
         if (a0 && (unsigned long)i != a0 - 1)
             continue;
         const Form *f = &fuzz_table[i];
+        rounds = f->fp >= 2 ? 256 : 64; // x87 has more inputs that matter
         rng_state = 0x9E3779B97F4A7C15ULL ^ ((uint64_t)(i + 1) * 0xDEADBEEF);
         hash = 0xcbf29ce484222325ULL;
         for (int r = 0; r < rounds; r++) {

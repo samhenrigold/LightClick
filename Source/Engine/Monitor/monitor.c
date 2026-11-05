@@ -2258,33 +2258,7 @@ static void h_div(void) {
     c->x[R_S1] = r;
 }
 
-static void do_fx(bool save) {
-    static u8 area[512] __attribute__((aligned(16)));
-    u64 va = c->x[R_S0];
-    u64 here = rip_here(c->elr - 4);
-    if (c->hybrid)
-        stop(STOP_FALLBACK, here, FB_FX, 0, 0);
-    if (c->cr0 & 8) {
-        c->stat_nm++;
-        deliver(7, 0, false, here, false);
-        return;
-    }
-    if (save) {
-        memset(area, 0, 512);
-        *(u16 *)(area + 0) = 0x37F; // default x87 control: no x87 state exists here
-        u32 mx = mxcsr_read();
-        *(u32 *)(area + 24) = mx;
-        *(u32 *)(area + 28) = 0xFFFF;
-        mon_fp_save(area + 160);
-        if (!guest_write(va, area, 512, c->cpl == 3 ? 4 : 0))
-            stop(STOP_UNSUPPORTED, here, 12, va, 0);
-    } else {
-        if (!guest_read(va, area, 512, c->cpl == 3 ? 4 : 0))
-            stop(STOP_UNSUPPORTED, here, 12, va, 0);
-        mon_fp_restore(area + 160);
-        mxcsr_apply(*(u32 *)(area + 24));
-    }
-}
+#include "x87.c"
 
 static void do_cli_sti(bool sti) {
     u32 iopl = (u32)(c->rflags_sys >> 12) & 3;
@@ -2597,6 +2571,9 @@ void mon_sync(void) {
             case SVC_FXRSTOR:
                 do_fx(false);
                 break;
+            case SVC_X87:
+                x87_op();
+                break;
             case SVC_H_SHIFT:
                 h_shift();
                 break;
@@ -2657,6 +2634,8 @@ void mon_init(void) {
     WSR(ttbr1_el1, v->ttbr1);
     __asm__ volatile("isb");
     mxcsr_apply(c->hybrid ? c->resume_mxcsr : 0x1F80);
+    if (!c->hybrid && !c->fcw)
+        c->fcw = 0x37F;
     fp_trap_sync();
     u64 entry = c->req_a[0];
     c->elr = translate_here(entry, 0, 0, false);

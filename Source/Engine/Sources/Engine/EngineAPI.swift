@@ -213,8 +213,16 @@ extension Engine {
         s.mxcsr = mxcsr()
         readXMM(into: &s)
         s.mm = c.pointee.mm
-        s.mmx_event = c.pointee.mmx_event
-        c.pointee.mmx_event = 0
+        s.fp_exp = c.pointee.fp_exp
+        s.fp_top = c.pointee.fp_top
+        s.fp_tags = c.pointee.fp_tags
+        s.fcw = c.pointee.fcw
+        s.fsw = c.pointee.fsw
+        s.fop = c.pointee.fop
+        s.fcs = c.pointee.fcs
+        s.fds = c.pointee.fds
+        s.fip = c.pointee.fip
+        s.fdp = c.pointee.fdp
         s.apic_base = c.pointee.apic_base | (c.pointee.apic_enabled != 0 ? 1 << 11 : 0)
         s.apic_tpr = c.pointee.apic_tpr
         s.apic_svr = c.pointee.apic_svr
@@ -267,6 +275,16 @@ extension Engine {
         c.pointee.resume_mxcsr = s.mxcsr
         writeXMM(from: s)
         c.pointee.mm = s.mm
+        c.pointee.fp_exp = s.fp_exp
+        c.pointee.fp_top = s.fp_top & 7
+        c.pointee.fp_tags = s.fp_tags
+        c.pointee.fcw = s.fcw
+        c.pointee.fsw = s.fsw & ~0x3800
+        c.pointee.fop = s.fop
+        c.pointee.fcs = s.fcs
+        c.pointee.fds = s.fds
+        c.pointee.fip = s.fip
+        c.pointee.fdp = s.fdp
         c.pointee.req_r.0 = s.rip
     }
 

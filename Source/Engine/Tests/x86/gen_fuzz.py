@@ -495,12 +495,71 @@ for imm in (0, 1, 2, 3, 4, 8, 9, 10, 11, 12):
         form(f"{op} ${imm} m", f"{op} ${imm},{m},%xmm1", ALL, FP)
         form(f"{op} ${imm} high", f"{op} ${imm},%xmm12,%xmm9", ALL, FP)
 
+# ---- x87 ---- Every encoding the monitor does, from a random stack, control word and memory operand at 32(%r15). The transcript takes in the FXSAVE image.
+X87 = "x87"
+X87U = "x87u"  # also feeds it pseudo-denormals, unnormals, pseudo-NaNs and pseudo-infinities
+F_CZP = F_C | F_Z | F_P
+def x87_reg_forms():
+    yield from ((0xD8, m) for m in range(0xC0, 0x100))
+    yield from ((0xD9, m) for m in list(range(0xC0, 0xD0)) + [0xD0, 0xE0, 0xE1, 0xE4, 0xE5] + list(range(0xE8, 0xEF)) + [0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xFA, 0xFC, 0xFD])
+    yield from ((0xDA, m) for m in list(range(0xC0, 0xE0)) + [0xE9])
+    yield from ((0xDB, m) for m in list(range(0xC0, 0xE0)) + [0xE2, 0xE3] + list(range(0xE8, 0xF8)))
+    yield from ((0xDC, m) for m in list(range(0xC0, 0xD0)) + list(range(0xE0, 0x100)))
+    yield from ((0xDD, m) for m in list(range(0xC0, 0xC8)) + list(range(0xD0, 0xF0)))
+    yield from ((0xDE, m) for m in list(range(0xC0, 0xD0)) + [0xD9] + list(range(0xE0, 0x100)))
+    yield from ((0xDF, m) for m in [0xE0] + list(range(0xE8, 0xF8)))
+X87_MEM = {0xD8: range(8), 0xD9: [0, 2, 3, 7], 0xDA: range(8), 0xDB: [0, 1, 2, 3, 5, 7], 0xDC: range(8), 0xDD: [0, 1, 2, 3, 7], 0xDE: range(8), 0xDF: range(8)}
+for kind in (X87, X87U):
+    tag = "" if kind == X87 else " unsupported"
+    for esc, m in x87_reg_forms():
+        if m & 7 in (0, 1, 2, 7) or m >= 0xE0 and esc == 0xD9:
+            form(f"x87 {esc:02x} {m:02x}{tag}", [f".byte {esc}, {m}"], ALL, kind)
+    for esc, regs in X87_MEM.items():
+        for reg in regs:
+            # Rosetta's fbld ignores a full stack, where the SDM has a stack fault: hybrid.c checks that. So make room first.
+            room = ["ffree %st(7)"] if (esc, reg) == (0xDF, 4) else []
+            form(f"x87 {esc:02x} /{reg} m{tag}", room + [f".byte 0x41, {esc}, {0x47 | reg << 3}, 32"], ALL, kind)  # 32(%r15)
+# What Rosetta can't be compared on, wiped before the transcript sees it. It leaves the reserved words of an image zero where a CPU writes ones, writes zero or
+# garbage for the instruction and data pointers, shows empty registers as the indefinite, and treats data16 images as full-sized ones. hybrid.c checks these against the SDM.
+ENV_MASK = ["movw $0,66(%r15)", "movw $0,70(%r15)", "movw $0,74(%r15)", "movl $0,76(%r15)", "movq $0,80(%r15)", "movl $0,88(%r15)"]
+FX_MASK = ["movw $0,70(%r15)", "movq $0,72(%r15)", "movq $0,80(%r15)"]
+WIPE_IMAGE = [f"movq $0,{off}(%r15)" for off in range(64, 64 + 112, 8)]
+CLEAN_XMM = [f"pxor %xmm{n},%xmm{n}" for n in (5, 6, 7, 8, 10, 11, 13, 14, 15)]  # the fuzz doesn't load these, and the image shows them
+FULL = CLEAN_XMM + ["fninit", "fld1", "fldpi", "fldz", "fldl2t", "fldl2e", "fldlg2", "fldln2", "fldt 32(%r15)"]
+for name, body in {
+    "fnstenv": ["fnstenv 64(%r15)"] + ENV_MASK,
+    "fnstenv fldenv": ["fnstenv 64(%r15)", "fldenv 64(%r15)"] + ENV_MASK,
+    "data16 fnstenv fldenv": [".byte 0x66, 0x41, 0xD9, 0x77, 64", ".byte 0x66, 0x41, 0xD9, 0x67, 64"] + WIPE_IMAGE,
+    "fnsave": FULL + ["fnsave 64(%r15)"] + ENV_MASK,
+    "fnsave frstor": FULL + ["fnsave 64(%r15)", "frstor 64(%r15)"] + ENV_MASK,
+    "fnsave any": ["fnsave 64(%r15)"] + WIPE_IMAGE,
+    "data16 fnsave frstor": [".byte 0x66, 0x41, 0xDD, 0x77, 64", ".byte 0x66, 0x41, 0xDD, 0x67, 64"] + WIPE_IMAGE,
+    "fxsave64": FULL + ["fxsave64 64(%r15)"] + FX_MASK,
+    "fxsave": FULL + ["fxsave 64(%r15)"] + FX_MASK,
+    "fxsave64 any": CLEAN_XMM + ["fxsave64 64(%r15)"] + WIPE_IMAGE,
+    "fxsave64 fninit fxrstor64": FULL + ["fxsave64 64(%r15)", "fninit", "fxrstor64 64(%r15)"] + FX_MASK,
+    "fxsave fninit fxrstor": FULL + ["fxsave 64(%r15)", "fninit", "fxrstor 64(%r15)"] + FX_MASK,
+    "fld fxsave fxrstor": CLEAN_XMM + ["fxsave64 64(%r15)", "fldpi", "fxrstor64 64(%r15)"] + WIPE_IMAGE,
+    "fldcw rc down": ["movw $0x77F,32(%r15)", "fldcw 32(%r15)", "fld1", "fldpi", "fdivrp", "fldpi"],
+    "fldcw rc up": ["movw $0xB7F,32(%r15)", "fldcw 32(%r15)", "fld1", "fldpi", "fdivrp", "fldl2t"],
+    "fldcw pc single": ["movw $0x07F,32(%r15)", "fldcw 32(%r15)", "fld1", "fldpi", "fdivrp"],
+    "fldcw unmasked": ["movw $0x340,32(%r15)", "fldcw 32(%r15)", "fnstsw %ax"],
+    "fnclex after flags": ["fld1", "fldz", "fdivrp", "fnclex"],
+    "fwait": ["fwait"],
+    "fstcw fstsw": ["fstcw 32(%r15)", "fstsw 34(%r15)"],
+    "fld fstp m80 split": ["fldt 32(%r15)", "fstpt 4090(%r15)"],
+    "fcomi;jcc": ["fcomi %st(1),%st", "seta %al", "setb %bl", "setp %cl", "sete %dl"],
+    "fucomi;cmov": ["fucomi %st(1),%st", "cmovael %r8d,%eax"],
+    "two ops one block": ["fld1", "fld1", "faddp", "fstpl 32(%r15)", "fldl 32(%r15)", "fsqrt", "fstps 40(%r15)"],
+}.items():
+    form(f"x87 {name}", body, ALL, X87)
+
 out = [".text", ".globl _fuzz_forms", ".p2align 4"]
 for i, (name, body, mask, kind) in enumerate(forms):
     out.append(f"Lf{i}:")
-    out.append("  call _fuzz_load" if kind == "int" else "  call _fuzz_load_fp")
+    out.append({"int": "  call _fuzz_load"}.get(kind, "  call _fuzz_load_x87" if kind in (X87, X87U) else "  call _fuzz_load_fp"))
     out.extend("  " + b for b in body)
-    out.append("  jmp _fuzz_save")
+    out.append("  jmp _fuzz_save_x87" if kind in (X87, X87U) else "  jmp _fuzz_save")
     out.append(".p2align 2")
 out.append(".const_data")
 out.append(".globl _fuzz_table")
@@ -508,7 +567,7 @@ out.append(".p2align 3")
 out.append("_fuzz_table:")
 for i, (name, body, mask, kind) in enumerate(forms):
     out.append(f"  .quad Lf{i}, Ln{i}")
-    out.append(f"  .long {mask}, {1 if kind == 'fp' else 0}")
+    out.append(f"  .long {mask}, {dict(fp=1, x87=2, x87u=3).get(kind, 0)}")
 out.append("  .quad 0, 0, 0")
 out.append(".cstring")
 for i, (name, body, mask, kind) in enumerate(forms):

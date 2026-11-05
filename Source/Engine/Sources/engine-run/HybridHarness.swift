@@ -88,21 +88,22 @@ final class HybridHarness {
             engine_note_write(handle, mailbox(1) + UInt64(4096 - first), UInt64(first))
             engine_note_write(handle, mailbox(2), UInt64(width - first))
         case 9:
-            if s.mmx_event != 1 || s.mm.3 != 0x1122_3344_5566_7788 {
-                failed = "MMX state at a fallback: event \(s.mmx_event), mm3 \(s.mm.3)"
+            if s.fp_top != 0 || s.fp_tags != 0xFF || s.mm.3 != 0x1122_3344_5566_7788 || s.fp_exp.3 != 0xFFFF {
+                failed = "MMX state at a fallback: top \(s.fp_top), tags \(s.fp_tags), mm3 \(s.mm.3), exponent \(s.fp_exp.3)"
             }
             s.mm.3 = ~s.mm.3
+        case 13:  // fld1, fldpi under RC up: TOP 6, two valid
+            let fp = s.fp_top == 6 && s.fp_tags == 0xC0 && s.fcw == 0xB7F && s.mm.6 == 0xC90F_DAA2_2168_C235 && s.fp_exp.6 == 0x4000 && s.mm.7 == 1 << 63
+            if !fp { failed = "x87 state at a fallback: top \(s.fp_top), tags \(s.fp_tags), cw \(s.fcw), st0 \(s.mm.6) \(s.fp_exp.6)" }
+            s.mm.6 = 0xFEDC_BA98_7654_3210
+            s.fp_exp.6 = 0x4005
+            s.fsw = 0x20
+        case 14:  // the operation that went to TCG hasn't touched anything
+            if s.fcw != 0x37E || s.fp_top != 6 || s.fp_tags != 0xC0 { failed = "unmasked x87 at a fallback: cw \(s.fcw), top \(s.fp_top)" }
+        case 15:
+            if s.fsw & 0x80 == 0 { failed = "fwait at a fallback with nothing pending" }
         case 10:
-            if s.mmx_event != 2 { failed = "emms at a fallback: event \(s.mmx_event)" }
-        case 6, 7:
-            let image = host(s.gpr.12 &- 0xFFFF_8800_0000_0000) + 160
-            withUnsafeMutableBytes(of: &s.xmm) { registers in
-                if s.gpr.13 == 6 {
-                    image.copyMemory(from: registers.baseAddress!, byteCount: 256)
-                } else {
-                    registers.baseAddress!.copyMemory(from: image, byteCount: 256)
-                }
-            }
+            if s.fp_tags != 0 { failed = "emms at a fallback: tags \(s.fp_tags)" }
         default: break
         }
         s.rip += s.gpr.14
@@ -173,6 +174,7 @@ final class HybridHarness {
         s.sel.1 = 0x08
         s.sel.2 = 0x10
         s.mxcsr = 0x1F80
+        s.fcw = 0x37F
         engine_set_state(handle, &s)
 
         let target = handle!
@@ -215,7 +217,7 @@ final class HybridHarness {
                 engine_tally_write(handle)
                 let tally = (try? String(contentsOfFile: tallyPath, encoding: .utf8)) ?? ""
                 for reason in [
-                    "unknown opcode", "x87 instruction", "hlt", "far return", "mov cr8", "rdmsr 0x1b", "wrmsr 0x6e0",
+                    "unknown opcode", "x87: fcos", "hlt", "far return", "mov cr8", "rdmsr 0x1b", "wrmsr 0x6e0",
                     "popcnt", "mmio form", "verr"
                 ]
                 where !tally.contains(reason) {
