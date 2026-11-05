@@ -1637,6 +1637,93 @@ static const TCGLdstHelperParam ldst_helper_param = {
     .ntmp = 1, .tmp = { TCG_REG_TMP0 }
 };
 
+/*
+ * Local experiment: adjacent 16-byte accesses in a TB share one TLB check. A full
+ * check that passes leaves its page number and addend in reserved registers, one
+ * pair for loads and one for stores. The next 16-byte access of that kind and MMU
+ * index then only needs to prove that it lies wholly in that page and, for movaps,
+ * is aligned, and uses the same addend.
+ *
+ * The pair is sound because a comparator match means plain RAM with no watchpoint,
+ * dirty tracking or MMIO flag, and a TLB entry can only change at these points:
+ * - Anything that runs C code, or leaves the TB: ops outside pvg_memo_keeps() end
+ *   the memo at translation time, so it never crosses a label, call or other access.
+ * - A 16-byte access's slow path: it overwrites both page registers with an all-ones
+ *   value, which no page number can equal, before rejoining.
+ * - Another vCPU: remote flushes run only between TBs, as for any cached translation.
+ *   A remote tlb_reset_dirty for new code on this page can miss these later stores,
+ *   the same race the ordinary check has between its compare and its store, only
+ *   wider. A guest must already synchronize cross-modifying code with the writer.
+ *
+ * A guest cannot reach a stale addend: page registers hold only page numbers from
+ * passed checks or the impossible value, and bits above the page number are compared.
+ */
+static bool pvg_same_page;
+static __thread struct {
+    bool valid[2];
+    uint8_t mem_index[2];
+    bool next_uses[2];
+} pvg_memo;
+
+#define PVG_MEMO_PAGE(is_ld)   ((is_ld) ? TCG_REG_X25 : TCG_REG_X27)
+#define PVG_MEMO_ADDEND(is_ld) ((is_ld) ? TCG_REG_X26 : TCG_REG_X28)
+
+static bool pvg_memo_access(const TCGOp *op)
+{
+    return (op->opc == INDEX_op_qemu_ld2 || op->opc == INDEX_op_qemu_st2) &&
+           TCGOP_TYPE(op) == TCG_TYPE_I128;
+}
+
+static bool pvg_memo_keeps(const TCGOp *op)
+{
+    switch (op->opc) {
+    case INDEX_op_insn_start:
+    case INDEX_op_discard:
+    case INDEX_op_mov:
+    case INDEX_op_add:
+    case INDEX_op_shl:
+    case INDEX_op_ld:
+    case INDEX_op_st:
+    case INDEX_op_mb:
+        return true;
+    default:
+        return pvg_memo_access(op);
+    }
+}
+
+/* Called for each op before it is emitted. */
+static void tcg_out_pvg_memo_op(TCGContext *s, const TCGOp *op)
+{
+    if (!pvg_same_page) {
+        return;
+    }
+    if (!pvg_memo_keeps(op)) {
+        pvg_memo.valid[0] = pvg_memo.valid[1] = false;
+    } else if (pvg_memo_access(op)) {
+        bool is_ld = op->opc == INDEX_op_qemu_ld2;
+        const TCGOp *next = op;
+        int budget = 64;
+
+        /* A lone access has no one to share with, so it pays nothing. */
+        pvg_memo.next_uses[is_ld] = false;
+        while (budget-- && (next = QTAILQ_NEXT(next, link)) && pvg_memo_keeps(next)) {
+            if (pvg_memo_access(next) && (next->opc == INDEX_op_qemu_ld2) == is_ld &&
+                get_mmuidx(next->args[3]) == get_mmuidx(op->args[3])) {
+                pvg_memo.next_uses[is_ld] = true;
+                break;
+            }
+        }
+    }
+}
+
+static void tcg_out_pvg_memo_poison(TCGContext *s, TCGLabelQemuLdst *lb)
+{
+    if (pvg_same_page && lb->type == TCG_TYPE_I128) {
+        tcg_out_movi(s, TCG_TYPE_I64, PVG_MEMO_PAGE(true), -1);
+        tcg_out_movi(s, TCG_TYPE_I64, PVG_MEMO_PAGE(false), -1);
+    }
+}
+
 static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
 {
     MemOp opc = get_memop(lb->oi);
@@ -1648,6 +1735,7 @@ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
     tcg_out_ld_helper_args(s, lb, &ldst_helper_param);
     tcg_out_call_int(s, qemu_ld_helpers[opc & MO_SIZE]);
     tcg_out_ld_helper_ret(s, lb, false, &ldst_helper_param);
+    tcg_out_pvg_memo_poison(s, lb);
     tcg_out_goto(s, lb->raddr);
     return true;
 }
@@ -1662,6 +1750,7 @@ static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
 
     tcg_out_st_helper_args(s, lb, &ldst_helper_param);
     tcg_out_call_int(s, qemu_st_helpers[opc & MO_SIZE]);
+    tcg_out_pvg_memo_poison(s, lb);
     tcg_out_goto(s, lb->raddr);
     return true;
 }
@@ -1905,9 +1994,48 @@ static void tcg_out_qemu_ldst_i128(TCGContext *s, TCGReg datalo, TCGReg datahi,
     HostAddress h;
     TCGReg base;
     bool use_pair;
+    tcg_insn_unit *same_page = NULL;
+    unsigned mem_index = get_mmuidx(oi);
+    TCGReg memo_page = PVG_MEMO_PAGE(is_ld), memo_addend = PVG_MEMO_ADDEND(is_ld);
+    unsigned a_mask = (1u << atom_and_align_for_opc(s, get_memop(oi), MO_ATOM_WITHIN16, true).align) - 1;
+    bool can_memo = pvg_same_page && tcg_use_softmmu && s->addr_type == TCG_TYPE_I64 &&
+                    (a_mask == 0 || a_mask == 15);
+    bool reuse = can_memo && pvg_memo.valid[is_ld] && pvg_memo.mem_index[is_ld] == mem_index;
+    bool arm = can_memo && (reuse || pvg_memo.next_uses[is_ld]);
+
+    if (reuse) {
+        tcg_out_insn(s, addsub_realshift, EOR_LSR, TCG_TYPE_I64, TCG_REG_TMP0,
+                     memo_page, addr_reg, TARGET_PAGE_BITS);
+        if (a_mask) {
+            tcg_out_logicali(s, Ilogic_imm_ANDI, TCG_TYPE_I64, TCG_REG_TMP2,
+                             addr_reg, a_mask);
+        } else {
+            tcg_out_insn(s, addsub_imm, ADDI, TCG_TYPE_I64, TCG_REG_TMP2, addr_reg, 15);
+            tcg_out_insn(s, addsub_realshift, EOR_LSR, TCG_TYPE_I64, TCG_REG_TMP2,
+                         memo_page, TCG_REG_TMP2, TARGET_PAGE_BITS);
+        }
+        tcg_out_insn(s, logic_shift, ORR, TCG_TYPE_I64, TCG_REG_TMP0, TCG_REG_TMP0,
+                     TCG_REG_TMP2);
+        same_page = s->code_ptr;
+        tcg_out_insn(s, cbz, CBZ, TCG_TYPE_I64, TCG_REG_TMP0, 0);
+    }
 
     ldst = prepare_host_addr(s, &h, addr_reg, oi, is_ld);
 
+    if (arm) {
+        /* Reached only on a hit, with the addend in TMP1; a miss is out of line. */
+        tcg_out_ubfm(s, TCG_TYPE_I64, memo_page, addr_reg, TARGET_PAGE_BITS, 63);
+        tcg_out_mov(s, TCG_TYPE_I64, memo_addend, TCG_REG_TMP1);
+        if (same_page) {
+            bool in_range = reloc_pc19(same_page, tcg_splitwx_to_rx(s->code_ptr));
+
+            tcg_debug_assert(in_range);
+        }
+        base = TCG_REG_TMP2;
+        tcg_out_insn(s, addsub_shift, ADD, 1, base, memo_addend, addr_reg);
+        pvg_memo.valid[is_ld] = true;
+        pvg_memo.mem_index[is_ld] = mem_index;
+    } else
     /* Compose the final address, as LDP/STP have no indexing. */
     if (h.index == TCG_REG_XZR) {
         base = h.base;
@@ -3718,6 +3846,13 @@ static void tcg_target_init(TCGContext *s)
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_TMP2);
     tcg_regset_set_reg(s->reserved_regs, TCG_VEC_TMP0);
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_V30); /* tgen_aa64_fp */
+    pvg_same_page = have_lse2 && pvg_tcg_fast_path("PVG_TCG_SAME_PAGE_128");
+    if (pvg_same_page) {
+        tcg_regset_set_reg(s->reserved_regs, PVG_MEMO_PAGE(true));
+        tcg_regset_set_reg(s->reserved_regs, PVG_MEMO_ADDEND(true));
+        tcg_regset_set_reg(s->reserved_regs, PVG_MEMO_PAGE(false));
+        tcg_regset_set_reg(s->reserved_regs, PVG_MEMO_ADDEND(false));
+    }
 }
 
 /* Saving pairs: (X19, X20) .. (X27, X28), (X29(fp), X30(lr)).  */
@@ -3807,6 +3942,7 @@ static void tcg_target_qemu_prologue(TCGContext *s)
 
 static void tcg_out_tb_start(TCGContext *s)
 {
+    pvg_memo.valid[0] = pvg_memo.valid[1] = false;
     tcg_out_bti(s, BTI_J);
 }
 

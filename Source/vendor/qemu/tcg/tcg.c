@@ -37,6 +37,7 @@
 #include "exec/target_page.h"
 #include "exec/translation-block.h"
 #include "exec/tlb-common.h"
+#include "qemu/pvg-tcg.h"
 #include "tcg/startup.h"
 #include "tcg/tcg-op-common.h"
 
@@ -6762,6 +6763,9 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     QTAILQ_FOREACH(op, &s->ops, link) {
         TCGOpcode opc = op->opc;
 
+#if defined(__aarch64__) && !defined(CONFIG_TCG_INTERPRETER)
+        tcg_out_pvg_memo_op(s, op);
+#endif
         switch (opc) {
         case INDEX_op_extrl_i64_i32:
             /*
