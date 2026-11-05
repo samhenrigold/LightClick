@@ -4,7 +4,7 @@ A library for running x86-64 guests on Apple silicon: an x86-to-AArch64 translat
 hardware 4 KB stage-1 translation, EnTSO, and a small EL1 monitor. QEMU is meant to keep the devices and machine.
 
 Build: `Source/Engine/build.sh` (monitor blob, x86 test images, Swift package, signing). Test: `Tests/run-all.sh`. Numbers: `Tests/bench.py`,
-`engine-run --kernel .build/images/kernel`, `engine-run .build/images/t_callret`, `t_rep`, `t_smc`.
+`engine-run --kernel .build/images/kernel`, `engine-run --smp 4 .build/images/smp`, `Tests/smp-probe/run.sh`, `engine-run .build/images/t_callret`, `t_rep`, `t_smc`.
 
 | Path | What |
 |---|---|
@@ -232,6 +232,113 @@ Expected, if the check holds: forks without most of the 2,430 cold blocks, so pe
 
 Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bitmap interplay beyond those few fallbacks. Cost per fallback is unknown; the tally's `tcg_ms` column gives it. Writes by a separate process into guest RAM (the OOP graphics helper) are not noted. Reset after hand-off is unexamined: firmware in 64-bit mode would run on the engine.
 
+## Multi-vCPU
+
+One vCPU is the largest gap to a usable guest. This is the design, what it costs, and how far it is built. **Measured** means on this machine by `Tests/smp-probe/run.sh` (EL1 code in a VM set up as the engine sets one up, EnTSO on) or `engine-run --smp 2|4 .build/images/smp` (the engine itself, `Tests/x86/kernel/smp.c`), under other work at load 5 to 8, so 10-20% between runs. Everything else is labelled.
+
+### Decisions
+
+**State.** x18 picks the vCPU: an `EngineCtx` per vCPU, 64 KB apart. EngineCtx is reachable from EL0, so what the monitor keeps for itself (`MonCpu`) sits at a fixed distance from it in EL1 memory, with that vCPU's stack at the top of the slot. Reaching it is a constant add. Each view has a return stack per vCPU, because two vCPUs can run one address space and a shared stack would just mismatch; x26 was always per vCPU. Shared by design: views, the shadow pool, rmap, mirrors, `page_info`, the code cache, block table, hash tables. The rule for the monitor: a `static` is shared, so it either moves to `MonCpu` or sits under the lock.
+
+**One monitor lock.** A test-and-swap spinlock over views, shadow pool, rmap, mirrors and `page_info`, skipped by a load and a branch at one vCPU. Not per-table locks and not lock-free: every operation here touches several of these structures at once, and the measurements below say one lock is cheap at the rates a guest has shown. A ticket lock is no better uncontended and worse under contention, so no fairness until something needs it.
+
+**One translator lock**, on the host, around `HC_TRANSLATE`, `HC_SMC`, `HC_VIEW_INVALIDATE_VA` and `HC_VIEW_DROP`. `os_unfair_lock` in a path that already costs an exit. Order is monitor lock then translator lock, and the translator never takes the other, so holding the monitor lock over a kill is safe, if not fast.
+
+**Nothing shared on the hottest paths.** Translated code changes in no way. Syscall, sysret, iret, exceptions, in-VM APIC and the indirect lookup take no lock and write nothing shared. A CPL change finds its view through a per-vCPU pin: a pinned view can't be evicted, so the pin needs no lock. Only leaving an address space takes it. LRU stamps move from every view switch to the unpin. `lookup` reads the per-view hash table, whose inserts already publish value before key.
+
+**Validate after marking, under the lock.** The monitor's single-vCPU order has races that matter now, all with one shape: something was read, then something was protected. Each is handled the same way: protect first, then look again.
+- A fill walks and installs under the lock, and every trapped page-table store takes the lock, so a store can't fall between them. The unlocked walk before it only sorts faults and devices from RAM.
+- A fill that starts tracking a new table drops what it installed and refaults: a peer may have written that table, unseen, before the protection took effect.
+- A translation reads code and tables on the host with nothing protected. Afterwards, under the lock, it marks frames and leaf slots and then walks again. If the mapping moved, or a frame had not been protected when read, it kills what it made and translates again.
+- A and D bits use compare-and-swap against the value the walk read, as hardware does, so a slot that has become data isn't touched.
+
+**Invalidation.** Shadow entries: nothing beyond today's `tlbi ...is`, as it reaches peers (below) and page tables never hold a stale entry. Block kill: today's entry word patched to `svc`, seen by peers without any IPI. Return stacks are the one thing that needs each peer's help: they hold pointers into dead blocks' bodies, in registers and memory the killer can't touch. A kill bumps a shared epoch; every way out of the monitor compares it and drops that vCPU's stacks on a change. Until then a peer may return into a dead block, whose body is intact and only stale (the cache never reuses memory short of a full reset). x86 allows that, as it must first have serialised (cross-modifying code) or taken the shootdown (a remap), and every serialising instruction and interrupt passes through the monitor. So no IPIs in the VM of our own.
+
+**TLB shootdown.** Stricter than x86: the shadow entry goes at the guest's store, with a broadcast invalidate, before the store is done. So `invlpg`, CR3 reloads and PCID flushes stay no-ops, and a guest's shootdown IPIs are only overhead. They can't be skipped, as the guest waits for its acks.
+
+**APIC and IPIs.** The in-VM APIC is per vCPU already. An ICR write for another vCPU exits with `HC_APIC_ICR`; the machine sets the target's host IRR and kicks it with `hv_vcpus_exit`. In hybrid mode the APIC is QEMU's, as it is today: an ICR write is device MMIO under the BQL, and the kick already exists as `hvdbt_kick`.
+
+**x86 memory order** is EnTSO in hardware on each vCPU, and needs no code. `mfence` is `dmb ish`, and locked forms are LSE. Not atomic where x86 is: an unlocked access crossing 16 bytes inside a cache line. A locked access across 16 bytes already stops.
+
+**SMC across vCPUs.** As today, with two additions. The validation above covers a store landing during a translation. And a writer needs forward progress: its one-off store block takes a few microseconds to arrive, and a peer calling into that frame re-protected it first, every time, so the test hung until a vCPU writing a code frame was allowed to finish first (`smc_held`, let go at its next monitor entry). Code and data sharing a frame now costs one trap and kill per store while another vCPU runs that code. The one-step path for odd atomics on a page table opens the page to every vCPU in the view, so with several vCPUs it stops instead (falls back in hybrid).
+
+**Full code cache reset** stays a stop: `tr_flush_all` aborts with several vCPUs. It needs every vCPU at an x86 boundary, for which `requestBoundary` exists; each then resumes through `translate_here`, which holds no pointer into the old cache. Not built. How often a real guest fills the 118 MB cache is **not measured** here, so a boot with several vCPUs may hit this abort.
+
+**QEMU hand-off, per vCPU** (not built, nothing here touches `hvdbt.c`). TCG keeps INIT, SIPI and everything up to long mode on each AP, since QEMU's `apic_startup` and TCG's real mode work today. An AP's first TB miss in 64-bit mode at a high-half address creates its `Engine(secondaryOf:)` on that vCPU's own thread, which HVF requires. `prepareCount` must be `max_cpus` before the BSP's first run, as the monitor's lock turns on from that. What changes in `hvdbt.c`: `hv` splits per CPU (`in_engine`, `engine`, `refused`, `tcg_ran`), the `-smp 1` check goes, the tally and watchdog go per vCPU.
+
+**One vCPU on TCG while others run here.** A fallback already has precise state and returns; the new part is others running meanwhile.
+- *Memory order.* TCG on arm64 emits barriers for an x86 guest, and its atomics are host atomics, so the two agree. Read, not run.
+- *TCG's stores to code and tables.* The notes ring moves to the first context and any vCPU drains it, on every way out of the monitor, under the lock. A guest can't act on a TCG store without an interrupt or a serialising instruction reaching the monitor. `notes_drain` is not safe yet with several vCPUs: it isn't locked, and the ring is per context.
+- *TCG's own TBs.* An engine store to code isn't seen by a TCG vCPU in a normal TB. A single stepped instruction regenerates from memory, but a long stay on TCG (firmware, a 32-bit process) can run stale code past a store by another vCPU. Today's flush "after any run of normal TBs" is per vCPU.
+- *Exclusive sections.* `tcg_handoff->run` is called outside `cpu_exec_start`/`cpu_exec_end`, so `start_exclusive` doesn't wait for an engine vCPU, and `cpu_exec_step_atomic` isn't atomic against one. Fixing it means bracketing `engine_run` and stopping engine vCPUs at a boundary for exclusive work, but `queue_tb_flush` is exclusive and frequent, and would stop them all. TB flushes must then go, or stop being exclusive here. This is the design's largest open part in QEMU.
+
+### Costs, measured
+
+| Operation | Cost | From |
+|---|---|---|
+| Lock and unlock, line already here | 0.4 ns over a 0.8 ns loop (ticket 1.1) | probe |
+| Lock and unlock, line last held by another vCPU, no waiting | 44 ns (one-way line transfer alone: 42) | probe |
+| Each acquire, 120 ns held, 1.7M / 3.4M locks/s in all (2 / 4 vCPUs) | under noise, at most +25 ns (ticket +15 to +32) | probe |
+| Each acquire, 120 ns held, no gap at all, 2 / 4 vCPUs | +120 / +360 ns (ticket +200 / +600) | probe |
+| Epoch check on each monitor exit | 0.00 ns; 0.02 with the line written once per microsecond | probe |
+| A or D bit, atomic | 1.3 ns | probe |
+| `tlbi vae1is` + `dsb` + `isb`: peers out of the VM / spinning / loading through 512 pages / three doing so | 210 / 270 / 254 / 256 ns | probe |
+| `tlbi aside1is`, same four | 180 / 186 / 302 / 493 ns | probe |
+| Block kill: host store and `sys_icache_invalidate`, to a running peer trapping | median 208 ns, 99% 2.3 us, max 8.1 us | probe |
+
+The engine itself, `--smp`, three runs each at load 10 to 29, ns. "Alone" is one vCPU working while the others wait in a spin; "together" is all of them at it, every vCPU in one address space or one leaf table. Together, table stores and fills run at about 1 to 2M per vCPU per second, far above any guest rate seen, so those columns are the lock saturated and not a forecast.
+
+| Path | 2 vCPUs, alone | 2, together | 4, alone | 4, together |
+|---|---|---|---|---|
+| Syscall + sysret | 149 | 148-149 | 149 | 153-154 |
+| Call and return, 40 deep and back, ring 3 | 28 | 28 | 28-29 | 27-28 |
+| CR3 write between two address spaces (takes the lock) | 122-127 | 198-221 | 122-129 | 707-929 |
+| Table store dropping a live entry, with TLBI (holds the lock throughout) | 270-301 | 518-588 | 222-260 | 1095-1246 |
+| Shadow fill after it, load included | 175-180 | 313-386 | 153-179 | 1011-1305 |
+
+| Path, ns | 2 vCPUs | 4 vCPUs |
+|---|---|---|
+| IPI, peer busy, one way: ICR trap, host, kick, exit, IRQ, `HC_IRQ`, delivery, handler with an APIC read and EOI | 3868-4080 | 4222-4309 |
+| IPI, peer in `hlt`, one way, about 2 us of spinning per round still in the figure | 4949-7388 | 6783-6959 |
+| Full shootdown: table store, `invlpg`, IPI to all others, each one's `invlpg`, ack | 3326-3911 | 5439-5682 |
+| `lock add`, both vCPUs on one line | 11-12 | not read |
+
+At one vCPU, against the `hv-accel` it branched from, alternating the two builds, best of 7, load up to 38: syscall 143 to 147, int and iret 221 to 227, fill 136 to 140, CR3 write 89 to 92, in-VM APIC and device paths unchanged, and flat `lc-bench` within 1% but for the noisy 64 MB chase and cold code. So 3 or 4 ns per trip through the monitor at the top end of noise here, which I attribute to the pins and the slot arithmetic without having separated them. `Tests/bench.py 3 25`'s table on the merge shows engine/rosetta-flat of 1.02, 1.04, 1.00, 0.97, 1.15, 1.07, 1.00, 1.00, 0.70, 0.63 and 1.11. The last is `largecode_warm`, whose 23 ns is the same on `hv-accel`'s own build in that comparison, so it did not come from this work.
+
+The lock at guest rates, reasoning from those: a boot's worst page-table store rate, 256,559/s across 4 vCPUs, at 44 ns per acquire plus at most 25 ns waiting is about 18 ms per 4000 ms of vCPU time. Holds there are short, 60 to 550 ns. CR3 writes at 9,000/s cost under 1 ms. Fill rates are **not measured** in any real guest, and would have to pass 1M/s to matter. IPIs: at the earlier profile's 10,000 interrupts/s, were every one an IPI at 4.3 us, about 43 ms per 4000, or 1%. Those rates came from a 4-vCPU TCG profile of system-heavy work.
+
+Translator lock, from the 1,109 s run on one vCPU: 16.65 s translating is 1.5% busy, and a boot's peak was about 3%, so waits should be rare. Not measured with several vCPUs. A first block on a frame is now translated twice.
+
+What the hardware does, measured:
+- `tlbi vae1is` reaches a peer: 0 stale of 226M reads with the peer running, 0 of 58M with it exiting to the host every 256 reads, 0 of 468K with it asleep in the host every 1K. A control with no invalidate saw 108M stale of 216M, so the peer's TLB really held the entry.
+- A *local* `tlbi vae1` also reached the peer: 0 stale of 226M. So the hypervisor, or the hardware, appears to broadcast it (HCR_EL2.FB, inferred). There is nothing to gain from a local form here.
+- `CTR_EL0` is `9444c004`: IDC 1, DIC 0. Patching `add` to `svc` and back under a peer with no context-synchronising event in its loop, 20,000 rounds, 261M executions: every patch arrived, at worst 8.1 us after the store, and no other exception class appeared. In one round the old word still ran 5 to 10 us after restoring.
+- x86 litmus through the engine: with EnTSO on, message passing reordered 0 of 3M reads, through movs and through `movdqa`; store buffering, which x86 allows, seen 15 to 266 of 400K, and with `mfence` or `xchg` 0 of 400K; load buffering 0 and 2+2W 0 of 400K; IRIW on 4 vCPUs 0 of 300K. With EnTSO off (`ENGINE_NO_TSO=1`), the control, message passing reordered 1.28M and 1.84M of 3M. Load buffering, 2+2W and store buffering with a barrier also showed 0 with EnTSO off, so here they prove little: those windows are hard to hit. IRIW has no control run.
+- The clock: a counter offset copied from the first vCPU keeps the TSC in step, 0 of 2M reads over a microsecond behind another vCPU's.
+
+### Risks that would make it no-go
+
+1. **EnTSO itself**, as in "What is left": undocumented from HVF, and it could go when Rosetta does. With several vCPUs nothing replaces it short of barriers on every access. Measured to hold here, on these litmus shapes, on this machine.
+2. **Patching a block's entry word under a running peer.** Moving between arbitrary instructions and `svc` is outside what the architecture promises for concurrent modification (from memory of the Arm ARM, whose list covers forms like `b`, `nop` and `svc`, and not checked against it just now). The promise for other cases is only "some behaviour at the same exception level", so EL0, which can't reach the monitor, though it could damage the guest. Measured clean, but a sample of one instruction pair on one chip. The fix is a `nop` as each block's first word: this is built, on with several vCPUs only. Alternating builds with a `nop` on every block: alu 2.31 to 2.25, branchy 12.76 to 12.53, `largecode_warm` 23.25 to 23.24, syscall 147 to 148, so nothing measurable. `tr_link` and `link_here` also retarget a `b.cond`, which that list may or may not cover. Whether the hardware cared about any of this was never seen, so the patching figure above is for the old form and the fix is unproven in the sense that matters.
+3. **A spinning vCPU when the lock holder's thread loses its core.** No way to see it from EL1. Bounded by the host's scheduler quantum, and worse the fuller the machine. **Not measured.** The fix is a spin limit and then an `hvc` to yield; not built. Would matter if the host is short of cores. The runs above passed at load 10 to 29 with no collapse visible in the means, which is not the same as a measurement of the worst case.
+4. **IPI rate.** At 4.3 us one way, IPIs reach 10% of four vCPUs at about 90,000/s. A real guest's rate under load is **not measured**. In hybrid mode each is MMIO through the BQL on top, also **not measured**, and BQL contention may be the real limit: every device access takes it.
+5. **QEMU's exclusive sections and TB flushes**, above. **Not tested**, and nothing here runs QEMU.
+6. **Evictions under the lock.** Each evicts about 710 blocks and holds both locks. Returning to an evicted space is 23-36 us end to end, which bounds it loosely, at 9/s on one vCPU. **Not measured** with several; 64 views is 32 address spaces, of which 4 vCPUs pin up to 8 views.
+7. A real guest's use of what stops here: odd atomics on page tables stop with several vCPUs, and locked accesses across 16 bytes go to TCG, not atomically against other vCPUs (5). Their rate in a real guest is **not measured**; the tally counts both.
+
+### Built
+
+`engine-run --smp <n> <image>` with `SMPGuest.swift`, `Engine(secondaryOf:index:)`, the state split, both locks, pins, the epoch, validation, `smc_held`. Each vCPU enters at the kernel's entry in long mode.
+`Tests/x86/kernel/smp.c`, on 2 and 4 vCPUs, in `run-all.sh`: every locked form (with an unlocked add as a control that must lose updates); litmus shapes; TSC agreement; IPIs (busy, `hlt`, masked, all-but-self); shootdowns with readers checking for old frames; patch and call, patching during translation, return into patched code, code remapped; page-table stores and fills by all vCPUs in one leaf table; CR3 writes; ring 3 syscall and call/return in one address space.
+
+To check that the tests can fail, one safeguard at a time was removed by hand: no return-stack epoch gave 5000 of 5000 stale returns; no validation after translating gave 30 to 44 stale of 20,000 in each of three runs; no monitor lock gave 12,437 stale reads and then a hang; no second walk under the lock gave 1,150 stale reads; and with no `smc_held`, the writer hung. Not put to this test: the refault on a newly tracked table, compare-and-swap for A and D, and eviction skipping pinned views, as the test kernel evicts nothing. Those three are reasoning. Per-vCPU return stacks only show in speed, and the run with a shared one was not made.
+
+### Not built, in order
+
+1. The notes ring shared and locked, then `hvdbt.c` per vCPU, then a boot with `-smp 2`. Only a boot can answer risks 3 to 7.
+2. Emulated LSE atomics on page tables, in place of the stop. Only if the tally shows them.
+3. Spin limit and yield. Eviction under several vCPUs in a test. The code cache rendezvous. Marking a block's first frame before translating, if double translation shows up in a profile. Avoiding the second exit on IPI receipt (`HC_IRQ`), about 0.8 us, by looking at the host IRR first.
+
 ## Not exact, known
 
 - **The private window.** Private memory lives at a non-canonical VA (bit 47 set, top bits clear), 2 TB slots at `0xF000_0000_0000` and `0xF100_0000_0000`. Other non-canonical addresses fault and become #GP, tested. A guest access inside the window instead reads the lookup table or context, or writes context or return stacks. A compatibility risk; stage 2
@@ -245,7 +352,7 @@ Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bit
 
 Honest order of risk, none of it started except as noted.
 
-1. **Multi-vCPU.** Everything here ran on one vCPU. Monitor statics must split per vCPU, shadow tables and block maps need locks, invalidation needs IPIs (a killed block's return-stack entries on another vCPU), and the host's translator needs a lock. EnTSO was only proved on two vCPUs in the spike's litmus.
+1. **Multi-vCPU.** Designed, and running a test kernel on 4 vCPUs: see "Multi-vCPU". QEMU still has one, and nothing here has booted with more.
 2. **Compatibility mode and 32-bit code.** 32-bit apps, kernels up to 10.7 or so, and `sysenter`. The decoder and emitters assume 64-bit mode. Real mode and firmware stay on TCG, using `EngineX86State` as the hand-off; whether QEMU tolerates two engines on one vCPU is still untested on a real boot.
 3. **x87 and MMX.** In the monitor, at about 50 ns an operation against Rosetta's 9 (`t_x87`), and test-i386's `test_floats` passes. Not booted. If the tally shows x87 still hot, inline `fld` and `fstp` come first; if it shows `fsin` and friends, they would need porting.
 4. **Far control flow and system odds:** `lretq`, far calls, mov to CS (the test kernel avoids them, starting with CS already set), `ins`/`outs`, debug registers, TF, NMI, machine checks, `xsave` family, `invpcid`, and proper MSR routing. SSE4 is unadvertised.
