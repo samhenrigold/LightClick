@@ -1410,7 +1410,35 @@ static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                
                       gen_helper_##lname##_ymm);                                   \
 }
 
-UNARY_IMM_SSE(PSHUFD,     pshufd)
+/*
+ * Local experiment: fixed shuffles of one xmm register as plain loads and stores,
+ * since these need no flags and are among compilers' most frequent helper calls.
+ * Loading everything first keeps it correct when the destination is also a source.
+ */
+static void gen_shuffle32_xmm(X86DecodedInsn *decode, int a, int b, int order)
+{
+    int ofs[2] = { vector_reg_offset(&decode->op[a]), vector_reg_offset(&decode->op[b]) };
+    TCGv_i32 t[4];
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        t[i] = tcg_temp_new_i32();
+        tcg_gen_ld_i32(t[i], tcg_env, ofs[i >> 1] + offsetof(ZMMReg, ZMM_L((order >> (i * 2)) & 3)));
+    }
+    for (i = 0; i < 4; i++) {
+        tcg_gen_st_i32(t[i], tcg_env, vector_reg_offset(&decode->op[0]) + offsetof(ZMMReg, ZMM_L(i)));
+    }
+}
+
+static void gen_PSHUFD(DisasContext *s, X86DecodedInsn *decode)
+{
+    if (emit_inline_fp && !s->vex_l) {
+        gen_shuffle32_xmm(decode, 1, 1, decode->immediate);
+        return;
+    }
+    gen_unary_imm_sse(s, decode, gen_helper_pshufd_xmm, gen_helper_pshufd_ymm);
+}
+
 UNARY_IMM_SSE(PSHUFHW,    pshufhw)
 UNARY_IMM_SSE(PSHUFLW,    pshuflw)
 #define gen_helper_vpermq_xmm NULL
@@ -5045,6 +5073,23 @@ static void gen_VSHUF(DisasContext *s, X86DecodedInsn *decode)
 {
     TCGv_i32 imm = tcg_constant_i32(decode->immediate);
     SSEFunc_0_pppi ps, pd, fn;
+
+    if (emit_inline_fp && !s->vex_l) {
+        if (s->prefix & PREFIX_DATA) {
+            TCGv_i64 lo = tcg_temp_new_i64(), hi = tcg_temp_new_i64();
+            int order = decode->immediate;
+
+            tcg_gen_ld_i64(lo, tcg_env, vector_reg_offset(&decode->op[1]) +
+                           offsetof(ZMMReg, ZMM_Q(order & 1)));
+            tcg_gen_ld_i64(hi, tcg_env, vector_reg_offset(&decode->op[2]) +
+                           offsetof(ZMMReg, ZMM_Q((order >> 1) & 1)));
+            tcg_gen_st_i64(lo, tcg_env, vector_reg_offset(&decode->op[0]) + offsetof(ZMMReg, ZMM_Q(0)));
+            tcg_gen_st_i64(hi, tcg_env, vector_reg_offset(&decode->op[0]) + offsetof(ZMMReg, ZMM_Q(1)));
+        } else {
+            gen_shuffle32_xmm(decode, 1, 2, decode->immediate);
+        }
+        return;
+    }
     ps = s->vex_l ? gen_helper_shufps_ymm : gen_helper_shufps_xmm;
     pd = s->vex_l ? gen_helper_shufpd_ymm : gen_helper_shufpd_xmm;
     fn = s->prefix & PREFIX_DATA ? pd : ps;
