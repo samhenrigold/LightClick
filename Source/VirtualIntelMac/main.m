@@ -10,7 +10,7 @@
 #include <errno.h>
 
 // CFFIXED_USER_HOME doesn't redirect preferences, so every standardUserDefaults caller in a --create-guest run gets a
-// suite of its own instead of the real app's domain: nothing reads or writes VIMCreationJob, VIMLibraryPath and the
+// suite of its own instead of the real app's domain: nothing reads or writes VIMCreationJob, the library path and the
 // rest.
 static void UsePrivateDefaults(void) {
     NSString *suite = @"LightClick.create-guest";
