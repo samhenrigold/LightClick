@@ -864,12 +864,173 @@ static TCGLabel *gen_sse_comis_fast(DisasContext *s, X86DecodedInsn *decode)
     return gen_sse_fp_finish(slow);
 }
 
+/*
+ * Packed forms use the same reasoning, lane by lane, committing only after every
+ * lane has passed, because the helper redoes the whole instruction. Destination
+ * stores come last, so it may also be a source. Packed add, sub, mul and div stay
+ * in the helper: its NEON path costs less than these checks in GPRs for four lanes.
+ */
+static TCGv_i64 gen_sse_lane_load(X86DecodedOp *op, int bits, int lane)
+{
+    TCGv_i64 t = tcg_temp_ebb_new_i64();
+    int ofs = vector_reg_offset(op);
+
+    if (bits == 64) {
+        tcg_gen_ld_i64(t, tcg_env, ofs + offsetof(ZMMReg, ZMM_Q(lane)));
+    } else {
+        tcg_gen_ld32u_i64(t, tcg_env, ofs + offsetof(ZMMReg, ZMM_L(lane)));
+    }
+    return t;
+}
+
+static void gen_sse_lane_store(X86DecodedOp *op, TCGv_i64 value, int bits, int lane)
+{
+    int ofs = vector_reg_offset(op);
+
+    if (bits == 64) {
+        tcg_gen_st_i64(value, tcg_env, ofs + offsetof(ZMMReg, ZMM_Q(lane)));
+    } else {
+        tcg_gen_st32_i64(value, tcg_env, ofs + offsetof(ZMMReg, ZMM_L(lane)));
+    }
+}
+
+static bool sse_packed_ok(DisasContext *s)
+{
+    return emit_inline_sse_packed && sse_fp_host_ok(s) && !s->vex_l;
+}
+
+/* Always exact, with no flags in any mode, so there is no guard or slow path. */
+static bool gen_sse_cvtdq2pd_fast(DisasContext *s, X86DecodedInsn *decode)
+{
+    TCGv_i64 a[2], r[2];
+    int i;
+
+    if (!sse_packed_ok(s)) {
+        return false;
+    }
+    for (i = 0; i < 2; i++) {
+        a[i] = gen_sse_lane_load(&decode->op[2], 32, i);
+    }
+    for (i = 0; i < 2; i++) {
+        r[i] = tcg_temp_ebb_new_i64();
+        tcg_gen_aa64_fp(r[i], a[i], a[i], TCG_AA64_SCVTF_D_FROM_W);
+        gen_sse_lane_store(&decode->op[0], r[i], 64, i);
+    }
+    return true;
+}
+
+/* As cvtss2sd: exact for normals and zeros, with no guard needed. */
+static TCGLabel *gen_sse_cvtps2pd_fast(DisasContext *s, X86DecodedInsn *decode)
+{
+    TCGLabel *slow;
+    TCGv_i64 r[2];
+    int i;
+
+    if (!sse_packed_ok(s)) {
+        return NULL;
+    }
+    slow = gen_new_label();
+    for (i = 0; i < 2; i++) {
+        TCGv_i64 a = gen_sse_lane_load(&decode->op[2], 32, i);
+        TCGv_i64 a2 = gen_sse_fp_magnitude(a, 32);
+
+        gen_sse_fp_reject_small(a2, 32, slow);
+        gen_sse_fp_reject_special(a2, 32, slow);
+        r[i] = tcg_temp_ebb_new_i64();
+        tcg_gen_aa64_fp(r[i], a, a, TCG_AA64_FCVT_D_FROM_S);
+    }
+    for (i = 0; i < 2; i++) {
+        gen_sse_lane_store(&decode->op[0], r[i], 64, i);
+    }
+    return gen_sse_fp_finish(slow);
+}
+
+/* As sqrtss/sqrtsd, whose guards also reject negative inputs through a NaN result. */
+static TCGLabel *gen_sse_sqrt_packed_fast(DisasContext *s, X86DecodedInsn *decode)
+{
+    bool dbl = s->prefix & PREFIX_DATA;
+    int bits = dbl ? 64 : 32, lanes = dbl ? 2 : 4;
+    TCGLabel *slow;
+    TCGv_i64 r[4];
+    int i;
+
+    if (!sse_packed_ok(s)) {
+        return NULL;
+    }
+    slow = gen_new_label();
+    gen_sse_fp_guard(slow, true);
+    for (i = 0; i < lanes; i++) {
+        TCGv_i64 a = gen_sse_lane_load(&decode->op[2], bits, i);
+        TCGv_i64 a2 = gen_sse_fp_magnitude(a, bits), r2;
+
+        gen_sse_fp_reject_small(a2, bits, slow);
+        r[i] = tcg_temp_ebb_new_i64();
+        tcg_gen_aa64_fp(r[i], a, a, dbl ? TCG_AA64_FSQRT_D : TCG_AA64_FSQRT_S);
+        r2 = gen_sse_fp_magnitude(r[i], bits);
+        gen_sse_fp_reject_special(r2, bits, slow);
+        gen_sse_fp_reject_small(r2, bits, slow);
+    }
+    for (i = 0; i < lanes; i++) {
+        gen_sse_lane_store(&decode->op[0], r[i], bits, i);
+    }
+    return gen_sse_fp_finish(slow);
+}
+
+/*
+ * cmpss, cmpsd and cmppd, in the eight SSE predicates. As for comis, only NaN and
+ * denormal inputs can raise a flag or change the answer, and they go to softfloat;
+ * RC, DAZ and FTZ cannot matter for the rest. Without NaNs, unord is false and
+ * ord is true, and nlt and nle are ge and gt. cmpps stays in the helper, since four
+ * lanes of these checks would not beat it.
+ */
+static TCGLabel *gen_sse_cmp_fast(DisasContext *s, X86DecodedInsn *decode, int predicate)
+{
+    static const TCGCond conds[8] = {
+        TCG_COND_EQ, TCG_COND_LT, TCG_COND_LE, TCG_COND_NEVER,
+        TCG_COND_NE, TCG_COND_GE, TCG_COND_GT, TCG_COND_ALWAYS,
+    };
+    bool scalar = s->prefix & (PREFIX_REPZ | PREFIX_REPNZ);
+    /* REPZ decides over a data prefix, as the helper table's index does. */
+    bool dbl = !(s->prefix & PREFIX_REPZ) && (s->prefix & (PREFIX_DATA | PREFIX_REPNZ));
+    int bits = dbl ? 64 : 32, lanes = scalar ? 1 : 2;
+    TCGLabel *slow;
+    TCGv_i64 r[2];
+    int i;
+
+    if (!emit_inline_sse_packed || !sse_fp_merge_ok(s, decode) || s->vex_l || (!dbl && !scalar)) {
+        return NULL;
+    }
+    slow = gen_new_label();
+    for (i = 0; i < lanes; i++) {
+        TCGv_i64 a = gen_sse_lane_load(&decode->op[1], bits, i);
+        TCGv_i64 b = gen_sse_lane_load(&decode->op[2], bits, i);
+        TCGv_i64 a2 = gen_sse_fp_magnitude(a, bits);
+        TCGv_i64 b2 = gen_sse_fp_magnitude(b, bits);
+
+        tcg_gen_brcondi_i64(TCG_COND_GTU, a2, SSE_FP_EXPONENT(bits), slow);
+        tcg_gen_brcondi_i64(TCG_COND_GTU, b2, SSE_FP_EXPONENT(bits), slow);
+        gen_sse_fp_reject_small(a2, bits, slow);
+        gen_sse_fp_reject_small(b2, bits, slow);
+        r[i] = tcg_temp_ebb_new_i64();
+        tcg_gen_negsetcond_i64(conds[predicate], r[i], gen_sse_fp_ordered(a, bits),
+                               gen_sse_fp_ordered(b, bits));
+    }
+    for (i = 0; i < lanes; i++) {
+        gen_sse_lane_store(&decode->op[0], r[i], bits, i);
+    }
+    return gen_sse_fp_finish(slow);
+}
+
 #else
 
 static TCGLabel *gen_sse_arith_fast(DisasContext *s, X86DecodedInsn *decode, int op)
 {
     return NULL;
 }
+#define gen_sse_cvtdq2pd_fast(s, decode)    false
+#define gen_sse_cvtps2pd_fast(s, decode)    NULL
+#define gen_sse_sqrt_packed_fast(s, decode) NULL
+#define gen_sse_cmp_fast(s, decode, predicate) NULL
 #define gen_sse_cvtsd2ss_fast(s, decode) NULL
 #define gen_sse_cvtss2sd_fast(s, decode) NULL
 #define gen_sse_cvtsi_fast(s, decode)    NULL
@@ -984,6 +1145,8 @@ static inline void gen_unary_fp_sse(DisasContext *s, X86DecodedInsn *decode,
         gen_sse_fp_join(done);
     } else {
         SSEFunc_0_epp ps, pd, fn;
+        TCGLabel *done;
+
         ps = s->vex_l ? ps_ymm : ps_xmm;
         pd = s->vex_l ? pd_ymm : pd_xmm;
         fn = s->prefix & PREFIX_DATA ? pd : ps;
@@ -991,7 +1154,9 @@ static inline void gen_unary_fp_sse(DisasContext *s, X86DecodedInsn *decode,
             gen_illegal_opcode(s);
             return;
         }
+        done = gen_sse_sqrt_packed_fast(s, decode);
         fn(tcg_env, OP_PTR0, OP_PTR2);
+        gen_sse_fp_join(done);
     }
 }
 #define UNARY_FP_SSE(uname, lname)                                                 \
@@ -1486,7 +1651,13 @@ UNARY_INT_SSE(VMOVSLDUP,    pmovsldup)
 UNARY_INT_SSE(VMOVSHDUP,    pmovshdup)
 UNARY_INT_SSE(VMOVDDUP,     pmovdldup)
 
-UNARY_INT_SSE(VCVTDQ2PD, cvtdq2pd)
+static void gen_VCVTDQ2PD(DisasContext *s, X86DecodedInsn *decode)
+{
+    if (!gen_sse_cvtdq2pd_fast(s, decode)) {
+        gen_unary_int_sse(s, decode, gen_helper_cvtdq2pd_xmm, gen_helper_cvtdq2pd_ymm);
+    }
+}
+
 UNARY_INT_SSE(VCVTPD2DQ, cvtpd2dq)
 UNARY_INT_SSE(VCVTTPD2DQ, cvttpd2dq)
 UNARY_INT_SSE(VCVTDQ2PS, cvtdq2ps)
@@ -4771,8 +4942,10 @@ static void gen_VCMP(DisasContext *s, X86DecodedInsn *decode)
         s->prefix & PREFIX_REPZ  ? 2 /* ss */ :
         s->prefix & PREFIX_REPNZ ? 3 /* sd */ :
         !!(s->prefix & PREFIX_DATA) /* pd */ + (s->vex_l << 2);
+    TCGLabel *done = index < 8 ? gen_sse_cmp_fast(s, decode, index) : NULL;
 
     gen_helper_cmp_funcs[index][b](tcg_env, OP_PTR0, OP_PTR1, OP_PTR2);
+    gen_sse_fp_join(done);
 }
 
 static void gen_VCOMI(DisasContext *s, X86DecodedInsn *decode)
@@ -4800,7 +4973,10 @@ static void gen_VCVTPS2PD(DisasContext *s, X86DecodedInsn *decode)
     if (s->vex_l) {
         gen_helper_cvtps2pd_ymm(tcg_env, OP_PTR0, OP_PTR2);
     } else {
+        TCGLabel *done = gen_sse_cvtps2pd_fast(s, decode);
+
         gen_helper_cvtps2pd_xmm(tcg_env, OP_PTR0, OP_PTR2);
+        gen_sse_fp_join(done);
     }
 }
 
