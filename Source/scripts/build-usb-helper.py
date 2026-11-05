@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from signing_options import host_options
 from usb_dependency_state import usb_inputs_hash
 import build_freshness as freshness
 
@@ -137,7 +138,7 @@ def build(source, app, identity, dependencies=None, kind='usb'):
             slices.append(output)
         subprocess.run(['lipo', '-create', *map(str, slices), '-output', str(destination)], check=True)
     destination.chmod(0o755)
-    subprocess.run(['codesign', '--force', '--sign', identity, '--identifier', label, '--timestamp=none', str(destination)], check=True)
+    subprocess.run(['codesign', '--force', '--sign', identity, '--identifier', label, *host_options(identity), str(destination)], check=True)
     subprocess.run(['codesign', '--verify', '--strict', '-R', '='+helper_requirement, str(destination)], check=True)
     info_path = app/'Contents/Info.plist'
     info = plistlib.loads(info_path.read_bytes())

@@ -1,0 +1,20 @@
+#!/bin/zsh
+# Notarizes and staples a release built with a Developer ID identity, then rewrites its ZIP.
+#
+#     scripts/notarize <folder from build-release.py> <notarytool keychain profile>
+#
+# Create the profile once with `xcrun notarytool store-credentials`.
+set -euo pipefail
+folder=${1:?usage: scripts/notarize <release folder> <keychain profile>}
+profile=${2:?usage: scripts/notarize <release folder> <keychain profile>}
+archive=$folder/LightClick.zip
+xcrun notarytool submit "$archive" --keychain-profile "$profile" --wait
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+ditto -x -k "$archive" "$work"
+xcrun stapler staple "$work/Light Click.app"
+xcrun stapler validate "$work/Light Click.app"
+rm "$archive"
+ditto -c -k --sequesterRsrc "$work" "$archive"
+shasum -a 256 "$archive" | sed "s|$folder/||" >"$folder/SHA256SUMS"
+print "Notarized: $archive"

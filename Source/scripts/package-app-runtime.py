@@ -17,6 +17,7 @@ import sys
 import tarfile
 import tempfile
 import build_freshness as freshness
+from signing_options import host_options
 
 
 def extract_host_inputs(source, destination, archive_name='apple-silicon-host-inputs.tar.gz', manifest_name='apple-silicon-SHA256SUMS'):
@@ -377,10 +378,10 @@ def main():
         else:
             # TCC and helper trust depend on the host identity surviving every
             # rebuild. Guest executables intentionally retain guest signing.
-            host_binary = binary.parent in (runtime/'bin', runtime/'lib')
+            host_binary = binary.parent in (runtime/'bin', runtime/'lib') or runtime/'Donor' in binary.parents
             command = ['/usr/bin/codesign', '--force', '--sign', args.signing_identity if host_binary else '-']
             if host_binary:
-                command += ['--options', 'runtime']
+                command += host_options(args.signing_identity)
             if binary in (runtime/'bin/qemu-system-x86_64', runtime/'bin/apple-gfx-helper'):
                 command += ['--entitlements', str(source/'support/Runtime.entitlements')]
             run(*command, binary)
@@ -388,7 +389,8 @@ def main():
         if remaining:
             raise RuntimeError(f'non-portable dependencies in {binary}: {remaining}')
     # One baseline runtime: no restricted TSO entitlement or launch-time probe.
-    run('/usr/bin/codesign', '--force', '--sign', '-', runtime/'Donor/ParavirtualizedGraphics.framework')
+    run('/usr/bin/codesign', '--force', '--sign', args.signing_identity, *host_options(args.signing_identity),
+        runtime/'Donor/ParavirtualizedGraphics.framework')
     for guest in ('mojave', 'catalina', 'bigsur'):
         shutil.copyfile(source/'VirtualIntelMac/Assets.xcassets'/f'{guest}Icon.imageset/art.png',
                         runtime/'GuestTools'/f'{guest}-support-icon.png')
@@ -435,7 +437,7 @@ def main():
         source, args.output, args.signing_identity, dependencies=args.dependencies, kind='network')
     with (runtime/'Packaging.plist').open('wb') as stream:
         plistlib.dump(receipt, stream)
-    run('/usr/bin/codesign', '--force', '--sign', args.signing_identity, '--options', 'runtime',
+    run('/usr/bin/codesign', '--force', '--sign', args.signing_identity, *host_options(args.signing_identity),
         '--entitlements', source/'support/App.entitlements', args.output)
     run('/usr/bin/codesign', '--verify', '--deep', '--strict', args.output)
     print(f'Packaged {args.output}; {len(copied)} linked libraries. Stock-host testing remains required.')
