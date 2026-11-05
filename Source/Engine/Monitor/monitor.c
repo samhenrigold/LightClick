@@ -971,7 +971,22 @@ static void shared_mark(int row, u64 va, View *v) {
     *shadow_slot(k, va, &own, 0, 0) |= PTE_X_MARK;
 }
 
+// The stack grows down from the top of this vCPU's slot toward its MonCpu, with nothing between. Going past would write over this vCPU's own state and show up as anything at all.
+static inline void stack_check(void) {
+    u64 sp;
+    __asm__ volatile("mov %0, sp" : "=r"(sp));
+    u64 used = (u64)me + CTX_SLOT - sp;
+    if (used > c->stat_stack_deepest) {
+        c->stat_stack_deepest = used;
+        if (used > CTX_SLOT - sizeof(MonCpu) - 4096)
+            stop(STOP_MONITOR_FAULT, 0, 0x57ACC, sp, used);
+    }
+}
+
 static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
+    stack_check();
+    u32 attempts = 0;
+again:;
     View *v = view_current();
     if (!single) {
         u64 hit = view_lookup(rip);
@@ -1037,7 +1052,9 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
                 c->tr_flushed = 0;
                 code_cache_reset = true;
                 reset_all_return_stacks();
-                return translate_here(rip, 0, 0, false);
+                site = 0;
+                kind = 0;
+                goto again;
             }
             mon_lock();
             cpu = ~0u; // and look at them all again
@@ -1107,7 +1124,12 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
                 hostcall(HC_SMC);
             }
             reset_all_return_stacks();
-            return translate_here(rip, 0, 0, false);
+            // Over again, unless another vCPU keeps storing to this frame, as with code and busy data on one page. Then one instruction, from a one-off block no store can take
+            // away, is progress however often that happens.
+            site = 0;
+            kind = 0;
+            single = ++attempts >= 8;
+            goto again;
         }
     }
     mon_unlock();
@@ -2042,6 +2064,8 @@ void mon_after_stop(void) {
 // Called on every way out of the monitor. If an interrupt is due and the pc is at an x86 boundary, take it. Otherwise step ARM
 // instructions until it is: one trap per ARM word, only while an interrupt waits. Costs nothing when none does.
 static void exit_check(void) {
+    stack_check();
+again:
     if (__atomic_load_n(&rs_epoch_shared, __ATOMIC_RELAXED) != me->rs_epoch) { // shortcut: one load, and at one vCPU it never differs
         me->rs_epoch = __atomic_load_n(&rs_epoch_shared, __ATOMIC_RELAXED);
         reset_my_return_stacks();
@@ -2084,13 +2108,11 @@ static void exit_check(void) {
                 event_delivered = false;
                 c->elr = translate_here(c->req_r[0], 0, 0, false);
             }
-            exit_check();
-            return;
+            goto again;
         }
         if (rip != c->irq_shadow_rip) {
             irq_deliver_now(rip, apic_vector);
-            exit_check();
-            return;
+            goto again;
         }
         c->irq_shadow_rip = ~0ULL; // the instruction after sti runs first
     }
