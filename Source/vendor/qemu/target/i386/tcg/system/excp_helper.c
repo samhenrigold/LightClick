@@ -644,6 +644,9 @@ bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
 {
     CPUX86State *env = cpu_env(cs);
     PVG_EVENT(TLB_MISS);
+    if (mmu_idx == MMU_PHYS_IDX) {
+        PVG_EVENT(PHYS_MISS); /* The walker's own; also counted in TLB_MISS. */
+    }
     TranslateResult out;
     TranslateFault err;
 

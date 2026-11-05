@@ -470,6 +470,9 @@ void tlb_context_switch(CPUState *cpu, uint64_t key, uint64_t tag_mask,
                    cache->bank[cache->active].valid &&
                    cache->bank[cache->active].key == key;
     cache->same_key_keeps += same_context;
+    if (!preserve) {
+        PVG_EVENT(CR3_FLUSH); /* TLB_FLUSH only counts tlb_flush_by_mmuidx. */
+    }
     if (!preserve && cache->known) {
         /* x86 invalidates only the named PCID, under any root it was cached
          * with. Banks of other PCIDs stay, as they do in hardware: the guest
