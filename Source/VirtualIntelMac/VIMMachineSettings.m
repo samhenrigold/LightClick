@@ -437,6 +437,7 @@ static void VIMAlignFormBaselines(NSView *view) {
     NSView *bar = [NSView new];
     bar.wantsLayer = YES;
     bar.layer.cornerRadius = 4;
+    bar.layer.cornerCurve = kCACornerCurveContinuous;
     bar.layer.masksToBounds = YES;
     NSView *disk = [NSView new], *other = [NSView new];
     NSColor *diskColor = [NSColor colorWithSRGBRed:.29 green:.67 blue:.91 alpha:1],

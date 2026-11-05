@@ -94,6 +94,7 @@
         NSMakeRect(NSMidX(self.bounds) - diameter / 2, NSMidY(self.bounds) - diameter / 2, diameter, diameter);
     self.materialView.frame = circle;
     self.materialView.layer.cornerRadius = diameter / 2;
+    self.materialView.layer.cornerCurve = kCACornerCurveContinuous;
     CGFloat width = diameter * .36 * self.glyphScale, height = diameter * .42 * self.glyphScale;
     self.glyphView.frame =
         NSMakeRect(diameter / 2 - width / 2 + diameter * .035, diameter / 2 - height / 2, width, height);

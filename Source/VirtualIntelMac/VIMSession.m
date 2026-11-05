@@ -3069,6 +3069,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     material.state = NSVisualEffectStateActive;
     material.wantsLayer = YES;
     material.layer.cornerRadius = 14;
+    material.layer.cornerCurve = kCACornerCurveContinuous;
     material.layer.masksToBounds = YES;
     material.translatesAutoresizingMaskIntoConstraints = NO;
     [notice addSubview:material];
