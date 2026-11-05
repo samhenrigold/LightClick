@@ -457,6 +457,8 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     insn_total = count;
     pend_count = 0;
     u32 *start = tr_cc;
+    if (ctx_ptr->vcpu_count > 1) // a kill patches the entry word under peers running it: nop to svc is a change the architecture allows, an arbitrary word isn't
+        E(0xD503201Fu);
     u32 map0 = pc_map_used;
     for (int i = 0; i < count; i++) {
         const Insn *in = &list[i];
