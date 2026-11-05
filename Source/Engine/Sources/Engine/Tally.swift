@@ -167,7 +167,8 @@ public final class Tally: @unchecked Sendable {
             let status = engine.readGuest(c.req_a.2, count: 4)?.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
             let result = Int64(bitPattern: r[0])
             o += "wait4 returned \(result) status " + (status.map { hex(UInt64($0)) } ?? "unreadable")
-            if let status, status & 0x7F != 0 {
+            // With no child ready (WNOHANG returns 0) or an error, the kernel left the status word as it found it.
+            if result > 0, let status, status & 0x7F != 0 {
                 o += " SIGNAL \(status & 0x7F)\n  last user page faults, rip, address, error, cr3:\n"
                 let faults = withUnsafeBytes(of: c.user_pf) { Array($0.bindMemory(to: EngineEvent.self)) }
                 for i in 0..<UInt64(faults.count) {

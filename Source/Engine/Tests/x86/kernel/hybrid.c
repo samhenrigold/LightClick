@@ -620,8 +620,6 @@ static void test_lazy_fp(u64 root) {
 // A store straddling into a page-table frame, as a kernel writes file data into a freed table that is still tracked.
 // Each byte must land where the instruction says.
 static void test_store_into_table(u64 root) {
-    // shortcut: straddling a tracked frame goes to TCG, not emulated. If a boot's tally ranks it high, emulate both
-    // halves here.
     u64 va = TEST_VA + 0x600000;
     u64 *slots = pte_of(root, va); // a leaf table in use, so its frame is tracked once it is walked
     u64 table = ((u64)slots - PHYSMAP) & ~0xFFFULL;
@@ -824,6 +822,28 @@ static void test_process_log(u64 root) {
     // The harness checks the log. The gate needs putting back for nothing else: nothing here takes a breakpoint again.
 }
 
+// A split store onto a tracked frame whose second page is missing: the fault names that page, and the store then
+// finishes.
+static void test_split_store_fault(u64 root) {
+    u64 *slots = pte_of(root, TEST_VA + 0xC00000);
+    u64 table = ((u64)slots - PHYSMAP) & ~0xFFFULL;
+    slots[0] = frame() | PRESENT_RW;
+    CHECK(*(volatile u64 *)(TEST_VA + 0xC00000) != 1); // walked, so the frame is tracked
+    *lazy_ptes[0] = table | PRESENT_RW;
+    *lazy_ptes[1] = 0;
+    __asm__ volatile("invlpg (%0)\n invlpg (%1)" : : "r"(LAZY_VA), "r"(LAZY_VA + 4096));
+    PHYS(lazy_frames[1])[0] = 0;
+    gate(14, lazy_pf_stub);
+    u64 count = lazy_pf_count, value = 0x1122334455667788ULL;
+    *(volatile u8 *)LAZY_VA; // the first page is mapped, so only the second can refuse
+    __asm__ volatile("movq %0, (%1)" : : "r"(value), "r"(LAZY_VA + 4096 - 3) : "memory");
+    gate(14, bad_stub);
+    CHECK(lazy_pf_count == count + 1);
+    CHECK((PHYS(table)[511] >> 40) == (value & 0xFFFFFF));
+    CHECK(PHYS(lazy_frames[1])[0] == value >> 24);
+    PHYS(table)[511] = 0;
+}
+
 void kmain(void) {
     __asm__ volatile("mov $0x10, %%ax\n mov %%ax, %%ds\n mov %%ax, %%es\n mov %%ax, %%ss\n" : : : "ax");
     tables();
@@ -842,6 +862,7 @@ void kmain(void) {
     test_store_into_table(root);
     test_rep_into_table(root);
     test_lazy_fp(root);
+    test_split_store_fault(root);
     test_process_log(root);
     test_view_churn(root);
     CHECK(!bad_vector);

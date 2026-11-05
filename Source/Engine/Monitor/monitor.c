@@ -972,27 +972,6 @@ static bool arm_decode(u32 w, ArmAccess *a) {
     return true;
 }
 
-// When only the second page refuses a split access, FAR is that page's start, so FAR can't say whether an access is split: work out its real address.
-static bool arm_splits(u32 w, const ArmAccess *a) {
-    if (a->rn == 31)
-        return false; // the translator reaches guest memory through general registers, never sp
-    u64 ea = c->x[a->rn];
-    if (w & (1u << 24)) {
-        ea += (u64)((w >> 10) & 0xfff) << (w >> 30);
-    } else if (w & (1u << 21)) {
-        u32 rm = (w >> 16) & 31, option = (w >> 13) & 7;
-        u64 off = rm == 31 ? 0 : c->x[rm];
-        if (option == 2)
-            off = (u32)off;
-        else if (option == 6)
-            off = (u64)(i64)(int32_t)off;
-        ea += (w & (1u << 12)) ? off << (w >> 30) : off;
-    } else if (((w >> 10) & 3) != 1) { // post-index accesses the base as it stands
-        ea += (u64)((i64)(int32_t)(w << 11) >> 23);
-    }
-    return (ea & 0xfff) + a->bytes > 4096;
-}
-
 // Finishes an emulated access: load value into the register, writeback, skip the word.
 static void arm_finish(const ArmAccess *a, u64 r) {
     if (a->load && a->rt != 31) {
@@ -1007,6 +986,58 @@ static void arm_finish(const ArmAccess *a, u64 r) {
     if (a->writeback)
         c->x[a->rn] += (u64)a->wb_delta;
     c->elr += 4;
+}
+
+// When only the second page refuses a split access, FAR is that page's start, so FAR can't say whether an access is split: work out its real address.
+static u64 arm_address(u32 w, const ArmAccess *a) {
+    u64 ea = c->x[a->rn]; // rn is never sp: the translator reaches guest memory through general registers
+    if (w & (1u << 24)) {
+        ea += (u64)((w >> 10) & 0xfff) << (w >> 30);
+    } else if (w & (1u << 21)) {
+        u32 rm = (w >> 16) & 31, option = (w >> 13) & 7;
+        u64 off = rm == 31 ? 0 : c->x[rm];
+        if (option == 2)
+            off = (u32)off;
+        else if (option == 6)
+            off = (u64)(i64)(int32_t)off;
+        ea += (w & (1u << 12)) ? off << (w >> 30) : off;
+    } else if (((w >> 10) & 3) != 1) { // post-index accesses the base as it stands
+        ea += (u64)((i64)(int32_t)(w << 11) >> 23);
+    }
+    return ea;
+}
+static bool arm_splits(u64 ea, const ArmAccess *a) { return (ea & 0xfff) + a->bytes > 4096; }
+
+static bool is_ram(u64 gpa);
+static void pt_slot_changed(u64 gpa);
+
+// A store across a page boundary with a tracked frame on either side. Boots do hundreds of these, mostly file data landing on frames once
+// used as tables. Both pages are checked first, so a fault leaves memory as it was.
+static void pt_split_store(u64 ea, const ArmAccess *a, u64 val) {
+    u64 here = rip_here(c->elr), second = (ea | 0xfff) + 1;
+    u32 access = 2 | (c->cpl == 3 ? 4 : 0), first = 4096 - (u32)(ea & 0xfff);
+    Walk w1 = x86_walk(c->cr3, ea, access, true);
+    if (w1.ok) {
+        Walk w2 = x86_walk(c->cr3, second, access, true);
+        if (w2.ok && is_ram(w1.gpa) && is_ram(w2.gpa) && !((page_info[w1.gpa >> 12] | page_info[w2.gpa >> 12]) & PI_CODE)) {
+            memcpy(RAM(w1.gpa), &val, first);
+            memcpy(RAM(w2.gpa), (u8 *)&val + first, a->bytes - first);
+            if (page_info[w1.gpa >> 12] & PI_PT)
+                pt_slot_changed(w1.gpa & ~7ULL);
+            if (page_info[w2.gpa >> 12] & PI_PT)
+                pt_slot_changed(w2.gpa & ~7ULL);
+            arm_finish(a, 0);
+            return;
+        }
+        if (!w2.ok && w2.fault_err != ~0u) {
+            raise_pf(second, w2.fault_err, here);
+            return;
+        }
+    } else if (w1.fault_err != ~0u) {
+        raise_pf(ea, w1.fault_err, here);
+        return;
+    }
+    stop(STOP_UNSUPPORTED, here, 5, ea, c->esr); // code on one side, a device or a non-canonical address: TCG has the whole of it
 }
 
 // ---- Virtual local APIC ----
@@ -1269,7 +1300,7 @@ static void handle_data_abort(bool lower) {
         ArmAccess a;
         if (!arm_decode(*(u32 *)c->elr, &a))
             stop(STOP_UNSUPPORTED, rip_here(c->elr), 4, far, esr); // pair, atomic or SIMD access to a device
-        if (arm_splits(*(u32 *)c->elr, &a))
+        if (arm_splits(arm_address(*(u32 *)c->elr, &a), &a))
             stop(STOP_UNSUPPORTED, rip_here(c->elr), 15, far, esr); // part of it is on another page
         u64 val = a.rt == 31 ? 0 : c->x[a.rt];
         u64 r = 0;
@@ -1316,8 +1347,11 @@ static void handle_data_abort(bool lower) {
         if (arm_decode(*(u32 *)c->elr, &a) && !a.load) { // a stage-1 fault has no register syndrome here, so decode the word
             u64 val = a.rt == 31 ? 0 : c->x[a.rt];
             u32 n = a.bytes;
-            if (arm_splits(*(u32 *)c->elr, &a))
-                stop(STOP_UNSUPPORTED, rip_here(c->elr), 5, far, esr); // split store on a page table
+            u64 ea = arm_address(*(u32 *)c->elr, &a);
+            if (arm_splits(ea, &a)) {
+                pt_split_store(ea, &a, val);
+                return;
+            }
             if (n == 8)
                 *(u64 *)RAM(w.gpa) = val;
             else
