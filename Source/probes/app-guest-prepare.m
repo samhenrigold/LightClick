@@ -16,7 +16,7 @@ int main(int argc,const char **argv) {@autoreleasepool {
         if(error){NSLog(@"%@",error);done=YES;return;}
         [agent collectStatusWithTool:tool completion:^(NSDictionary *report,NSError *failure) {
             if(failure){NSLog(@"%@",failure);done=YES;return;}
-            [VIMGuestPreparation prepareWithAgent:agent report:report runtime:runtime journal:journal control:control
+            [VIMGuestPreparation prepareWithAgent:agent report:report runtime:runtime journal:journal control:control allowHeadlessRepair:NO
                 progress:^(NSString *message){if(![last isEqual:message]){NSLog(@"%@",message);last=message;}}
                 completion:^(NSDictionary *receipt,NSError *problem) {
                     if(problem)NSLog(@"%@",problem);

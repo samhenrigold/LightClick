@@ -11,5 +11,5 @@ mkdir -p "$root/Build/Probes"
 output="$root/Build/Probes/library-unavailable-tests-$architecture"
 xcrun clang -arch "$architecture" -mmacosx-version-min=15.0 -fobjc-arc -fmodules \
     -I "$root/VirtualIntelMac" -framework Cocoa "$root/probes/library-unavailable-tests.m" \
-    "${objects[@]}" -o "$output"
+    "${objects[@]}" -lbsm -o "$output"
 exec "$output" "$root/VirtualIntelMac/Assets.xcassets/tigerWallpaper.imageset/art.jpg"

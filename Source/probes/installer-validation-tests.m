@@ -67,7 +67,7 @@ int main(int argc,const char **argv){@autoreleasepool {
     Require([VIMInstallerAssembly validatePreparedMedia:media guest:@"mavericks" error:nil],@"complete prepared image accepted");
     for(NSString *container in @[@"APM",@"HFS",@"ISO",@"UDF"]) {
         bootBlocks=[NSMutableData dataWithLength:36864];char *bytes=bootBlocks.mutableBytes;
-        if([container isEqual:@"APM"]){memcpy(bytes,"ER",2);memcpy(bytes+512,"PM",2);}
+        if([container isEqual:@"APM"]){memcpy(bytes,"ER",2);bytes[2]=2;memcpy(bytes+512,"PM",2);}
         if([container isEqual:@"HFS"])memcpy(bytes+1024,"H+",2);
         if([container isEqual:@"ISO"])memcpy(bytes+32769,"CD001",5);
         if([container isEqual:@"UDF"])memcpy(bytes+32769,"BEA01",5);
