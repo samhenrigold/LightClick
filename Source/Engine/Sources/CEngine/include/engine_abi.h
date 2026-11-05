@@ -37,6 +37,10 @@
 #define OFF_HASH (128ULL << 20) // EL0 ro, per view: indirect-branch table
 #define HASH_ENTRIES (1ULL << 16)
 #define HASH_BYTES (HASH_ENTRIES * 16)
+// The gigabyte that XNU nests its shared libraries into from one page directory, whatever process maps it. Elsewhere, or under another OS, nothing is shared.
+#define SHARED_USER_BASE 0x7FFF80000000ULL
+#define SHARED_USER_END 0x7FFFC0000000ULL
+#define SHARED_USER_DIRS 4
 #define MAX_VIEWS 64 // two per x86 address space. shortcut: no recycling yet, a real guest needs LRU eviction
 #define OFF_BLOCKS (196ULL << 20) // EL1 ro: block table, pc maps
 #define BLOCKS_MAX (1ULL << 19) // the table has 16 MB
@@ -155,6 +159,7 @@ enum {
     HC_DEBUG, // a[0] a[1] printable
     HC_NOTE, // hybrid, for the tally. a[0] 1 process syscall (a[1] next rip), 2 wait4 returning (a[1] rip, a[2] status pointer), 3 user fault (a[1] rip, a[2] vector, a[3] error)
     HC_FALLBACK, // layout as HC_STOP. The host runs this x86 instruction elsewhere and sets the state; r[0] is the rip to continue at
+    HC_VIEW_FORGET, // a[0] view: empty its lookup table, as a slot above a shared directory changed
 };
 
 // Stop reasons for HC_STOP.
@@ -229,6 +234,9 @@ typedef struct {
     uint32_t stepping; // walking to an x86 boundary with the software step
     uint32_t pool_limit; // shadow pool pages, 0 for all of them; tests shrink it
     uint32_t tr_flushed; // the translator reset the code cache; every return stack is stale
+    uint64_t shared_dirs[SHARED_USER_DIRS]; // page directories at SHARED_USER_BASE that more than one address space uses: blocks under them are one domain
+    uint32_t shared_dir_count;
+    uint32_t share_user; // 0: LC_HVDBT_NO_SHARE, or not hybrid
     uint32_t direct_flush; // device memory left the VM: shadows may still point at it, drop them before running on
     // x87 and MMX state, by physical register. mm holds the significands, and translated code loads and stores them.
     uint64_t mm[8];

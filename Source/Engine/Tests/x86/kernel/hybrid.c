@@ -414,8 +414,8 @@ static void test_port_forms(void) {
     command(9); // the host checks what it saw
 }
 
-// ---- Two tasks' FP state under lazy switching, as XNU does it: xmm in both, the x87 stack in one and MMX in the other ----
-// The state lives only in xmm registers, so C here mustn't use them: this file is built without implicit float.
+// ---- Two tasks' FP state under lazy switching, as XNU does it: xmm in both, the x87 stack in one and MMX in the other
+// ---- The state lives only in xmm registers, so C here mustn't use them: this file is built without implicit float.
 #define LAZY_STEPS 2000000
 typedef struct {
     u8 *area; // fxsave image, in the physmap
@@ -428,7 +428,8 @@ static volatile int lazy_current;
 static volatile u64 lazy_nm_count;
 static const u8 byte_swap[16] __attribute__((aligned(16))) = {3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12};
 
-// Each task's own rounding and precision, so that a mix-up changes the numbers. Every 16th step: costs a monitor call or several.
+// Each task's own rounding and precision, so that a mix-up changes the numbers. Every 16th step: costs a monitor call
+// or several.
 static const u16 task_cw[2] = {0xA7F, 0x77F};
 static inline void task_fp_seed(int n) {
     __asm__ volatile("fninit\n" : : : "memory");
@@ -443,11 +444,17 @@ static inline void task_fp_step(int n, u64 step) {
     if (n == 0)
         __asm__ volatile("fadd %%st(1), %%st\n fsqrt\n fxch\n fld1\n faddp\n fxch\n" : : : "memory");
     else
-        __asm__ volatile("movq %0, %%mm2\n paddq %%mm2, %%mm3\n pxor %%mm3, %%mm6\n psllq $1, %%mm3\n" : : "r"(step) : "memory");
+        __asm__ volatile("movq %0, %%mm2\n paddq %%mm2, %%mm3\n pxor %%mm3, %%mm6\n psllq $1, %%mm3\n"
+                         :
+                         : "r"(step)
+                         : "memory");
 }
 static void task_fp_read(int n, u64 *out) {
     if (n == 0)
-        __asm__ volatile("fld %%st(0)\n fstpt (%0)\n fld %%st(1)\n fstpt 16(%0)\n fnstcw 32(%0)\n" : : "r"(out) : "memory");
+        __asm__ volatile("fld %%st(0)\n fstpt (%0)\n fld %%st(1)\n fstpt 16(%0)\n fnstcw 32(%0)\n"
+                         :
+                         : "r"(out)
+                         : "memory");
     else
         __asm__ volatile("movq %%mm3, (%0)\n movq %%mm6, 16(%0)\n" : : "r"(out) : "memory");
 }
@@ -764,7 +771,7 @@ static void test_rep_into_table(u64 root) {
 
 // ---- A small process in ring 3, for the tally's process log: a fault, a wait4 that returns a status, an exit ----
 static u64 tss[13];
-u64 user_saved_rsp;
+u64 user_saved_rsp, swap_slot, swap_value;
 __asm__(".text\n"
         "_user_blob:\n"
         "  int3\n"
@@ -780,7 +787,13 @@ __asm__(".text\n"
         "_user_int3:\n"
         "  iretq\n"
         "_user_syscall:\n"
-        "  cmpl $0x2000001, %eax\n"
+        "  cmpl $0x2000009, %eax\n" // the shared region test: a store the kernel makes for it, mid-call
+        "  jne 2f\n"
+        "  movq _swap_slot(%rip), %rax\n"
+        "  movq _swap_value(%rip), %rdx\n"
+        "  movq %rdx, (%rax)\n"
+        "  sysretq\n"
+        "2: cmpl $0x2000001, %eax\n"
         "  je 1f\n"
         "  movl $0x300, (%rsi)\n"
         "  movl $77, %eax\n"
@@ -795,6 +808,199 @@ __asm__(".text\n"
 extern char user_blob[] __asm__("_user_blob"), user_blob_end[] __asm__("_user_blob_end"),
     user_int3[] __asm__("_user_int3"), user_syscall[] __asm__("_user_syscall");
 void enter_user(u64 rip, u64 rsp);
+
+static u64 shared_root_copy(u64 root, u64 directory, u64 *third_out) {
+    u64 r = frame(), third = frame();
+    for (int i = 0; i < 512; i++) {
+        PHYS(r)[i] = PHYS(root)[i];
+        PHYS(third)[i] = 0;
+    }
+    PHYS(r)[255] = third | PRESENT_RW | 4;
+    PHYS(third)[510] = directory | PRESENT_RW | 4;
+    if (third_out)
+        *third_out = third;
+    return r;
+}
+
+#define SHARED_VA 0x7FFF80000000ULL
+
+// mov $value, %ebx; jmp +0; mov $exit, %eax; syscall. A jump, so that two blocks get linked.
+static void shared_code(u64 page, u32 value) {
+    static const u8 tail[] = {0xEB, 0x00, 0xB8, 0x01, 0x00, 0x00, 0x02, 0x0F, 0x05};
+    volatile u8 *to = (volatile u8 *)PHYS(page);
+    to[0] = 0xBB;
+    for (int i = 0; i < 4; i++)
+        to[1 + i] = (u8)(value >> (i * 8));
+    for (u32 i = 0; i < sizeof tail; i++)
+        to[5 + i] = tail[i];
+}
+
+// Runs the code at the shared address in this address space, and says what it was.
+static u32 shared_run(u64 r, u64 home) {
+    u64 value;
+    write_cr3(r);
+    __asm__ volatile("call _enter_user"
+                     : "=b"(value)
+                     : "D"(SHARED_VA), "S"(SHARED_VA + 4096)
+                     : "rax", "rcx", "rdx", "rbp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "memory");
+    write_cr3(home);
+    return (u32)value;
+}
+
+static u32 shared_run_with_stack(u64 r, u64 home) {
+    u64 value;
+    write_cr3(r);
+    __asm__ volatile("call _enter_user"
+                     : "=b"(value)
+                     : "D"(SHARED_VA), "S"(SHARED_VA + 8192)
+                     : "rax", "rcx", "rdx", "rbp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "memory");
+    write_cr3(home);
+    return (u32)value;
+}
+
+// Several address spaces nested on one page directory, as XNU's shared region is: one translation serves them all, and
+// each change must reach each of them.
+static void test_shared_region(u64 root) {
+    u64 directory = frame(), table = frame(), code = frame(), third_a, third_b;
+    for (int i = 0; i < 512; i++) {
+        PHYS(directory)[i] = 0;
+        PHYS(table)[i] = 0;
+    }
+    PHYS(directory)[0] = table | PRESENT_RW | 4;
+    PHYS(table)[0] = code | PRESENT_RW | 4;
+    shared_code(code, 1);
+    u64 a = shared_root_copy(root, directory, &third_a), b = shared_root_copy(root, directory, &third_b);
+    for (int i = 0; i < 3; i++) {
+        CHECK(shared_run(a, root) == 1);
+        CHECK(shared_run(b, root) == 1);
+    }
+    // The page moves to another frame, for everyone.
+    u64 code2 = frame();
+    shared_code(code2, 2);
+    PHYS(table)[0] = code2 | PRESENT_RW | 4;
+    CHECK(shared_run(a, root) == 2);
+    CHECK(shared_run(b, root) == 2);
+    // The code is written.
+    shared_code(code2, 3);
+    CHECK(shared_run(b, root) == 3);
+    CHECK(shared_run(a, root) == 3);
+    // The directory's own slot changes.
+    u64 table2 = frame(), code3 = frame();
+    for (int i = 0; i < 512; i++)
+        PHYS(table2)[i] = 0;
+    shared_code(code3, 4);
+    PHYS(table2)[0] = code3 | PRESENT_RW | 4;
+    PHYS(directory)[0] = table2 | PRESENT_RW | 4;
+    CHECK(shared_run(a, root) == 4);
+    CHECK(shared_run(b, root) == 4);
+    // One process leaves for a directory of its own, as unnesting does, while the other stays. Then it comes back.
+    u64 own = frame(), own_table = frame(), own_code = frame();
+    for (int i = 0; i < 512; i++) {
+        PHYS(own)[i] = 0;
+        PHYS(own_table)[i] = 0;
+    }
+    shared_code(own_code, 5);
+    PHYS(own)[0] = own_table | PRESENT_RW | 4;
+    PHYS(own_table)[0] = own_code | PRESENT_RW | 4;
+    PHYS(third_b)[510] = own | PRESENT_RW | 4;
+    for (int i = 0; i < 2; i++) {
+        CHECK(shared_run(b, root) == 5);
+        CHECK(shared_run(a, root) == 4);
+    }
+    PHYS(third_b)[510] = directory | PRESENT_RW | 4;
+    CHECK(shared_run(b, root) == 4);
+    // Another process at the same address, never sharing.
+    u64 c = shared_root_copy(root, own, 0);
+    CHECK(shared_run(c, root) == 5);
+    CHECK(shared_run(a, root) == 4);
+    // The first process, which holds the marks, leaves. Later changes must still reach the others, and a newcomer
+    // shares.
+    PHYS(third_a)[510] = 0;
+    CHECK(shared_run(b, root) == 4);
+    u64 d = shared_root_copy(root, directory, 0);
+    CHECK(shared_run(d, root) == 4);
+    shared_code(code3, 6);
+    CHECK(shared_run(b, root) == 6);
+    CHECK(shared_run(d, root) == 6);
+    u64 code4 = frame();
+    shared_code(code4, 7);
+    PHYS(table2)[0] = code4 | PRESENT_RW | 4;
+    CHECK(shared_run(d, root) == 7);
+    CHECK(shared_run(b, root) == 7);
+    // Its tables are freed and poisoned, and nothing walks them to any effect.
+    PHYS(a)[255] = 0xDEADBEEFDEADBEEFULL;
+    CHECK(shared_run(b, root) == 7);
+    // Processes come and go, more than there are views, with a change at each step reaching them all.
+    u32 value = 8;
+    u64 longer = shared_root_copy(root, directory, 0);
+    for (int i = 0; i < 90; i++) {
+        u64 third, child = shared_root_copy(root, directory, &third);
+        CHECK(shared_run(child, root) == value - 1);
+        CHECK(shared_run(longer, root) == value - 1);
+        if (i % 3 == 0) {
+            shared_code(code4, value - 1);
+        } else {
+            u64 next = frame();
+            shared_code(next, value);
+            PHYS(table2)[0] = next | PRESENT_RW | 4;
+            CHECK(shared_run(child, root) == value);
+            value++;
+        }
+        PHYS(third)[510] = 0; // it exits
+        CHECK(shared_run(longer, root) == value - 1);
+        CHECK(shared_run(d, root) == value - 1);
+    }
+}
+
+// A return needs no lookup: a process that leaves the directory mid-call must not come back to the shared translation
+// of its caller. shared page: call helper; mov $value, %ebx; mov $exit, %eax; syscall
+static void shared_caller(u64 page, u32 value) {
+    static const u8 head[] = {0xE8, 0xFB, 0x1F, 0x00, 0x00, 0xBB};
+    static const u8 tail[] = {0xB8, 0x01, 0x00, 0x00, 0x02, 0x0F, 0x05};
+    volatile u8 *to = (volatile u8 *)PHYS(page);
+    for (u32 i = 0; i < sizeof head; i++)
+        to[i] = head[i];
+    for (int i = 0; i < 4; i++)
+        to[sizeof head + (u32)i] = (u8)(value >> (i * 8));
+    for (u32 i = 0; i < sizeof tail; i++)
+        to[sizeof head + 4 + i] = tail[i];
+}
+
+static void test_shared_return(u64 root) {
+    u64 directory = frame(), table = frame(), code = frame(), stack = frame(), helper = frame(), own = frame(),
+        own_table = frame(), own_code = frame();
+    // helper, at the second page after the caller: mov $swap, %eax; syscall; ret
+    static const u8 body[] = {0xB8, 0x09, 0x00, 0x00, 0x02, 0x0F, 0x05, 0xC3};
+    for (u32 i = 0; i < sizeof body; i++)
+        ((volatile u8 *)PHYS(helper))[i] = body[i];
+    shared_caller(code, 21);
+    shared_caller(own_code, 22);
+    PHYS(directory)[0] = table | PRESENT_RW | 4;
+    PHYS(table)[0] = code | PRESENT_RW | 4;
+    PHYS(table)[1] = stack | PRESENT_RW | 4;
+    PHYS(table)[2] = helper | PRESENT_RW | 4;
+    PHYS(own)[0] = own_table | PRESENT_RW | 4;
+    PHYS(own_table)[0] = own_code | PRESENT_RW | 4;
+    PHYS(own_table)[1] = stack | PRESENT_RW | 4;
+    PHYS(own_table)[2] = helper | PRESENT_RW | 4;
+    u64 third_a, third_b;
+    u64 a = shared_root_copy(root, directory, &third_a), b = shared_root_copy(root, directory, &third_b);
+    // Warm, so that the return stack and the links lead straight back.
+    static u64 unused;
+    swap_slot = (u64)&unused;
+    swap_value = 0;
+    for (int i = 0; i < 4; i++) {
+        CHECK(shared_run_with_stack(a, root) == 21);
+        CHECK(shared_run_with_stack(b, root) == 21);
+    }
+    swap_slot = (u64)&PHYS(third_b)[510];
+    swap_value = own | PRESENT_RW | 4;
+    CHECK(shared_run_with_stack(b, root) == 22);
+    CHECK(shared_run_with_stack(a, root) == 21);
+    swap_slot = (u64)&unused;
+    PHYS(third_b)[510] = directory | PRESENT_RW | 4;
+    CHECK(shared_run_with_stack(b, root) == 21);
+}
 
 static void test_process_log(u64 root) {
     u64 t = (u64)tss;
@@ -1054,10 +1260,16 @@ static void test_x87(void) {
     __asm__ volatile("fnclex\n fxsave64 (%0)" : : "r"(area) : "memory");
     CHECK(*(u64 *)(area + 32) == 0xC000000000000000ULL && *(u16 *)(area + 40) == 0xFFFF);
     // A NaN in ST0 doesn't change that, where Rosetta runs the NaN rules against its empty register.
-    __asm__ volatile("fninit\n fldt (%0)\n fadd %%st(3), %%st\n fxsave64 (%1)" : : "r"((const u8[10]){1, 0, 0, 0, 0, 0, 0, 0xC0, 0xFF, 0x7F}), "r"(area) : "memory");
+    __asm__ volatile("fninit\n fldt (%0)\n fadd %%st(3), %%st\n fxsave64 (%1)"
+                     :
+                     : "r"((const u8[10]){1, 0, 0, 0, 0, 0, 0, 0xC0, 0xFF, 0x7F}), "r"(area)
+                     : "memory");
     CHECK(*(u64 *)(area + 32) == 0xC000000000000000ULL && *(u16 *)(area + 40) == 0xFFFF);
     // Stack overflow: the same with C1 set, TOP moved, and the register overwritten.
-    __asm__ volatile("fninit\n fld1\n fld1\n fld1\n fld1\n fld1\n fld1\n fld1\n fld1\n fnclex\n fldpi\n" : : : "memory");
+    __asm__ volatile("fninit\n fld1\n fld1\n fld1\n fld1\n fld1\n fld1\n fld1\n fld1\n fnclex\n fldpi\n"
+                     :
+                     :
+                     : "memory");
     sw = x87_sw();
     CHECK((sw & 0x7F) == 0x41 && (sw & 0x200) && (sw >> 11 & 7) == 7);
     // fbld as well, which Rosetta lets through.
@@ -1077,7 +1289,8 @@ static void test_x87(void) {
     CHECK(area[4] == 0 && *(u64 *)(area + 32 + 15 * 0) != 0xC000000000000000ULL);
     CHECK(*(u64 *)(area + 32 + 16 * 7) == 0xC90FDAA22168C235ULL && *(u16 *)(area + 40 + 16 * 7) == 0x4000);
 
-    // Instruction and data pointers, and the opcode. r12 as the base, so the ModRM byte is known; a label gives the rip.
+    // Instruction and data pointers, and the opcode. r12 as the base, so the ModRM byte is known; a label gives the
+    // rip.
     u64 at, cell = 0;
     __asm__ volatile("fninit\n lea 1f(%%rip), %0\n mov %1, %%r12\n 1: .byte 0x41, 0xDD, 0x04, 0x24\n" // fldl (%r12)
                      "fxsave64 (%2)\n"
@@ -1087,7 +1300,8 @@ static void test_x87(void) {
     CHECK(*(u16 *)(area + 6) == 0x504 && *(u64 *)(area + 8) == at && *(u64 *)(area + 16) == (u64)&cell);
     // The small format and fnstenv's: reserved words all ones, opcode beside the selector.
     __asm__ volatile("fnstenv (%0)" : : "r"(area) : "memory");
-    CHECK(*(u32 *)(area + 0) == 0xFFFF037F && *(u32 *)(area + 12) == (u32)at && *(u32 *)(area + 16) == (0x504u << 16 | 8) && *(u32 *)(area + 20) == (u32)(u64)&cell);
+    CHECK(*(u32 *)(area + 0) == 0xFFFF037F && *(u32 *)(area + 12) == (u32)at &&
+          *(u32 *)(area + 16) == (0x504u << 16 | 8) && *(u32 *)(area + 20) == (u32)(u64)&cell);
     CHECK(*(u16 *)(area + 8) == 0x7FFF); // the one register in use, physical 7, holds zero: tag 01
     __asm__ volatile("fldcw (%0)\n" : : "r"((const u16[1]){0x37F}) : "memory");
     __asm__ volatile("fxsave (%0)" : : "r"(area) : "memory");
@@ -1102,18 +1316,27 @@ static void test_x87(void) {
     // fxsave leaves the end of the image alone, and fxrstor brings back everything it holds. ST order, not physical.
     for (int w = 52; w < 64; w++)
         ((u64 *)area)[w] = 0x5A5A5A5A5A5A5A5AULL;
-    u64 xmm3[2] __attribute__((aligned(16))) = {0x1111222233334444ULL, 0x5555666677778888ULL}, back[2] __attribute__((aligned(16)));
-    __asm__ volatile("movaps (%1), %%xmm3\n fninit\n fld1\n fldpi\n fxsave64 (%0)\n fninit\n pxor %%xmm3, %%xmm3\n fxrstor64 (%0)\n movaps %%xmm3, (%2)\n" : : "r"(area), "r"(xmm3), "r"(back) : "memory", "xmm3");
+    u64 xmm3[2] __attribute__((aligned(16))) = {0x1111222233334444ULL, 0x5555666677778888ULL},
+                back[2] __attribute__((aligned(16)));
+    __asm__ volatile("movaps (%1), %%xmm3\n fninit\n fld1\n fldpi\n fxsave64 (%0)\n fninit\n pxor %%xmm3, %%xmm3\n "
+                     "fxrstor64 (%0)\n movaps %%xmm3, (%2)\n"
+                     :
+                     : "r"(area), "r"(xmm3), "r"(back)
+                     : "memory", "xmm3");
     CHECK(back[0] == xmm3[0] && back[1] == xmm3[1]);
     CHECK(((u64 *)area)[52] == 0x5A5A5A5A5A5A5A5AULL && ((u64 *)area)[63] == 0x5A5A5A5A5A5A5A5AULL);
-    CHECK(area[4] == 0xC0 && *(u64 *)(area + 32) == 0xC90FDAA22168C235ULL && *(u64 *)(area + 48) == 0x8000000000000000ULL);
+    CHECK(area[4] == 0xC0 && *(u64 *)(area + 32) == 0xC90FDAA22168C235ULL &&
+          *(u64 *)(area + 48) == 0x8000000000000000ULL);
     __asm__ volatile("fstpl %0\n" : "=m"(d));
     __asm__ volatile("fstp %st(0)");
     CHECK(*(u64 *)&d == 0x400921FB54442D18ULL);
     // Reserved MXCSR bits: #GP, nothing restored.
     gate(13, gp_skip5);
     *(u32 *)(area + 24) = 0x10000 | 0x1F80;
-    __asm__ volatile("fninit\n fldz\n mov %0, %%r12\n .byte 0x49, 0x0F, 0xAE, 0x0C, 0x24\n" : : "r"(area) : "r12", "memory");
+    __asm__ volatile("fninit\n fldz\n mov %0, %%r12\n .byte 0x49, 0x0F, 0xAE, 0x0C, 0x24\n"
+                     :
+                     : "r"(area)
+                     : "r12", "memory");
     gate(13, bad_stub);
     CHECK(gp_count == 1);
     sw = x87_sw();
@@ -1121,15 +1344,23 @@ static void test_x87(void) {
     __asm__ volatile("fninit");
 
     // MMX and the stack: TOP 0, all valid, exponents all ones where written; emms empties the tags and leaves TOP.
-    __asm__ volatile("fninit\n fld1\n fld1\n movq %0, %%mm2\n fxsave64 (%1)\n" : : "r"(lo = 0x0123456789ABCDEFULL), "r"(area) : "memory");
-    CHECK((*(u16 *)(area + 2) >> 11 & 7) == 0 && area[4] == 0xFF && *(u64 *)(area + 32 + 2 * 16) == lo && *(u16 *)(area + 40 + 2 * 16) == 0xFFFF);
+    __asm__ volatile("fninit\n fld1\n fld1\n movq %0, %%mm2\n fxsave64 (%1)\n"
+                     :
+                     : "r"(lo = 0x0123456789ABCDEFULL), "r"(area)
+                     : "memory");
+    CHECK((*(u16 *)(area + 2) >> 11 & 7) == 0 && area[4] == 0xFF && *(u64 *)(area + 32 + 2 * 16) == lo &&
+          *(u16 *)(area + 40 + 2 * 16) == 0xFFFF);
     __asm__ volatile("emms\n fxsave64 (%0)" : : "r"(area) : "memory");
     CHECK(area[4] == 0 && (*(u16 *)(area + 2) >> 11 & 7) == 0);
     // ...and x87 can read what MMX left: a NaN whose significand is the MMX value, by physical number.
-    __asm__ volatile("fninit\n movq %0, %%mm7\n emms\n fld %%st(7)\n fxsave64 (%1)\n" : : "r"(lo), "r"(area) : "memory");
+    __asm__ volatile("fninit\n movq %0, %%mm7\n emms\n fld %%st(7)\n fxsave64 (%1)\n"
+                     :
+                     : "r"(lo), "r"(area)
+                     : "memory");
     CHECK(*(u16 *)(area + 2) >> 11 == 7);
 
-    // A fault on a store changes nothing: the page faults in and the instruction runs once. TOP moved once, the value is whole.
+    // A fault on a store changes nothing: the page faults in and the instruction runs once. TOP moved once, the value
+    // is whole.
     u64 before = lazy_pf_count;
     *lazy_ptes[2] = 0;
     __asm__ volatile("invlpg (%0)" : : "r"(LAZY_VA + (2ULL << 12)));
@@ -1175,11 +1406,17 @@ static void test_x87(void) {
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
     gate(14, bad_stub);
 
-    // At a fallback TCG gets all of it. Action 13 checks the stack as this leaves it, and writes ST0 and the status word for the way back.
+    // At a fallback TCG gets all of it. Action 13 checks the stack as this leaves it, and writes ST0 and the status
+    // word for the way back.
     __asm__ volatile("fninit\n fldcw (%0)\n fld1\n fldpi\n" : : "r"((const u16[1]){0xB7F}) : "memory");
-    __asm__ volatile("mov $13, %%r13\n mov $2, %%r14\n .byte 0xD9, 0xFF\n fxsave64 (%0)" : : "r"(area) : "r13", "r14", "memory");
-    CHECK(*(u64 *)(area + 32) == 0xFEDCBA9876543210ULL && *(u16 *)(area + 40) == 0x4005 && (*(u16 *)(area + 2) & 0x7F) == 0x20);
-    // An unmasked exception takes the operation to TCG (action 14 checks that nothing moved). Flags now unmasked are pending, and fwait goes too.
+    __asm__ volatile("mov $13, %%r13\n mov $2, %%r14\n .byte 0xD9, 0xFF\n fxsave64 (%0)"
+                     :
+                     : "r"(area)
+                     : "r13", "r14", "memory");
+    CHECK(*(u64 *)(area + 32) == 0xFEDCBA9876543210ULL && *(u16 *)(area + 40) == 0x4005 &&
+          (*(u16 *)(area + 2) & 0x7F) == 0x20);
+    // An unmasked exception takes the operation to TCG (action 14 checks that nothing moved). Flags now unmasked are
+    // pending, and fwait goes too.
     __asm__ volatile("fninit\n fld1\n fld1\n fldcw (%0)\n" : : "r"((const u16[1]){0x37E}) : "memory");
     __asm__ volatile("mov $14, %%r13\n mov $2, %%r14\n faddp\n" : : : "r13", "r14");
     __asm__ volatile("fninit\n fld1\n fldz\n fdivrp\n fldcw (%0)\n" : : "r"((const u16[1]){0x37B}) : "memory");
@@ -1189,7 +1426,8 @@ static void test_x87(void) {
     __asm__ volatile("fninit");
 }
 
-// x87 operands go through translated loads and stores, so devices and tracked frames work as for any move. fxsave, written from the monitor, goes to TCG for a tracked frame.
+// x87 operands go through translated loads and stores, so devices and tracked frames work as for any move. fxsave,
+// written from the monitor, goes to TCG for a tracked frame.
 static void test_x87_memory(u64 root) {
     u64 got = 0;
     __asm__ volatile("fninit\n fldl (%0)\n fstpl (%1)" : : "r"(PHYS(MARKED)), "r"(&got) : "memory");
@@ -1252,6 +1490,8 @@ void kmain(void) {
     test_inline_ops(root);
     test_direct_map();
     test_process_log(root);
+    test_shared_region(root);
+    test_shared_return(root);
     test_view_churn(root);
     CHECK(!bad_vector);
     puts_("hybrid checks passed\n");

@@ -352,6 +352,8 @@ public final class Tally: @unchecked Sendable {
         o += "blocks invalidated   " + perSecond(t.invalidated) + "\n"
         o +=
             "cold blocks a cache keyed by frame had: \(t.again_live) live in another view, \(t.again_dead) dead with the frame unchanged. Lower bounds\n\n"
+        o +=
+            "shared user blocks: \(t.shared_blocks) translated, \(t.shared_found) found by another view, under \(c.shared_dir_count) directories\n\n"
         o += "== why blocks died: blocks, of those with the page still on the same frame, calls ==\n"
         let killed = withUnsafeBytes(of: t.killed) { Array($0.bindMemory(to: UInt64.self)) }
         let unmoved = withUnsafeBytes(of: t.killed_unmoved) { Array($0.bindMemory(to: UInt64.self)) }

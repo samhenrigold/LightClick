@@ -100,6 +100,28 @@ static bool is_ram(u64 gpa) { return gpa < cfg.ram_size && (cfg.priv[OFF_PAGEINF
 // those entries identical, and a change to them invalidates through the page-table write path. Everything else belongs to one view.
 #define KEY_DOMAIN 0x40000000
 static int view_high;
+// A rip under a page directory that several address spaces share maps the same bytes in all of them, so one translation serves them all. The last page stays out,
+// as a block starting there could run into the next directory.
+static int shared_user_key(u64 cr3, int cpl, u64 rip) {
+    if (cpl != 3 || !ctx_ptr->shared_dir_count || rip < SHARED_USER_BASE || rip >= SHARED_USER_END - 4096)
+        return 0;
+    u64 table = cr3 & 0x000FFFFFFFFFF000ULL;
+    if (!is_ram(table))
+        return 0;
+    u64 e = *(u64 *)(ram_at(table) + ((rip >> 39) & 0x1ff) * 8);
+    table = e & 0x000FFFFFFFFFF000ULL;
+    if (!(e & 1) || !is_ram(table))
+        return 0;
+    e = *(u64 *)(ram_at(table) + ((rip >> 30) & 0x1ff) * 8);
+    if (!(e & 1) || (e & 0x80))
+        return 0;
+    u64 directory = e & 0x000FFFFFFFFFF000ULL;
+    for (u32 i = 0; i < ctx_ptr->shared_dir_count; i++)
+        if (ctx_ptr->shared_dirs[i] == directory)
+            return KEY_DOMAIN | (int)((directory >> 12) & 0x3FFFFFFF);
+    return 0;
+}
+
 static int block_key(int view, u64 cr3, int cpl, u64 rip) {
     if (cpl == 0 && (rip >> 47)) {
         u64 table = cr3 & 0x000FFFFFFFFFF000ULL;
@@ -108,7 +130,8 @@ static int block_key(int view, u64 cr3, int cpl, u64 rip) {
             return KEY_DOMAIN | (int)((e >> 12) & 0x3FFFFFFF);
         }
     }
-    return view;
+    int shared = shared_user_key(cr3, cpl, rip);
+    return shared ? shared : view;
 }
 
 // ---- Guest memory, host's read-only view ----
@@ -921,6 +944,8 @@ TrResult tr_translate(int view, uint64_t cr3, int cpl, uint64_t rip, bool single
     if (!single) {
         u32 hit = map_find(key, rip);
         if (hit) {
+            if ((key & KEY_DOMAIN) && cpl == 3)
+                stats.shared_found++;
             TrResult r = {0};
             r.arm = tr_cc_va(cc_base + hblocks[hit - 1].entry_word);
             r.frames[0] = hblocks[hit - 1].frame[0];
@@ -930,6 +955,8 @@ TrResult tr_translate(int view, uint64_t cr3, int cpl, uint64_t rip, bool single
         }
     }
     TrResult r = do_translate(view, cr3, cpl, rip, single);
+    if ((key & KEY_DOMAIN) && cpl == 3)
+        stats.shared_blocks++;
     r.key = key;
     return r;
 }
@@ -1011,6 +1038,8 @@ static void hash_remove(int view, u64 rip) {
     }
 }
 
+static void hash_remove(int view, u64 rip);
+
 static void kill_block(u32 idx) {
     HostBlock *hb = &hblocks[idx];
     if (hb->dead)
@@ -1052,7 +1081,9 @@ int tr_invalidate_frame(uint64_t gpa, uint32_t why) {
     return n;
 }
 
-int tr_invalidate_view_va(int view, uint64_t va, uint32_t why, bool unmoved) {
+void tr_view_forget(int view) { memset(hash_table(view), 0, HASH_BYTES); }
+
+int tr_invalidate_view_va(int view, uint64_t va, uint32_t why, bool unmoved, bool keeper) {
     int n = 0;
     u64 page = va & ~0xfffULL;
     u32 slot = page_slot(page);
@@ -1065,7 +1096,11 @@ int tr_invalidate_view_va(int view, uint64_t va, uint32_t why, bool unmoved) {
             continue;
         }
         u64 first = hb->rip & ~0xfffULL;
-        if (((int)hb->view == view || (hb->view & KEY_DOMAIN)) && (first == page || (hb->frame[1] != ~0ULL && first + 4096 == page))) {
+        bool here = first == page || (hb->frame[1] != ~0ULL && first + 4096 == page);
+        bool shared_user = (hb->view & KEY_DOMAIN) && !(hb->rip >> 47);
+        if (here && shared_user && !keeper) { // only this view's sight of it changed: the block stands for the others
+            hash_remove(view, hb->rip);
+        } else if (here && ((int)hb->view == view || (hb->view & KEY_DOMAIN))) {
             kill_block(*link - 1);
             n++;
             *link = *next;

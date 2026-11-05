@@ -158,7 +158,7 @@ static inline void hostcall(u64 code) {
 // ---- Views: an x86 address space seen from one privilege level ----
 typedef struct {
     u64 cr3; // masked: table address and PCID
-    u32 cpl, valid;
+    u32 cpl, valid, sees_shared, pad_shared; // sees_shared: its lookup table may hold blocks of a shared user domain
     u64 root0, root1; // VA of shadow roots
     u64 ttbr0, ttbr1;
     u64 hash_va;
@@ -259,6 +259,7 @@ static inline bool canonical(u64 va) { return (u64)((i64)(va << 16) >> 16) == va
 
 // Permission logic mirrors the SDM for CR0.WP=1 (enforced at CR0 writes) without SMAP (not advertised, stopped at CR4 writes).
 // access: bit 1 write, bit 2 user, bit 4 fetch.
+static void track_root(View *v, u64 va, const Walk *w);
 // walk_any_tables: the tables may be a dead process's, freed and poisoned: a slot pointing outside RAM just ends the walk
 
 static Walk x86_walk(u64 cr3, u64 va, u32 access, bool set_ad) {
@@ -902,6 +903,68 @@ static void link_here(u64 site, u32 kind, u64 arm) {
     c->stat_links_here++;
 }
 
+// ---- Shared user domains. See "Sharing user translations" in DESIGN.md ----
+// A view may look up a shared block only while its own tables lead to the shared directory: zap_entry has it forget them when that slot changes. The directory's
+// contents can change for every view at once, and only the keeper sees that: its shadow carries the code marks, and it stays while it maps the directory.
+static struct {
+    u64 directory, first_cr3;
+    u32 first_view, keeper; // keeper is valid once shared
+} shared_seen[8];
+static u32 shared_seen_next;
+
+// Whether the rip's directory is shared, deciding it now if a second address space has just reached it. Returns its row, or -1.
+static int shared_row(const Walk *w, const View *v, u64 rip) {
+    if (!c->share_user || c->cpl != 3 || rip < SHARED_USER_BASE || rip >= SHARED_USER_END - 4096 || w->leaf_level == 2)
+        return -1;
+    u64 directory = *w->chain[2] & X_ADDR;
+    for (u32 i = 0; i < 8; i++) {
+        if (shared_seen[i].directory != directory)
+            continue;
+        for (u32 d = 0; d < c->shared_dir_count; d++)
+            if (c->shared_dirs[d] == directory)
+                return (int)i;
+        if (shared_seen[i].first_cr3 == v->cr3 || c->shared_dir_count == SHARED_USER_DIRS)
+            return -1;
+        c->shared_dirs[c->shared_dir_count++] = directory;
+        View *first = &views[shared_seen[i].first_view];
+        shared_seen[i].keeper = first->valid && first->cr3 == shared_seen[i].first_cr3 ? shared_seen[i].first_view : (u32)(v - views);
+        views[shared_seen[i].keeper].keeper = 1;
+        return (int)i;
+    }
+    for (u32 n = 0; n < 8; n++, shared_seen_next = (shared_seen_next + 1) % 8) { // a row in use as shared stays
+        bool in_use = false;
+        for (u32 d = 0; d < c->shared_dir_count; d++)
+            in_use = in_use || c->shared_dirs[d] == shared_seen[shared_seen_next].directory;
+        if (!in_use)
+            break;
+    }
+    shared_seen[shared_seen_next].directory = directory;
+    shared_seen[shared_seen_next].first_cr3 = v->cr3;
+    shared_seen[shared_seen_next].first_view = (u32)(v - views);
+    shared_seen_next = (shared_seen_next + 1) % 8;
+    return -1;
+}
+
+// Puts the code mark for a shared page on the keeper, choosing a new one if this one has stopped mapping the directory. Its zap then killed what it marked.
+static void shared_mark(int row, u64 va, View *v) {
+    u64 directory = shared_seen[row].directory;
+    View *k = &views[shared_seen[row].keeper];
+    walk_any_tables = true; // it may be a dead process's, with its tables freed and poisoned
+    Walk own = x86_walk(k->cr3, va, 0, false);
+    walk_any_tables = false;
+    if (!k->valid || !own.ok || (*own.chain[2] & X_ADDR) != directory) {
+        k->keeper = 0;
+        shared_seen[row].keeper = (u32)(v - views);
+        k = v;
+        k->keeper = 1;
+        own = x86_walk(k->cr3, va, 0, false);
+        if (!own.ok)
+            return; // the block's own page is gone from under it: its next use faults
+    }
+    track_root(k, va, &own);
+    *shadow_slot(k, va, &own, 0, 0) |= PTE_X_MARK;
+}
+
 static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
     View *v = view_current();
     if (!single) {
@@ -926,6 +989,7 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
     }
     if (c->hybrid && !is_ram(w.gpa))
         stop(STOP_FALLBACK, rip, FB_FETCH_NOT_RAM, w.gpa, 0);
+    int shared = single ? -1 : shared_row(&w, v, rip);
     c->req_a[0] = c->view;
     c->req_a[1] = rip;
     c->req_a[2] = site;
@@ -979,6 +1043,14 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
         }
     }
     track_root(v, rip, &w);
+    if (shared >= 0) { // this view just needs its own path built, so that a change to its slot above the directory reaches zap_entry
+        shadow_slot(v, rip, &w, 0, 0);
+        v->sees_shared = 1;
+        shared_mark(shared, rip, v);
+        if (c->req_r[3])
+            shared_mark(shared, (rip & ~0xfffULL) + 4096, v);
+        return c->req_r[0];
+    }
     *shadow_slot(v, rip, &w, 0, 0) |= PTE_X_MARK;
     if (c->cpl == 0 && (rip >> 47)) { // shared with other views: the domain's keeper must see writes to this mapping too
         View *keeper = domain_keeper(*w.chain[3] & X_ADDR, v);
@@ -1038,10 +1110,17 @@ static void zap_entry(u64 *e, const ShadowDesc *d) {
             c->req_a[1] = va;
             c->req_a[2] = zap_why;
             c->req_a[3] = now.ok && (now.gpa & ~0xfffULL) == (v & PTE_ADDR); // the guest's mapping of this page has not moved
+            c->req_a[4] = views[d->view].keeper;
             hostcall(HC_VIEW_INVALIDATE_VA);
             reset_all_return_stacks();
         }
     } else if (v & 1) {
+        if (d->level == 2 && views[d->view].sees_shared && !evicting && pte_va(e, d) == SHARED_USER_BASE) { // what its lookups mean may have changed
+            views[d->view].sees_shared = 0;
+            c->req_a[0] = d->view;
+            hostcall(HC_VIEW_FORGET);
+            reset_all_return_stacks(); // a return needs no lookup, and it could land on one of those blocks
+        }
         zap_table(pool_index((void *)IPA_TO_VA(v & PTE_ADDR)));
     }
 }
