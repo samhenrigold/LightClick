@@ -503,9 +503,9 @@ public final class Engine {
         case Int(STOP_UNSUPPORTED):
             let names: [UInt64: String] = [
                 3: "split locked access", 4: "mmio form: pair, atomic or SIMD to a device", 5: "split store on a page table",
-                6: "sysret to compatibility mode", 7: "16 or 32-bit iret", 8: "iret to compatibility mode", 9: "TF set",
-                10: "CR0 write: paging, protection or WP off", 11: "CR4 write: unsupported bit", 13: "non-flat fs or gs",
-                14: "unmasked SSE exceptions", 15: "split access across a device page",
+                7: "16 or 32-bit iret", 8: "entering compatibility mode with a segment only TCG runs", 9: "TF set",
+                10: "CR0 write: paging, protection or WP off", 11: "CR4 write: unsupported bit", 13: "segment load only TCG runs in compatibility mode",
+                14: "unmasked SSE exceptions", 15: "split access across a device page", 18: "far transfer through a gate, to 16-bit code or with a 16-bit operand", 19: "stack or frame outside RAM",
             ]
             return names[a.2] ?? "unsupported case \(a.2)"
         default:

@@ -94,7 +94,7 @@ static inline void hostcall(u64 code) {
 // ---- Views: an x86 address space seen from one privilege level ----
 typedef struct {
     u64 cr3; // masked: table address and PCID
-    u32 cpl, valid;
+    u32 cpl, valid; // cpl: 4 added in compatibility mode, whose code at any rip decodes differently
     u64 root0, root1; // VA of shadow roots
     u64 ttbr0, ttbr1;
     u64 rs_saved, rs_top;
@@ -602,6 +602,7 @@ static View *domain_keeper(u64 pml4e_target, View *requester) {
     return requester;
 }
 
+static inline u32 view_mode(void) { return c->cpl | (c->compat ? 4 : 0); }
 static inline u64 cr3_key(u64 cr3) { return (c->cr4 & (1ULL << 17)) ? (cr3 & (X_ADDR | 0xfff)) : (cr3 & X_ADDR); }
 
 static View *view_current(void) { return &views[c->view]; }
@@ -1455,22 +1456,78 @@ typedef struct {
     u32 lo, hi;
 } Desc32;
 
-static bool gdt_read(u32 sel, u64 *out) {
+// XNU's 32-bit user selectors are in the LDT.
+static bool desc_read(u32 sel, u64 *out) {
     u32 idx = sel & ~7u;
-    if (sel & 4)
-        return false; // LDT selectors stop in the callers
-    if (idx + 7 > c->gdtr_limit)
+    if (idx + 7 > ((sel & 4) ? c->ldt_limit : c->gdtr_limit))
         return false;
-    return guest_read(c->gdtr_base + idx, out, 8, 0);
+    return guest_read(((sel & 4) ? c->ldt_base : c->gdtr_base) + idx, out, 8, 0);
 }
 
-static void set_cpl(u32 cpl, u64 ring_rsp_unused) {
-    (void)ring_rsp_unused;
-    if (c->cpl == cpl)
+static inline u64 desc_base(u64 d) { return ((d >> 16) & 0xffffff) | ((d >> 32) & 0xff000000ULL); }
+static inline u64 desc_limit(u64 d) {
+    u64 limit = (d & 0xffff) | ((d >> 32) & 0xf0000);
+    return (d >> 55) & 1 ? limit << 12 | 0xfff : limit;
+}
+static inline u32 desc_dpl(u64 d) { return (u32)(d >> 45) & 3; }
+static inline bool desc_flat(u64 d) { return !desc_base(d) && desc_limit(d) == 0xffffffffULL; }
+#define DESC_P (1ULL << 47)
+#define DESC_S (1ULL << 44)
+#define DESC_CODE (1ULL << 43)
+#define DESC_CONFORMING (1ULL << 42) // expand-down in a data segment
+#define DESC_RW (1ULL << 41) // readable code, writable data
+#define DESC_L (1ULL << 53)
+#define DESC_D (1ULL << 54)
+#define SEG_ES 0
+#define SEG_SS 2
+#define SEG_DS 3
+#define SEG_FS 4
+#define SEG_GS 5
+
+// Translated 32-bit code uses es, ds, cs and ss as flat, and fs and gs by base alone, with no limit check: XNU's cthread segment is 8 KB and its users stay inside.
+// A register holding anything else sets its bit in seg_bad, and while one is set compatibility mode runs on TCG, which also does the nulling of ring-0 selectors on
+// the way out to ring 3. Noted at the load, as a CPU caches a descriptor, and from CPUX86State at each hand-back: hvdbt_seg_bad in hvdbt.c has to agree.
+static void seg_note(u32 sr, u64 d, bool null) {
+    bool ok = null ? sr >= SEG_FS : (d & DESC_S) && (d & DESC_P) && !(d & DESC_CODE) && desc_dpl(d) == 3;
+    if (ok && !null && sr < SEG_FS)
+        ok = desc_flat(d) && !(d & DESC_CONFORMING);
+    if (ok)
+        c->seg_bad &= ~(1u << sr);
+    else
+        c->seg_bad |= 1u << sr;
+}
+
+static void set_mode(u32 cpl, bool compat) {
+    if (compat) // what every 32-bit emitter counts on. The SDM leaves these undefined across the switch.
+        for (int i = 0; i < 8; i++)
+            c->x[i] = (u32)c->x[i];
+    if (c->cpl == cpl && c->compat == compat)
         return;
     c->cpl = cpl;
-    c->stat_cr3 += 0;
-    view_activate(view_find(cr3_key(c->cr3), cpl));
+    c->compat = compat;
+    view_activate(view_find(cr3_key(c->cr3), view_mode()));
+}
+
+// Whether entering compatibility mode with this CS and SS can stay here. False: it raised #GP or #SS, or it never returns because TCG takes the instruction at `here`.
+static bool compat_entry_ok(u64 cd, u32 ss, u32 cpl, u64 here) {
+    if (cpl != 3 || !(cd & DESC_D) || !desc_flat(cd) || (c->seg_bad & (1u << SEG_ES | 1u << SEG_DS | 1u << SEG_FS | 1u << SEG_GS)))
+        stop(STOP_UNSUPPORTED, here, 8, ss, cd);
+    u64 sd;
+    if (!(ss & ~3u)) {
+        raise_gp(0, here);
+        return false;
+    }
+    if (!desc_read(ss, &sd) || (ss & 3) != cpl || desc_dpl(sd) != cpl || !(sd & DESC_S) || (sd & DESC_CODE) || !(sd & DESC_RW)) {
+        raise_gp(ss & ~3u, here);
+        return false;
+    }
+    if (!(sd & DESC_P)) {
+        deliver(12, ss & ~3u, true, here, false);
+        return false;
+    }
+    if (!desc_flat(sd) || !(sd & DESC_D) || (sd & DESC_CONFORMING))
+        stop(STOP_UNSUPPORTED, here, 8, ss, sd);
+    return true;
 }
 
 static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int) {
@@ -1523,7 +1580,7 @@ static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int)
     u64 target = (gate[0] & 0xffff) | ((gate[0] >> 32) & 0xffff0000ULL) | (gate[1] << 32);
     u32 sel = (u32)(gate[0] >> 16) & 0xffff;
     u64 cdesc;
-    if (!gdt_read(sel, &cdesc) || !(cdesc & (1ULL << 47)) || !(cdesc & (1ULL << 53))) {
+    if (!desc_read(sel, &cdesc) || !(cdesc & (1ULL << 47)) || !(cdesc & (1ULL << 53))) {
         deliver(13, sel & ~3u, true, ret_rip, false);
         deliver_depth--;
         return;
@@ -1574,7 +1631,7 @@ static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int)
     if (type == 14)
         keep &= ~RF_IF;
     rflags_set(keep);
-    set_cpl(new_cpl, 0);
+    set_mode(new_cpl, false);
     c->halted = 0;
     deliver_depth--;
     c->elr = translate_here(target, 0, 0, false);
@@ -1641,7 +1698,10 @@ static void mxcsr_apply(u32 v);
 static void host_resync(void) {
     mxcsr_apply(c->resume_mxcsr);
     fp_trap_sync();
-    view_activate(view_find(cr3_key(c->cr3), c->cpl));
+    if (c->compat) // TCG leaves the top halves as it found them
+        for (int i = 0; i < 8; i++)
+            c->x[i] = (u32)c->x[i];
+    view_activate(view_find(cr3_key(c->cr3), view_mode()));
     c->irq_shadow_rip = ~0ULL;
     deliver_depth = 0;
     c->elr = translate_here(c->req_r[0], 0, 0, false);
@@ -1738,6 +1798,7 @@ static void do_syscall(void) {
     c->stat_syscall++;
     note_event('S', next, c->x[0], 0);
     note_process_syscall(next);
+    u64 entry = c->compat ? c->cstar : c->lstar; // Intel's #UD here is AMD's CSTAR on TCG, the reference
     c->x[1] = next;
     u64 fl = rflags_get();
     c->x[11] = fl;
@@ -1745,8 +1806,50 @@ static void do_syscall(void) {
     u16 cs = (u16)((c->star >> 32) & 0xfffc);
     c->seg_sel[1] = cs;
     c->seg_sel[2] = (u16)(cs + 8);
-    set_cpl(0, 0);
-    c->elr = translate_here(c->lstar, 0, 0, false);
+    set_mode(0, false);
+    c->elr = translate_here(entry, 0, 0, false);
+}
+
+// The 32-bit fast path XNU's libsystem takes. The hidden parts of CS and SS come from the instruction, not a table: hvdbt.c forces CS's size bits to match.
+static void do_sysenter(void) {
+    u64 here = rip_here(c->elr - 4);
+    u16 cs = (u16)(c->sysenter_cs & 0xfffc);
+    if (!cs) {
+        raise_gp(0, here);
+        return;
+    }
+    note_event('S', here, c->x[0], 1);
+    c->rflags_sys &= ~(RF_IF | RF_RF | RF_VM);
+    c->seg_sel[1] = cs;
+    c->seg_sel[2] = (u16)(cs + 8);
+    c->x[4] = c->sysenter_esp;
+    set_mode(0, false);
+    c->elr = translate_here(c->sysenter_eip, 0, 0, false);
+}
+
+// From a 64-bit kernel, normally to 32-bit code. The selectors follow from IA32_SYSENTER_CS, and no table is read.
+static void do_sysexit(void) {
+    u64 here = rip_here(c->elr - 4);
+    bool op64 = c->x[R_S0];
+    u16 cs = (u16)c->sysenter_cs;
+    if (!(cs & 0xfffc)) {
+        raise_gp(0, here);
+        return;
+    }
+    if (!op64 && (c->seg_bad & (1u << SEG_ES | 1u << SEG_DS | 1u << SEG_FS | 1u << SEG_GS)))
+        stop(STOP_UNSUPPORTED, here, 8, cs, 0);
+    u64 rip = op64 ? c->x[2] : (u32)c->x[2], rsp = op64 ? c->x[1] : (u32)c->x[1];
+    if (!canonical(rip)) {
+        raise_gp(0, here);
+        return;
+    }
+    note_event('R', rip, c->x[0], 1);
+    note_wait_returned(rip);
+    c->seg_sel[1] = (u16)(((cs + (op64 ? 32 : 16)) & 0xfffc) | 3);
+    c->seg_sel[2] = (u16)(((cs + (op64 ? 40 : 24)) & 0xfffc) | 3);
+    c->x[4] = rsp;
+    set_mode(3, !op64);
+    c->elr = translate_here(rip, 0, 0, false);
 }
 
 static void do_sysret(void) {
@@ -1756,8 +1859,10 @@ static void do_sysret(void) {
         x86_ud();
         return;
     }
+    if (!op64 && (c->seg_bad & (1u << SEG_ES | 1u << SEG_DS | 1u << SEG_FS | 1u << SEG_GS)))
+        stop(STOP_UNSUPPORTED, rip_here(c->elr - 4), 8, 0, 0);
     if (!op64)
-        stop(STOP_UNSUPPORTED, rip_here(c->elr - 4), 6, 0, 0); // sysret to compatibility mode
+        rip = (u32)rip;
     if (!canonical(rip)) {
         x86_gp0();
         return;
@@ -1767,9 +1872,9 @@ static void do_sysret(void) {
     u64 fl = (c->x[11] & 0x3C7FD7ULL) | RFLAGS_FIXED;
     rflags_set(fl);
     u16 base = (u16)((c->star >> 48) & 0xffff);
-    c->seg_sel[1] = (u16)((base + 16) | 3);
+    c->seg_sel[1] = (u16)((op64 ? base + 16 : base) | 3);
     c->seg_sel[2] = (u16)((base + 8) | 3);
-    set_cpl(3, 0);
+    set_mode(3, !op64);
     c->elr = translate_here(rip, 0, 0, false);
 }
 
@@ -1795,12 +1900,16 @@ static void do_iret(void) {
         return;
     }
     u64 cd;
-    if (!gdt_read(cs, &cd) || !(cd & (1ULL << 47)) || !(cd & (1ULL << 44)) || !(cd & (1ULL << 43))) {
+    if (!desc_read(cs, &cd) || !(cd & (1ULL << 47)) || !(cd & (1ULL << 44)) || !(cd & (1ULL << 43))) {
         raise_gp(cs & ~3u, here);
         return;
     }
-    if (!(cd & (1ULL << 53)))
-        stop(STOP_UNSUPPORTED, here, 8, cs, cd); // compatibility mode
+    bool to_compat = !(cd & DESC_L);
+    if (to_compat) {
+        if (!compat_entry_ok(cd, ss, new_cpl, here))
+            return;
+        rip = (u32)rip;
+    }
     if (!canonical(rip)) {
         raise_gp(0, here);
         return;
@@ -1819,8 +1928,149 @@ static void do_iret(void) {
     c->x[4] = rsp;
     c->seg_sel[1] = (u16)cs;
     c->seg_sel[2] = (u16)ss;
-    set_cpl(new_cpl, 0);
+    set_mode(new_cpl, to_compat);
     c->elr = translate_here(rip, 0, 0, false);
+}
+
+// The page of [va, va + n) that refused the access, as the fault it is.
+static void raise_range_fault(u64 va, u32 n, u32 access, u64 here) {
+    Walk w = x86_walk(c->cr3, va, access, false);
+    if (w.ok) {
+        va = (va | 0xfff) + 1;
+        w = x86_walk(c->cr3, va, access, false);
+    }
+    if (w.ok)
+        stop(STOP_UNSUPPORTED, here, 19, va, n);
+    if (w.fault_err == ~0u)
+        raise_gp(0, here);
+    else
+        raise_pf(va, w.fault_err, here);
+}
+
+// Far returns, calls and jumps at ring 3, between code segments of the same privilege: into and out of compatibility mode, or within it. Gates, other rings and
+// 16-bit code or operands are TCG's. The translator sends ring 0's back before they get here.
+static void do_far(void) {
+    u64 here = rip_here(c->elr - 4), off = c->x[R_S0], arg = c->x[R_S2], sp = c->x[4];
+    u32 kind = arg & 3, opsz = (arg >> 8) & 15, imm = (u32)(arg >> 16) & 0xffff, sel = (u32)c->x[R_S1] & 0xffff, access = c->cpl == 3 ? 4 : 0;
+    u64 cd;
+    u8 mem[16];
+    if (opsz == 2 || c->cpl != 3)
+        stop(STOP_UNSUPPORTED, here, 18, sel, opsz);
+    if (kind == 0) { // retf: selector and offset from the stack, which moves last
+        if (!guest_read(sp, mem, opsz * 2, access)) {
+            raise_range_fault(sp, opsz * 2, access, here);
+            return;
+        }
+        off = 0;
+        memcpy(&off, mem, opsz);
+        sel = *(u16 *)(mem + opsz);
+    }
+    if (!(sel & ~3u)) {
+        raise_gp(0, here);
+        return;
+    }
+    if (!desc_read(sel, &cd)) {
+        raise_gp(sel & ~3u, here);
+        return;
+    }
+    if (!(cd & DESC_S))
+        stop(STOP_UNSUPPORTED, here, 18, sel, cd); // a call gate
+    u32 rpl = sel & 3, dpl = desc_dpl(cd);
+    bool conforming = cd & DESC_CONFORMING;
+    bool allowed = kind == 0 ? rpl == 3 && (conforming ? dpl <= 3 : dpl == 3) : (conforming ? dpl <= 3 : dpl == 3);
+    if (!(cd & DESC_CODE) || !allowed) {
+        raise_gp(sel & ~3u, here);
+        return;
+    }
+    if (!(cd & DESC_P)) {
+        deliver(11, sel & ~3u, true, here, false);
+        return;
+    }
+    bool to_compat = !(cd & DESC_L);
+    if (to_compat && !(cd & DESC_D))
+        stop(STOP_UNSUPPORTED, here, 18, sel, cd);
+    if (to_compat) {
+        if (!compat_entry_ok(cd, c->seg_sel[SEG_SS], 3, here))
+            return;
+        off = (u32)off;
+    } else if (!canonical(off)) {
+        raise_gp(0, here);
+        return;
+    }
+    if (kind == 1) { // call: the old CS above the old rip, at the old width
+        u64 at = sp - opsz * 2, ret = next_rip_lit(), old_cs = c->seg_sel[1];
+        if (c->compat)
+            at = (u32)at;
+        memcpy(mem, &ret, opsz);
+        memset(mem + opsz, 0, opsz);
+        memcpy(mem + opsz, &old_cs, 2);
+        if (!guest_write(at, mem, opsz * 2, access)) {
+            raise_range_fault(at, opsz * 2, access | 2, here);
+            return;
+        }
+        sp = at;
+    } else if (kind == 0)
+        sp += opsz * 2 + imm;
+    c->x[4] = c->compat ? (u32)sp : sp;
+    c->seg_sel[1] = (u16)((sel & ~3u) | 3);
+    set_mode(3, to_compat);
+    c->elr = translate_here(off, 0, 0, false);
+}
+
+// mov to a segment register, or pop. In 64-bit mode es, ds and ss do nothing but be noted; fs and gs take their base. In compatibility mode these are the
+// checks of a real load, since nothing else will make them.
+static void do_mov_seg(void) {
+    u32 sr = (u32)c->x[R_S0] & 7, pop = (u32)(c->x[R_S0] >> 8) & 15, sel = (u32)c->x[R_S1] & 0xffff;
+    u64 here = rip_here(c->elr - 4), d = 0;
+    bool null = !(sel & ~3u);
+    if (sr == 1) {
+        x86_ud();
+        return;
+    }
+    bool got = !null && desc_read(sel, &d);
+    if (!null && !got && (c->compat || sr >= SEG_FS)) {
+        raise_gp(sel & ~3u, here);
+        return;
+    }
+    if (c->compat) {
+        u32 rpl = sel & 3, dpl = desc_dpl(d), err = sel & ~3u;
+        if (sr == SEG_SS) {
+            if (null || rpl != 3 || dpl != 3 || !(d & DESC_S) || (d & DESC_CODE) || !(d & DESC_RW)) {
+                raise_gp(err, here);
+                return;
+            }
+            if (!(d & DESC_P)) {
+                deliver(12, err, true, here, false);
+                return;
+            }
+            if (!desc_flat(d) || !(d & DESC_D) || (d & DESC_CONFORMING))
+                stop(STOP_UNSUPPORTED, here, 13, sel, d);
+        } else if (!null) {
+            bool code = d & DESC_CODE, conforming = code && (d & DESC_CONFORMING);
+            if (!(d & DESC_S) || (code && !(d & DESC_RW)) || (!conforming && dpl < 3)) {
+                raise_gp(err, here);
+                return;
+            }
+            if (!(d & DESC_P)) {
+                deliver(11, err, true, here, false);
+                return;
+            }
+        }
+        if (sr != SEG_SS) {
+            seg_note(sr, d, null);
+            if (c->seg_bad & (1u << sr)) // TCG makes the load, and keeps the vCPU until the register changes
+                stop(STOP_UNSUPPORTED, here, 13, sel, d);
+        }
+    } else if (sr != SEG_SS) {
+        seg_note(sr, got ? d : 0, null);
+    }
+    c->seg_sel[sr] = (u16)sel;
+    if (sr >= SEG_FS && (!null || c->compat))
+        c->x[sr == SEG_FS ? R_FS : R_GS] = null ? 0 : desc_base(d);
+    if (pop)
+        c->x[4] = c->compat ? (u32)(c->x[4] + pop) : c->x[4] + pop;
+    if (sr == SEG_SS && c->compat)
+        c->irq_shadow_rip = next_rip_lit(); // interrupts wait for the instruction after a load of ss
 }
 
 static void do_popf(void) {
@@ -1866,7 +2116,7 @@ static void do_mov_cr_write(void) {
             c->cr3 = v & ~(1ULL << 63);
             // The shadow stays in step with x86 tables through write protection, so a flush needs no work: the x86 TLB
             // may always be emptier than software assumed, and here it simply never holds a stale entry.
-            view_activate(view_find(cr3_key(c->cr3), c->cpl));
+            view_activate(view_find(cr3_key(c->cr3), view_mode()));
             u64 next = next_rip_lit();
             c->elr = translate_here(next, 0, 0, false);
             break;
@@ -1895,6 +2145,9 @@ static void do_mov_cr_write(void) {
 #define MSR_TSC 0x10u
 #define MSR_APIC_BASE 0x1Bu
 #define MSR_TSC_DEADLINE 0x6E0u
+#define MSR_SYSENTER_CS 0x174u
+#define MSR_SYSENTER_ESP 0x175u
+#define MSR_SYSENTER_EIP 0x176u
 
 // The 24 MHz counter in nanoseconds, then at the guest's TSC rate, in the same steps as QEMU's cpu_get_tsc so TCG and the engine agree.
 static inline u64 tsc_now(void) {
@@ -1904,7 +2157,7 @@ static inline u64 tsc_now(void) {
 
 // The MSRs that live here in hybrid mode. Everything else, including the APIC's and the TSC's, is QEMU's.
 static bool msr_is_monitors(u32 m) {
-    return m == MSR_EFER || m == MSR_STAR || m == MSR_LSTAR || m == MSR_CSTAR || m == MSR_SFMASK || m == MSR_FS || m == MSR_GS || m == MSR_KGS;
+    return m == MSR_EFER || m == MSR_STAR || m == MSR_LSTAR || m == MSR_CSTAR || m == MSR_SFMASK || m == MSR_FS || m == MSR_GS || m == MSR_KGS || m == MSR_SYSENTER_CS || m == MSR_SYSENTER_ESP || m == MSR_SYSENTER_EIP;
 }
 
 static bool rdmsr(u32 m, u64 *v) {
@@ -1932,6 +2185,15 @@ static bool rdmsr(u32 m, u64 *v) {
             return true;
         case MSR_KGS:
             *v = c->kernel_gs_base;
+            return true;
+        case MSR_SYSENTER_CS:
+            *v = c->sysenter_cs;
+            return true;
+        case MSR_SYSENTER_ESP:
+            *v = c->sysenter_esp;
+            return true;
+        case MSR_SYSENTER_EIP:
+            *v = c->sysenter_eip;
             return true;
         case MSR_TSC:
             *v = tsc_now();
@@ -1974,6 +2236,15 @@ static bool wrmsr(u32 m, u64 v) {
             return true;
         case MSR_KGS:
             c->kernel_gs_base = v;
+            return true;
+        case MSR_SYSENTER_CS:
+            c->sysenter_cs = v;
+            return true;
+        case MSR_SYSENTER_ESP:
+            c->sysenter_esp = v;
+            return true;
+        case MSR_SYSENTER_EIP:
+            c->sysenter_eip = v;
             return true;
         case MSR_APIC_BASE:
             c->apic_base = v & 0xFFFFF000ULL;
@@ -2353,6 +2624,15 @@ void mon_sync(void) {
             case SVC_SYSRET:
                 do_sysret();
                 break;
+            case SVC_SYSENTER:
+                do_sysenter();
+                break;
+            case SVC_SYSEXIT:
+                do_sysexit();
+                break;
+            case SVC_FAR:
+                do_far();
+                break;
             case SVC_IRET:
                 do_iret();
                 break;
@@ -2516,37 +2796,27 @@ void mon_sync(void) {
             case SVC_STR:
                 c->x[R_S0] = c->tr;
                 break;
-            case SVC_LLDT:
-                c->ldtr = (u16)c->x[R_S0];
+            case SVC_LLDT: {
+                u64 d[2] = {0, 0};
+                u32 sel = (u32)c->x[R_S0] & 0xffff, idx = sel & ~7u;
+                if ((sel & ~3u) && ((sel & 4) || idx + 15 > c->gdtr_limit || !guest_read(c->gdtr_base + idx, d, 16, 0) || ((d[0] >> 40) & 0x1f) != 2)) {
+                    raise_gp(sel & ~3u, rip_here(c->elr - 4));
+                    break;
+                }
+                c->ldtr = (u16)sel;
+                c->ldt_base = desc_base(d[0]) | d[1] << 32;
+                c->ldt_limit = (u32)desc_limit(d[0]);
                 break;
+            }
             case SVC_SLDT:
                 c->x[R_S0] = c->ldtr;
                 break;
             case SVC_MOV_SEG_READ:
                 c->x[R_S0] = c->seg_sel[c->x[R_S0] & 7];
                 break;
-            case SVC_MOV_SEG_WRITE: {
-                u32 sr = (u32)c->x[R_S0] & 7;
-                u32 sel = (u32)c->x[R_S1] & 0xffff;
-                if (sr == 1) {
-                    x86_ud();
-                    break;
-                }
-                // Long mode ignores bases and limits on es, ds, ss. Loading fs or gs by selector sets the base from the
-                // descriptor: nothing in this model makes that non-zero, so non-null ones are checked and stop if not flat.
-                if ((sr == 4 || sr == 5) && (sel & ~3u)) {
-                    u64 d;
-                    if (!gdt_read(sel, &d)) {
-                        raise_gp(sel & ~3u, rip_here(c->elr - 4));
-                        break;
-                    }
-                    if ((d >> 16 & 0xffffff) || (d >> 56))
-                        stop(STOP_UNSUPPORTED, rip_here(c->elr - 4), 13, sel, d); // non-flat fs or gs
-                    c->x[sr == 4 ? R_FS : R_GS] = 0;
-                }
-                c->seg_sel[sr] = (u16)sel;
+            case SVC_MOV_SEG_WRITE:
+                do_mov_seg();
                 break;
-            }
             case SVC_IN:
             case SVC_OUT: {
                 if (c->hybrid && (c->x[R_S0] & 0xffff) == 0x5658)
@@ -2647,7 +2917,7 @@ void mon_init(void) {
     u64 *desc_hole = (u64 *)PRIV(OFF_MON_DATA + (1ULL << 20));
     hole_entry_priv = desc_hole[0];
     hole_entry_ram = desc_hole[1];
-    View *v = view_find(cr3_key(c->cr3), c->cpl);
+    View *v = view_find(cr3_key(c->cr3), view_mode());
     c->view = (u32)(v - views);
     c->x[R_RS] = v->rs_saved;
     c->rs_top = v->rs_top;

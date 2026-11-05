@@ -115,6 +115,9 @@ enum {
     SVC_FXRSTOR,
     SVC_MFENCE_UNUSED,
     SVC_CLTS,
+    SVC_SYSENTER,
+    SVC_SYSEXIT, // x16 1 with REX.W
+    SVC_FAR, // x16 offset, x17 selector, x22 kind (0 retf, 1 call, 2 jmp) | operand size << 8 | retf's immediate << 16
     // Helpers: operands in x16, x17, x22, x23. Results as documented in monitor.c. Flags come back in x22 (nzcv), x23 (pf), x24 (aux).
     SVC_H_SHIFT = 64, // narrow and rotate-through-carry shifts: x16 value, x17 count, x22 kind|size<<8. x16 result
     SVC_H_SHD, // shld/shrd: x16 dst, x17 src, x22 count, x23 size|isright<<8. x16 result
@@ -223,6 +226,11 @@ typedef struct {
     uint32_t tr_flushed; // the translator reset the code cache; every return stack is stale
     uint32_t mmx_event; // what MMX last did to the x87 tags here: 0 or an ENGINE_MMX_ value. The host applies it to state it owns.
     uint64_t mm[8]; // translated code loads and stores these
+    uint32_t compat; // CS.L clear: 32-bit user code. In this state the low eight GPRs always have their top halves clear, and the view is a separate one
+    uint32_t seg_bad; // bit by seg_sel index: this register's contents keep compatibility mode off the engine. See seg_note in monitor.c
+    uint64_t ldt_base;
+    uint32_t ldt_limit, pad_ldt;
+    uint64_t sysenter_cs, sysenter_esp, sysenter_eip;
     uint64_t ram_size;
     uint64_t kernel_view_tag;
 

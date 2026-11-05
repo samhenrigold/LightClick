@@ -14,6 +14,7 @@
 u32 *tr_cc;
 bool tr_precise_flags, tr_has_tzcnt, tr_hybrid, tr_no_bulk_rep;
 int tr_cpl;
+bool tr_compat;
 u64 tr_stub_lookup, tr_stub_ret_miss, tr_stub_pushf, tr_stub_sahf;
 
 static TrConfig cfg;
@@ -289,6 +290,24 @@ static void emit_control(const Insn *in, int idx, int live_after) {
             u32 *back = internal_target(in->target, idx);
             int sub = in->sub;
             int sf = in->addr32 ? 0 : 1; // with 67h the count is ecx
+            if (in->addr16) { // 32-bit code with 67h: the count is cx, and ecx's top half stays
+                if (sub >= 2) {
+                    add_imm(0, 1, 0, S0, 1, 1);
+                    bfi(1, 1, S0, 0, 16);
+                }
+                ubfx(0, S0, 1, 0, 16);
+                u32 *over = 0;
+                if (sub >= 3) {
+                    over = tr_cc;
+                    b_cond(sub == 3 ? 1 : 0, 0);
+                }
+                if (!back)
+                    add_pending(tr_cc, in->target, SVC_JCC, 0);
+                cbz(sub >= 2, 0, S0, back ? (int)(back - tr_cc) : 0);
+                if (over)
+                    *over |= ((u32)(tr_cc - over) & 0x7ffff) << 5;
+                break;
+            }
             if (sub >= 2)
                 add_imm(sf, 1, 0, 1, 1, 1);
             if (sub == 0 || sub == 1) {
@@ -322,7 +341,10 @@ static void emit_control(const Insn *in, int idx, int live_after) {
         case OP_CALL: {
             // Guest push first (it can fault), shadow pair next, then a real bl so that the matching ret is predicted.
             movimm(S0, in->next);
-            E(0xF8000C00u | ((u32)-8 & 0x1ff) << 12 | 4 << 5 | S0);
+            if (tr_compat)
+                E(0xB8000C00u | ((u32)-4 & 0x1ff) << 12 | 4 << 5 | S0);
+            else
+                E(0xF8000C00u | ((u32)-8 & 0x1ff) << 12 | 4 << 5 | S0);
             adr_words(S1, 3);
             E(0xA9800000u | ((u32)-2 & 0x7f) << 15 | S1 << 10 | RS << 5 | S0); // stp x16, x17, [x26, #-16]!
             add_pending(tr_cc, in->target, SVC_CALL, 1);
@@ -333,9 +355,12 @@ static void emit_control(const Insn *in, int idx, int live_after) {
             if (in->rm_reg)
                 mov_reg(1, S0, in->rm);
             else
-                ldst(1, 8, S0, addr_prepare(in, 8));
+                ldst(1, in->sz, S0, addr_prepare(in, in->sz));
             movimm(S1, in->next);
-            E(0xF8000C00u | ((u32)-8 & 0x1ff) << 12 | 4 << 5 | S1);
+            if (tr_compat)
+                E(0xB8000C00u | ((u32)-4 & 0x1ff) << 12 | 4 << 5 | S1);
+            else
+                E(0xF8000C00u | ((u32)-8 & 0x1ff) << 12 | 4 << 5 | S1);
             adr_words(AD, 4);
             E(0xA9800000u | ((u32)-2 & 0x7f) << 15 | AD << 10 | RS << 5 | S1);
             bl_rel((int)((i64)(tr_stub_lookup - tr_cc_va(tr_cc)) / 4));
@@ -347,17 +372,21 @@ static void emit_control(const Insn *in, int idx, int live_after) {
             if (in->rm_reg)
                 mov_reg(1, S0, in->rm);
             else
-                ldst(1, 8, S0, addr_prepare(in, 8));
+                ldst(1, in->sz, S0, addr_prepare(in, in->sz));
             emit_indirect_tail();
             break;
         case OP_RET: {
-            E(0xF8400400u | 8 << 12 | 4 << 5 | S0); // ldr x16, [x4], #8
+            // shortcut: post-index leaves esp past 4 GB for a stack at the very top of memory. No XNU process has one, as the commpage sits there
+            if (tr_compat)
+                E(0xB8400400u | 4 << 12 | 4 << 5 | S0); // ldr w16, [x4], #4
+            else
+                E(0xF8400400u | 8 << 12 | 4 << 5 | S0); // ldr x16, [x4], #8
             if (in->imm) {
                 if (in->imm < 4096)
-                    add_imm(1, 0, 0, 4, 4, (u32)in->imm);
+                    add_imm(!tr_compat, 0, 0, 4, 4, (u32)in->imm);
                 else {
                     movimm(S1, (u64)in->imm);
-                    add_reg(1, 0, 0, 4, 4, S1, 0);
+                    add_reg(!tr_compat, 0, 0, 4, 4, S1, 0);
                 }
             }
             if (cfg.no_return_prediction) { // the guest's value decides, by lookup
@@ -398,6 +427,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     walk_cr3 = cr3;
     walk_cpl = cpl;
     tr_cpl = cpl;
+    tr_compat = ctx_ptr->compat;
     if ((u8 *)tr_cc - (u8 *)cc_base > (long)(cc_limit - 0x40000) || hblock_count >= BLOCKS_MAX - 2 ||
         pc_map_used + MAX_INSNS >= PCMAP_BYTES / sizeof(PcMap)) {
         flush_everything();
@@ -511,6 +541,9 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
             case OP_IN:
             case OP_OUT:
             case OP_SWAPGS:
+            case OP_SYSENTER:
+            case OP_SYSEXIT:
+            case OP_FAR:
             case OP_FXSAVE:
             case OP_FXRSTOR:
                 emit_monitor_op(in);
@@ -615,6 +648,7 @@ static void emit_monitor_op(const Insn *in) {
         case OP_WBINVD:
         case OP_CLTS:
         case OP_SYSRET:
+        case OP_SYSEXIT:
         case OP_SWAPGS:
             cpl0_only = true;
             break;
@@ -634,6 +668,26 @@ static void emit_monitor_op(const Insn *in) {
     switch (in->op) {
         case OP_SYSCALL:
             svc(SVC_SYSCALL);
+            break;
+        case OP_SYSENTER:
+            svc(SVC_SYSENTER);
+            break;
+        case OP_SYSEXIT:
+            movimm(S0, in->sz == 8);
+            svc(SVC_SYSEXIT);
+            break;
+        case OP_FAR:
+            if (in->has_imm) {
+                movimm(S0, (u64)in->imm);
+                movimm(S1, (u64)in->disp);
+            } else if (in->sub) { // both words before anything changes
+                Addr a = {.base = addr_reg(in)};
+                ldst(1, in->sz, S0, a);
+                a.imm = in->sz;
+                ldst(1, 2, S1, a);
+            }
+            movimm(S2, (u64)in->sub | (u64)in->sz << 8 | (u64)(in->has_imm ? 0 : in->imm) << 16);
+            svc(SVC_FAR);
             break;
         case OP_SYSRET:
             mov_reg(1, S0, XZR);
@@ -724,7 +778,7 @@ static void emit_monitor_op(const Insn *in) {
                 Addr a = {.base = S2};
                 ldst(0, 2, S1, a);
                 a.imm = 2;
-                ldst(0, 8, S0, a);
+                ldst(0, tr_compat ? 4 : 8, S0, a);
             }
             break;
         }
@@ -748,8 +802,12 @@ static void emit_monitor_op(const Insn *in) {
             break;
         }
         case OP_MOV_SEG: {
-            movimm(S0, in->sub);
-            if (in->to_reg) {
+            movimm(S0, in->pop_seg ? (u64)in->sub | (u64)in->sz << 8 : in->sub); // the monitor moves the stack, once the load is accepted
+            if (in->pop_seg) {
+                Addr a = {.base = 4};
+                ldst(1, in->sz, S1, a);
+                svc(SVC_MOV_SEG_WRITE);
+            } else if (in->to_reg) {
                 svc(SVC_MOV_SEG_READ);
                 if (in->rm_reg)
                     gpr_write(in->rm, in->sz == 2 ? 2 : in->sz, false, S0);

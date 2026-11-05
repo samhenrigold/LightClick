@@ -228,6 +228,13 @@ extension Engine {
         s.apic_irr = c.pointee.apic_irr
         s.apic_isr = c.pointee.apic_isr
         s.apic_tmr = c.pointee.apic_tmr
+        s.compat = c.pointee.compat
+        s.seg_bad = c.pointee.seg_bad
+        s.ldt_base = c.pointee.ldt_base
+        s.ldt_limit = c.pointee.ldt_limit
+        s.sysenter_cs = c.pointee.sysenter_cs
+        s.sysenter_esp = c.pointee.sysenter_esp
+        s.sysenter_eip = c.pointee.sysenter_eip
         return s
     }
 
@@ -267,6 +274,13 @@ extension Engine {
         c.pointee.resume_mxcsr = s.mxcsr
         writeXMM(from: s)
         c.pointee.mm = s.mm
+        c.pointee.compat = s.compat
+        c.pointee.seg_bad = s.seg_bad
+        c.pointee.ldt_base = s.ldt_base
+        c.pointee.ldt_limit = s.ldt_limit
+        c.pointee.sysenter_cs = s.sysenter_cs
+        c.pointee.sysenter_esp = s.sysenter_esp
+        c.pointee.sysenter_eip = s.sysenter_eip
         c.pointee.req_r.0 = s.rip
     }
 
