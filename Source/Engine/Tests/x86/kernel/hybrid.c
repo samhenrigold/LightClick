@@ -495,12 +495,77 @@ static void lazy_switch(void) {
     __asm__ volatile("sti");
 }
 
-static void test_lazy_fp(void) {
+// The shape of the guest's integrity check: hashing pages that fault in, with the kernel using xmm itself on the way,
+// as a code-signing check in vm_fault does.
+#define LAZY_PAGES 32
+#define LAZY_VA (TEST_VA + 0x10000000)
+static u64 lazy_frames[LAZY_PAGES], *lazy_ptes[LAZY_PAGES];
+static volatile u64 lazy_pf_count;
+__asm__(".text\n"
+        "_lazy_pf_stub:\n"
+        "  pushq %rax\n pushq %rcx\n pushq %rdx\n pushq %rsi\n pushq %rdi\n"
+        "  pushq %r8\n pushq %r9\n pushq %r10\n pushq %r11\n"
+        "  pushq %rbp\n"
+        "  movq %rsp, %rbp\n"
+        "  andq $-16, %rsp\n" // it spills xmm with movaps
+        "  call _lazy_pf\n"
+        "  movq %rbp, %rsp\n"
+        "  popq %rbp\n"
+        "  popq %r11\n popq %r10\n popq %r9\n popq %r8\n"
+        "  popq %rdi\n popq %rsi\n popq %rdx\n popq %rcx\n popq %rax\n"
+        "  addq $8, %rsp\n"
+        "  iretq\n");
+extern char lazy_pf_stub[] __asm__("_lazy_pf_stub");
+
+void lazy_pf(void) {
+    u64 cr2;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    u64 page = (cr2 - LAZY_VA) >> 12;
+    if (page >= LAZY_PAGES) {
+        puts_("FAIL: a page fault outside the lazy test's pages\n");
+        done(3);
+    }
+    lazy_pf_count++;
+    *lazy_ptes[page] = lazy_frames[page] | PRESENT_RW;
+    // What a kernel hash does with the registers it borrows. Under TS this takes #NM first, in the kernel, as XNU's
+    // does.
+    u64 saved[8] __attribute__((aligned(16)));
+    __asm__ volatile("movaps %%xmm0, 0(%0)\n movaps %%xmm7, 16(%0)\n movaps %%xmm15, 32(%0)\n"
+                     "pxor %%xmm0, %%xmm0\n pcmpeqd %%xmm7, %%xmm7\n paddd %%xmm7, %%xmm15\n"
+                     "movaps 0(%0), %%xmm0\n movaps 16(%0), %%xmm7\n movaps 32(%0), %%xmm15\n"
+                     :
+                     : "r"(saved)
+                     : "memory");
+}
+
+static inline void task_touch(u64 step) {
+    const u8 *at = (const u8 *)LAZY_VA + (step * 40 % (LAZY_PAGES * 4096 - 32));
+    __asm__ volatile("movdqu (%0), %%xmm7\n paddd %%xmm7, %%xmm15\n pxor 16(%1), %%xmm2\n"
+                     :
+                     : "r"(at), "r"((u64)at & ~15ULL)
+                     : "memory");
+    if ((step & 0x3FF) == 0) { // the page goes away again
+        u64 page = (step >> 10) % LAZY_PAGES;
+        *lazy_ptes[page] = 0;
+        __asm__ volatile("invlpg (%0)" : : "r"(LAZY_VA + (page << 12)));
+    }
+}
+
+static void test_lazy_fp(u64 root) {
     u64 golden[2][6];
+    for (int i = 0; i < LAZY_PAGES; i++) {
+        lazy_frames[i] = frame();
+        for (int w = 0; w < 512; w++)
+            PHYS(lazy_frames[i])[w] = 0x9E3779B97F4A7C15ULL * (u64)(i * 512 + w + 1);
+        lazy_ptes[i] = pte_of(root, LAZY_VA + ((u64)i << 12));
+    }
+    gate(14, lazy_pf_stub);
     for (int n = 0; n < 2; n++) {
         task_seed(n + 1);
-        for (u64 i = 0; i < LAZY_STEPS; i++)
+        for (u64 i = 0; i < LAZY_STEPS; i++) {
             task_step(i * (n + 3), ~i);
+            task_touch(i);
+        }
         task_read(golden[n]);
     }
     for (int n = 0; n < 2; n++) {
@@ -524,6 +589,7 @@ static void test_lazy_fp(void) {
         int n = lazy_current;
         for (u64 run = 0; run < quantum && t->steps < LAZY_STEPS; run++, t->steps++) {
             task_step(t->steps * (n + 3), ~t->steps);
+            task_touch(t->steps);
             if ((t->steps & 0xFFF) ==
                 0) // a fallback in the middle of a task: its xmm state goes through the host and back
                 __asm__ volatile("mov $0, %%r13\n mov $2, %%r14\n .byte 0xDB, 0xE3\n" : : : "r13", "r14");
@@ -546,6 +612,8 @@ static void test_lazy_fp(void) {
         for (int i = 0; i < 6; i++)
             CHECK(tasks[n].result[i] == golden[n][i]);
     CHECK(lazy_nm_count > 100);
+    CHECK(lazy_pf_count > 1000);
+    gate(14, bad_stub);
     CHECK(irq_count > 2);
 }
 
@@ -666,7 +734,7 @@ void kmain(void) {
     test_vmport();
     test_port_forms();
     test_rep_into_table(root);
-    test_lazy_fp();
+    test_lazy_fp(root);
     test_process_log(root);
     test_view_churn(root);
     CHECK(!bad_vector);

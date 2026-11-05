@@ -692,7 +692,8 @@ static void track_root(View *v, u64 va, const Walk *w) {
 static u64 note_wait_cr3, note_wait_status;
 static void note_process_syscall(u64 next) {
     u64 n = c->x[0];
-    if (!c->hybrid || (n != 0x2000001 && n != 0x2000007 && n != 0x2000190 && n != 0x200003b && n != 0x20000f4 && n != 0x2000037))
+    bool console_write = (n == 0x2000004 || n == 0x200018d) && c->x[7] <= 2;
+    if (!c->hybrid || (!console_write && n != 0x2000001 && n != 0x2000007 && n != 0x2000190 && n != 0x200003b && n != 0x20000f4 && n != 0x2000037))
         return;
     c->req_a[0] = 1;
     c->req_a[1] = next;

@@ -152,6 +152,11 @@ public final class Tally: @unchecked Sendable {
         switch c.req_a.0 {
         case 1:
             switch r[0] & 0xFFFFFF {
+            case 4, 0x18D:
+                let text =
+                    engine.readGuest(r[6], count: Int(min(r[2], 240))).map { String(decoding: $0, as: UTF8.self) }
+                    ?? "unreadable"
+                o += "write fd \(r[7]): " + text.replacingOccurrences(of: "\n", with: " ")
             case 1: o += "exit \(r[7] & 0xFF)"
             case 0x37: o += "reboot how \(hex(r[7]))"
             case 0x3B: o += "execve " + guestString(r[7]) + " [" + guestArguments(r[6]) + "]"
