@@ -45,9 +45,11 @@ static bool dispatch_acquire_barrier;
 static bool dispatch_relaxed;
 static bool shared_dispatch;
 static bool ret_stack;
+static bool inline_trim;
 #if defined(__APPLE__) && defined(__aarch64__) && !defined(CONFIG_USER_ONLY)
 void pvg_tcg_dispatch_tail(void);
 static bool tail_dispatch;
+static bool ret_miss_tail;
 #endif
 
 static void __attribute__((constructor)) init_inline_jmp_cache(void)
@@ -60,12 +62,14 @@ static void __attribute__((constructor)) init_inline_jmp_cache(void)
     const char *value = getenv("PVG_TCG_DISPATCH_ACQUIRE");
     dispatch_acquire_barrier = value && !strcmp(value, "1");
     dispatch_relaxed = pvg_tcg_fast_path("PVG_TCG_DISPATCH_RELAXED");
+    inline_trim = pvg_tcg_fast_path("PVG_TCG_INLINE_TRIM");
     value = getenv("PVG_TCG_SHARED_DISPATCH");
     shared_dispatch = value && !strcmp(value, "1");
 #if defined(__APPLE__) && defined(__aarch64__) && !defined(CONFIG_USER_ONLY)
     value = getenv("PVG_TCG_TAIL_DISPATCH");
     tail_dispatch = value && !strcmp(value, "1");
     ret_stack = pvg_tcg_fast_path("PVG_TCG_RET_STACK");
+    ret_miss_tail = pvg_tcg_fast_path("PVG_TCG_RET_MISS_TAIL");
 #endif
 }
 
@@ -2119,6 +2123,12 @@ static void gen_cached_indirect_jump(DisasContext *s)
     }
 #if defined(TARGET_X86_64) && TCG_TARGET_REG_BITS == 64 && !defined(CONFIG_USER_ONLY)
 #if defined(__APPLE__) && defined(__aarch64__)
+    /* Most rets hit the prediction above, so give misses the shared stub rather
+     * than some 50 more ops to optimize, allocate and emit in every ret TB. */
+    if (s->ret_predict && ret_miss_tail && (s->flags & HF_CS64_MASK)) {
+        tcg_gen_goto_ptr(tcg_constant_ptr(pvg_tcg_dispatch_tail));
+        return;
+    }
     if (tail_dispatch && (s->flags & HF_CS64_MASK) &&
         (s->flags & HF_CPL_MASK) == 3 &&
         !(s->base.tb->cflags & CF_NO_GOTO_PTR)) {
@@ -2144,6 +2154,7 @@ static void gen_cached_indirect_jump(DisasContext *s)
      * CPL or mode condition, so the mode gates are only about code size. Kernel
      * CR3 transitions can have cold jump caches, hence the separate CPL0 flag. */
     if (emit_inline_jmp_cache &&
+        !(inline_trim && qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) &&
         ((s->flags & HF_CS64_MASK) || emit_inline_jmp_cache_32) &&
         ((s->flags & HF_CPL_MASK) == 3 || emit_inline_jmp_cache_cpl0) &&
         !(s->base.tb->cflags & CF_NO_GOTO_PTR)) {
@@ -2165,14 +2176,22 @@ static void gen_cached_indirect_jump(DisasContext *s)
 
         /* The opt-in runtime guard allows stopped-world same-boot A/B tests.
          * Cache misses, breakpoints and logging retain the original helper. */
-        tcg_gen_ld8u_i32(flags, tcg_constant_ptr(&x86_tcg_inline_jmp_cache), 0);
-        tcg_gen_brcondi_i32(TCG_COND_EQ, flags, 0, slow);
+        /* The trim drops two checks from every site. Nothing changes the guard
+         * after startup, and logging is decided above at translation time, so
+         * logging enabled later misses inline hits, as it does chained TBs. */
+        if (!inline_trim) {
+            tcg_gen_ld8u_i32(flags, tcg_constant_ptr(&x86_tcg_inline_jmp_cache),
+                             0);
+            tcg_gen_brcondi_i32(TCG_COND_EQ, flags, 0, slow);
+        }
         tcg_gen_ld_ptr(tb, tcg_env,
                        cpu_off + offsetof(CPUState, breakpoints.tqh_first));
         tcg_gen_brcondi_ptr(TCG_COND_NE, tb, 0, slow);
-        tcg_gen_ld_i32(flags, tcg_constant_ptr(&qemu_loglevel), 0);
-        tcg_gen_andi_i32(flags, flags, CPU_LOG_TB_CPU | CPU_LOG_EXEC);
-        tcg_gen_brcondi_i32(TCG_COND_NE, flags, 0, slow);
+        if (!inline_trim) {
+            tcg_gen_ld_i32(flags, tcg_constant_ptr(&qemu_loglevel), 0);
+            tcg_gen_andi_i32(flags, flags, CPU_LOG_TB_CPU | CPU_LOG_EXEC);
+            tcg_gen_brcondi_i32(TCG_COND_NE, flags, 0, slow);
+        }
 
         /* Far transfers also end in DISAS_JUMP, so the target's mode and CS base
          * can differ from this TB's. Compute the pc the way the runtime mode
