@@ -215,6 +215,40 @@ static NOINLINE uint64_t memcpy_chunk(uint64_t n) {
     return total;
 }
 
+// Each copy path directly: which one libc's memcpy takes depends on the CPUID the guest sees.
+#if defined(__x86_64__)
+static NOINLINE uint64_t rep_movsb_chunk(uint64_t n) {
+    for (uint64_t i = 0; i < n; i++) {
+        void *to = copy_target;
+        const void *from = copy_source;
+        size_t count = COPY_BYTES;
+        __asm__ volatile("rep movsb" : "+D"(to), "+S"(from), "+c"(count) : : "memory");
+    }
+    return copy_target[n % COPY_BYTES];
+}
+
+static NOINLINE uint64_t rep_stosq_chunk(uint64_t n) {
+    for (uint64_t i = 0; i < n; i++) {
+        void *to = copy_target;
+        size_t count = COPY_BYTES / 8;
+        __asm__ volatile("rep stosq" : "+D"(to), "+c"(count) : "a"(i) : "memory");
+    }
+    return copy_target[n % COPY_BYTES];
+}
+
+static NOINLINE uint64_t movups_copy_chunk(uint64_t n) {
+    for (uint64_t i = 0; i < n; i++)
+        for (size_t at = 0; at < COPY_BYTES; at += 64)
+            __asm__ volatile("movups (%0),%%xmm0\n\tmovups 16(%0),%%xmm1\n\tmovups 32(%0),%%xmm2\n\t"
+                             "movups 48(%0),%%xmm3\n\tmovups %%xmm0,(%1)\n\tmovups %%xmm1,16(%1)\n\t"
+                             "movups %%xmm2,32(%1)\n\tmovups %%xmm3,48(%1)"
+                             :
+                             : "r"(copy_source + at), "r"(copy_target + at)
+                             : "memory", "xmm0", "xmm1", "xmm2", "xmm3");
+    return copy_target[n % COPY_BYTES];
+}
+#endif
+
 // Floating point: the a and c sequences settle on ordinary normal values, so neither overflows nor goes denormal.
 
 typedef float float4 __attribute__((vector_size(16)));
@@ -441,6 +475,11 @@ int main(int argc, char **argv) {
         die("mmap");
     memset(copy_target, 0, COPY_BYTES);
     measure("memcpy", "MB/s", COPY_BYTES / 1e6, 1, memcpy_chunk);
+#if defined(__x86_64__)
+    measure("rep_movsb", "MB/s", COPY_BYTES / 1e6, 1, rep_movsb_chunk);
+    measure("rep_stosq", "MB/s", COPY_BYTES / 1e6, 1, rep_stosq_chunk);
+    measure("movups_copy", "MB/s", COPY_BYTES / 1e6, 1, movups_copy_chunk);
+#endif
 
     measure("sse_float", "ns/iter", 1e9, 0, sse_float_chunk);
     measure("scalar_double", "ns/iter", 1e9, 0, scalar_double_chunk);
