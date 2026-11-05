@@ -90,6 +90,68 @@ static void __attribute__((constructor)) init_inline_jmp_cache(void)
 #include "exec/helper-info.c.inc"
 #undef  HELPER_H
 
+/*
+ * Local experiment: these SSE helpers touch only xmm registers and sse_status,
+ * which are not TCG globals, and never raise an exception or call back into the
+ * translator. Saying so keeps guest registers live in host registers across the
+ * call. Audited against ops_sse.h: the ones that write CC_SRC or env->regs, load
+ * memory or fault (comis, ptest, pcmp*str*, maskmov, gather) are not listed.
+ * The call still has side effects, so xmm state is reloaded after it.
+ */
+static void __attribute__((constructor)) init_sse_helper_flags(void)
+{
+#define SSE_NO_GLOBALS(name) \
+    helper_info_##name.flags |= TCG_CALL_NO_RWG
+#define SSE_NO_GLOBALS_FP(name)    \
+    SSE_NO_GLOBALS(name##ps_xmm);  \
+    SSE_NO_GLOBALS(name##pd_xmm);  \
+    SSE_NO_GLOBALS(name##ss);      \
+    SSE_NO_GLOBALS(name##sd)
+
+    if (!pvg_tcg_fast_path("PVG_TCG_SSE_NO_GLOBALS")) {
+        return;
+    }
+    SSE_NO_GLOBALS_FP(add);
+    SSE_NO_GLOBALS_FP(sub);
+    SSE_NO_GLOBALS_FP(mul);
+    SSE_NO_GLOBALS_FP(div);
+    SSE_NO_GLOBALS_FP(min);
+    SSE_NO_GLOBALS_FP(max);
+    SSE_NO_GLOBALS_FP(cmpeq);
+    SSE_NO_GLOBALS_FP(cmplt);
+    SSE_NO_GLOBALS_FP(cmple);
+    SSE_NO_GLOBALS_FP(cmpunord);
+    SSE_NO_GLOBALS_FP(cmpneq);
+    SSE_NO_GLOBALS_FP(cmpnlt);
+    SSE_NO_GLOBALS_FP(cmpnle);
+    SSE_NO_GLOBALS_FP(cmpord);
+    SSE_NO_GLOBALS(sqrtps_xmm);
+    SSE_NO_GLOBALS(sqrtpd_xmm);
+    SSE_NO_GLOBALS(sqrtss);
+    SSE_NO_GLOBALS(sqrtsd);
+    SSE_NO_GLOBALS(cvtps2pd_xmm);
+    SSE_NO_GLOBALS(cvtpd2ps_xmm);
+    SSE_NO_GLOBALS(cvtdq2ps_xmm);
+    SSE_NO_GLOBALS(cvtdq2pd_xmm);
+    SSE_NO_GLOBALS(cvtps2dq_xmm);
+    SSE_NO_GLOBALS(cvtpd2dq_xmm);
+    SSE_NO_GLOBALS(cvttps2dq_xmm);
+    SSE_NO_GLOBALS(cvttpd2dq_xmm);
+    SSE_NO_GLOBALS(cvtss2sd);
+    SSE_NO_GLOBALS(cvtsd2ss);
+    SSE_NO_GLOBALS(cvttss2si);
+    SSE_NO_GLOBALS(cvttsd2si);
+    SSE_NO_GLOBALS(cvttss2sq);
+    SSE_NO_GLOBALS(cvttsd2sq);
+    SSE_NO_GLOBALS(pmaddwd_xmm);
+    SSE_NO_GLOBALS(psadbw_xmm);
+    SSE_NO_GLOBALS(packuswb_xmm);
+    SSE_NO_GLOBALS(packsswb_xmm);
+    SSE_NO_GLOBALS(packssdw_xmm);
+#undef SSE_NO_GLOBALS_FP
+#undef SSE_NO_GLOBALS
+}
+
 /* Fixes for Windows namespace pollution.  */
 #undef IN
 #undef OUT
