@@ -2,7 +2,7 @@
 # clang for probes that use the @objc classes in Packages/: builds each package for the host architecture, then adds its
 # generated header and static library. Pass -mmacosx-version-min=15.0 and no -arch.
 #
-#     clang-with-swift-packages GuestControl [InstallerKit] -- <clang arguments>
+#     clang-with-swift-packages GuestControl [InstallerKit] [MachineKit] -- <clang arguments>
 set -euo pipefail
 root=${0:A:h:h}
 flags=()

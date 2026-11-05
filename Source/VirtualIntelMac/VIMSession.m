@@ -4,6 +4,7 @@
 #import "VIMSymbolImages.h"
 #import "AppDelegate.h"
 #import "VIMMachine.h"
+#import "MachineKit-Swift.h"
 #import "VIMMetalView.h"
 #import "VIMDisplayConnection.h"
 #import "VIMQMPConnection.h"
@@ -3483,10 +3484,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return; // Desktop evidence never authorizes modern Metal patching.
     }
     if (self.completionGuestReport &&
-        (error || ![report[@"BootSessionUUID"] isEqual:self.completionGuestReport[@"BootSessionUUID"]] ||
-         ![report[@"ProductBuildVersion"] isEqual:self.completionGuestReport[@"ProductBuildVersion"]] ||
-         ![report[@"VolumeUUID"] isEqual:self.completionGuestReport[@"VolumeUUID"]] ||
-         ![report[@"InstalledSystemCandidate"] isEqual:@YES]))
+        (error || ![VIMMachineModel report:report stillMatchesCompletionReport:self.completionGuestReport]))
         self.completionGuestReport = nil;
     NSString *message = nil;
     if (error) {
@@ -3499,8 +3497,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         self.guestStatus.stringValue = message;
     } else {
         NSString *version = [report[@"ProductVersion"] isKindOfClass:NSString.class] ? report[@"ProductVersion"] : @"";
-        BOOL installed = [report[@"InstalledSystemCandidate"] isEqual:@YES] && [report[@"LiveRoot"] isEqual:@YES] &&
-                         [report[@"KernelMatchesSystem"] isEqual:@YES];
+        BOOL installed = [VIMMachineModel reportIsLiveInstalledSystem:report];
         self.guestStatus.stringValue =
             [NSString stringWithFormat:@"%@ %@%@", VIMOperatingSystemName(self.machine.guest), version,
                                        installed ? @"" : @" — setup in progress"];
@@ -3724,8 +3721,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                     dataUsingEncoding:NSUTF8StringEncoding]];
         }
     }
-    if (self.repairRequested && !error && ([report[@"DesktopRunning"] isEqual:@YES] || self.verifiedUpdateRepair) &&
-        [report[@"InstalledSystemCandidate"] isEqual:@YES] && [report[@"Guest"] isEqual:self.machine.guest]) {
+    if (self.repairRequested && !error &&
+        [VIMMachineModel report:report
+            admitsPreparationForGuest:self.machine.guest
+                 verifiedUpdateRepair:self.verifiedUpdateRepair]) {
         self.repairRequested = NO;
         self.preparing = YES;
         self.completionGuestReport = nil;
@@ -3830,8 +3829,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     }
     if (self.preparationRequested && !error &&
-        ([report[@"DesktopRunning"] isEqual:@YES] || self.verifiedUpdateRepair) &&
-        [report[@"InstalledSystemCandidate"] isEqual:@YES] && [report[@"Guest"] isEqual:self.machine.guest]) {
+        [VIMMachineModel report:report
+            admitsPreparationForGuest:self.machine.guest
+                 verifiedUpdateRepair:self.verifiedUpdateRepair]) {
         self.preparationRequested = NO;
         self.preparing = YES;
         self.window.subtitle = @"Finishing setup…";
