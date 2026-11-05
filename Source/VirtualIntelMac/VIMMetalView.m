@@ -18,6 +18,7 @@
 @property uint64_t regionFingerprint;
 @property CFTimeInterval presentedAt;
 @property CFTimeInterval submittedAt;
+@property CFTimeInterval handedOffAt;
 @property NSUInteger epoch, generation, width, height;
 @property uint32_t marker;
 @end
@@ -67,6 +68,10 @@
 @property uint64_t lastFingerprint;
 @property CFTimeInterval lastFingerprintAt, lastDistinctAt;
 @property id<MTLTexture> lastPresentedTexture;
+// VIM_INPUT_LATENCY=1 only: the one input waiting for its first changed frame.
+@property BOOL measureInputLatency;
+@property CFTimeInterval latencyEventAt, latencyHandledAt, latencyReplyAt;
+@property(copy) NSString *latencyKind;
 @property(nonatomic, copy) NSString *diagnosticsDirectory;
 @property NSMutableSet<NSString *> *pressedKeys;
 @property NSTrackingArea *mouseTracking;
@@ -245,6 +250,38 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
     }
     return result;
 }
+- (void)armInputLatency:(NSEvent *)event kind:(NSString *)kind {
+    if (!self.measureInputLatency)
+        return;
+    // Motion over a still screen changes no pixels, so let it lapse rather than pair with an unrelated later frame.
+    // A key or button takes the slot from waiting motion; otherwise the oldest unanswered input keeps it.
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL waiting = self.latencyEventAt > 0 && now - self.latencyEventAt < 1;
+    if (waiting && (![self.latencyKind isEqual:@"move"] || [kind isEqual:@"move"]))
+        return;
+    self.latencyEventAt = event.timestamp;
+    self.latencyHandledAt = now;
+    self.latencyReplyAt = 0;
+    self.latencyKind = kind;
+}
+- (void)noteInputReply {
+    if (self.measureInputLatency && self.latencyEventAt > 0 && !self.latencyReplyAt)
+        self.latencyReplyAt = CACurrentMediaTime();
+}
+- (void)reportInputLatency:(VIMPresentedFingerprint *)frame {
+    // A frame handed off before the input can't show its effect.
+    if (self.latencyEventAt <= 0 || frame.handedOffAt < self.latencyEventAt)
+        return;
+    double pixel = frame.presentedAt - self.latencyEventAt;
+    if (pixel < 1)
+        fprintf(stderr,
+                "VIM input latency: kind=%s appkit-ms=%.1f qmp-reply-ms=%.1f handoff-to-present-ms=%.1f "
+                "event-to-pixel-ms=%.1f\n",
+                self.latencyKind.UTF8String, (self.latencyHandledAt - self.latencyEventAt) * 1000,
+                self.latencyReplyAt > 0 ? (self.latencyReplyAt - self.latencyEventAt) * 1000 : -1.,
+                (frame.presentedAt - frame.handedOffAt) * 1000, pixel * 1000);
+    self.latencyEventAt = 0;
+}
 - (void)setFingerprintMeasurementEnabled:(BOOL)enabled {
     NSAssert(NSThread.isMainThread, @"Fingerprint measurement is main-thread owned");
     self.fingerprintGeneration++;
@@ -352,6 +389,7 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
         if (self.lastDistinctAt > 0)
             self->_distinctGaps[(NSUInteger)MIN(255., (frame.presentedAt - self.lastDistinctAt) * 1000.)]++;
         self.lastDistinctAt = frame.presentedAt;
+        [self reportInputLatency:frame];
     } else
         self.duplicateFrames++;
     self.lastFingerprint = frame.fingerprint;
@@ -385,7 +423,9 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
         self.drawableAcquisitionQueue = dispatch_queue_create(
             "com.mac.virtualintelmac.drawable-acquisition",
             dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
-        if ([NSProcessInfo.processInfo.environment[@"VIM_DISPLAY_DISTINCT"] isEqualToString:@"1"])
+        self.measureInputLatency = [NSProcessInfo.processInfo.environment[@"VIM_INPUT_LATENCY"] isEqualToString:@"1"];
+        if (self.measureInputLatency ||
+            [NSProcessInfo.processInfo.environment[@"VIM_DISPLAY_DISTINCT"] isEqualToString:@"1"])
             [self setFingerprintMeasurementEnabled:YES];
         self.pressedKeys = [NSMutableSet set];
         self.guestCursorVisible = YES;
@@ -883,6 +923,8 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
         [super keyDown:event];
         return;
     }
+    if (!event.isARepeat)
+        [self armInputLatency:event kind:@"key"];
     [self synchronizeModifiers:event];
     NSString *key = [self keyName:event.keyCode];
     if (key && !event.isARepeat)
@@ -965,6 +1007,7 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
     CGRect frame = self.presentationLayer.frame;
     if (frame.size.width <= 0 || frame.size.height <= 0)
         return;
+    [self armInputLatency:event kind:@"move"];
     int x = (int)(MAX(0, MIN(1, (p.x - frame.origin.x) / frame.size.width)) * 32767);
     int y = (int)(MAX(0, MIN(1, 1 - (p.y - frame.origin.y) / frame.size.height)) * 32767);
     [self emit:@[
@@ -977,6 +1020,7 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
     if (down && !self.inputCaptured)
         [self captureInput];
     [self mouseMoved:event];
+    [self armInputLatency:event kind:@"button"];
     [self emit:@[ @{@"type" : @"btn", @"data" : @{@"button" : button, @"down" : @(down)}} ]];
 }
 - (void)mouseDown:(NSEvent *)e {
@@ -1206,7 +1250,7 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
     if (!CGSizeEqualToSize(self.presentationLayer.drawableSize, drawableSize))
         self.presentationLayer.drawableSize = drawableSize;
     [self layout];
-    CFTimeInterval submitted = self.measurePresentation ? CACurrentMediaTime() : 0;
+    CFTimeInterval submitted = self.measurePresentation || self.measureInputLatency ? CACurrentMediaTime() : 0;
     NSUInteger epoch = self.displayEpoch;
     self.frameInFlight = YES; // Includes drawable acquisition; one job per view.
     if (self.asynchronousDrawableAcquisition) {
@@ -1279,7 +1323,7 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
         self.pendingSurfaceCompletion = nil;
         self.pendingSurfaceWidth = self.pendingSurfaceHeight = self.pendingSurfaceEpoch = 0;
         self.coalescedBeforeEncoding++;
-        if (self.measurePresentation)
+        if (submitted > 0)
             submitted = CACurrentMediaTime();
         superseded(NO);
     }
@@ -1342,6 +1386,7 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
             fingerprint.height = height;
             fingerprint.generation = self.fingerprintGeneration;
             fingerprint.submittedAt = CACurrentMediaTime();
+            fingerprint.handedOffAt = submitted;
             fingerprintOutput = self.fingerprintBuffer;
             [compute setComputePipelineState:self.fingerprintPipeline];
             [compute setTexture:presentedTexture atIndex:0];

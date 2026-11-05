@@ -44,6 +44,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// guest backing pixels. Empty rect disables the marker. Never normal input.
 - (void)setFingerprintTraceEnabled:(BOOL)enabled;
 - (void)setFingerprintMarkerRect:(NSRect)rect;
+/// With VIM_INPUT_LATENCY=1, marks the QMP reply of the input being timed. Otherwise a flag check.
+- (void)noteInputReply;
 /// Takes ownership of fd on every path; never copies the shared frame pixels.
 - (BOOL)installFrameDescriptor:(int)fd length:(NSUInteger)length error:(NSError **)error;
 /// Main-thread only. Completion fires once, after GPU use or a skipped frame.

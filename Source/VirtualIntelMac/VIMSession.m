@@ -1824,6 +1824,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                            completion:^(id result, NSError *error) {
                              if (observer)
                                  observer(inputQueued, error);
+                             [weakSelf.displayView noteInputReply];
                              if (error && weakSelf.task.running)
                                  weakSelf.status.stringValue = error.localizedDescription;
                            }];
