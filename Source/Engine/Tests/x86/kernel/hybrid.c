@@ -889,13 +889,16 @@ static void test_inline_ops(u64 root) {
     CHECK(!(flags & 0x200));
     __asm__ volatile("sti\n pushfq\n popq %0" : "=r"(flags));
     CHECK(flags & 0x200);
-    // With the line raised under cli, the vector comes after the one instruction following sti, not before it.
-    __asm__ volatile("cli");
-    u64 irqs = irq_count, seen = ~0ULL;
-    command(4);
-    __asm__ volatile("sti\n mov %1, %0\n nop" : "=r"(seen) : "m"(irq_count));
-    CHECK(seen == irqs);
-    CHECK(irq_count == irqs + 1);
+    // With the line raised under cli, the vector comes after the one instruction following sti, not before it. Again
+    // once linked: then nothing but sti itself leaves the code to take it.
+    for (int pass = 0; pass < 3; pass++) {
+        __asm__ volatile("cli");
+        u64 irqs = irq_count, seen = ~0ULL, later = ~0ULL;
+        command(4);
+        __asm__ volatile("sti\n mov %2, %0\n nop\n mov %2, %1\n" : "=&r"(seen), "=&r"(later) : "m"(irq_count));
+        CHECK(seen == irqs);
+        CHECK(later == irqs + 1);
+    }
 }
 
 static void test_ptest_flags(void) {

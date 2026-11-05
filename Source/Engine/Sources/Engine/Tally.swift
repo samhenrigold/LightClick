@@ -22,6 +22,10 @@ public final class Tally: @unchecked Sendable {
     private var sites: [String: Site] = [:]
     private var mmioPages: [UInt64: UInt64] = [:]
     private var mmioSites: [String: UInt64] = [:]
+    private struct SharedFrame {
+        var blocks: UInt64 = 0, spaces = Set<UInt64>(), low = UInt64.max, high: UInt64 = 0
+    }
+    private var coldByDirectory: [UInt64: SharedFrame] = [:], coldByTable: [UInt64: SharedFrame] = [:]
     private var ports: [UInt16: UInt64] = [:]
     private var boundaries: UInt64 = 0
     private var samples: [String] = []
@@ -221,6 +225,30 @@ public final class Tally: @unchecked Sendable {
         addSample("engine", rip, cpl, cr3)
     }
 
+    // Whether address spaces share page tables under the code they run, which decides whether they could share its translations.
+    func coldUserBlock(rip: UInt64, cr3: UInt64) {
+        func entry(_ table: UInt64, _ index: UInt64) -> UInt64? {
+            engine.host((table & 0x000F_FFFF_FFFF_F000) + index * 8)?.loadUnaligned(as: UInt64.self)
+        }
+        guard let top = entry(cr3, (rip >> 39) & 0x1FF), top & 1 != 0, let upper = entry(top, (rip >> 30) & 0x1FF),
+            upper & 1 != 0, upper & 0x80 == 0
+        else { return }
+        let directory = upper & 0x000F_FFFF_FFFF_F000
+        let space = cr3 & 0x000F_FFFF_FFFF_F000
+        lock.lock()
+        defer { lock.unlock() }
+        func count(_ row: inout SharedFrame) {
+            row.blocks += 1
+            row.spaces.insert(space)
+            row.low = min(row.low, rip)
+            row.high = max(row.high, rip)
+        }
+        count(&coldByDirectory[directory, default: SharedFrame()])
+        if let middle = entry(directory, (rip >> 21) & 0x1FF), middle & 1 != 0, middle & 0x80 == 0 {
+            count(&coldByTable[middle & 0x000F_FFFF_FFFF_F000, default: SharedFrame()])
+        }
+    }
+
     func mmioSample(rip: UInt64, gpa: UInt64, size: UInt64, write: Bool) {
         let bytes =
             engine.readGuest(rip, count: 8).map { $0.map { String(format: "%02x", $0) }.joined(separator: " ") }
@@ -400,6 +428,18 @@ public final class Tally: @unchecked Sendable {
             }
         }
 
+        for (title, rows) in [("page directory", coldByDirectory), ("page table", coldByTable)] {
+            o +=
+                "\n== cold user blocks by the \(title) frame above them: blocks, address spaces seen sharing it, lowest and highest rip ==\n"
+            for (frame, row) in rows.sorted(by: { $0.value.blocks > $1.value.blocks }).prefix(16) {
+                o +=
+                    String(format: "%12llu %6d  ", row.blocks, row.spaces.count) + hex(frame) + " " + hex(row.low) + " "
+                    + hex(row.high) + "\n"
+            }
+            let shared = rows.values.filter { $0.spaces.count > 1 }.reduce(0) { $0 + $1.blocks }
+            o +=
+                "of all \(rows.values.reduce(0) { $0 + $1.blocks }) blocks, \(shared) under a frame more than one address space used\n"
+        }
         o += "\n== mmio by page ==\n"
         for (page, count) in mmioPages.sorted(by: { $0.value > $1.value }).prefix(40) {
             o += String(format: "%12d  ", count) + hex(page) + "\n"

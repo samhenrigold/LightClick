@@ -196,6 +196,26 @@ Device memory: `vga.vram` (512 MB at 0x80000000) and `vmsvga.fifo` (64 KB at 0xa
 
 Fork, from a 60 s loop of 6,575 forks at 9.1 ms each: 2,430 cold blocks, 53,204 cold instructions and 2.84 ms translating per fork, 697 page-table stores, 38.8 CR3 writes. In that run HC_TRANSLATE was 57.8M calls and 46.4 s of host time, against 27.9M cold blocks, so about half the calls only link an existing block. Each also costs a round trip out of the VM, not separated here. At least 56% of those cold blocks repeated a rip and frame some block already covered. That changes the proposal above: sharing translations of the shared region is now where the largest measured cost goes.
 
+Inlined in translated code, measured in the test kernel, per operation: cr3, segment and sidt reads from 45 ns to about 0; rdtsc to about 0.5 ns; narrow shifts with dead flags to under 1 ns; `cli; sti` from 90 to 50 ns (the non-hybrid sti still traps). The monitor links to a block its view already knows without leaving the VM. Not measured: XNU's syscall, ctxsw and fork after this.
+
+### Sharing user translations: a design, waiting on one check
+
+Why: per fork in the 6,575-fork run, 2,430 cold blocks and 53,204 cold instructions, 2.84 ms translating of 9.1 ms, before exits; at least 56% of all cold blocks repeated a rip and frame already covered. A child runs the same library code as its parent and retranslates it.
+
+The check, from the tally's `cold user blocks by the page directory frame` rows on the next boot: from memory of XNU's pmap_nest, the shared region is nested by PDPT entry, so processes share page-directory frames there. Those rows should show large block counts under a few directory frames used by many address spaces, with rips in 0x7fff80000000 and up. If instead sharing shows only at page-table level, the key below moves down a level, and more unnesting splits it. If neither shows, this design is wrong.
+
+Design, an extension of the kernel domains (`block_key`):
+
+1. Key. For CPL 3, a rip under a directory frame other spaces share keeps its blocks under KEY_DOMAIN plus that frame and the CPL, so the existing map finds them from any view. A private frame is a domain of one, which behaves as a view does now.
+2. Links stay within a domain, as tr_link and link_here already insist, so chains survive into the next child. Going between domains takes the view's table, which is a monitor lookup with no host exit once the block is known.
+3. Validity. A block is valid wherever the directory frame is mapped at that slot, because its mappings are in that shared frame. A store to it must invalidate, and any mirror sees it, but a mirror can vanish with its process. So code marks go only on a keeper view for each domain, as the kernel's do, never on the translating child's view, whose exit must not kill shared blocks. Keepers are not evicted: at most one extra view per shared directory, a handful.
+4. A process that leaves the domain, by unnesting 2 MB for its own copy or by exit, changes its own upper-level slot. That zaps only its own shadow and kills nothing. A later entry finds a different frame, so it has a different key.
+5. Return prediction and the per-view tables are unchanged. A shared block enters a view's table on its first lookup there.
+
+Risks: a stale link means running wrong code with no fault, so this needs a test of two spaces sharing a directory, with one rewriting a slot and one unnesting, and the keeper's own process exiting. The keeper's exit is the hard case: its slot store zaps marked entries, which kills the domain's blocks. That is safe and costs a retranslation, and pinning it to a long-lived process such as launchd avoids most of it.
+
+Expected, if the check holds: forks without most of the 2,430 cold blocks, so perhaps half the 9.1 ms. An estimate only.
+
 Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bitmap interplay beyond those few fallbacks. Cost per fallback is unknown; the tally's `tcg_ms` column gives it. Writes by a separate process into guest RAM (the OOP graphics helper) are not noted. Reset after hand-off is unexamined: firmware in 64-bit mode would run on the engine.
 
 ## Not exact, known
