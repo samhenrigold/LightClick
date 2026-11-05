@@ -158,7 +158,9 @@ finally:
     deadline = time.time()+20
     while time.time() < deadline:
         listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
-        leftovers = [int(line.split()[0]) for line in listing.splitlines() if str(work) in line and 'guest-bench' not in line]
+        # Match the executable's path only: another app's VM may be using a disk in this folder.
+        leftovers = [int(line.split()[0]) for line in listing.splitlines()
+                     if line.split(None, 1)[1].startswith(str(work)+'/')]
         if not leftovers:
             break
         for pid in leftovers:
