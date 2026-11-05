@@ -1360,6 +1360,7 @@ static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int)
     c->stat_vector[vector & 255]++;
     c->vector_last_rip[vector & 255] = ret_rip;
     c->vector_last_err[vector & 255] = err;
+    c->vector_last_cr3[vector & 255] = c->cr3;
     note_event('E', ret_rip, err, vector);
     if (deliver_depth >= 3)
         stop(STOP_TRIPLE_FAULT, ret_rip, vector, err, c->cr2);

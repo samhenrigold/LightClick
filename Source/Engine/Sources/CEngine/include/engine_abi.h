@@ -246,7 +246,7 @@ typedef struct {
     uint32_t note_head, note_tail, note_overflow, pad4;
     uint32_t note_ring[256]; // frame + 1
     uint64_t stat_note_code, stat_note_pt, stat_nm;
-    uint64_t stat_vector[256], vector_last_rip[256], vector_last_err[256]; // every delivery, software int and #GP included
+    uint64_t stat_vector[256], vector_last_rip[256], vector_last_err[256], vector_last_cr3[256]; // every delivery, software int and #GP included
     uint64_t event_next;
     EngineEvent events[EVENT_RING];
 } EngineCtx;

@@ -163,7 +163,7 @@ static struct {
 
 extern char isr0[], isr3[], isr6[], isr8[], isr13[], isr14[], isr32[], isr33[], isr128[], syscall_entry[];
 extern char user_blob[], user_blob_end[], u_syscalls[], u_touch[], u_touch_write[], u_spin[], u_cli[], u_ud2[], u_div0[], u_int3[], u_noncanon[],
-    u_kernel_read[], u_int80[], u_flags_at_fault[], u_rmw_fault[], u_store_loop[], u_return_value[], u_rep_copy[], u_store_cross[], u_load_cross[];
+    u_kernel_read[], u_int80[], u_flags_at_fault[], u_rmw_fault[], u_store_loop[], u_return_value[], u_rep_copy[], u_store_cross[], u_load_cross[], u_table_limits[], u_idt_base[], u_gdt_base[];
 extern u64 enter_user(u64 rip, u64 rsp, u64 rflags);
 extern __attribute__((noreturn)) void return_from_user(void);
 
@@ -352,6 +352,12 @@ static void test_faults(void) {
     u64 r;
     r = run_user(u_ud2, 0, 0);
     CHECK(r == 0x106 && last_vector == 6 && last_rip == user_rip(u_ud2), "ud2 status %x vec %x rip %x", r, last_vector, last_rip);
+    r = run_user(u_table_limits, 0, 0);
+    CHECK(r == ((sizeof idt - 1) | (sizeof gdt - 1) << 16 | 0x30ULL << 32), "sidt, sgdt, str, sldt from ring 3: %x vec %x", r, last_vector);
+    r = run_user(u_idt_base, 0, 0);
+    CHECK(r == (u64)idt, "sidt base from ring 3: %x", r);
+    r = run_user(u_gdt_base, 0, 0);
+    CHECK(r == (u64)gdt, "sgdt base from ring 3: %x", r);
     r = run_user(u_cli, 0, 0);
     CHECK(r == 0x10D && last_err == 0 && last_rip == user_rip(u_cli), "cli status %x err %x rip %x", r, last_err, last_rip);
     r = run_user(u_div0, 0, 0);

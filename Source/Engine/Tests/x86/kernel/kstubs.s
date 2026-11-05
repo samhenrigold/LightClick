@@ -134,6 +134,7 @@ _return_from_user:
 // ---- Ring 3 code, copied to user pages. Position independent, with a syscall per action. Ends at user_blob_end. ----
     .globl _user_blob, _user_blob_end
     .globl _u_syscalls, _u_touch, _u_touch_write, _u_spin, _u_cli, _u_ud2, _u_div0, _u_int3, _u_noncanon, _u_kernel_read, _u_int80, _u_flags_at_fault
+    .globl _u_table_limits, _u_idt_base, _u_gdt_base
     .globl _u_rmw_fault, _u_store_loop, _u_return_value, _u_rep_copy, _u_store_cross, _u_load_cross
     .p2align 12
 _user_blob:
@@ -197,6 +198,39 @@ _u_spin:
     jnz 1b
     jmp 8b
 2:  movq $2, %rdi
+    movq $1, %rax
+    syscall
+    ud2
+
+// Without UMIP these read fine from ring 3, and libsystem reads the CPU number that way. Limits and selectors in one word.
+_u_table_limits:
+    subq $32, %rsp
+    sidt (%rsp)
+    movzwq (%rsp), %rdi
+    sgdt 16(%rsp)
+    movzwq 16(%rsp), %rax
+    shlq $16, %rax
+    orq %rax, %rdi
+    strq %rax
+    shlq $32, %rax
+    orq %rax, %rdi
+    sldtq %rax
+    shlq $48, %rax
+    orq %rax, %rdi
+    movq $1, %rax
+    syscall
+    ud2
+_u_idt_base:
+    subq $32, %rsp
+    sidt (%rsp)
+    movq 2(%rsp), %rdi
+    movq $1, %rax
+    syscall
+    ud2
+_u_gdt_base:
+    subq $32, %rsp
+    sgdt (%rsp)
+    movq 2(%rsp), %rdi
     movq $1, %rax
     syscall
     ud2

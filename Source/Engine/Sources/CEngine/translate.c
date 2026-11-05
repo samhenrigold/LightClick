@@ -571,10 +571,12 @@ static void emit_monitor_op(const Insn *in) {
         case OP_INVLPG:
         case OP_INVPCID:
         case OP_WBINVD:
-        case OP_LGDT:
         case OP_SYSRET:
         case OP_SWAPGS:
             cpl0_only = true;
+            break;
+        case OP_LGDT:
+            cpl0_only = in->sub <= 1; // sgdt and sidt are not privileged without UMIP, which isn't offered: libsystem reads the CPU number with sidt
             break;
         case OP_LTR:
             cpl0_only = in->sub == 0 || in->sub == 2;

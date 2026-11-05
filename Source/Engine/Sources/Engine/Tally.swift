@@ -202,10 +202,11 @@ public final class Tally: @unchecked Sendable {
         let vectors = withUnsafeBytes(of: c.stat_vector) { Array($0.bindMemory(to: UInt64.self)) }
         let vectorRIP = withUnsafeBytes(of: c.vector_last_rip) { Array($0.bindMemory(to: UInt64.self)) }
         let vectorErr = withUnsafeBytes(of: c.vector_last_err) { Array($0.bindMemory(to: UInt64.self)) }
+        let vectorCR3 = withUnsafeBytes(of: c.vector_last_cr3) { Array($0.bindMemory(to: UInt64.self)) }
         for v in vectors.indices.filter({ vectors[$0] > 0 }).sorted(by: { vectors[$0] > vectors[$1] }) {
             o +=
                 "vector " + hex(UInt64(v)) + perSecond(vectors[v]) + "  " + hex(vectorRIP[v]) + " err "
-                + hex(vectorErr[v]) + "  " + engine.bytes(at: vectorRIP[v]) + "\n"
+                + hex(vectorErr[v]) + "  " + engine.bytes(at: vectorRIP[v], cr3: vectorCR3[v]) + "\n"
         }
         o += "\n== the monitor's last events, oldest first: E delivered, I iret, C cr3 write, S syscall, R sysret ==\n"
         o +=

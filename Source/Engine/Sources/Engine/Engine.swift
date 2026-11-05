@@ -530,6 +530,7 @@ public final class Engine {
     /// Guest bytes at a VA for error messages, through the current CR3.
     public func bytes(at va: UInt64, count: Int = 12, cr3: UInt64? = nil) -> String {
         var out: [String] = []
+        let cr3 = cr3 ?? ctx.pointee.cr3  // once: from another thread it changes mid-read, and a user page's bytes stop at the first switch
         for i in 0..<count {
             guard let gpa = translate(va + UInt64(i), cr3: cr3), let at = host(gpa) else { break }
             out.append(String(format: "%02x", at.load(as: UInt8.self)))
