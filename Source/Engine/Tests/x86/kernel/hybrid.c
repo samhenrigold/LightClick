@@ -1177,6 +1177,54 @@ static void test_linked_loop(void) {
     (void)cr0;
 }
 
+// A second vCPU joins through the C API, as an application processor does under QEMU: it takes fallbacks and kicks here
+// while the first works on, with blocks shared between them.
+static volatile u64 second_count, second_done;
+static u8 second_stack[16384] __attribute__((aligned(16)));
+
+void second_vcpu(void) {
+    for (int i = 0; i < 2000; i++) {
+        u64 rbx = 0;
+        __asm__ volatile("mov $1, %%r13\n mov $5, %%r14\n .byte 0x66, 0x0F, 0x38, 0x41, 0xC1\n"
+                         : "=b"(rbx)
+                         :
+                         : "r13", "r14", "xmm0");
+        CHECK(rbx == 0x1234);
+        CHECK(((u32 (*)(void))KERNEL_SHARED_VA)() != 0);
+        second_count++;
+    }
+    second_done = 1;
+    for (;;)
+        __asm__ volatile("pause");
+}
+
+static void test_second_vcpu(u64 root) {
+    MAILBOX[1] = 0;
+    MAILBOX[2] = (u64)second_vcpu;
+    MAILBOX[3] = (u64)second_stack + sizeof second_stack - 8;
+    command(18);
+    if (!MAILBOX[1])
+        return;
+    for (u64 turns = 0; !second_done; turns++) {
+        u64 rbx = 0;
+        __asm__ volatile("mov $1, %%r13\n mov $5, %%r14\n .byte 0x66, 0x0F, 0x38, 0x41, 0xC1\n"
+                         : "=b"(rbx)
+                         :
+                         : "r13", "r14", "xmm0");
+        CHECK(rbx == 0x1234);
+        // Notes for the shared ring, of a frame holding code they both run, and the blocks die under the other vCPU.
+        if (!(turns & 255)) {
+            u64 code = frame();
+            put_function(code, 7);
+            *pte_of(root, KERNEL_SHARED_VA) = code | PRESENT_RW;
+            __asm__ volatile("invlpg (%0)" : : "r"(KERNEL_SHARED_VA));
+            CHECK(((u32 (*)(void))KERNEL_SHARED_VA)() == 7);
+        }
+        CHECK(turns < 100000000);
+    }
+    CHECK(second_count == 2000);
+}
+
 static void test_process_log(u64 root) {
     u64 t = (u64)tss;
     gdt[3] = 0x00CFF2000000FFFFULL;
@@ -1719,6 +1767,7 @@ void kmain(void) {
     test_kernel_domain(root);
     test_many_blocks(root);
     test_linked_loop();
+    test_second_vcpu(root);
     test_process_log(root);
     test_shared_region(root);
     test_shared_return(root);

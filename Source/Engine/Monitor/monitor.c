@@ -1618,7 +1618,7 @@ static void handle_data_abort(bool lower) {
     pool_reclaim();
     if (smp) { // The walk above took no lock, so nothing kept the entry from changing since. Under the lock every page-table store waits for this fill.
         w = x86_walk(c->cr3, far, access, true);
-        if (!w.ok || !is_ram(w.gpa)) {
+        if (!w.ok || (!is_ram(w.gpa) && !is_direct(w.gpa))) {
             mon_unlock();
             return; // retry the access, which sorts out which of the above it is now
         }
@@ -2070,7 +2070,7 @@ static void exit_check(void) {
     bool exact, found;
     u64 rip = rip_of_pc(c->elr, &exact, &found);
     if (found && exact) {
-        if (stop_now) { // the host wants the vCPU at an x86 boundary, with all state in place
+        if (stop_now && rip != c->irq_shadow_rip) { // the host wants the vCPU at an x86 boundary, with all state in place. Not inside sti's shadow, which resuming would lose: the next boundary will do
             c->stop_requested = 0;
             c->req_a[0] = rip;
             c->req_r[0] = rip;

@@ -73,6 +73,30 @@ public func engine_create(_ config: UnsafePointer<EngineConfig>, _ ops: UnsafePo
 @_cdecl("engine_destroy")
 public func engine_destroy(_ h: OpaquePointer) { Unmanaged<Handle>.fromOpaque(UnsafeRawPointer(h)).release() }
 
+@_cdecl("engine_prepare_count")
+public func engine_prepare_count(_ first: OpaquePointer, _ count: UInt32) { handle(first).engine.prepareCount(count) }
+
+@_cdecl("engine_create_secondary")
+public func engine_create_secondary(_ first: OpaquePointer, _ index: UInt32, _ ops: UnsafePointer<EngineMachineOps>) -> OpaquePointer? {
+    guard index < UInt32(kMaxVcpus) else {
+        FileHandle.standardError.write(Data("engine_create_secondary: vCPU \(index) is past the limit\n".utf8))
+        return nil
+    }
+    let engine: Engine
+    do {
+        engine = try Engine(secondaryOf: handle(first).engine, index: index)
+    } catch {
+        FileHandle.standardError.write(Data("engine_create_secondary: \(error)\n".utf8))
+        return nil
+    }
+    let machine = CMachine(ops: ops.pointee)
+    engine.machine = machine
+    return OpaquePointer(Unmanaged.passRetained(Handle(engine: engine, machine: machine)).toOpaque())
+}
+
+@_cdecl("engine_count_exclusive_stop")
+public func engine_count_exclusive_stop(_ h: OpaquePointer) { handle(h).engine.tally?.exclusiveStop() }
+
 @_cdecl("engine_ram")
 public func engine_ram(_ h: OpaquePointer) -> UnsafeMutableRawPointer { handle(h).engine.ram }
 

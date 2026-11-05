@@ -22,6 +22,7 @@ public final class Tally: @unchecked Sendable {
     private var sites: [String: Site] = [:]
     private var mmioPages: [UInt64: UInt64] = [:]
     private var mmioSites: [String: UInt64] = [:]
+    private let exclusiveStops = UnsafeMutablePointer<Int>.allocate(capacity: 1)
     private struct SharedFrame {
         var blocks: UInt64 = 0, spaces = Set<UInt64>(), low = UInt64.max, high: UInt64 = 0
     }
@@ -261,6 +262,9 @@ public final class Tally: @unchecked Sendable {
         mmioSites["\(hex(rip)) \(write ? "w" : "r") \(size) \(hex(gpa & ~0xF_FFFF))  \(bytes)", default: 0] += 1
     }
 
+    // Any thread, so approximate, which is all it is for.
+    func exclusiveStop() { exclusiveStops.pointee += 1 }
+
     func mmio(_ gpa: UInt64) {
         lock.lock()
         mmioPages[gpa & ~0xFFF, default: 0] += 1
@@ -359,7 +363,8 @@ public final class Tally: @unchecked Sendable {
         o +=
             "shared user blocks: \(t.shared_blocks) translated, \(t.shared_found) found by another view, under \(c.shared_dir_count) directories\n"
         o +=
-            "view lookup tables emptied: \(t.hash_refills) as full, \(t.hash_forgets) forgetting a shared directory. Code cache resets: \(t.cache_resets)\n\n"
+            "view lookup tables emptied: \(t.hash_refills) as full, \(t.hash_forgets) forgetting a shared directory. Code cache resets: \(t.cache_resets)\n"
+        o += "stopped for another vCPU's exclusive section: \(exclusiveStops.pointee)\n\n"
         o += "== why blocks died: blocks, of those with the page still on the same frame, calls ==\n"
         let killed = withUnsafeBytes(of: t.killed) { Array($0.bindMemory(to: UInt64.self)) }
         let unmoved = withUnsafeBytes(of: t.killed_unmoved) { Array($0.bindMemory(to: UInt64.self)) }

@@ -354,6 +354,12 @@ What the hardware does, measured:
 
 To check that the tests can fail, one safeguard at a time was removed by hand: no return-stack epoch gave 5000 of 5000 stale returns; no validation after translating gave 30 to 44 stale of 20,000 in each of three runs; no monitor lock gave 12,437 stale reads and then a hang; no second walk under the lock gave 1,150 stale reads; and with no `smc_held`, the writer hung. Not put to this test: the refault on a newly tracked table, compare-and-swap for A and D, and eviction skipping pinned views, as the test kernel evicts nothing. Those three are reasoning. Per-vCPU return stacks only show in speed, and the run with a shared one was not made.
 
+### Hybrid: first steps built
+
+`hvdbt.c` is per vCPU, and each application processor joins through `engine_create_secondary` on its own thread at its first high-half TB miss, after TCG has taken it through INIT, SIPI and real mode. Exclusive sections take option A, the simple exact one: `engine_run` sits between `cpu_exec_start` and `cpu_exec_end`, and a kick while one is pending stops the vCPU at a boundary. The tally counts those stops, to say whether TB flushes need something better. The notes ring and shared directories are one for the VM, under the lock. A full code cache gets every vCPU out, at a boundary or asleep, and holds them out until it is reset.
+
+Measured here: 93 resets under two and four vCPUs in `--smp`; a second vCPU joining the hybrid test through the C API, 30 runs in a row. That test found a retry for ever on direct-mapped device memory in the SMP fill path. Not measured: any of this under QEMU, which has only been compiled. Not done: the spin limit, TCG's stale TBs if an application processor's trampoline is rewritten for a second start, and stale TBs during a long stay on TCG.
+
 ### Not built, in order
 
 1. The notes ring shared and locked, then `hvdbt.c` per vCPU, then a boot with `-smp 2`. Only a boot can answer risks 3 to 7.

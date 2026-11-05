@@ -48,21 +48,31 @@
 #define OTHER_INTERRUPTS (CPU_INTERRUPT_NMI | CPU_INTERRUPT_SMI | CPU_INTERRUPT_INIT | CPU_INTERRUPT_SIPI | CPU_INTERRUPT_MCE)
 
 static struct {
-    EngineHandle *engine;
+    EngineHandle *engine; /* the first vCPU's, which makes the VM and owns what is one for all: RAM notes, device memory */
     bool dead;
-    bool in_engine;
-    bool tcg_ran; /* normal TBs have been generated: engine writes may have made them stale, and nothing tells TCG */
     ram_addr_t ram_base;
     uint64_t ram_bytes, below_4g;
+    uint64_t kernel_base, kernel_slide, kernel_data, kernel_data_bytes;
+    bool shutdown_dumped;
+} hv;
+
+/* As the engine's MAX_VCPUS. */
+#define HVDBT_MAX_CPUS 8
+
+typedef struct {
+    EngineHandle *engine;
+    bool in_engine;
+    bool tcg_ran; /* normal TBs have been generated: engine writes may have made them stale, and nothing tells TCG */
     /* Pages TCG wrote since DIRTY_MEMORY_CODE was last cleared for them. Only the vCPU thread touches this. */
     ram_addr_t written[64];
     unsigned written_count;
     bool protect_all;
     char refused[64]; /* why the vCPU is on TCG, while it is */
-    uint64_t kernel_base, kernel_slide, kernel_data, kernel_data_bytes;
-    bool shutdown_dumped;
     bool dump_done;
-} hv;
+} HvCpu;
+
+static HvCpu hv_cpus[HVDBT_MAX_CPUS];
+#define HV(cs) (&hv_cpus[(cs)->cpu_index])
 
 static void hvdbt_dump_kernel(CPUState *cs, const char *path);
 
@@ -72,10 +82,10 @@ static void hvdbt_dump_kernel(CPUState *cs, const char *path);
 static void hvdbt_after_device(CPUState *cs)
 {
     if (cpu_test_interrupt(cs, CPU_INTERRUPT_HARD | CPU_INTERRUPT_POLL)) {
-        engine_set_irq_line(hv.engine, true);
+        engine_set_irq_line(HV(cs)->engine, true);
     }
     if (cpu_test_interrupt(cs, OTHER_INTERRUPTS) || !cpu_can_run(cs) || !cpu_work_list_empty(cs)) {
-        engine_request_boundary(hv.engine);
+        engine_request_boundary(HV(cs)->engine);
     }
 }
 
@@ -197,7 +207,7 @@ static void hvdbt_watch_power_ports(CPUState *cs, uint16_t port, unsigned size, 
     if (port != 0x604 && port != 0x605 && port != 0xcf9) {
         return;
     }
-    engine_tally_port_write(hv.engine, port, size, value, hv.kernel_slide);
+    engine_tally_port_write(HV(cs)->engine, port, size, value, hv.kernel_slide);
     if ((off || reset) && getenv("LC_HVDBT_RAM") && !hv.shutdown_dumped) {
         /* Sparse: zero pages are holes. The offset is into pc.ram, which is the GPA below 4 GB and GPA - 4 GB + below_4g above it. */
         FILE *ram = fopen(getenv("LC_HVDBT_RAM"), "wb");
@@ -282,7 +292,7 @@ static bool hvdbt_has_interrupt(void *opaque)
         apic_poll_irq(X86_CPU(cs)->apic_state);
     }
     if (cpu_test_interrupt(cs, OTHER_INTERRUPTS)) { /* TCG delivers these, when the boundary stop gets back to its loop */
-        engine_request_boundary(hv.engine);
+        engine_request_boundary(HV(cs)->engine);
     }
     hard = cpu_test_interrupt(cs, CPU_INTERRUPT_HARD);
     bql_unlock();
@@ -388,7 +398,7 @@ static void hvdbt_put_state(CPUState *cs)
     CPUX86State *env = cpu_env(cs);
     EngineX86State s;
 
-    engine_get_state(hv.engine, &s);
+    engine_get_state(HV(cs)->engine, &s);
     memcpy(s.gpr, env->regs, sizeof s.gpr);
     s.rip = env->eip;
     s.rflags = env->eflags; /* cpu_exec_exit made it whole */
@@ -443,7 +453,7 @@ static void hvdbt_put_state(CPUState *cs)
     s.fds = env->fpds;
     s.fip = env->fpip;
     s.fdp = env->fpdp;
-    engine_set_state(hv.engine, &s);
+    engine_set_state(HV(cs)->engine, &s);
 
     /* The TSC is the same clock on both sides, cpu_get_tsc's steps with cpu_get_tsc's offsets. */
     uint32_t khz = env->user_tsc_khz;
@@ -453,7 +463,7 @@ static void hvdbt_put_state(CPUState *cs)
         g = r;
         r = next;
     }
-    engine_set_tsc(hv.engine, cpus_get_elapsed_ticks() - cpu_get_host_ticks(), env->tsc_offset, num / g, den / g);
+    engine_set_tsc(HV(cs)->engine, cpus_get_elapsed_ticks() - cpu_get_host_ticks(), env->tsc_offset, num / g, den / g);
 }
 
 static void hvdbt_get_state(CPUState *cs)
@@ -461,7 +471,7 @@ static void hvdbt_get_state(CPUState *cs)
     CPUX86State *env = cpu_env(cs);
     EngineX86State s;
 
-    engine_get_state(hv.engine, &s);
+    engine_get_state(HV(cs)->engine, &s);
     memcpy(env->regs, s.gpr, sizeof s.gpr);
     env->eip = s.rip;
     env->eflags = s.rflags; /* cpu_exec_enter splits it again */
@@ -544,10 +554,11 @@ static void hvdbt_note_write(uint64_t addr, uint64_t len, bool by_tcg)
         return;
     }
     if (by_tcg) {
-        if (hv.written_count < ARRAY_SIZE(hv.written)) {
-            hv.written[hv.written_count++] = addr & TARGET_PAGE_MASK;
+        HvCpu *cpu = HV(current_cpu);
+        if (cpu->written_count < ARRAY_SIZE(cpu->written)) {
+            cpu->written[cpu->written_count++] = addr & TARGET_PAGE_MASK;
         } else {
-            hv.protect_all = true;
+            cpu->protect_all = true;
         }
     }
     uint64_t off = addr - hv.ram_base;
@@ -563,17 +574,17 @@ static void hvdbt_note_write(uint64_t addr, uint64_t len, bool by_tcg)
 }
 
 /* Every TCG write to RAM must hit notdirty_write, or the engine won't hear of it. That is what a clean page does; it stays dirty once written. */
-static void hvdbt_protect_written(void)
+static void hvdbt_protect_written(HvCpu *cpu)
 {
-    if (hv.protect_all) {
+    if (cpu->protect_all) {
         physical_memory_test_and_clear_dirty(hv.ram_base, hv.ram_bytes, DIRTY_MEMORY_CODE, NULL);
     } else {
-        for (unsigned i = 0; i < hv.written_count; i++) {
-            physical_memory_test_and_clear_dirty(hv.written[i], TARGET_PAGE_SIZE, DIRTY_MEMORY_CODE, NULL);
+        for (unsigned i = 0; i < cpu->written_count; i++) {
+            physical_memory_test_and_clear_dirty(cpu->written[i], TARGET_PAGE_SIZE, DIRTY_MEMORY_CODE, NULL);
         }
     }
-    hv.protect_all = false;
-    hv.written_count = 0;
+    cpu->protect_all = false;
+    cpu->written_count = 0;
 }
 
 /* ---- Hand-off ---- */
@@ -592,7 +603,30 @@ static bool hvdbt_mark_device(Int128 start, Int128 len, const MemoryRegion *mr, 
 
 static void hvdbt_write_tally_at_exit(void)
 {
-    engine_tally_write(hv.engine);
+    for (int i = 0; i < HVDBT_MAX_CPUS; i++) {
+        if (hv_cpus[i].engine) {
+            engine_tally_write(hv_cpus[i].engine);
+        }
+    }
+}
+
+static void hvdbt_set_ops(EngineMachineOps *ops, CPUState *cs)
+{
+    *ops = (EngineMachineOps) {
+        .opaque = cs,
+        .mmio_read = hvdbt_mmio_read,
+        .mmio_write = hvdbt_mmio_write,
+        .port_read = hvdbt_port_read,
+        .port_write = hvdbt_port_write,
+        .read_msr = hvdbt_read_msr,
+        .write_msr = hvdbt_write_msr,
+        .cpuid = hvdbt_cpuid,
+        .acknowledge_interrupt = hvdbt_acknowledge_interrupt,
+        .has_interrupt_waiting = hvdbt_has_interrupt,
+        .wait_for_interrupt = hvdbt_wait,
+        .apic_eoi = hvdbt_apic_eoi,
+        .apic_icr = hvdbt_apic_icr,
+    };
 }
 
 static void *hvdbt_watchdog(void *arg);
@@ -619,30 +653,19 @@ static bool hvdbt_create(CPUState *cs)
         .tzcnt_lzcnt = (env->features[FEAT_7_0_EBX] & CPUID_7_0_EBX_BMI1) && (env->features[FEAT_8000_0001_ECX] & CPUID_EXT3_ABM),
         .hybrid = true,
     };
-    EngineMachineOps ops = {
-        .opaque = cs,
-        .mmio_read = hvdbt_mmio_read,
-        .mmio_write = hvdbt_mmio_write,
-        .port_read = hvdbt_port_read,
-        .port_write = hvdbt_port_write,
-        .read_msr = hvdbt_read_msr,
-        .write_msr = hvdbt_write_msr,
-        .cpuid = hvdbt_cpuid,
-        .acknowledge_interrupt = hvdbt_acknowledge_interrupt,
-        .has_interrupt_waiting = hvdbt_has_interrupt,
-        .wait_for_interrupt = hvdbt_wait,
-        .apic_eoi = hvdbt_apic_eoi,
-        .apic_icr = hvdbt_apic_icr,
-    };
+    EngineMachineOps ops;
+    hvdbt_set_ops(&ops, cs);
     EngineHandle *engine = engine_create(&config, &ops);
     if (!engine) {
         error_report("hvdbt: the engine would not start: staying on TCG");
         return false;
     }
+    engine_prepare_count(engine, ms->smp.max_cpus); /* before it runs: the monitor's lock turns on from this */
     hv.ram_base = memory_region_get_ram_addr(ms->ram);
     hv.ram_bytes = ms->ram_size;
     hv.below_4g = x86ms->above_4g_mem_size ? x86ms->below_4g_mem_size : ms->ram_size;
-    hv.protect_all = true;
+    HV(cs)->protect_all = true;
+    HV(cs)->engine = engine;
     hv.engine = engine; /* hvdbt_mark_device reads it, and nothing else can until the release below */
 
     /* shortcut: the memory map as it stands at hand-off. A BAR or PAM change after this isn't seen; a low-RAM remap would need a MemoryListener. */
@@ -668,23 +691,52 @@ static bool hvdbt_create(CPUState *cs)
     return true;
 }
 
+/* Another vCPU joins the VM on its own thread, as HVF requires. The first made it and said how many there would be. */
+static bool hvdbt_create_secondary(CPUState *cs)
+{
+    const char *tally = getenv("LC_HVDBT_TALLY");
+    EngineMachineOps ops;
+
+    hvdbt_set_ops(&ops, cs);
+    HvCpu *cpu = HV(cs);
+    cpu->engine = engine_create_secondary(hv.engine, cs->cpu_index, &ops);
+    if (!cpu->engine) {
+        error_report("hvdbt: vCPU %d would not join the engine", cs->cpu_index);
+        return false;
+    }
+    cpu->protect_all = true;
+    if (tally) {
+        g_autofree char *path = g_strdup_printf("%s.cpu%d", tally, cs->cpu_index);
+        engine_tally_start(cpu->engine, path);
+    }
+    QemuThread watchdog;
+    qemu_thread_create(&watchdog, "hvdbt-watchdog", hvdbt_watchdog, cs, QEMU_THREAD_DETACHED);
+    info_report("hvdbt: vCPU %d joins at rip 0x%" PRIx64, cs->cpu_index, (uint64_t)cpu_env(cs)->eip);
+    return true;
+}
+
 static bool hvdbt_want_engine(CPUState *cs, vaddr pc, uint32_t flags)
 {
     CPUX86State *env = cpu_env(cs);
+    HvCpu *cpu = HV(cs);
     bool ok;
 
     if (hv.dead) {
         return false;
     }
-    if (!hv.engine && (int64_t)pc >= 0) { /* firmware and boot loaders run identity-mapped; XNU's vstart is the first thing in the high half */
-        hv.tcg_ran = true;
+    /*
+     * Firmware and boot loaders run identity-mapped, and XNU's vstart is the first thing in the high half. An application processor gets there through TCG's real mode, and
+     * waits on TCG until the first vCPU has made the VM.
+     */
+    if (!cpu->engine && ((int64_t)pc >= 0 || (cs->cpu_index && !__atomic_load_n(&hv.engine, __ATOMIC_ACQUIRE)))) {
+        cpu->tcg_ran = true;
         return false;
     }
-    if (current_machine->smp.max_cpus != 1 || !qemu_tcg_mttcg_enabled()) {
-        error_report("hvdbt: needs -smp 1 and -accel tcg,thread=multi");
+    if (current_machine->smp.max_cpus > HVDBT_MAX_CPUS || !qemu_tcg_mttcg_enabled()) {
+        error_report("hvdbt: needs at most %d vCPUs and -accel tcg,thread=multi", HVDBT_MAX_CPUS);
         exit(EXIT_FAILURE);
     }
-    char why[sizeof hv.refused];
+    char why[sizeof cpu->refused];
     why[0] = 0;
     if (!(flags & HF_CS64_MASK)) {
         const SegmentCache *cseg = &env->segs[R_CS], *sseg = &env->segs[R_SS];
@@ -715,12 +767,12 @@ static bool hvdbt_want_engine(CPUState *cs, vaddr pc, uint32_t flags)
     }
     ok = !why[0];
     if (!ok) {
-        hv.tcg_ran = true;
+        cpu->tcg_ran = true;
     }
-    if (strcmp(why, hv.refused)) { /* on a change only: this runs at each TB miss while on TCG */
-        strcpy(hv.refused, why);
-        if (!ok && hv.engine) {
-            engine_tally_refused(hv.engine, why);
+    if (strcmp(why, cpu->refused)) { /* on a change only: this runs at each TB miss while on TCG */
+        strcpy(cpu->refused, why);
+        if (!ok && cpu->engine) {
+            engine_tally_refused(cpu->engine, why);
         }
     }
     return ok;
@@ -730,7 +782,7 @@ static void hvdbt_finish(CPUState *cs)
 {
     hv.dead = true;
     cpu_dump_state(cs, stderr, CPU_DUMP_CODE | CPU_DUMP_CCOP);
-    engine_tally_write(hv.engine);
+    hvdbt_write_tally_at_exit();
     vm_stop(RUN_STATE_INTERNAL_ERROR);
 }
 
@@ -756,29 +808,36 @@ static void hvdbt_prepare_step(CPUState *cs)
 
 static void hvdbt_run(CPUState *cs)
 {
+    HvCpu *cpu = HV(cs);
     EngineRunResult result;
 
-    if (!hv.engine && !hvdbt_create(cs)) {
+    if (!cpu->engine && !(hv.engine ? hvdbt_create_secondary(cs) : hvdbt_create(cs))) {
         hv.dead = true;
         return;
     }
-    if (hv.tcg_ran) { /* the flush runs from the work queue, then the TB miss brings control back */
-        hv.tcg_ran = false;
+    if (cpu->tcg_ran) { /* the flush runs from the work queue, then the TB miss brings control back. It is exclusive: with several vCPUs, it stops the others at a boundary */
+        cpu->tcg_ran = false;
         queue_tb_flush(cs);
     }
-    hvdbt_protect_written();
-    qatomic_set_mb(&hv.in_engine, true);
+    hvdbt_protect_written(cpu);
+    qatomic_set_mb(&cpu->in_engine, true);
     if (!cpu_can_run(cs) || !cpu_work_list_empty(cs)) {
-        qatomic_set(&hv.in_engine, false);
+        qatomic_set(&cpu->in_engine, false);
         return;
     }
     hvdbt_put_state(cs);
-    engine_set_irq_line(hv.engine, cpu_test_interrupt(cs, CPU_INTERRUPT_HARD | CPU_INTERRUPT_POLL));
+    engine_set_irq_line(cpu->engine, cpu_test_interrupt(cs, CPU_INTERRUPT_HARD | CPU_INTERRUPT_POLL));
 
+    /*
+     * Between these, start_exclusive waits for this vCPU as for one running TBs: an atomic step or a TB flush elsewhere finds it stopped at a boundary. It kicks it, and the kick
+     * below turns that into a stop. cpu_exec_start itself waits while an exclusive section is on.
+     */
     bql_unlock();
-    result = engine_run(hv.engine);
+    cpu_exec_start(cs);
+    result = engine_run(cpu->engine);
+    cpu_exec_end(cs);
     bql_lock();
-    qatomic_set(&hv.in_engine, false);
+    qatomic_set(&cpu->in_engine, false);
     hvdbt_get_state(cs);
 
     switch (result) {
@@ -788,7 +847,7 @@ static void hvdbt_run(CPUState *cs)
     case ENGINE_RUN_BOUNDARY: /* whatever asked for the stop is in TCG's loop now */
         break;
     case ENGINE_RUN_ERROR:
-        error_report("hvdbt: %s", engine_error_text(hv.engine));
+        error_report("hvdbt: %s", engine_error_text(cpu->engine));
         hvdbt_finish(cs);
         break;
     default:
@@ -798,17 +857,22 @@ static void hvdbt_run(CPUState *cs)
     }
 }
 
-/* Interrupts wake the monitor. A stop, or queued work, needs the state in QEMU's hands. */
+/* Interrupts wake the monitor. A stop, queued work or another vCPU's exclusive section need the state in QEMU's hands. */
 static void hvdbt_kick(CPUState *cs)
 {
-    if (!qatomic_read(&hv.in_engine)) {
+    HvCpu *cpu = HV(cs);
+
+    if (!qatomic_read(&cpu->in_engine) || !cpu->engine) {
         return;
     }
-    if (qatomic_read(&cs->stop) || !cpu_work_list_empty(cs)) {
-        engine_request_boundary(hv.engine);
+    if (cpu_exclusive_pending()) {
+        engine_count_exclusive_stop(cpu->engine);
+        engine_request_boundary(cpu->engine);
+    } else if (qatomic_read(&cs->stop) || !cpu_work_list_empty(cs)) {
+        engine_request_boundary(cpu->engine);
     } else {
-        engine_set_irq_line(hv.engine, true);
-        engine_kick(hv.engine);
+        engine_set_irq_line(cpu->engine, true);
+        engine_kick(cpu->engine);
     }
 }
 
@@ -841,9 +905,9 @@ static void hvdbt_stall_report(CPUState *cs, run_on_cpu_data unused)
     APICCommonState *apic = cpu->apic_state;
     char text[2048];
 
-    qatomic_set(&hv.dump_done, true);
-    engine_debug_text(hv.engine, text, sizeof text);
-    fprintf(stderr, "\nhvdbt: no progress for 5 s. Last off the engine because: %s\n%s", hv.refused[0] ? hv.refused : "a stop to take this report", text);
+    qatomic_set(&HV(cs)->dump_done, true);
+    engine_debug_text(HV(cs)->engine, text, sizeof text);
+    fprintf(stderr, "\nhvdbt: no progress for 5 s. Last off the engine because: %s\n%s", HV(cs)->refused[0] ? HV(cs)->refused : "a stop to take this report", text);
     cpu_dump_state(cs, stderr, CPU_DUMP_CODE | CPU_DUMP_CCOP);
     hvdbt_dump_bytes(cs, "code", env->eip, 64, 64);
     hvdbt_dump_bytes(cs, "stack", env->regs[R_ESP], 0, 64);
@@ -976,6 +1040,7 @@ static void hvdbt_dump_kernel(CPUState *cs, const char *path)
 static void *hvdbt_watchdog(void *arg)
 {
     CPUState *cs = arg;
+    HvCpu *cpu = HV(cs);
     CPUX86State *env = cpu_env(cs);
     uint64_t last = ~0ULL;
     int idle = 0, reports = 0, seconds = 0;
@@ -983,17 +1048,17 @@ static void *hvdbt_watchdog(void *arg)
 
     while (!qatomic_read(&hv.dead)) {
         g_usleep(G_USEC_PER_SEC);
-        if (screen && ++seconds % 30 == 0) {
+        if (screen && !cs->cpu_index && ++seconds % 30 == 0) {
             aio_bh_schedule_oneshot(qemu_get_aio_context(), hvdbt_screen_bh, (void *)screen);
         }
         if (!runstate_is_running()) {
             idle = 0;
             continue;
         }
-        if (!qatomic_read(&hv.in_engine)) { /* racy reads, and only for a human: does TCG's rip move? */
-            engine_tally_sample(hv.engine, env->eip, env->hflags & HF_CPL_MASK, env->cr[3]);
+        if (!qatomic_read(&cpu->in_engine)) { /* racy reads, and only for a human: does TCG's rip move? */
+            engine_tally_sample(cpu->engine, env->eip, env->hflags & HF_CPL_MASK, env->cr[3]);
         }
-        uint64_t now = engine_progress(hv.engine);
+        uint64_t now = engine_progress(cpu->engine);
         if (now != last) {
             last = now;
             idle = 0;
@@ -1002,13 +1067,13 @@ static void *hvdbt_watchdog(void *arg)
         idle++;
         if (idle == 5 && reports < 4) {
             reports++;
-            qatomic_set(&hv.dump_done, false);
+            qatomic_set(&cpu->dump_done, false);
             async_run_on_cpu(cs, hvdbt_stall_report, RUN_ON_CPU_NULL);
-        } else if (idle == 8 && reports && !qatomic_read(&hv.dump_done)) {
+        } else if (idle == 8 && reports && !qatomic_read(&cpu->dump_done)) {
             /* No stop in 3 s: no x86 boundary reached, or stuck in a host call or on the BQL. All that can be seen from here. */
             char text[2048];
-            engine_debug_text(hv.engine, text, sizeof text);
-            fprintf(stderr, "\nhvdbt: no progress, and the vCPU did not stop for a report in 3 s. in_engine %d\n%s", qatomic_read(&hv.in_engine), text);
+            engine_debug_text(cpu->engine, text, sizeof text);
+            fprintf(stderr, "\nhvdbt: vCPU %d: no progress, and it did not stop for a report in 3 s. in_engine %d\n%s", cs->cpu_index, qatomic_read(&cpu->in_engine), text);
             fflush(stderr);
         }
     }

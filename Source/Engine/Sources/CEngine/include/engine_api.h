@@ -81,6 +81,12 @@ typedef struct {
 } EngineX86State;
 
 EngineHandle *engine_create(const EngineConfig *config, const EngineMachineOps *ops);
+// On the first vCPU, before it runs: how many this VM will have, however many are made by then.
+void engine_prepare_count(EngineHandle *first, uint32_t count);
+// Another vCPU of first's VM, created and run on the calling thread, from then on used as any handle. Index: from 1, less than the prepared count.
+EngineHandle *engine_create_secondary(EngineHandle *first, uint32_t index, const EngineMachineOps *ops);
+// For the tally: a kick that will stop this vCPU for another's exclusive section.
+void engine_count_exclusive_stop(EngineHandle *engine);
 void engine_destroy(EngineHandle *engine);
 // Host pointer to RAM, for loaders and DMA.
 void *engine_ram(EngineHandle *engine);

@@ -14,6 +14,7 @@ final class HybridHarness {
     var failed: String?
     var direct: UnsafeMutableRawPointer?
     var deadline: UInt64 = 0
+    var machineOps: EngineMachineOps?
     var deviceWrites: UInt64 = 0
     var pendingVector = false
     var acks = 0
@@ -78,6 +79,40 @@ final class HybridHarness {
             }
         case 17:
             if deadline != 0x1234_89AB_CDEF { failed = "the TSC deadline did not reach the APIC: \(deadline)" }
+        case 18:
+            guard ProcessInfo.processInfo.environment["ENGINE_HYBRID_SMP"] == "1" else { return }
+            host(0x3000).storeBytes(of: 1 as UInt64, toByteOffset: 8, as: UInt64.self)
+            var state = EngineX86State()
+            engine_get_state(handle, &state)
+            state.rip = mailbox(2)
+            state.gpr.4 = mailbox(3)
+            state.rflags &= ~0x200
+            let first = handle!
+            let machine = machineOps!
+            Thread.detachNewThread { [self] in
+                var ops = machine
+                guard let second = engine_create_secondary(first, 1, &ops) else {
+                    failed = "the second vCPU would not start"
+                    return
+                }
+                var s = state
+                engine_set_state(second, &s)
+                while true {
+                    switch engine_run(second) {
+                    case ENGINE_RUN_FALLBACK.rawValue:
+                        engine_get_state(second, &s)
+                        playTCG(&s)
+                        engine_set_state(second, &s)
+                    case ENGINE_RUN_BOUNDARY.rawValue:
+                        engine_get_state(second, &s)
+                        engine_set_state(second, &s)
+                    default:
+                        FileHandle.standardError.write(
+                            Data("second vCPU: \(String(cString: engine_error_text(second)))\n".utf8))
+                        exit(7)
+                    }
+                }
+            }
         case 10: timerOn = true
         case 11: timerOn = false
         case 9:
@@ -211,6 +246,8 @@ final class HybridHarness {
             apic_eoi: { _, _ in },
             apic_icr: { _, _ in })
         guard let created = engine_create(&config, &ops) else { return 3 }
+        machineOps = ops
+        if ProcessInfo.processInfo.environment["ENGINE_HYBRID_SMP"] == "1" { engine_prepare_count(created, 2) }
         handle = created
         host((1 << 32) + 0x1000).storeBytes(of: UInt64(0x1122_3344_5566_7788), as: UInt64.self)
         engine_mark_device(handle, 0xA0000, 0x1000)
