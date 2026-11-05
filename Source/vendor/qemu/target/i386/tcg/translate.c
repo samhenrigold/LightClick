@@ -25,6 +25,7 @@
 #include "exec/translation-block.h"
 #include "tcg/tcg-op.h"
 #include "tcg/tcg-op-gvec.h"
+#include "tcg/tcg-temp-internal.h"
 #include "exec/translator.h"
 #include "exec/target_page.h"
 #include "fpu/softfloat.h"
@@ -42,6 +43,7 @@ static bool emit_inline_jmp_cache;
 static bool emit_inline_jmp_cache_32;
 static bool emit_inline_jmp_cache_cpl0;
 static bool emit_bulk_rep;
+static bool emit_inline_fp;
 static bool dispatch_acquire_barrier;
 static bool dispatch_relaxed;
 static bool shared_dispatch;
@@ -61,6 +63,15 @@ static void __attribute__((constructor)) init_inline_jmp_cache(void)
     emit_inline_jmp_cache_cpl0 =
         pvg_tcg_fast_path("PVG_TCG_INLINE_JMP_CACHE_CPL0");
     emit_bulk_rep = pvg_tcg_fast_path("PVG_TCG_BULK_REP");
+
+    /* The guard loads this bitfield directly, so prove where it lives. */
+    float_status layout = { 0 };
+    uint16_t flags;
+    set_float_exception_flags(float_flag_inexact, &layout);
+    memcpy(&flags, &layout, sizeof(flags));
+    emit_inline_fp = flags == float_flag_inexact &&
+                     pvg_tcg_fast_path("PVG_TCG_INLINE_FP");
+
     const char *value = getenv("PVG_TCG_DISPATCH_ACQUIRE");
     dispatch_acquire_barrier = value && !strcmp(value, "1");
     dispatch_relaxed = pvg_tcg_fast_path("PVG_TCG_DISPATCH_RELAXED");

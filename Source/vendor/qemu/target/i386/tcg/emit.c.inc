@@ -530,6 +530,361 @@ static void gen_3dnow(DisasContext *s, X86DecodedInsn *decode)
     }
 }
 
+enum { SSE_FP_NONE, SSE_FP_ADD, SSE_FP_SUB, SSE_FP_MUL, SSE_FP_DIV, SSE_FP_SQRT };
+
+/*
+ * Local AArch64 experiment, not an upstream contribution: scalar SSE on the host
+ * FPU, inline, in the cases where the result and every MXCSR flag are provable.
+ * Each gen_sse_*_fast emits that path and returns a label for its caller to set
+ * after the existing helper call, which handles everything else through
+ * softfloat. It returns NULL when no fast path was emitted.
+ *
+ * Why each case is exact, with host FPCR == 0 (nearest, no flush, no traps):
+ *
+ * - Finite normal result from normal or zero inputs: both ISAs round the same
+ *   IEEE operation, and SSE has no x87-style double rounding.
+ * - Inexact: the host's flag is not read. The arithmetic paths need PE already
+ *   sticky, so the flag cannot change; otherwise softfloat's slower path does it.
+ * - Rounding mode: MXCSR.RC must be nearest, because host FPCR stays fixed.
+ * - DAZ, FTZ: both must be off, since they change results. Testing them with RC
+ *   costs nothing extra.
+ * - Denormal input: raises DE, which the host does not report in this mode.
+ *   Softfloat. The test also catches the smallest normal, which is only slower.
+ * - NaN input: x86 and Arm pick different payloads and x86's default NaN is
+ *   negative. Any NaN result goes to softfloat, which also covers invalid
+ *   (0/0, inf-inf, 0*inf, sqrt(-x)).
+ * - Infinity: overflow and divide-by-zero both show as an infinite result, so
+ *   that goes to softfloat for OE/ZE and the flags, as do infinite inputs.
+ * - Tiny result: UE depends on tininess, detected after rounding on x86, so any
+ *   result at or below the smallest normal goes to softfloat, boundary included.
+ * - Zero result: exact cancellation in add/sub gives +0 in nearest on both, with
+ *   no flags. From mul, div or a narrowing conversion, it could be underflow, so
+ *   it counts only when an input already forces an exact zero (x*0, 0/x).
+ *   sqrt(+-0) is exact and keeps its sign, and normal inputs cannot give zero.
+ * - Unmasked exceptions: softfloat never delivers #XF here, so the masks do not
+ *   change QEMU's behavior and neither path reads them. That gap predates this.
+ * - comis/ucomis: no rounding and no inexact, so no MXCSR guard. They differ only
+ *   for NaN, and NaN and denormal inputs go to softfloat. The rest compare as
+ *   sign-magnitude integers, where -0 == +0 comes out naturally.
+ * - cvttss2si/cvttsd2si: truncation ignores RC, and only PE can be raised once
+ *   out-of-range and NaN inputs (x86 indefinite with IE; Arm would saturate, or
+ *   give 0 for NaN) are excluded by magnitude. The exact -2^31 goes to softfloat.
+ * - cvtsi2sd: always exact, so no guard at all, in every RC.
+ * - cvtsi2ss, cvtsq2ss, cvtsq2sd: can round, so RC and sticky PE guards. No
+ *   overflow or tiny result is possible.
+ * - cvtss2sd: always exact for normals and zeros, so no guard. Denormal, infinity
+ *   and NaN inputs go to softfloat (DE, IE on SNaN, payload).
+ * - cvtsd2ss: narrowing, so it has the arithmetic guards and result checks.
+ * - FEAT_AFP (FPCR.AH, FIZ, NEP) is deliberately unused. It would match x86 for
+ *   NaNs and denormals, but those all leave here anyway, and it would mean
+ *   switching FPCR around the C helpers on this thread, whose hardfloat paths
+ *   and FPCR checks assume zero.
+ * - VEX forms stay with the helper (Penryn guests have none), as does any form
+ *   whose destination is not its first source, so upper lanes need no merging.
+ */
+#if defined(__aarch64__) && defined(TARGET_X86_64)
+
+/* Inputs are compared shifted left, dropping the sign and any zero padding. */
+#define SSE_FP_EXPONENT(bits) \
+    ((bits) == 64 ? UINT64_C(0xffe0000000000000) : UINT64_C(0xff00000000000000))
+
+static bool sse_fp_host_ok(DisasContext *s)
+{
+    uint64_t fpcr;
+
+    if (!emit_inline_fp || (s->prefix & PREFIX_VEX)) {
+        return false;
+    }
+    /* TBs are shared, but no vCPU thread changes FPCR after starting. */
+    asm volatile("mrs %0, fpcr" : "=r"(fpcr));
+    return fpcr == 0;
+}
+
+static bool sse_fp_merge_ok(DisasContext *s, X86DecodedInsn *decode)
+{
+    return sse_fp_host_ok(s) &&
+           vector_reg_offset(&decode->op[0]) == vector_reg_offset(&decode->op[1]);
+}
+
+static void gen_sse_fp_guard(TCGLabel *slow, bool mode)
+{
+    TCGv_i32 t = tcg_temp_ebb_new_i32();
+
+    if (mode) {
+        /* RC 0x6000, FTZ 0x8000, DAZ 0x0040; update_mxcsr_status keeps these. */
+        tcg_gen_ld_i32(t, tcg_env, offsetof(CPUX86State, mxcsr));
+        tcg_gen_brcondi_i32(TCG_COND_TSTNE, t, 0xe040, slow);
+    }
+    /* First member of float_status, as the constructor checks. */
+    tcg_gen_ld16u_i32(t, tcg_env, offsetof(CPUX86State, sse_status));
+    tcg_gen_brcondi_i32(TCG_COND_TSTEQ, t, float_flag_inexact, slow);
+    tcg_temp_free_i32(t);
+}
+
+static TCGv_i64 gen_sse_fp_load(X86DecodedOp *op, int bits)
+{
+    TCGv_i64 t = tcg_temp_ebb_new_i64();
+
+    if (bits == 64) {
+        tcg_gen_ld_i64(t, tcg_env, vector_reg_offset(op));
+    } else {
+        tcg_gen_ld32u_i64(t, tcg_env, vector_reg_offset(op));
+    }
+    return t;
+}
+
+static TCGv_i64 gen_sse_fp_magnitude(TCGv_i64 value, int bits)
+{
+    TCGv_i64 t = tcg_temp_ebb_new_i64();
+
+    tcg_gen_shli_i64(t, value, 65 - bits);
+    return t;
+}
+
+/* Rejects zero exponents except zero itself, and the smallest normal. */
+static void gen_sse_fp_reject_small(TCGv_i64 magnitude, int bits, TCGLabel *slow)
+{
+    TCGv_i64 t = tcg_temp_ebb_new_i64();
+
+    tcg_gen_subi_i64(t, magnitude, 1);
+    tcg_gen_brcondi_i64(TCG_COND_TSTEQ, t, SSE_FP_EXPONENT(bits), slow);
+    tcg_temp_free_i64(t);
+}
+
+static void gen_sse_fp_reject_special(TCGv_i64 magnitude, int bits, TCGLabel *slow)
+{
+    TCGv_i64 t = tcg_temp_ebb_new_i64();
+
+    tcg_gen_not_i64(t, magnitude);
+    tcg_gen_brcondi_i64(TCG_COND_TSTEQ, t, SSE_FP_EXPONENT(bits), slow);
+    tcg_temp_free_i64(t);
+}
+
+static void gen_sse_fp_store(X86DecodedOp *op, TCGv_i64 value, int bits)
+{
+    if (bits == 64) {
+        tcg_gen_st_i64(value, tcg_env, vector_reg_offset(op));
+    } else {
+        tcg_gen_st32_i64(value, tcg_env, vector_reg_offset(op));
+    }
+}
+
+static TCGLabel *gen_sse_fp_finish(TCGLabel *slow)
+{
+    TCGLabel *done = gen_new_label();
+
+    tcg_gen_br(done);
+    gen_set_label(slow);
+    return done;
+}
+
+/* The shared shape: guards, inputs, one host op, result checks. */
+static TCGLabel *gen_sse_fp_op(X86DecodedInsn *decode, TCGAa64Fp kind,
+                               int in_bits, int out_bits, bool unary,
+                               bool zero_needs_a, bool zero_needs_b)
+{
+    TCGLabel *slow = gen_new_label();
+    TCGv_i64 a, b, a2, b2 = NULL, r, r2;
+
+    gen_sse_fp_guard(slow, true);
+    a = gen_sse_fp_load(&decode->op[unary ? 2 : 1], in_bits);
+    a2 = gen_sse_fp_magnitude(a, in_bits);
+    gen_sse_fp_reject_small(a2, in_bits, slow);
+    b = a;
+    if (!unary) {
+        b = gen_sse_fp_load(&decode->op[2], in_bits);
+        b2 = gen_sse_fp_magnitude(b, in_bits);
+        gen_sse_fp_reject_small(b2, in_bits, slow);
+    }
+
+    r = tcg_temp_ebb_new_i64();
+    tcg_gen_aa64_fp(r, a, b, kind);
+
+    r2 = gen_sse_fp_magnitude(r, out_bits);
+    gen_sse_fp_reject_special(r2, out_bits, slow);
+    gen_sse_fp_reject_small(r2, out_bits, slow);
+    if (zero_needs_a) {
+        /* Reject zero results unless an input was zero. */
+        TCGv_i64 bad = tcg_temp_ebb_new_i64(), t = tcg_temp_ebb_new_i64();
+
+        tcg_gen_setcondi_i64(TCG_COND_EQ, bad, r2, 0);
+        tcg_gen_setcondi_i64(TCG_COND_NE, t, a2, 0);
+        tcg_gen_and_i64(bad, bad, t);
+        if (zero_needs_b) {
+            tcg_gen_setcondi_i64(TCG_COND_NE, t, b2, 0);
+            tcg_gen_and_i64(bad, bad, t);
+        }
+        tcg_gen_brcondi_i64(TCG_COND_NE, bad, 0, slow);
+    }
+    gen_sse_fp_store(&decode->op[0], r, out_bits);
+    return gen_sse_fp_finish(slow);
+}
+
+static TCGLabel *gen_sse_arith_fast(DisasContext *s, X86DecodedInsn *decode, int op)
+{
+    bool dbl = s->prefix & PREFIX_REPNZ;
+    int bits = dbl ? 64 : 32;
+
+    if (op == SSE_FP_NONE || !sse_fp_merge_ok(s, decode)) {
+        return NULL;
+    }
+    switch (op) {
+    case SSE_FP_ADD:
+        return gen_sse_fp_op(decode, TCG_AA64_FADD_S + dbl, bits, bits, false, false, false);
+    case SSE_FP_SUB:
+        return gen_sse_fp_op(decode, TCG_AA64_FSUB_S + dbl, bits, bits, false, false, false);
+    case SSE_FP_MUL:
+        return gen_sse_fp_op(decode, TCG_AA64_FMUL_S + dbl, bits, bits, false, true, true);
+    case SSE_FP_DIV:
+        return gen_sse_fp_op(decode, TCG_AA64_FDIV_S + dbl, bits, bits, false, true, false);
+    default:
+        return gen_sse_fp_op(decode, TCG_AA64_FSQRT_S + dbl, bits, bits, true, false, false);
+    }
+}
+
+static TCGLabel *gen_sse_cvtsd2ss_fast(DisasContext *s, X86DecodedInsn *decode)
+{
+    if (!sse_fp_merge_ok(s, decode)) {
+        return NULL;
+    }
+    return gen_sse_fp_op(decode, TCG_AA64_FCVT_S_FROM_D, 64, 32, true, true, false);
+}
+
+static TCGLabel *gen_sse_cvtss2sd_fast(DisasContext *s, X86DecodedInsn *decode)
+{
+    TCGLabel *slow;
+    TCGv_i64 a, a2, r;
+
+    if (!sse_fp_merge_ok(s, decode)) {
+        return NULL;
+    }
+    slow = gen_new_label();
+    a = gen_sse_fp_load(&decode->op[2], 32);
+    a2 = gen_sse_fp_magnitude(a, 32);
+    gen_sse_fp_reject_small(a2, 32, slow);
+    gen_sse_fp_reject_special(a2, 32, slow);
+    r = tcg_temp_ebb_new_i64();
+    tcg_gen_aa64_fp(r, a, a, TCG_AA64_FCVT_D_FROM_S);
+    gen_sse_fp_store(&decode->op[0], r, 64);
+    return gen_sse_fp_finish(slow);
+}
+
+static TCGLabel *gen_sse_cvtsi_fast(DisasContext *s, X86DecodedInsn *decode)
+{
+    bool dbl = s->prefix & PREFIX_REPNZ, wide = decode->op[2].ot == MO_64;
+    TCGLabel *slow;
+    TCGv_i64 r;
+
+    if (!sse_fp_merge_ok(s, decode)) {
+        return NULL;
+    }
+    slow = gen_new_label();
+    if (!dbl || wide) {
+        gen_sse_fp_guard(slow, true);
+    }
+    r = tcg_temp_ebb_new_i64();
+    tcg_gen_aa64_fp(r, s->T1, s->T1,
+                    dbl ? (wide ? TCG_AA64_SCVTF_D_FROM_X : TCG_AA64_SCVTF_D_FROM_W)
+                        : (wide ? TCG_AA64_SCVTF_S_FROM_X : TCG_AA64_SCVTF_S_FROM_W));
+    gen_sse_fp_store(&decode->op[0], r, dbl ? 64 : 32);
+    return gen_sse_fp_finish(slow);
+}
+
+static TCGLabel *gen_sse_cvtt_fast(DisasContext *s, X86DecodedInsn *decode)
+{
+    bool dbl = s->prefix & PREFIX_REPNZ, wide = decode->op[0].ot == MO_64;
+    int bits = dbl ? 64 : 32;
+    /* 2^31 or 2^63, as a shifted magnitude. */
+    uint64_t bound = dbl ? (wide ? UINT64_C(0x87c0000000000000) : UINT64_C(0x83c0000000000000))
+                         : (wide ? UINT64_C(0xbe00000000000000) : UINT64_C(0x9e00000000000000));
+    TCGLabel *slow;
+    TCGv_i64 a, a2, r;
+
+    if (!sse_fp_host_ok(s)) {
+        return NULL;
+    }
+    slow = gen_new_label();
+    gen_sse_fp_guard(slow, false);
+    a = gen_sse_fp_load(&decode->op[2], bits);
+    a2 = gen_sse_fp_magnitude(a, bits);
+    gen_sse_fp_reject_small(a2, bits, slow);
+    tcg_gen_brcondi_i64(TCG_COND_GEU, a2, bound, slow);
+    r = tcg_temp_ebb_new_i64();
+    tcg_gen_aa64_fp(r, a, a,
+                    dbl ? (wide ? TCG_AA64_FCVTZS_X_FROM_D : TCG_AA64_FCVTZS_W_FROM_D)
+                        : (wide ? TCG_AA64_FCVTZS_X_FROM_S : TCG_AA64_FCVTZS_W_FROM_S));
+    tcg_gen_mov_tl(s->T0, r);
+    return gen_sse_fp_finish(slow);
+}
+
+/* Sign-magnitude to an ordinary signed integer, with sign at the top bit. */
+static TCGv_i64 gen_sse_fp_ordered(TCGv_i64 value, int bits)
+{
+    TCGv_i64 top = tcg_temp_ebb_new_i64(), abs = tcg_temp_ebb_new_i64();
+    TCGv_i64 neg = tcg_temp_ebb_new_i64(), t = tcg_temp_ebb_new_i64();
+
+    tcg_gen_shli_i64(top, value, 64 - bits);
+    tcg_gen_andi_i64(abs, top, INT64_MAX);
+    tcg_gen_neg_i64(neg, abs);
+    tcg_gen_movcond_i64(TCG_COND_LT, t, top, tcg_constant_i64(0), neg, abs);
+    return t;
+}
+
+static TCGLabel *gen_sse_comis_fast(DisasContext *s, X86DecodedInsn *decode)
+{
+    int bits = s->prefix & PREFIX_DATA ? 64 : 32;
+    uint64_t infinity = SSE_FP_EXPONENT(bits);
+    TCGLabel *slow;
+    TCGv_i64 a, b, a2, b2, x, y, lt, eq;
+
+    if (!sse_fp_host_ok(s)) {
+        return NULL;
+    }
+    slow = gen_new_label();
+    a = gen_sse_fp_load(&decode->op[1], bits);
+    b = gen_sse_fp_load(&decode->op[2], bits);
+    a2 = gen_sse_fp_magnitude(a, bits);
+    b2 = gen_sse_fp_magnitude(b, bits);
+    tcg_gen_brcondi_i64(TCG_COND_GTU, a2, infinity, slow);
+    tcg_gen_brcondi_i64(TCG_COND_GTU, b2, infinity, slow);
+    gen_sse_fp_reject_small(a2, bits, slow);
+    gen_sse_fp_reject_small(b2, bits, slow);
+
+    x = gen_sse_fp_ordered(a, bits);
+    y = gen_sse_fp_ordered(b, bits);
+    lt = tcg_temp_ebb_new_i64();
+    eq = tcg_temp_ebb_new_i64();
+    tcg_gen_setcond_i64(TCG_COND_LT, lt, x, y);
+    tcg_gen_setcond_i64(TCG_COND_EQ, eq, x, y);
+    QEMU_BUILD_BUG_ON(CC_C != 1);
+    tcg_gen_shli_i64(eq, eq, ctz32(CC_Z));
+    tcg_gen_or_i64(cpu_cc_src, lt, eq);
+    /* The helper sets this too, and assume_cc_op relies on both. */
+    tcg_gen_movi_i32(cpu_cc_op, CC_OP_EFLAGS);
+    return gen_sse_fp_finish(slow);
+}
+
+#else
+
+static TCGLabel *gen_sse_arith_fast(DisasContext *s, X86DecodedInsn *decode, int op)
+{
+    return NULL;
+}
+#define gen_sse_cvtsd2ss_fast(s, decode) NULL
+#define gen_sse_cvtss2sd_fast(s, decode) NULL
+#define gen_sse_cvtsi_fast(s, decode)    NULL
+#define gen_sse_cvtt_fast(s, decode)     NULL
+#define gen_sse_comis_fast(s, decode)    NULL
+
+#endif
+
+static inline void gen_sse_fp_join(TCGLabel *done)
+{
+    if (done) {
+        gen_set_label(done);
+    }
+}
+
 /*
  * 00 = v*ps Vps, Hps, Wpd
  * 66 = v*pd Vpd, Hpd, Wps
@@ -543,11 +898,15 @@ static inline void gen_unary_fp_sse(DisasContext *s, X86DecodedInsn *decode,
 {
     if ((s->prefix & (PREFIX_REPZ | PREFIX_REPNZ)) != 0) {
         SSEFunc_0_eppp fn = s->prefix & PREFIX_REPZ ? ss : sd;
+        TCGLabel *done;
+
         if (!fn) {
             gen_illegal_opcode(s);
             return;
         }
+        done = gen_sse_arith_fast(s, decode, SSE_FP_SQRT);
         fn(tcg_env, OP_PTR0, OP_PTR1, OP_PTR2);
+        gen_sse_fp_join(done);
     } else {
         SSEFunc_0_epp ps, pd, fn;
         ps = s->vex_l ? ps_ymm : ps_xmm;
@@ -582,11 +941,15 @@ UNARY_FP_SSE(VSQRT, sqrt)
 static inline void gen_fp_sse(DisasContext *s, X86DecodedInsn *decode,
                               SSEFunc_0_eppp pd_xmm, SSEFunc_0_eppp ps_xmm,
                               SSEFunc_0_eppp pd_ymm, SSEFunc_0_eppp ps_ymm,
-                              SSEFunc_0_eppp sd, SSEFunc_0_eppp ss)
+                              SSEFunc_0_eppp sd, SSEFunc_0_eppp ss, int fast)
 {
     SSEFunc_0_eppp ps, pd, fn;
+    TCGLabel *done = NULL;
     if ((s->prefix & (PREFIX_REPZ | PREFIX_REPNZ)) != 0) {
         fn = s->prefix & PREFIX_REPZ ? ss : sd;
+        if (fn) {
+            done = gen_sse_arith_fast(s, decode, fast);
+        }
     } else {
         ps = s->vex_l ? ps_ymm : ps_xmm;
         pd = s->vex_l ? pd_ymm : pd_xmm;
@@ -594,12 +957,13 @@ static inline void gen_fp_sse(DisasContext *s, X86DecodedInsn *decode,
     }
     if (fn) {
         fn(tcg_env, OP_PTR0, OP_PTR1, OP_PTR2);
+        gen_sse_fp_join(done);
     } else {
         gen_illegal_opcode(s);
     }
 }
 
-#define FP_SSE(uname, lname)                                                       \
+#define FP_SSE(uname, lname, fast)                                                 \
 static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                   \
 {                                                                                  \
     gen_fp_sse(s, decode,                                                          \
@@ -608,14 +972,15 @@ static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                
                gen_helper_##lname##pd_ymm,                                         \
                gen_helper_##lname##ps_ymm,                                         \
                gen_helper_##lname##sd,                                             \
-               gen_helper_##lname##ss);                                            \
+               gen_helper_##lname##ss,                                             \
+               fast);                                                              \
 }
-FP_SSE(VADD, add)
-FP_SSE(VMUL, mul)
-FP_SSE(VSUB, sub)
-FP_SSE(VMIN, min)
-FP_SSE(VDIV, div)
-FP_SSE(VMAX, max)
+FP_SSE(VADD, add, SSE_FP_ADD)
+FP_SSE(VMUL, mul, SSE_FP_MUL)
+FP_SSE(VSUB, sub, SSE_FP_SUB)
+FP_SSE(VMIN, min, SSE_FP_NONE)
+FP_SSE(VDIV, div, SSE_FP_DIV)
+FP_SSE(VMAX, max, SSE_FP_NONE)
 
 #define FMA_SSE_PACKED(uname, ptr0, ptr1, ptr2, even, odd)                         \
 static void gen_##uname##Px(DisasContext *s, X86DecodedInsn *decode)               \
@@ -672,7 +1037,7 @@ static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                
                gen_helper_##lname##dq_xmm,                                         \
                gen_helper_##lname##qdq_ymm,                                        \
                gen_helper_##lname##dq_ymm,                                         \
-               NULL, NULL);                                                        \
+               NULL, NULL, SSE_FP_NONE);                                                        \
 }
 FP_UNPACK_SSE(VUNPCKLPx, punpckl)
 FP_UNPACK_SSE(VUNPCKHPx, punpckh)
@@ -4265,8 +4630,11 @@ static void gen_VCMP(DisasContext *s, X86DecodedInsn *decode)
 static void gen_VCOMI(DisasContext *s, X86DecodedInsn *decode)
 {
     SSEFunc_0_epp fn;
+    TCGLabel *done = gen_sse_comis_fast(s, decode);
+
     fn = s->prefix & PREFIX_DATA ? gen_helper_comisd : gen_helper_comiss;
     fn(tcg_env, OP_PTR1, OP_PTR2);
+    gen_sse_fp_join(done);
     assume_cc_op(s, CC_OP_EFLAGS);
 }
 
@@ -4304,20 +4672,28 @@ static void gen_VCVTPS2PH(DisasContext *s, X86DecodedInsn *decode)
 
 static void gen_VCVTSD2SS(DisasContext *s, X86DecodedInsn *decode)
 {
+    TCGLabel *done = gen_sse_cvtsd2ss_fast(s, decode);
+
     gen_helper_cvtsd2ss(tcg_env, OP_PTR0, OP_PTR1, OP_PTR2);
+    gen_sse_fp_join(done);
 }
 
 static void gen_VCVTSS2SD(DisasContext *s, X86DecodedInsn *decode)
 {
+    TCGLabel *done = gen_sse_cvtss2sd_fast(s, decode);
+
     gen_helper_cvtss2sd(tcg_env, OP_PTR0, OP_PTR1, OP_PTR2);
+    gen_sse_fp_join(done);
 }
 
 static void gen_VCVTSI2Sx(DisasContext *s, X86DecodedInsn *decode)
 {
     int vec_len = vector_len(s, decode);
+    TCGLabel *done;
     TCGv_i32 in;
 
     tcg_gen_gvec_mov(MO_64, decode->op[0].offset, decode->op[1].offset, vec_len, vec_len);
+    done = gen_sse_cvtsi_fast(s, decode);
 
 #ifdef TARGET_X86_64
     MemOp ot = decode->op[2].ot;
@@ -4327,6 +4703,7 @@ static void gen_VCVTSI2Sx(DisasContext *s, X86DecodedInsn *decode)
         } else {
             gen_helper_cvtsq2ss(tcg_env, OP_PTR0, s->T1);
         }
+        gen_sse_fp_join(done);
         return;
     }
     in = tcg_temp_new_i32();
@@ -4340,6 +4717,7 @@ static void gen_VCVTSI2Sx(DisasContext *s, X86DecodedInsn *decode)
     } else {
         gen_helper_cvtsi2ss(tcg_env, OP_PTR0, in);
     }
+    gen_sse_fp_join(done);
 }
 
 static inline void gen_VCVTtSx2SI(DisasContext *s, X86DecodedInsn *decode,
@@ -4389,9 +4767,12 @@ static void gen_VCVTSx2SI(DisasContext *s, X86DecodedInsn *decode)
 
 static void gen_VCVTTSx2SI(DisasContext *s, X86DecodedInsn *decode)
 {
+    TCGLabel *done = gen_sse_cvtt_fast(s, decode);
+
     gen_VCVTtSx2SI(s, decode,
                    gen_helper_cvttss2si, gen_helper_cvttss2sq,
                    gen_helper_cvttsd2si, gen_helper_cvttsd2sq);
+    gen_sse_fp_join(done);
 }
 
 static void gen_VEXTRACTx128(DisasContext *s, X86DecodedInsn *decode)
@@ -4673,8 +5054,11 @@ static void gen_VSHUF(DisasContext *s, X86DecodedInsn *decode)
 static void gen_VUCOMI(DisasContext *s, X86DecodedInsn *decode)
 {
     SSEFunc_0_epp fn;
+    TCGLabel *done = gen_sse_comis_fast(s, decode);
+
     fn = s->prefix & PREFIX_DATA ? gen_helper_ucomisd : gen_helper_ucomiss;
     fn(tcg_env, OP_PTR1, OP_PTR2);
+    gen_sse_fp_join(done);
     assume_cc_op(s, CC_OP_EFLAGS);
 }
 
