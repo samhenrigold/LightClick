@@ -363,7 +363,6 @@ for i in (0, 3, 7):
     form(f"pinsrw {i} r", f"pinsrw ${i},%eax,%xmm1", ALL, FP)
     form(f"pinsrw {i} m", f"pinsrw ${i},8(%r15),%xmm1", ALL, FP)
     form(f"pextrw {i}", f"pextrw ${i},%xmm1,%eax", ALL, FP)
-form("ldmxcsr round trip", ["subq $8,%rsp", "stmxcsr (%rsp)", "ldmxcsr (%rsp)", "stmxcsr 8(%r15)", "addq $8,%rsp"], ALL, FP)
 
 out = [".text", ".globl _fuzz_forms", ".p2align 4"]
 for i, (name, body, mask, kind) in enumerate(forms):

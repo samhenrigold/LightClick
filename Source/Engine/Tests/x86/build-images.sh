@@ -22,6 +22,14 @@ for prog in t_sanity t_smc t_callret; do
 done
 clang -target x86_64-apple-macos11 -O1 "$here/flatrun.c" -o "$out/flatrun"
 
+# The same algorithms at every optimisation level. flags already holds -O2; a later -O wins.
+for level in 0 1 2 3 s; do
+    clang "${flags[@]}" -O$level -c "$here/t_corpus.c" -o "$out/t_corpus_O$level.o"
+    link "t_corpus_O$level" "$out/t_corpus_O$level.o" "$out/flatlibc.o"
+done
+clang "${flags[@]}" -msse3 -mssse3 -msse4.1 -c "$here/t_corpus.c" -o "$out/t_corpus_sse4.o"
+link t_corpus_sse4 "$out/t_corpus_sse4.o" "$out/flatlibc.o"
+
 # QEMU's test-i386 in 64-bit mode.
 qemu_tests=$here/../../../vendor/qemu/tests/tcg/i386
 sed -e 's/"initcall"/"__DATA,initcall"/' -e 's/"loopl"/".byte 0x67; loop"/' -e 's/"loopzl"/".byte 0x67; loopz"/' -e 's/"loopnzl"/".byte 0x67; loopnz"/' -e 's/"enter" size " /size "enter /' -e 's/TEST_ENTER("q"/TEST_ENTER(""/' -e 's/TEST_ENTER("w"/TEST_ENTER(".byte 0x66;"/' -e 's/uc->uc_mcontext.gregs\[[A-Z_]*\]/0/g' \

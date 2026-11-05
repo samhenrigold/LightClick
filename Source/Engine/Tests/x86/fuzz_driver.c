@@ -141,6 +141,14 @@ static void run_round(const Form *f, bool verbose) {
     for (int i = 0; i < BUF_BYTES / 8; i++)
         mix(buffer[i]);
     if (verbose) {
+        printf(" regs");
+        for (int i = 0; i < 16; i++)
+            printf(" %016lx", fuzz_st.r[i] >= base && fuzz_st.r[i] < base + BUF_BYTES ? fuzz_st.r[i] - base : fuzz_st.r[i]);
+        printf("\n");
+        uint64_t bh = 0;
+        for (int i = 0; i < BUF_BYTES / 8; i++)
+            bh = bh * 31 + buffer[i];
+        printf(" buffer %016lx\n", bh);
         printf(" in rax=%016lx rbx=%016lx rcx=%016lx fl=%04lx mx=%04lx x1=%016lx%016lx x2=%016lx%016lx mem=%016lx%016lx\n", in_rax, in_rbx, in_rcx,
                in_flags, in_mx, in_x1[1], in_x1[0], in_x2[1], in_x2[0], mem[1], mem[0]);
         printf(" out rax=%016lx rbx=%016lx rcx=%016lx rdx=%016lx fl=%04lx/%04lx mx=%04lx x1=%016lx%016lx rsp=%lx mem8=%016lx\n", fuzz_st.r[0],
