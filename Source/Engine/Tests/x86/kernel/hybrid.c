@@ -1305,6 +1305,18 @@ static void test_direct_map(void) {
     CHECK(direct[0] == 0xC0000000ULL * 3); // the harness's device
 }
 
+// With the line raised under cli, the vector comes after the one instruction following sti, not before it. A function
+// of its own: inline, the compiler unrolls the caller's loop, and each pass would be new code, whose first run comes
+// back through the monitor whatever sti does.
+static __attribute__((noinline)) void sti_with_a_vector_waiting(void) {
+    __asm__ volatile("cli");
+    u64 irqs = irq_count, seen = ~0ULL, later = ~0ULL;
+    command(4);
+    __asm__ volatile("sti\n mov %2, %0\n nop\n mov %2, %1\n" : "=&r"(seen), "=&r"(later) : "m"(irq_count));
+    CHECK(seen == irqs);
+    CHECK(later == irqs + 1);
+}
+
 // The inlined forms: each must see what the monitor's state says, and sti must keep its one-instruction shadow with an
 // interrupt waiting.
 static void test_inline_ops(u64 root) {
@@ -1335,16 +1347,9 @@ static void test_inline_ops(u64 root) {
     CHECK(!(flags & 0x200));
     __asm__ volatile("sti\n pushfq\n popq %0" : "=r"(flags));
     CHECK(flags & 0x200);
-    // With the line raised under cli, the vector comes after the one instruction following sti, not before it. Again
-    // once linked: then nothing but sti itself leaves the code to take it.
-    for (int pass = 0; pass < 3; pass++) {
-        __asm__ volatile("cli");
-        u64 irqs = irq_count, seen = ~0ULL, later = ~0ULL;
-        command(4);
-        __asm__ volatile("sti\n mov %2, %0\n nop\n mov %2, %1\n" : "=&r"(seen), "=&r"(later) : "m"(irq_count));
-        CHECK(seen == irqs);
-        CHECK(later == irqs + 1);
-    }
+    // Again once linked: then nothing but sti itself leaves the code to take it.
+    for (int pass = 0; pass < 3; pass++)
+        sti_with_a_vector_waiting();
 }
 
 static void test_ptest_flags(void) {

@@ -162,6 +162,7 @@ enum {
     HC_DEBUG, // a[0] a[1] printable
     HC_NOTE, // hybrid, for the tally. a[0] 1 process syscall (a[1] next rip), 2 wait4 returning (a[1] rip, a[2] status pointer), 3 user fault (a[1] rip, a[2] vector, a[3] error)
     HC_FALLBACK, // layout as HC_STOP. The host runs this x86 instruction elsewhere and sets the state; r[0] is the rip to continue at
+    HC_YIELD, // a lock has been held a long time: let the host run something else
     HC_PARK, // out of the code cache for a moment, in case another vCPU is resetting it
     HC_VIEW_FORGET, // a[0] view: empty its lookup table, as a slot above a shared directory changed
 };

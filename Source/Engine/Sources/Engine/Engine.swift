@@ -504,6 +504,8 @@ public final class Engine {
             _ = tr_invalidate_frame(c.pointee.req_a.0, UInt32(c.pointee.req_a.1))
         case Int(HC_VIEW_INVALIDATE_VA):
             _ = tr_invalidate_view_va(Int32(c.pointee.req_a.0), c.pointee.req_a.1, UInt32(c.pointee.req_a.2), c.pointee.req_a.3 != 0, c.pointee.req_a.4 != 0)
+        case Int(HC_YIELD):
+            sched_yield()
         case Int(HC_PARK):
             gate.leave()
             gate.enter()

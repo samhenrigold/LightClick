@@ -79,14 +79,17 @@ _Static_assert(OFF_CTX + MAX_VCPUS * CTX_SLOT <= OFF_RSTACKS, "contexts run past
 // One lock over views, the shadow pool, rmap, mirrors and page_info, with no cost beyond a load at one vCPU. See "Multi-vCPU" in DESIGN.md, which has the measurements
 // that justify holding it on a shadow fill or a page-table store. Nested takers just count, and `stop` lets go, since it abandons the stack that took it.
 static u32 mon_lock_word;
+static inline void hostcall(u64 code);
 #define smp (c0->vcpu_count > 1)
 static inline void mon_lock(void) {
     if (!smp || me->lock_depth++)
         return;
-    for (;;) {
+    for (u32 spins = 1;; spins++) {
         if (!__atomic_load_n(&mon_lock_word, __ATOMIC_RELAXED) && !__atomic_exchange_n(&mon_lock_word, 1, __ATOMIC_ACQUIRE))
             return;
-        __asm__ volatile("yield"); // shortcut: no limit, so a holder that loses its core makes others spin. A limit and an hvc to yield, if a boot on a full machine shows it
+        __asm__ volatile("yield");
+        if (!(spins & 0x3FFF)) // a long wait: the holder's thread may have lost its core, and with more vCPUs than free cores, spinning here is what keeps it off
+            hostcall(HC_YIELD);
     }
 }
 static inline void mon_unlock(void) {

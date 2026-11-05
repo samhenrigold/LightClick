@@ -1055,6 +1055,13 @@ static void *hvdbt_watchdog(void *arg)
             idle = 0;
             continue;
         }
+        /*
+         * shortcut: a store by a vCPU on the engine doesn't reach TBs a vCPU staying on TCG already has, so such a stay could run stale code past another's store. Flushing once a
+         * second bounds that, and costs an exclusive stop a second, only during a stay. Exact would be TCG hearing of engine stores; if stale code ever shows, start there.
+         */
+        if (cpu->refused[0] && current_machine->smp.max_cpus > 1) {
+            queue_tb_flush(cs);
+        }
         if (!qatomic_read(&cpu->in_engine)) { /* racy reads, and only for a human: does TCG's rip move? */
             engine_tally_sample(cpu->engine, env->eip, env->hflags & HF_CPL_MASK, env->cr[3]);
         }
