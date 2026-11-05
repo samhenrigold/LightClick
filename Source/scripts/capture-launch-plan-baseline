@@ -1,0 +1,18 @@
+#!/bin/zsh
+# Records expected.json from the Objective-C assembly that VIMLaunchPlan.swift
+# replaced, taken verbatim from its last commit. Only the host-facing reads differ.
+set -euo pipefail
+root=${0:A:h:h}
+revision=26403bf4
+work=$root/Build/Probes/launch-plan-baseline
+mkdir -p "$work"
+git -C "$root" show "$revision:Source/VirtualIntelMac/VIMSession.m" |
+    sed -n '/BOOL preparedGL=/,/self.task.environment=environment;/p' |
+    sed -e 's/NSProcessInfo\.processInfo\.arguments/self.fakeArguments/g' \
+        -e 's/NSProcessInfo\.processInfo\.environment/self.fakeEnvironment/g' \
+        -e 's/NSUUID\.UUID\.UUIDString/@"FIXED-UUID"/g' \
+        -e 's/!\[NSFileManager\.defaultManager fileExistsAtPath:file\]/NO/' \
+        -e 's/BOOL valid=fd>=0.*/BOOL valid=YES;/' >"$work/launch-plan-baseline-body.inc"
+xcrun clang -fobjc-arc -fmodules -w -I "$root/VirtualIntelMac" -I "$work" \
+    "$root/probes/launch-plan-baseline.m" -framework Foundation -o "$work/baseline"
+"$work/baseline" "$root/tests/launch-plan/scenarios.json" "$root/tests/launch-plan/expected.json"

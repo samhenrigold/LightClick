@@ -42,6 +42,7 @@
 #import "VIMInstallerCatalog.h"
 #import "VIMImageSlots.h"
 #import "VIMLegacyTabletPolicy.h"
+#import "Virtual_Intel_Mac-Swift.h"
 
 static NSMutableDictionary<NSString *,VIMSession *> *sessions;
 static NSMutableDictionary<NSString *,NSUUID *> *pendingRosettaStarts;
@@ -69,7 +70,6 @@ static BOOL VIMSkipsDevelopmentPowerConfirmation(void) {
 }
 typedef NS_ENUM(NSUInteger,VIMBootOperation) {VIMBootStart,VIMBootPrepare,VIMBootInstall,VIMBootRepair};
 static NSString *SessionKey(VIMMachine *machine) {return machine.configuration[@"Identifier"]?:machine.URL.URLByResolvingSymlinksInPath.path;}
-static NSString *VIMOptionPath(NSString *path) { return [path stringByReplacingOccurrencesOfString:@"," withString:@",,"]; }
 static NSError *VIMSessionError(NSString *message) {
     return [NSError errorWithDomain:@"VirtualIntelMac.Session" code:1 userInfo:@{NSLocalizedDescriptionKey:message}];
 }
@@ -929,11 +929,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     NSString *firmwareEFI=[commonFirmware stringByAppendingPathComponent:@"EFI.img"];
     if(![NSFileManager.defaultManager fileExistsAtPath:firmwareEFI])
         firmwareEFI=[firmwareRoot stringByAppendingPathComponent:@"EFI.img"];
-    BOOL preparedGL=[self.machine.guest isEqual:@"bigsur"]&&self.machine.hasPublishedGuestGraphics;
     BOOL signatureOnly=[VIMGuestBootPolicy readyAtURL:[self.machine.URL URLByAppendingPathComponent:@"State/BootPolicy.plist"]
         guest:self.machine.guest identifier:config[@"Identifier"]];
-    NSString *bootPolicy=[NSString stringWithFormat:@"name=opt/org.virtualintelmac/boot-policy,string=VIM1%c%c00",
-        signatureOnly?'S':'L',preparedGL?'1':'0'];
     // Old research guests retain their own known-compatible OpenCore and CODE
     // files. Never apply the supported guests' EFI boot policy or root patches.
     NSString *efiOverride=packageResearchFirmware?
@@ -952,63 +949,29 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
         if(error)*error=VIMSessionError(@"This app is missing its firmware. Rebuild or reinstall the complete app.");
         [self cleanUp];return NO;
     }
-    NSString *(^path)(NSString *)=^NSString *(NSString *key){
-        if([key isEqual:@"Firmware"])return VIMOptionPath(packageResearchFirmware?
-            [self.machine.URL.path stringByAppendingPathComponent:config[@"Firmware"]]:
-            firmwareCode);
-        if([key isEqual:@"BootMedia"])return VIMOptionPath(efiOverride?:firmwareEFI);
-        if([key isEqual:@"InstallerMedia"]&&[config[@"InstallerMediaShared"] boolValue])return VIMOptionPath(config[key]);
-        return VIMOptionPath([self.machine.URL.path stringByAppendingPathComponent:config[key]]);
+    NSString *(^machinePath)(NSString *)=^NSString *(NSString *key){
+        return [self.machine.URL.path stringByAppendingPathComponent:config[key]];
     };
-    NSString *memory=[config[@"MemoryMiB"] stringValue];
-    // The documented shared network is IPv4. Do not advertise a second IPv6
-    // default route that can black-hole connections on IPv4-only host networks.
-    NSMutableString *network=[NSMutableString stringWithString:@"user,id=net0,ipv6=off"];
-    NSString *mac=VIMNetworkMACAddress(config);
-    if([config[@"SSHEnabled"] boolValue])[network appendFormat:@",hostfwd=tcp:127.0.0.1:%ld-:22",[config[@"SSHPort"] integerValue]];
-    if([config[@"FileSharingEnabled"] boolValue])[network appendFormat:@",hostfwd=tcp:127.0.0.1:%ld-:445",[config[@"FileSharingPort"] integerValue]];
-    if(![VIMNetworkMode(config) isEqual:@"shared"])network=[NSMutableString stringWithString:@"socket,id=net0,fd=0"];
-    NSString *cpu=@"Penryn,vendor=GenuineIntel,+sse4.2,+popcnt,+aes,+pclmulqdq,+pcid";
-    // Use one virtual timestamp rate on ARM. At the default 1 GHz, early
-    // XNU releases can wrap their nanotime multiplier or have no matching
-    // commpage routine. This is not an instruction-speed limit. Intel HVF
-    // keeps its hardware counter.
-    if(appleSilicon)
-        cpu=[cpu stringByAppendingString:@",tsc-frequency=1200000000"];
-    // Mavericks rejects newer Intel models in cpuid_set_info before drivers
-    // start (verified "Unsupported CPU" on the Ice Lake HVF host). Keep the
-    // same supported Penryn identity as its TCG path; HVF still executes guest
-    // instructions natively. Do not change supported production guests.
-    if(!appleSilicon&&!self.machine.preMetalGuest)cpu=mojave?@"host,model=94":@"host";
-    // Explicit research comparison only: Mavericks knows Haswell, unlike
-    // this host's newer CPUID model. Preserve the normal guest and TCG paths.
     NSUInteger openGLCPUOption=[launchArguments indexOfObject:@"--opengl-cpu-model"];
+    NSString *researchCPUModel=nil;
     if(openGLCPUOption!=NSNotFound) {
         NSString *model=openGLCPUOption+1<launchArguments.count?launchArguments[openGLCPUOption+1]:@"";
         if(appleSilicon||!self.machine.openGLResearchGuest||![@[@"penryn",@"haswell"] containsObject:model]) {
             if(error)*error=VIMSessionError(@"--opengl-cpu-model requires an Intel-host research Mac and penryn or haswell. The Mac was not started.");
             [self cleanUp];return NO;
         }
-        if([model isEqual:@"haswell"])cpu=@"Haswell,vendor=GenuineIntel,+pcid,-hle,-rtm";
+        researchCPUModel=model;
         [self.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Research CPU comparison: %@\n",model] dataUsingEncoding:NSUTF8StringEncoding]];
     }
-    NSString *sataDisk=@"ide-hd,bus=ide.1,drive=macos,bootindex=2,rotation_rate=1";
-    NSString *nvmeDisk=@"nvme,drive=macos,serial=VIM00000001,bus=pcie.0,addr=0x8,bootindex=2";
-    // Big Sur on ARM TCG can hand off to XNU over SATA and then wait
-    // indefinitely for its root volume. The same installed disk boots over
-    // native NVMe. Keep the controller stable across later update boots;
-    // leave Intel, earlier systems and ongoing installations on SATA.
-    BOOL installedBigSur=appleSilicon&&[self.machine.guest isEqual:@"bigsur"]&&
-        [@[@"installed",@"imported-prepared"] containsObject:config[@"InstallState"]?:@""];
-    NSString *systemDiskDevice=installedBigSur?nvmeDisk:sataDisk;
     NSUInteger diskOption=[launchArguments indexOfObject:@"--system-disk-interface"];
+    NSString *systemDiskInterface=nil;
     if(diskOption!=NSNotFound) {
         NSString *interface=diskOption+1<launchArguments.count?launchArguments[diskOption+1]:@"";
         if(![@[@"sata",@"nvme"] containsObject:interface]) {
             if(error)*error=VIMSessionError(@"--system-disk-interface requires sata or nvme. The Mac was not started.");
             [self cleanUp];return NO;
         }
-        systemDiskDevice=[interface isEqual:@"nvme"]?nvmeDisk:sataDisk;
+        systemDiskInterface=interface;
         [self.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Development system disk interface: %@\n",interface] dataUsingEncoding:NSUTF8StringEncoding]];
     }
     self.task=[NSTask new];self.task.executableURL=[NSURL fileURLWithPath:qemu];
@@ -1017,186 +980,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     // vCPU threads and cannot promote those host threads itself.
     self.task.qualityOfService=NSQualityOfServiceUserInitiated;
     if(self.networkClient.socket)self.task.standardInput=self.networkClient.socket;
-    // Input uses USB throughout, including firmware. Do not also publish an
-    // unused PS/2 keyboard: the legacy Voodoo driver identifies it as generic
-    // and independently triggers Keyboard Setup Assistant despite Apple USB ID.
-    // Explicit development isolation: keep the production devices, memory and
-    // display path while enabling TCG's guest watchpoints on an Intel builder.
-    BOOL developmentTCG=[NSProcessInfo.processInfo.arguments containsObject:@"--development-tcg"];
-    BOOL earlyAppleXHCI=[@[@"lion",@"mountainlion",@"mavericks",@"yosemite"] containsObject:self.machine.guest];
-    NSString *xhciDevice=@"qemu-xhci,id=xhci,bus=pcie.0,addr=0x7";
-    // El Capitan binds the 64-bit BAR, but its MSI-X path delays physical
-    // storage completions. Classic MSI also serves the earlier driver.
-    if(earlyAppleXHCI||[self.machine.guest isEqual:@"elcapitan"])
-        xhciDevice=[xhciDevice stringByAppendingString:@",msi=on,msix=off,conditional-intr-mapping=on"];
-    // Only the early AppleUSBXHCI stack needs a low BAR and bulk-ring help.
-    if(earlyAppleXHCI)xhciDevice=[xhciDevice stringByAppendingString:@",x-bar-32bit=on,x-bulk-event-data=on"];
-    NSMutableArray *baseArguments=[NSMutableArray arrayWithArray:@[@"-name",VIMOptionPath(self.machine.name),@"-L",bios,@"-machine",@"q35,i8042=off",@"-accel",(appleSilicon||developmentTCG)?@"tcg,thread=multi":@"hvf",
-        // v1 does not implement reliable S3/S4 resume. Do not advertise these
-        // states to macOS in the first place; pmset sleep=0 remains a second
-        // safeguard, rather than the sole defense against an idle timer.
-        @"-global",@"ICH9-LPC.disable_s3=1",@"-global",@"ICH9-LPC.disable_s4=1",
-        @"-cpu",cpu,@"-smp",[config[@"CPUCount"] stringValue],@"-m",memory,
-        @"-object",[NSString stringWithFormat:appleSilicon?
-            @"memory-backend-shm,id=pvg-ram,size=%@M,share=on":
-            @"memory-backend-ram,id=pvg-ram,size=%@M",memory],
-        @"-machine",@"memory-backend=pvg-ram",@"-nodefaults",@"-vga",@"none",
-        @"-device",@"apple-gfx-pci",@"-display",@"none",
-        // Darwin9's EHCI uses legacy IRQ10. Keep it off VGA's PIRQ F,
-        // whose PIC alias is deliberately disabled after _PIC(1). Slot5
-        // routes EHCI INTD to PIRQ E instead; newer guests retain their map.
-        @"-device",[self.machine.guest isEqual:@"leopard"]?@"ich9-usb-ehci1,id=usb,bus=pcie.0,addr=0x5":@"ich9-usb-ehci1,id=usb",@"-device",@"usb-kbd,id=keyboard,bus=usb.0,port=1,apple-ansi=on",
-        // USB passthrough bus (USB 2 and 3). A fixed slot after the network
-        // adapter's leaves existing device addresses and services unchanged.
-        @"-device",xhciDevice,
-        @"-device",@"usb-tablet,id=tablet,bus=usb.0,port=2",
-        // Apple's Intel guest agent opens this exact VirtIO console name.
-        // Keep its control endpoint inside the per-session private directory;
-        // unlike network forwarding it is never exposed on a TCP interface.
-        @"-device",@"virtio-serial-pci,id=guestserial",
-        @"-chardev",[NSString stringWithFormat:@"socket,id=guestagent,path=%@,server=on,wait=off",
-            VIMOptionPath([self.runtimeDirectory stringByAppendingPathComponent:@"guest-agent"])],
-        // Older systems have Apple16X50Serial but no AppleVirtIOConsole.
-        // Keep metadata local and on the same app-owned QGA socket. Graphics
-        // and bulk support-media delivery never travel over this slow UART.
-        @"-device",self.machine.preMetalGuest?
-            @"isa-serial,chardev=guestagent,index=1":
-            @"virtserialport,bus=guestserial.0,chardev=guestagent,name=org.qemu.guest_agent.0",
-        // A distinct channel, never another client of the guest-agent socket.
-        // Present it even when sharing is off so enabling it needs no restart.
-        @"-chardev",[NSString stringWithFormat:@"socket,id=clipboard,path=%@,server=on,wait=off",
-            VIMOptionPath([self.runtimeDirectory stringByAppendingPathComponent:@"clipboard"])],
-        @"-device",self.machine.preMetalGuest?@"isa-serial,chardev=clipboard,index=0":@"virtserialport,bus=guestserial.0,chardev=clipboard,name=org.vim.clipboard",
-        // Old donated framebuffer drivers do not report DPMS to host PVG.
-        // Dedicated metadata events remain available with clipboard disabled.
-        @"-chardev",[NSString stringWithFormat:@"socket,id=displaypower,path=%@,server=on,wait=off",
-            VIMOptionPath([self.runtimeDirectory stringByAppendingPathComponent:@"displaypower"])],
-        @"-device",@"virtserialport,bus=guestserial.0,chardev=displaypower,name=org.vim.display"]];
-    if([@[@"mojave",@"catalina"] containsObject:self.machine.guest]) {
-        // These Recovery images ship Apple16X50Serial but not Apple's QGA.
-        // Installed macOS keeps its native VirtIO channel; only the Recovery
-        // service opens COM2. No graphics or payload archive uses this UART.
-        [baseArguments addObjectsFromArray:@[@"-chardev",[NSString stringWithFormat:
-            @"socket,id=recoveryagent,path=%@,server=on,wait=off",
-            VIMOptionPath([self.runtimeDirectory stringByAppendingPathComponent:@"recovery-agent"])],
-            @"-device",@"isa-serial,chardev=recoveryagent,index=1"]];
-    }
-    // Native Tiger's 16X50 driver requires the dedicated ISA edge/high
-    // contract, not upstream AML's shared level interrupt. Repeated native
-    // boots and verified bulk/control traffic qualify this Tiger-only path.
-    if([self.machine.guest isEqual:@"tiger"])
-        [baseArguments addObjectsFromArray:@[@"-global",@"isa-serial.acpi-irq-edge=on"]];
-    if(!efiOverride&&!self.machine.preMetalGuest)[baseArguments addObjectsFromArray:@[@"-fw_cfg",bootPolicy]];
-    // Boot-time only; older per-OS firmware ignores this named item. The
-    // unified image uses it before loading the unchanged OpenCore profile.
-    [baseArguments addObjectsFromArray:@[@"-fw_cfg",[NSString stringWithFormat:
-        @"name=opt/org.virtualintelmac/firmware-profile,string=%@",self.machine.guest]]];
-    if(!installerDisplay) {
-        // The existing QEMU property supplies the initial native display mode;
-        // no fixed 1920-wide default or wait for the desktop/guest tool.
-        NSDictionary *graphics=@{@"driver":@"apple-gfx-pci",@"display-modes":@[
-            [NSString stringWithFormat:@"%lux%lu@60",(unsigned long)initialPixels.width,(unsigned long)initialPixels.height]]};
-        NSData *json=[NSJSONSerialization dataWithJSONObject:graphics options:0 error:NULL];
-        baseArguments[[baseArguments indexOfObject:@"apple-gfx-pci"]]=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
-    }
-    if([self.machine.guest isEqual:@"elcapitan"]) {
-        // Actual15G31 recovery relocates the low halves of 64-bit PCI BARs
-        // below4GB but leaves OVMF's high dwords in the device. Its page table
-        // maps XHCI at0x88004000 while the device decodes0x888004000; the first
-        // capability read returns all ones and Apple's unplug path panics.
-        // OVMF's native zero-aperture policy allocates the complete BAR below
-        //4GB up front. Keep USB3 and native drivers, not an Apple kext patch.
-        [baseArguments addObjectsFromArray:@[@"-fw_cfg",@"name=opt/ovmf/X-PciMmio64Mb,string=0"]];
-    }
-    if(!config[@"AudioEnabled"]||[config[@"AudioEnabled"] boolValue]) {
-        NSMutableString *audio=[NSMutableString stringWithString:@"sdl,id=audio0"];
-        // QEMU otherwise fixes its mixer at 44.1 kHz even on a 48 kHz host.
-        // Match the selected output's current rate: avoid a second converter
-        // after guest mixing, without changing the host device or queue size.
-        [audio appendFormat:@",out.frequency=%lu",(unsigned long)VIMHostOutputSampleRate(VIMAudioSelection(config,NO))];
-        // Capture also follows its selected physical device, independently of
-        // output. Avoid SDL's native-input -> 44.1 kHz -> guest-rate chain.
-        [audio appendFormat:@",in.frequency=%lu",(unsigned long)VIMHostInputSampleRate(VIMAudioSelection(config,YES))];
-        if([VIMAudioSelection(config,YES) isEqual:@"disabled"])[audio appendString:@",in.voices=0"];
-        if([VIMAudioSelection(config,NO) isEqual:@"disabled"])[audio appendString:@",out.voices=0"];
-        [baseArguments addObjectsFromArray:@[@"-audiodev",audio]];
-        // Keep this in the original PCI-device order so existing network
-        // service associations are not disturbed by the sound implementation.
-        // Big Sur ships AppleVirtIOSound (IOVirtIOPrimaryMatch 0x00191af4).
-        if([self.machine.guest isEqual:@"bigsur"])
-            [baseArguments addObjectsFromArray:@[@"-device",@"virtio-sound-pci,audiodev=audio0,x-apple-reconfigure=on"]];
-        else [baseArguments addObjectsFromArray:@[@"-device",@"intel-hda,id=hda",@"-device",@"hda-duplex,bus=hda.0,audiodev=audio0"]];
-        // Explicit development-only cold-codec trace through the normal app
-        // launch. No QEMU debugger or additional control connection is needed.
-        if(![self.machine.guest isEqual:@"bigsur"]&&[NSProcessInfo.processInfo.arguments containsObject:@"--trace-hda-codec"])
-            [baseArguments addObjectsFromArray:@[@"-global",@"intel-hda.debug=2",@"-global",@"hda-duplex.debug=2"]];
-    }
-    if(!efiOverride&&[@[@"snowleopard",@"lion",@"mountainlion",@"mavericks",@"yosemite",
-                        @"elcapitan",@"sierra",@"highsierra"] containsObject:self.machine.guest]) {
-        // The bundled MacPro5,1 profiles preserve the virtual DIMM records.
-        // Report a period-appropriate nominal speed in SMBIOS, not a host
-        // bandwidth claim. Capacity, memory timing and the TSC are unchanged.
-        [baseArguments addObjectsFromArray:@[@"-smbios",@"type=17,speed=1066"]];
-    }
-    if(!efiOverride&&self.machine.preMetalGuest) {
-        // Older bundled profiles leave the serial empty. Supply a clearly
-        // virtual, stable identifier without borrowing the host's identity
-        // or changing the firmware profile, hardware UUID, or board ID.
-        NSUUID *identifier=[[NSUUID alloc] initWithUUIDString:config[@"Identifier"]];
-        if(identifier) {
-            NSString *uuid=identifier.UUIDString;
-            NSString *serial=[uuid substringFromIndex:uuid.length-12];
-            [baseArguments addObjectsFromArray:@[@"-smbios",[NSString stringWithFormat:@"type=1,serial=%@",serial]]];
-        }
-    }
-    [baseArguments addObjectsFromArray:@[
-        @"-device",@"isa-applesmc,osk=ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc",@"-smbios",@"type=2",
-        @"-drive",[NSString stringWithFormat:@"if=pflash,format=raw,readonly=on,file=%@",path(@"Firmware")],
-        @"-drive",[NSString stringWithFormat:@"if=pflash,format=raw,file=%@",path(@"NVRAM")],
-        @"-drive",[NSString stringWithFormat:@"id=opencore,if=none,format=raw,%@,file=%@",
-            @"snapshot=on",path(@"BootMedia")],
-        // OVMF has NvmExpressDxe, while native Tiger has no NVMe block driver.
-        // Keep the bootloader disk available to firmware, not Disk Arbitration:
-        // an ESP-only IDE disk otherwise races Tiger's unreadable-media dialog
-        // before its guest agent can register a per-disk no-mount policy.
-        // The installed OS disk stays on the same native IDE controller.
-        @"-device",[self.machine.guest isEqual:@"tiger"]?
-            @"nvme,bus=pcie.0,addr=0x8,drive=opencore,bootindex=1,serial=VIMFirmwareEFI":
-            @"ide-hd,bus=ide.0,drive=opencore,bootindex=1,rotation_rate=1",
-        @"-drive",[NSString stringWithFormat:@"id=macos,if=none,format=qcow2,file=%@",path(@"Disk")],
-        @"-device",systemDiskDevice,
-        // On q35 the auto-assigned slot 5 shares INTx with EHCI (IRQ 21).
-        // Apple's 8254X filter can consume the masked initial LSC while
-        // servicing that unrelated USB interrupt, leaving en0 inactive.
-        // Reserve slot 6 / IRQ 22: no emulated-register or guest-driver patch,
-        // link reset, or delayed boot-time reconnect is necessary.
-        @"-device",[@"e1000-82545em,id=ethernet,bus=pcie.0,addr=0x6,netdev=net0,mac=" stringByAppendingString:mac],
-        @"-qmp",[NSString stringWithFormat:@"unix:%@,server=on,wait=off",qmp],
-        @"-serial",self.machine.preMetalGuest?@"none":[NSString stringWithFormat:@"file:%@",[self.machine.URL.path stringByAppendingPathComponent:@"State/serial.log"]],
-        @"-monitor",@"none",@"-action",@"reboot=shutdown"]];
-    [baseArguments addObjectsFromArray:@[@"-netdev",network]];
-    // Establish an unplugged cable before executing any guest instruction.
-    // Keep the backend available so reconnecting never needs a guest reboot.
-    if(openGLInprocess || (config[@"NetworkConnected"]&&![config[@"NetworkConnected"] boolValue]))[baseArguments addObject:@"-S"];
-    NSMutableArray *mediaArguments=baseArguments;
-    // Explicit development diagnosis only: capture boot-time PHY accesses
-    // through QEMU's disabled-by-default tracing, not a second QMP client.
-    if([NSProcessInfo.processInfo.arguments containsObject:@"--trace-network"])
-        [mediaArguments addObjectsFromArray:@[@"-trace",@"enable=e1000_*",@"-trace",@"enable=e1000x_link_negotiation_*"]];
-    if([NSProcessInfo.processInfo.arguments containsObject:@"--trace-cursor"])
-        [mediaArguments addObjectsFromArray:@[@"-trace",@"enable=vmware_cursor_define"]];
-    if([NSProcessInfo.processInfo.arguments containsObject:@"--trace-image-enumeration"])
-        [mediaArguments addObjectsFromArray:@[@"-trace",@"enable=usb_msd_maxlun"]];
-    if([NSProcessInfo.processInfo.arguments containsObject:@"--firmware-diagnostics"])
-        [mediaArguments addObjectsFromArray:@[@"-debugcon",[@"file:" stringByAppendingString:[self.machine.URL.path stringByAppendingPathComponent:@"State/firmware.log"]],@"-global",@"isa-debugcon.iobase=0x402"]];
-    // Kernel debugging for the opt-in legacy harness, bound to loopback only.
-    // Does not open a second QMP owner or expose debug access in normal VMs.
-    NSInteger openGLGDB=[config[@"LegacyGDBPort"] integerValue];
-    if(self.machine.openGLResearchGuest&&openGLGDB>0&&openGLGDB<=65535)
-        [mediaArguments addObjectsFromArray:@[@"-gdb",[NSString stringWithFormat:@"tcp:127.0.0.1:%ld",(long)openGLGDB]]];
-    // Independent read-only support media: never take over the user's CD/DVD
-    // or the macOS installer. Insert only during setup and eject after copying.
-    [mediaArguments addObjectsFromArray:@[@"-drive",@"id=setup-support,if=none,media=cdrom,readonly=on",@"-device",@"ide-cd,id=setup-support-device,bus=ide.4,drive=setup-support"]];
     NSString *optical=config[@"OpticalMedia"];
     NSError *opticalFailure=nil;
     NSString *opticalFormat=optical.length?VIMOpticalImageFormat(optical,&opticalFailure):nil;
@@ -1212,17 +995,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
             [self cleanUp];return NO;
         }
     }
-    BOOL diskImage=[opticalFormat isEqual:@"dmg"];
-    NSString *opticalDrive=optical.length&&!diskImage?[NSString stringWithFormat:@"id=cdrom,if=none,media=cdrom,format=raw,readonly=on,file=%@",VIMOptionPath(optical)]:@"id=cdrom,if=none,media=cdrom,readonly=on";
-    [mediaArguments addObjectsFromArray:@[@"-drive",opticalDrive,@"-device",@"ide-cd,id=cdrom-device,bus=ide.3,drive=cdrom"]];
-    // DMGs are disks, not optical sectors: preserve their 512-byte geometry
-    // through a stock USB/SCSI removable device. Both backends are read-only;
-    // the unused drive has no medium, not a converted or cached placeholder.
-    NSString *imageDrive=diskImage?[NSString stringWithFormat:@"id=removable-image,if=none,media=disk,format=dmg,readonly=on,file=%@",VIMOptionPath(optical)]:@"id=removable-image,if=none,media=disk,readonly=on";
-    [mediaArguments addObjectsFromArray:@[@"-drive",imageDrive,@"-device",[NSString stringWithFormat:@"usb-bot,id=image-usb,bus=%@,port=%lu",VIMImageUSBBus(self.machine.guest),(unsigned long)VIMImageUSBPort(self.machine.guest,0)],@"-device",@"scsi-hd,id=image-device,bus=image-usb.0,drive=removable-image,removable=on,logical_block_size=512,physical_block_size=512"]];
     self.insertedMediaPath=optical?:@"";self.insertedMediaFormat=opticalFormat;
     self.additionalMedia=[NSMutableDictionary new];
     self.imageDevices=[NSMutableSet new];
+    NSMutableArray<LaunchImage *> *additionalImages=[NSMutableArray new];
     for(NSUInteger slot=1;slot<VIMImageSlotCount;slot++) {
         NSString *path=VIMImageSlotPath(config,slot);NSError *failure=nil;
         NSString *format=path.length?VIMOpticalImageFormat(path,&failure):nil;
@@ -1233,86 +1009,19 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
             else {if(error)*error=VIMFriendlyDiscImageError(path,failure);[self cleanUp];return NO;}
         }
         if(path.length)self.additionalMedia[@(slot)]=@{@"Path":path,@"Format":format};
-        NSString *backend=[NSString stringWithFormat:@"image-backend-%lu",(unsigned long)slot];
-        NSString *drive=[NSString stringWithFormat:@"id=%@,if=none,media=disk,readonly=on%@",backend,
-            path.length?[NSString stringWithFormat:@",format=%@,file=%@",format,VIMOptionPath(path)]:@""];
         if(path.length) {
-            [mediaArguments addObjectsFromArray:@[@"-drive",drive]];
-            NSString *transport=[NSString stringWithFormat:@"image-usb-%lu",(unsigned long)slot];
-            NSString *device=[NSString stringWithFormat:@"scsi-hd,id=%@,bus=%@.0,drive=%@,removable=on,logical_block_size=512,physical_block_size=512",
-                VIMImageSlotDevice(slot,format),transport,backend];
-            [mediaArguments addObjectsFromArray:@[@"-device",[NSString stringWithFormat:@"usb-bot,id=%@,bus=%@,port=%lu",transport,VIMImageUSBBus(self.machine.guest),(unsigned long)VIMImageUSBPort(self.machine.guest,slot)],@"-device",device]];
+            [additionalImages addObject:[[LaunchImage alloc] initWithSlot:(NSInteger)slot path:path format:format]];
             [self.imageDevices addObject:@(slot)];
         }
     }
+    NSString *setupMedia=nil;
     if(self.machine.preMetalGuest&&config[@"InstallerMedia"]) {
         NSError *setupError=nil;NSURL *policy=[VIMAutomaticSetup configurationMediaForMachine:self.machine error:&setupError];
         if(setupError){if(error)*error=setupError;[self cleanUp];return NO;}
         self.openGLSetupMediaAttached=policy!=nil;
-        if(policy)[mediaArguments addObjectsFromArray:@[@"-drive",[NSString stringWithFormat:@"id=opengl-setup,if=none,media=cdrom,format=raw,readonly=on,file=%@",VIMOptionPath(policy.path)],
-            @"-device",@"ide-cd,id=opengl-setup-device,bus=ide.5,drive=opengl-setup"]];
+        setupMedia=policy.path;
     }
-    self.task.arguments=mediaArguments;
-    if(installerDisplay || config[@"InstallerMedia"]) {
-        NSMutableArray *arguments=[self.task.arguments mutableCopy];
-        if(installerDisplay) {
-            NSUInteger vga=[arguments indexOfObject:@"-vga"];
-            // Research-only surface-provider bring-up. Never changes the
-            // supported guests' installer adapter or pretends this is PVG.
-            BOOL openGLSVGA=self.machine.preMetalGuest&&[config[@"LegacyDisplayAdapter"] isEqual:@"vmware"];
-            arguments[vga+1]=openGLSVGA?@"vmware":@"std";
-            if(openGLSVGA&&self.machine.passthroughOpenGLEnabled) {
-                [arguments addObjectsFromArray:@[@"-global",@"vmware-svga.passthrough-opengl-bridge=on",
-                    @"-global",@"vmware-svga.vgamem_mb=512",
-                    // This research layout's SVGA/EHCI use native GSI21.
-                    // Remove only their duplicate PIC fanout after _PIC(1),
-                    // preserving SATA's real legacy route and boot PIC mode.
-                    @"-global",@"ICH9-LPC.x-apic-pirq-f-native-only=on"]];
-                // This installed research guest uses the installer display
-                // transport, not installer display semantics. A real panel
-                // contract lets Mavericks choose HiDPI without a preference.
-                NSString *mode=self.displayMode;
-                BOOL explicitMode=config[@"DisplayMode"]!=nil||config[@"RetinaEnabled"]!=nil;
-                BOOL retina=[mode isEqual:@"retina"]&&(explicitMode||self.window.backingScaleFactor>1);
-                // Panel capability is hardware, not the current UI choice.
-                // Booting Scaled must not turn a Retina host into a low-DPI
-                // physical panel: 10.8 then omits every native 2x mode and
-                // cannot switch back to Retina without another boot. Keep
-                // both choices available; guest-display selects the requested
-                // 1x/2x mode through the existing production path afterward.
-                BOOL retinaPanel=self.supportsRetinaDisplay&&(retina||self.window.backingScaleFactor>1);
-                [arguments addObjectsFromArray:@[@"-global",[NSString stringWithFormat:@"vmware-svga.passthrough-opengl-panel-width=%u",retinaPanel?2560:1280],
-                    @"-global",[NSString stringWithFormat:@"vmware-svga.passthrough-opengl-panel-height=%u",retinaPanel?1600:800],
-                    @"-global",[NSString stringWithFormat:@"vmware-svga.passthrough-opengl-ui-scale=%u",retinaPanel?2:1]]];
-            }
-            if(!openGLSVGA)
-                [arguments addObjectsFromArray:@[@"-global",@"VGA.xres=1280",@"-global",@"VGA.yres=800"]];
-            NSUInteger pvg=[arguments indexOfObject:@"apple-gfx-pci"];
-            [arguments removeObjectsInRange:NSMakeRange(pvg-1,2)];
-        }
-        if(config[@"InstallerMedia"]) [arguments addObjectsFromArray:@[@"-drive",[NSString stringWithFormat:@"id=installer,if=none,format=raw,%@,file=%@",
-            [config[@"InstallerMediaKind"] isEqual:@"disk"]?@"snapshot=on":@"readonly=on",path(@"InstallerMedia")],
-            @"-device",[config[@"InstallerMediaKind"] isEqual:@"disk"]?
-                @"ide-hd,bus=ide.2,unit=0,drive=installer,bootindex=3,rotation_rate=1":
-                @"ide-cd,bus=ide.2,unit=0,drive=installer,bootindex=3"]];
-        self.task.arguments=arguments;
-    }
-    NSMutableDictionary *environment=[NSProcessInfo.processInfo.environment mutableCopy];
-    if(openGLInprocess) {
-        environment[@"VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY"]=inprocessLibrary;
-        if(!environment[@"VIM_PASSTHROUGH_OPENGL_INLINE"])environment[@"VIM_PASSTHROUGH_OPENGL_INLINE"]=@"1";
-        if(!environment[@"VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT"])environment[@"VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT"]=@"1";
-        if(!environment[@"VIM_DISPLAY_EVENT_DRIVEN"])environment[@"VIM_DISPLAY_EVENT_DRIVEN"]=@"1";
-        if(![environment[@"VIM_OPENGL_VRAM_SERVICE"] length])
-            environment[@"VIM_OPENGL_VRAM_SERVICE"]=[@"com.mac.virtualintelmac.ram." stringByAppendingString:NSUUID.UUID.UUIDString];
-        if(![environment[@"VIM_OPENGL_VRAM_ENDPOINT"] length])
-            environment[@"VIM_OPENGL_VRAM_ENDPOINT"]=[self.runtimeDirectory stringByAppendingPathComponent:@"vram-endpoint.plist"];
-        if(![environment[@"VIM_OPENGL_DISPLAY_ENDPOINT"] length])
-            environment[@"VIM_OPENGL_DISPLAY_ENDPOINT"]=[self.runtimeDirectory stringByAppendingPathComponent:@"graphics-endpoint.plist"];
-    }
-    // Never inherit a developer's routing override into an unrelated VM.
-    [environment removeObjectForKey:@"VIM_AUDIO_OUTPUT_DEVICE"];
-    [environment removeObjectForKey:@"VIM_AUDIO_INPUT_DEVICE"];
+    NSMutableDictionary<NSNumber *,NSString *> *audioDeviceNames=[NSMutableDictionary new];
     for(NSNumber *input in @[@NO,@YES]) {
         NSString *uid=VIMAudioSelection(config,input.boolValue);
         if([@[@"default",@"disabled"] containsObject:uid])continue;
@@ -1323,54 +1032,45 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
             if(error)*error=VIMSessionError(@"The selected sound device is unavailable or has a duplicate name. Choose Default or another device in Sound settings.");
             [self cleanUp];return NO;
         }
-        environment[input.boolValue?@"VIM_AUDIO_INPUT_DEVICE":@"VIM_AUDIO_OUTPUT_DEVICE"]=choice[@"Name"];
+        audioDeviceNames[input]=choice[@"Name"];
     }
-    environment[@"VIM_INPUT_BACKPRESSURE"]=@"1";
-    [environment removeObjectForKey:@"VIM_E1000_LINK_HISTORY"];
-    if([NSProcessInfo.processInfo.arguments containsObject:@"--record-network-history"])
-        environment[@"VIM_E1000_LINK_HISTORY"]=@"1";
-    // Host tuning must not leak between development launches or architectures.
-    for(NSString *key in environment.allKeys)
-        if([key hasPrefix:@"PVG_"])[environment removeObjectForKey:key];
-    [environment removeObjectForKey:@"DYLD_INSERT_LIBRARIES"];
-    [environment removeObjectForKey:@"VIM_INSTALLER_DISPLAY_SOCKET"];
-    [environment removeObjectForKey:@"VIM_DISPLAY_REFRESH_MS"];
-    [environment addEntriesFromDictionary:@{@"PVG_OOP_HELPER":helper,@"PVG_OOP_DONOR":donor,
-        @"PVG_APP_DISPLAY_SOCKET":self.displayConnection.socketPath,@"PVG_TCG_TSO":@"0",
-        @"PVG_TCG_LAZY_JMP_CACHE":@"1",@"PVG_TCG_KEEP_PHYS_TLB":@"1",@"PVG_TCG_INLINE_JMP_CACHE":@"1",
-        @"PVG_TCG_NATIVE_FP_FLAGS":@"0",@"PVG_TCG_NATIVE_PACKED_FP":@"1",@"PVG_TCG_NATIVE_EXACT_FP":@"1",
-        // Panel capability, not the current logical mode. Creating a1x-only
-        // PVG panel prevents macOS from advertising any2x mode for a later
-        // live Retina selection. The guest-display tool selects1x or2x.
-        @"PVG_OOP_SCALE_FACTOR":@"2",@"PVG_APP_DISPLAY_SCALE":@"2",
-        @"PVG_PRESERVE_IOSURFACE":@"1",@"PVG_SHADOW_COALESCE":@"1",
-        @"PVG_SHADOW_MAX_CHUNK":@"1048576",@"PVG_SHADOW_TEXTURE_PAGING":@"1"}];
-    // The framework cannot raw-blit packed multisample depth/stencil. The
-    // ordered transfer adapter was qualified in the CLI harness, but omitted
-    // when that harness became this app. Keep its quiet path enabled on Intel;
-    // it preserves samples and the original command-buffer event ordering.
-    if(!appleSilicon)environment[@"PVG_TEST_MSAA_TRANSFER"]=@"1";
-    if(installerDisplay) {
-        [environment removeObjectForKey:@"PVG_APP_DISPLAY_SOCKET"];
-        environment[@"VIM_INSTALLER_DISPLAY_SOCKET"]=self.displayConnection.socketPath;
-        if(self.machine.preMetalGuest&&self.machine.passthroughOpenGLEnabled) {
-            // The ordinary embedded display defaults to a 30-ms poll. That
-            // caps the accelerated research scanout at ~33 Hz before any
-            // rendering/ACK cost. This does not change supported guest paths.
-            NSInteger interval=[NSUserDefaults.standardUserDefaults integerForKey:@"VIMLegacyDisplayRefreshMS"];
-            environment[@"VIM_DISPLAY_REFRESH_MS"]=[NSString stringWithFormat:@"%ld",(long)(interval>=5&&interval<=1000?interval:16)];
-        }
+    LaunchInput *launch=[LaunchInput new];
+    launch.guest=self.machine.guest;launch.machineName=self.machine.name;launch.machinePath=self.machine.URL.path;
+    launch.configuration=config;launch.processArguments=launchArguments;
+    launch.inheritedEnvironment=NSProcessInfo.processInfo.environment;
+    launch.appleSilicon=appleSilicon;launch.preMetalGuest=self.machine.preMetalGuest;
+    launch.openGLResearchGuest=self.machine.openGLResearchGuest;launch.passthroughOpenGLEnabled=self.machine.passthroughOpenGLEnabled;
+    launch.installerDisplay=installerDisplay;launch.hasPublishedGuestGraphics=self.machine.hasPublishedGuestGraphics;
+    launch.bootPolicySignatureOnly=signatureOnly;launch.bootMediaOverridden=efiOverride!=nil;
+    launch.biosPath=bios;launch.firmwarePath=packageResearchFirmware?machinePath(@"Firmware"):firmwareCode;
+    launch.nvramPath=machinePath(@"NVRAM");launch.bootMediaPath=efiOverride?:firmwareEFI;launch.diskPath=machinePath(@"Disk");
+    if(config[@"InstallerMedia"])launch.installerPath=[config[@"InstallerMediaShared"] boolValue]?config[@"InstallerMedia"]:machinePath(@"InstallerMedia");
+    launch.runtimeDirectory=self.runtimeDirectory;launch.qmpPath=qmp;
+    launch.helperPath=helper;launch.donorPath=donor;launch.llvmPath=llvm;
+    launch.displaySocketPath=self.displayConnection.socketPath;
+    if(openGLInprocess)launch.inprocessOpenGLLibrary=inprocessLibrary;
+    launch.vramServiceIdentifier=NSUUID.UUID.UUIDString;
+    launch.guestWidth=(NSInteger)initialPixels.width;launch.guestHeight=(NSInteger)initialPixels.height;
+    launch.displayMode=self.displayMode;launch.backingScaleFactor=self.window.backingScaleFactor;
+    launch.supportsRetinaDisplay=self.supportsRetinaDisplay;
+    launch.legacyDisplayRefreshMS=[NSUserDefaults.standardUserDefaults integerForKey:@"VIMLegacyDisplayRefreshMS"];
+    launch.networkMode=VIMNetworkMode(config);launch.macAddress=VIMNetworkMACAddress(config);
+    launch.researchCPUModel=researchCPUModel;launch.systemDiskInterface=systemDiskInterface;
+    launch.audioOutputSelection=VIMAudioSelection(config,NO);launch.audioInputSelection=VIMAudioSelection(config,YES);
+    launch.audioOutputRate=(NSInteger)VIMHostOutputSampleRate(VIMAudioSelection(config,NO));
+    launch.audioInputRate=(NSInteger)VIMHostInputSampleRate(VIMAudioSelection(config,YES));
+    launch.audioOutputDeviceName=audioDeviceNames[@NO];launch.audioInputDeviceName=audioDeviceNames[@YES];
+    if(optical.length){launch.opticalPath=optical;launch.opticalFormat=opticalFormat;}
+    launch.additionalImages=additionalImages;
+    launch.imageUSBBus=VIMImageUSBBus(self.machine.guest);launch.imageUSBBasePort=(NSInteger)VIMImageUSBPort(self.machine.guest,0);
+    launch.setupMediaPath=setupMedia;
+    LaunchPlan *plan=[[LaunchPlan alloc] initWithInput:launch];
+    if(!plan) {
+        if(error)*error=VIMSessionError(@"This Mac's configuration could not be read. It was not started.");
+        [self cleanUp];return NO;
     }
-    // These caches/fast paths are guarded by architectural MMU conditions,
-    // not by guest macOS version. The AIR repair is genuinely Mojave-only.
-    if(mojave)environment[@"PVG_HOST_AIR_LLVM"]=llvm;
-    [environment addEntriesFromDictionary:@{@"PVG_TCG_ALTERNATE_LOOKUP":@"1",
-        @"PVG_TCG_PCID_CONTEXTS":@"1",@"PVG_TCG_CONTEXT_JMP_CACHE":@"1",@"PVG_TCG_FAST_PTW":@"1",
-        @"PVG_TCG_TLB_FLOOR_BITS":@"12",@"PVG_TCG_TLB_FLOOR_MASK":@"4"}];
-    if(!appleSilicon)for(NSString *key in environment.allKeys)
-        if([key hasPrefix:@"PVG_TCG_"]||[key hasPrefix:@"PVG_SHADOW_"]||[key hasPrefix:@"PVG_OOP_"]||[key isEqual:@"PVG_HOST_AIR_LLVM"]||[key isEqual:@"PVG_PRESERVE_IOSURFACE"])
-            [environment removeObjectForKey:key];
-    self.task.environment=environment;
+    self.task.arguments=plan.arguments;
+    self.task.environment=plan.environment;
     if(![self.machine prepareUpdaterDisplayForBoot:error]){[self cleanUp];return NO;}
     NSString *logPath=[self.machine.URL.path stringByAppendingPathComponent:@"State/session.log"];
     if(![NSFileManager.defaultManager fileExistsAtPath:logPath]) [NSFileManager.defaultManager createFileAtPath:logPath contents:nil attributes:nil];

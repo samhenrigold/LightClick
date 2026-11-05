@@ -1,0 +1,9 @@
+#!/bin/zsh
+# Checks QEMU's arguments and environment against tests/launch-plan/expected.json.
+# --record rewrites it: a deliberate change only, and review the diff.
+set -euo pipefail
+root=${0:A:h:h}
+mkdir -p "$root/Build/Probes"
+xcrun swiftc -swift-version 5 "$root/VirtualIntelMac/VIMLaunchPlan.swift" "$root/tests/launch-plan/main.swift" \
+    -o "$root/Build/Probes/launch-plan-tests"
+exec "$root/Build/Probes/launch-plan-tests" "$root/tests/launch-plan" "$@"
