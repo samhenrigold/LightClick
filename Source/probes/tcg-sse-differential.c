@@ -2,7 +2,8 @@
 // FTZ modes, with PE sticky and not, plus upper lanes, EFLAGS and shuffles. Each `op=` line names what differed.
 //   xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O1 Source/probes/tcg-sse-differential.c -o tcg-sse-differential
 // The check that matters is the same guest with the fast paths on and off, which must match exactly:
-//   PVG_TCG_INLINE_FP=0 PVG_TCG_NATIVE_EXACT_FP=0 PVG_TCG_NATIVE_PACKED_FP=0
+//   PVG_TCG_INLINE_FP=0 PVG_TCG_INLINE_SSE_PACKED=0 PVG_TCG_SSE_NO_GLOBALS=0 PVG_TCG_NATIVE_EXACT_FP=0
+//   PVG_TCG_NATIVE_PACKED_FP=0
 // Rosetta is a second opinion only. QEMU's SSE uses x87 NaN propagation (a TODO in fpu_helper.c), so it differs from
 // hardware in lines with two NaN inputs whichever path runs.
 #include <stdint.h>
@@ -126,6 +127,70 @@ static const char *const edge_names[EDGE_OPS] = {
     "cvtss2sd",     "cvtsd2ss",     "cvtsi2sd_32",  "cvtsi2sd_64", "cvtsi2ss_32", "cvtsi2ss_64", "cvttsd2si_32",
     "cvttsd2si_64", "cvttss2si_32", "cvttss2si_64", "comisd",      "ucomisd",     "comiss",      "ucomiss",
 };
+
+// Every packed form with a fast path, on edge values placed in each lane, in every MXCSR mode. Results cover all 128
+// bits, and the MXCSR flags show whether any lane reached softfloat with the wrong answer.
+#define PACKED_FORMS(X)                                                                                                \
+    X("sqrtps") X("sqrtpd") X("cvtps2pd") X("cvtdq2pd") X("cmpeqpd") X("cmpltpd") X("cmplepd") X("cmpunordpd")         \
+        X("cmpneqpd") X("cmpnltpd") X("cmpnlepd") X("cmpordpd") X("cmpeqsd") X("cmpltsd") X("cmplesd") X("cmpunordsd") \
+            X("cmpneqsd") X("cmpnltsd") X("cmpnlesd") X("cmpordsd") X("cmpeqss") X("cmpltss") X("cmpless")             \
+                X("cmpunordss") X("cmpneqss") X("cmpnltss") X("cmpnless") X("cmpordss") X("addps") X("addpd")          \
+                    X("mulps") X("mulpd") X("divps") X("divpd") X("cmpltps") X("cvtdq2ps") X("cvttps2dq")
+#define PACKED_NAME(insn) insn,
+static const char *const packed_names[] = {PACKED_FORMS(PACKED_NAME)};
+#define PACKED_CASE(insn) \
+    case __COUNTER__ - packed_base: \
+        VECTOR2(insn);                 \
+        break;
+
+enum { packed_base = __COUNTER__ + 1 };
+static void packed_op(unsigned op, unsigned mode, xmm x, xmm y, uint64_t *h) {
+    xmm result = {0, 0};
+    unsigned flags = 0;
+    switch (op) { PACKED_FORMS(PACKED_CASE) }
+    *h = mix(mix(mix(*h, result.lo), result.hi), flags);
+}
+
+static uint64_t edge_lanes32(uint32_t a, uint32_t b) { return (uint64_t)a << 32 | b; }
+
+static void packed_cases(unsigned saved) {
+    for (unsigned op = 0; op < COUNT(packed_names); op++)
+        for (unsigned controls = 0; controls < 32; controls++) {
+            unsigned mode = 0x1f80 | ((controls & 3) << 13) | ((controls & 4) ? 0x40 : 0) |
+                            ((controls & 8) ? 0x8000 : 0) | ((controls & 16) ? 0x20 : 0);
+            uint64_t h = 1469598103934665603ULL;
+            // One special lane among ordinary ones proves that a late lane cannot leave earlier results stored.
+            for (size_t i = 0; i < COUNT(edge32); i++)
+                for (unsigned lane = 0; lane < 4; lane++) {
+                    uint32_t v[4] = {0x3fc00000, 0x40490fdb, 0x3f800000, 0x41200000};
+                    uint32_t w[4] = {0x40000000, 0x3f000000, 0xbfc00000, 0x41200000};
+                    v[lane] = edge32[i];
+                    xmm x, y;
+                    x.lo = edge_lanes32(v[1], v[0]);
+                    x.hi = edge_lanes32(v[3], v[2]);
+                    y.lo = edge_lanes32(w[1], w[0]);
+                    y.hi = edge_lanes32(w[3], w[2]);
+                    packed_op(op, mode, x, y, &h);
+                    packed_op(op, mode, y, x, &h);
+                }
+            for (size_t i = 0; i < COUNT(edge64); i++)
+                for (size_t j = 0; j < COUNT(edge64); j++) {
+                    xmm x = {edge64[i], 0x3ff8000000000000ULL}, y = {edge64[j] | (uint64_t)(i & 1) << 63, edge64[i]};
+                    packed_op(op, mode, x, y, &h);
+                }
+            for (unsigned i = 0; i < 2000; i++) {
+                xmm x = {next(), next()}, y = {next(), next()};
+                if (i & 1) {
+                    // Small integers and ordinary floats, so that many lanes take the fast path.
+                    x.lo = edge_lanes32((uint32_t)(int32_t)(x.lo >> 48) | 0x3f800000, (uint32_t)x.lo & 0x3fffffff);
+                    y.lo = edge_lanes32((uint32_t)y.lo & 0x7fffff | 0x40000000, (uint32_t)(y.lo >> 20) & 0x3fffffff);
+                }
+                packed_op(op, mode, x, y, &h);
+            }
+            _mm_setcsr(saved);
+            printf("op=%s mxcsr=%04x hash=%016llx\n", packed_names[op], mode, (unsigned long long)h);
+        }
+}
 
 static void edge_op(int op, unsigned mode, uint64_t av, uint64_t bv, uint32_t a32, uint32_t b32, uint64_t *h) {
     xmm x, y, result = {0, 0};
@@ -314,6 +379,77 @@ static void edge_cases(unsigned saved) {
                      : "xmm0");                                                                                        \
     h = mix(mix(h, out.lo), out.hi);
 
+// Forms that take no MXCSR: separate registers, then the destination as its own source, then a memory source.
+#define BYTE_FORM(insn)                                                                                                \
+    __asm__ volatile("movdqu %[p],%%xmm0\n\tmovdqu %[q],%%xmm1\n\t" insn " %%xmm1,%%xmm0\n\tmovdqu %%xmm0,%[r]"          \
+                     : [r] "=m"(out)                                                                                   \
+                     : [p] "m"(in[0]), [q] "m"(in[1])                                                                  \
+                     : "xmm0", "xmm1");                                                                                \
+    h = mix(mix(h, out.lo), out.hi);                                                                                   \
+    __asm__ volatile("movdqu %[p],%%xmm0\n\t" insn " %%xmm0,%%xmm0\n\tmovdqu %%xmm0,%[r]"                               \
+                     : [r] "=m"(out)                                                                                   \
+                     : [p] "m"(in[0])                                                                                  \
+                     : "xmm0");                                                                                        \
+    h = mix(mix(h, out.lo), out.hi);                                                                                   \
+    __asm__ volatile("movdqu %[p],%%xmm0\n\t" insn " %[q],%%xmm0\n\tmovdqu %%xmm0,%[r]"                                 \
+                     : [r] "=m"(out)                                                                                   \
+                     : [p] "m"(in[0]), [q] "m"(aligned)                                                                \
+                     : "xmm0");                                                                                        \
+    h = mix(mix(h, out.lo), out.hi);
+#define WORD_SHUFFLE(imm)                                                                                              \
+    __asm__ volatile("movdqu %[p],%%xmm1\n\tpshuflw $" #imm ",%%xmm1,%%xmm0\n\tpshufhw $" #imm                          \
+                     ",%%xmm1,%%xmm2\n\tmovdqu %%xmm0,%[r]\n\tmovdqu %%xmm2,%[s]"                                         \
+                     : [r] "=m"(out), [s] "=m"(other)                                                                  \
+                     : [p] "m"(in[0])                                                                                  \
+                     : "xmm0", "xmm1", "xmm2");                                                                        \
+    h = mix(mix(mix(mix(h, out.lo), out.hi), other.lo), other.hi);                                                     \
+    __asm__ volatile("movdqu %[p],%%xmm0\n\tpshuflw $" #imm ",%%xmm0,%%xmm0\n\tpshufhw $" #imm                          \
+                     ",%%xmm0,%%xmm0\n\tmovdqu %%xmm0,%[r]\n\tpshuflw $" #imm ",%[q],%%xmm1\n\tmovdqu %%xmm1,%[s]"         \
+                     : [r] "=m"(out), [s] "=m"(other)                                                                  \
+                     : [p] "m"(in[0]), [q] "m"(aligned)                                                                \
+                     : "xmm0", "xmm1");                                                                                \
+    h = mix(mix(mix(mix(h, out.lo), out.hi), other.lo), other.hi);
+
+static void integer_shuffles(void) {
+    const xmm in[2] = {{0x0123456789abcdefULL, 0xfedcba9876543210ULL}, {0x8899aabbccddeeffULL, 0x0011223344556677ULL}};
+    static const xmm aligned __attribute__((aligned(16))) = {0x1032547698badcfeULL, 0xefcdab8967452301ULL};
+    xmm out, other;
+    uint64_t h = 1469598103934665603ULL;
+    BYTE_FORM("punpcklbw")
+    BYTE_FORM("punpcklwd")
+    BYTE_FORM("punpckldq")
+    BYTE_FORM("punpcklqdq")
+    BYTE_FORM("punpckhbw")
+    BYTE_FORM("punpckhwd")
+    BYTE_FORM("punpckhdq")
+    BYTE_FORM("punpckhqdq")
+    BYTE_FORM("unpcklps")
+    BYTE_FORM("unpckhps")
+    BYTE_FORM("unpcklpd")
+    BYTE_FORM("unpckhpd")
+    WORD_SHUFFLE(0x00)
+    WORD_SHUFFLE(0x1b)
+    WORD_SHUFFLE(0x39)
+    WORD_SHUFFLE(0x4e)
+    WORD_SHUFFLE(0x93)
+    WORD_SHUFFLE(0xb1)
+    WORD_SHUFFLE(0xd8)
+    WORD_SHUFFLE(0xe4)
+    WORD_SHUFFLE(0xff)
+    printf("op=integer_shuffles hash=%016llx\n", (unsigned long long)h);
+    h = 1469598103934665603ULL;
+    for (unsigned i = 0; i < 4096; i++) {
+        xmm x = {next(), next()};
+        uint64_t ps = 0xdeadbeefdeadbeefULL, pd = 0xdeadbeefdeadbeefULL;
+        __asm__ volatile("movdqu %[p],%%xmm0\n\tmovmskps %%xmm0,%k[a]\n\tmovmskpd %%xmm0,%k[b]"
+                         : [a] "+r"(ps), [b] "+r"(pd)
+                         : [p] "m"(x)
+                         : "xmm0");
+        h = mix(mix(h, ps), pd);
+    }
+    printf("op=movmsk hash=%016llx\n", (unsigned long long)h);
+}
+
 static void shuffles(void) {
     const xmm in[2] = {{0x1111111122222222ULL, 0x3333333344444444ULL}, {0x5555555566666666ULL, 0x7777777788888888ULL}};
     static const xmm aligned __attribute__((aligned(16))) = {0x99999999aaaaaaaaULL, 0xbbbbbbbbccccccccULL};
@@ -392,6 +528,8 @@ int main(void) {
         printf("mxcsr=%04x hash=%016llx\n", mode, (unsigned long long)h);
     }
     edge_cases(saved);
+    packed_cases(saved);
     shuffles();
+    integer_shuffles();
     _mm_setcsr(saved);
 }
