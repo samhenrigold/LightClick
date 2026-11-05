@@ -1,0 +1,631 @@
+#!/usr/bin/env python3
+"""Boot throwaway clones of a VM, case by case, and judge each boot PASS or FAIL.
+
+    scripts/boot-matrix <app> --machine <machine.vintelmac> [--env K=V ...] [--parallel N] [--capture SECONDS]
+                        [--results DIR] [--work DIR] [--keep-passed] [--dry-run] CASE...
+
+A CASE is one quoted string, a name and then switches:
+
+    'one-vcpu-8x cpus=1 runs=8 seconds=30'
+    'smp2-desktop cpus=2 desktop=300 seconds=330'
+    'smp2-no-share cpus=2 desktop=300 LC_HVDBT_NO_SHARE=1'
+    'stress cpus=4 program=/path/to/x86-program expect="PASSED: 0 failures"'
+
+    cpus=N      CPUCount in the clone (default: the machine's)
+    runs=N      boots of this case (default 1)
+    seconds=N   keep running this long after QEMU starts (default 30, or 0 with desktop= or program=)
+    desktop=N   fail unless the guest agent reports the desktop within N seconds (default 300 with program=)
+    program=P   stage this local x86 program in the guest and run it; a nonzero exit fails the boot
+    expect=T    fail unless the program's stdout contains T
+    KEY=VALUE   an upper-case word is an environment variable for the app and QEMU; it overrides --env
+
+Every boot gets its own work directory, an APFS clone titled "Clone of <machine>", and a private home through
+CFFIXED_USER_HOME, with forwarded ports off, so boots can run side by side and beside other VMs. The work directory
+must be on the machine's volume. LC_HVDBT=1 also writes a tally, which that boot then must produce.
+
+One PASS or FAIL line per boot, a SUMMARY line per case, then a last line to read: exit 0 all passed, 1 a failure,
+2 refused before starting, 130 interrupted. Failed boots keep tally, session.log, launch.json and the logs under the
+results folder; program results and captures are kept for every boot; everything else is deleted, on every exit but
+SIGKILL. --capture takes the window with screencapture every N seconds, which fails while the display is asleep.
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+from dataclasses import dataclass, field
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+source = Path(__file__).resolve().parents[1]
+QEMU = 'qemu-system-x86_64'
+# Anchored: guests write to the tally and the log, and a guest's own text must not fail or pass a boot.
+OUTCOME = re.compile(r'^outcome: (hard stop|guest powered off|running)\b', re.M)
+HARD_STOP = re.compile(r'^state: HARD STOP: (.*)$', re.M)
+USER_FAULT = re.compile(r'^proc +\S+ cr3 \S+ FAULT vector .*$', re.M)
+NO_PROGRESS = re.compile(r'^hvdbt: no progress\b.*$', re.M)
+LIFECYCLE = re.compile(r'^\[Light Click\] Lifecycle: .*"SHUTDOWN".*$', re.M)
+# The older scripts' grep. A guest process can die of a signal on a healthy boot, so this is a note, not a failure.
+SUSPECT = re.compile(r'FIPS USER|EXITED WITH SIGNAL|Symbol not found| SIGNAL ')
+PROCESS_LOG_LIMIT = 2000  # Tally.swift stops recording process rows here
+WINDOW_ID = ('ObjC.import("CoreGraphics");'
+             'const all = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(0, 0)));'
+             'const mine = all.filter(w => w.kCGWindowOwnerPID == %d && w.kCGWindowLayer == 0);'
+             'mine.sort((a, b) => b.kCGWindowBounds.Width * b.kCGWindowBounds.Height'
+             ' - a.kCGWindowBounds.Width * a.kCGWindowBounds.Height);'
+             'mine.length ? String(mine[0].kCGWindowNumber) : ""')
+stopping = threading.Event()
+output_lock = threading.Lock()
+
+
+def say(line):
+    with output_lock:
+        print(line, flush=True)
+
+
+def judge(log, tally, qemu_exited=False, app_exited=False, want_tally=False, desktop_missing=None,
+          program_failure=None):
+    """Every reason this boot failed, the most telling first. Nothing is read but the arguments."""
+    failures = []
+    if tally is not None:
+        outcome = OUTCOME.search(tally)
+        if outcome and outcome[1] == 'hard stop':
+            detail = HARD_STOP.search(tally)
+            failures.append('hard stop' + (f': {detail[1]}' if detail else ''))
+        elif outcome and outcome[1] == 'guest powered off':
+            failures.append('guest power-off')
+        elif not outcome and want_tally:
+            failures.append('the tally has no outcome line')
+        faults = USER_FAULT.findall(tally)
+        if faults:
+            failures.append(f'{len(faults)} user FAULT rows, first: {faults[0]}')
+    elif want_tally:
+        failures.append('no tally: the engine never took over')
+    stalls = NO_PROGRESS.findall(log)
+    if stalls:
+        failures.append(f'{len(stalls)} no progress reports')
+    shutdowns = LIFECYCLE.findall(log)
+    if any('"guest-shutdown"' in line for line in shutdowns) and 'guest power-off' not in failures:
+        failures.append('guest power-off')
+    if qemu_exited:
+        rebooted = any('"guest-reset"' in line for line in shutdowns)
+        failures.append('QEMU exited after a guest reboot' if rebooted else 'QEMU exited')
+    if app_exited:
+        failures.append('the app exited')
+    if desktop_missing:
+        failures.append(desktop_missing)
+    if program_failure:
+        failures.append(program_failure)
+    return failures
+
+
+def notes(tally):
+    """What a PASS line should still mention."""
+    if tally is None:
+        return []
+    found = [f'suspect={len(SUSPECT.findall(tally))}']
+    if len(re.findall(r'^proc ', tally, re.M)) >= PROCESS_LOG_LIMIT:
+        found.append('process-log-full')  # later user FAULT rows weren't recorded
+    return found
+
+
+@dataclass
+class Case:
+    name: str
+    cpus: int | None = None
+    runs: int = 1
+    seconds: int | None = None
+    desktop: int | None = None
+    program: Path | None = None
+    expect: str | None = None
+    env: dict = field(default_factory=dict)
+
+
+def parse_case(text, shared_env=()):
+    words = shlex.split(text)
+    if not words or not re.fullmatch(r'[A-Za-z0-9][\w.-]*', words[0]):
+        raise ValueError(f'a case starts with a name: {text!r}')
+    case = Case(words[0], env=dict(item.split('=', 1) for item in shared_env))
+    for word in words[1:]:
+        key, equals, value = word.partition('=')
+        if not equals:
+            raise ValueError(f'{case.name}: expected KEY=VALUE, got {word!r}')
+        if key in ('cpus', 'runs', 'seconds', 'desktop'):
+            if not value.isdigit():
+                raise ValueError(f'{case.name}: {key} needs a number')
+            setattr(case, key, int(value))
+        elif key == 'program':
+            case.program = Path(value).expanduser().resolve()
+            if not case.program.is_file():
+                raise ValueError(f'{case.name}: no program at {value}')
+        elif key == 'expect':
+            case.expect = value
+        elif re.fullmatch(r'[A-Z][A-Z0-9_]*', key):
+            case.env[key] = value
+        else:
+            raise ValueError(f'{case.name}: unknown switch {key}')
+    if case.program and case.desktop is None:
+        case.desktop = 300
+    if case.seconds is None:
+        case.seconds = 0 if case.desktop is not None else 30
+    if case.expect is not None and not case.program:
+        raise ValueError(f'{case.name}: expect= needs program=')
+    if case.runs < 1 or case.cpus == 0:
+        raise ValueError(f'{case.name}: runs and cpus start at 1')
+    return case
+
+
+def remove_tree(path):
+    """Delete a directory unless something is mounted inside it. Returns whether it's gone."""
+    device = path.lstat().st_dev
+    for parent, directories, _ in os.walk(path):
+        for name in directories:
+            if os.lstat(os.path.join(parent, name)).st_dev != device:
+                return False
+    shutil.rmtree(path)
+    return True
+
+
+def clone_machine(machine, library, cpus):
+    """An APFS clone of the machine that the app can't confuse with it. Only the clone is ever edited."""
+    # The window title is VIMMachine's name, which is the package's name. Anything edited in a clone dies with it,
+    # so its window must never read like the source's: someone once lost work that way.
+    clone = library/f'Clone of {machine.name}'
+    copy = subprocess.run(['cp', '-c', '-R', str(machine), str(clone)], capture_output=True, text=True)
+    if copy.returncode:
+        raise RuntimeError(f'APFS clone failed, is --work on the machine\'s volume? {copy.stderr.strip()}')
+    for parent, directories, files in os.walk(clone):
+        for name in directories+files:
+            path = Path(parent, name)
+            if path.is_symlink() and not path.resolve().is_relative_to(clone):
+                raise RuntimeError(f'{path.relative_to(clone)} links outside the machine; it could write to the source')
+    # Copied from the source's last boot, these would read as this boot's evidence. A pending RequestedBundleName
+    # or CPUCount would rename the clone back and undo the switches below.
+    for name in ('session.log', 'GuestStatus.plist', 'PendingConfiguration.plist'):
+        (clone/'State'/name).unlink(missing_ok=True)
+    settings = clone/'Machine.plist'
+    # Host or bridged networking would put a second VM with the source's MAC address on the real network.
+    edits = [('SSHEnabled', '-bool', 'NO'), ('FileSharingEnabled', '-bool', 'NO'),
+             ('NetworkMode', '-string', 'shared')]
+    if cpus:
+        edits.append(('CPUCount', '-integer', str(cpus)))
+    for key, kind, value in edits:
+        subprocess.run(['plutil', '-replace', key, kind, value, str(settings)], check=True, capture_output=True)
+    return clone
+
+
+def process_table():
+    listing = subprocess.run(['ps', '-axo', 'pid=,ppid=,stat=,lstart=,comm='], capture_output=True, text=True,
+                             check=True)
+    table = {}
+    for line in listing.stdout.splitlines():
+        parts = line.split(None, 8)  # lstart is five words; comm may hold spaces
+        if len(parts) == 9:
+            table[int(parts[0])] = {'ppid': int(parts[1]), 'stat': parts[2], 'start': ' '.join(parts[3:8]),
+                                    'comm': parts[8]}
+    return table
+
+
+def save_launch(pid, path):
+    """QEMU's arguments and environment as the kernel holds them, which is what actually reached it."""
+    import ctypes
+    import struct
+    size = ctypes.c_size_t(1 << 20)
+    buffer = ctypes.create_string_buffer(size.value)
+    if ctypes.CDLL(None).sysctl((ctypes.c_int*3)(1, 49, pid), 3, buffer, ctypes.byref(size), None, 0):
+        raise OSError('sysctl failed')
+    data = buffer.raw[:size.value]
+    argc = struct.unpack('i', data[:4])[0]
+    start = data.index(b'\0', 4)
+    while data[start] == 0:
+        start += 1
+    parts = data[start:].split(b'\0')
+    environment = dict(p.decode(errors='replace').split('=', 1) for p in parts[argc:] if b'=' in p)
+    launch = {'args': [p.decode(errors='replace') for p in parts[:argc]], 'env': environment}
+    path.write_text(json.dumps(launch, indent=1, sort_keys=True))
+    return launch
+
+
+class EndBoot(Exception):
+    pass
+
+
+class Boot:
+    def __init__(self, options, case, run):
+        self.options, self.case, self.run_number = options, case, run
+        self.label = f'{case.name}#{run}'
+        self.work = options.work/f'{case.name}-{run}'
+        self.evidence = options.results/f'{case.name}-{run}'
+        self.tally = self.work/'tally.txt'
+        self.process = None
+        self.known = {}  # pid to start time, of everything descended from our app
+        self.qemu = None
+        self.qemu_exited = self.app_exited = False
+        self.desktop_seconds = self.desktop_missing = self.program_failure = None
+        self.started = None
+        self.next_capture = 0
+        self.capture_warned = False
+        self.interrupted = False
+        self.launch = None
+
+    def read(self, path):
+        try:
+            return path.read_text(errors='replace')
+        except OSError:
+            return None
+
+    def track(self):
+        table = process_table()
+        grew = True
+        while grew:
+            grew = False
+            for pid, row in table.items():
+                parent = row['ppid']
+                ours = parent == self.process.pid or (parent in self.known
+                                                      and table.get(parent, {}).get('start') == self.known[parent])
+                if pid not in self.known and ours:
+                    self.known[pid] = row['start']
+                    grew = True
+        if self.qemu is None:
+            for pid in self.known:
+                if pid in table and Path(table[pid]['comm']).name == QEMU:
+                    self.qemu = pid
+                    break
+        return table
+
+    def alive(self, pid, table):
+        row = table.get(pid)
+        return bool(row) and row['start'] == self.known.get(pid) and not row['stat'].startswith('Z')
+
+    def tick(self):
+        """Once a second while the boot runs: ends it as soon as there's a reason to."""
+        if stopping.is_set():
+            self.interrupted = True
+            raise EndBoot
+        table = self.track()
+        if self.process.poll() is not None:
+            self.app_exited = True
+            raise EndBoot
+        if self.qemu is not None and not self.alive(self.qemu, table):
+            self.qemu_exited = True
+            time.sleep(2)  # the app logs QEMU's last lifecycle events after it exits
+            raise EndBoot
+        if judge(self.read(self.session_log) or '', self.read(self.tally)):
+            raise EndBoot
+        if self.options.capture and self.started and time.monotonic() >= self.next_capture:
+            self.next_capture = time.monotonic()+self.options.capture
+            self.capture()
+
+    def pause(self, seconds):
+        deadline = time.monotonic()+seconds
+        while True:
+            self.tick()
+            left = deadline-time.monotonic()
+            if left <= 0:
+                return
+            time.sleep(min(left, 1))
+
+    def capture(self):
+        script = WINDOW_ID % self.process.pid
+        found = subprocess.run(['osascript', '-l', 'JavaScript', '-e', script], capture_output=True, text=True,
+                               timeout=20)
+        window = found.stdout.strip()
+        if not window:
+            return  # no window yet
+        self.evidence.mkdir(parents=True, exist_ok=True)
+        image = self.evidence/f's{int(time.monotonic()-self.started)}.png'
+        shot = subprocess.run(['screencapture', '-x', f'-l{window}', str(image)], capture_output=True, text=True)
+        if shot.returncode and not self.capture_warned:
+            self.capture_warned = True
+            say(f'NOTE {self.label} screencapture failed; it can\'t while the display is asleep: {shot.stderr.strip()}')
+
+    def request(self, command, timeout):
+        """One diagnostic command through the app's own guest agent connection. None if it timed out."""
+        (self.channel/'Result.json').unlink(missing_ok=True)
+        temporary = self.channel/'Request.tmp'
+        temporary.write_text(json.dumps(command))
+        temporary.rename(self.channel/'Request.json')
+        deadline = time.monotonic()+timeout
+        while time.monotonic() < deadline:
+            self.tick()
+            if (self.channel/'Result.json').exists():
+                return json.loads((self.channel/'Result.json').read_text())
+            time.sleep(1)
+        return None
+
+    def wait_for_desktop(self):
+        deadline = self.started+self.case.desktop
+        last = 'the guest agent never answered'
+        next_probe = 0
+        while time.monotonic() < deadline:
+            self.tick()
+            # OpenGL guests (High Sierra and older) never write GuestStatus.plist, so ask the agent as well.
+            try:
+                with (self.machine/'State/GuestStatus.plist').open('rb') as file:
+                    report = plistlib.load(file).get('Report', {})
+            except (OSError, plistlib.InvalidFileException):
+                report = {}
+            if report.get('DesktopRunning') is not True and self.channel.is_dir() and time.monotonic() >= next_probe:
+                result = self.request({'Action': 'status-probe'}, deadline-time.monotonic()) or {}
+                report = result.get('Report') or {}
+                last = result.get('Error') or (f'DesktopRunning is {report["DesktopRunning"]}' if report else last)
+                next_probe = time.monotonic()+10
+            if report.get('DesktopRunning') is True:
+                self.desktop_seconds = int(time.monotonic()-self.started)
+                return True
+            time.sleep(1)
+        self.desktop_missing = f'no desktop after {self.case.desktop}s: {last}'
+        return False
+
+    def run_program(self):
+        shutil.copyfile(self.case.program, self.channel/'Transfer.bin')
+        staged = self.request({'Action': 'stage-probe'}, 900)
+        if not staged or 'Error' in staged:
+            self.program_failure = f'staging the program failed: {staged}'
+            return
+        program = staged['Transfer']['Directory']+'/Transfer.bin'
+        self.request({'Executable': '/bin/chmod', 'Arguments': ['0755', program]}, 120)
+        result = self.request({'Executable': program, 'Arguments': []}, 900)
+        if result is None:
+            self.program_failure = 'the program didn\'t finish in 900s'
+            return
+        self.evidence.mkdir(parents=True, exist_ok=True)
+        (self.evidence/'program.json').write_text(json.dumps(result, indent=1))
+        lines = str(result.get('Stderr') or result.get('Error') or '').splitlines()
+        if result.get('ExitCode') != 0:
+            self.program_failure = f'program exit {result.get("ExitCode")}: {lines[0] if lines else "no stderr"}'
+        elif self.case.expect is not None and self.case.expect not in result.get('Stdout', ''):
+            self.program_failure = f'program stdout lacks {self.case.expect!r}'
+
+    def launch_app(self):
+        self.work.mkdir(parents=True)
+        home = self.work/'home'
+        library = home/'Library/Application Support/Light Click'
+        for child in ('Machines', 'Downloads', 'Installers'):
+            (library/child).mkdir(parents=True)
+        self.machine = clone_machine(self.options.machine, library/'Machines', self.case.cpus)
+        self.session_log = self.machine/'State/session.log'
+        identifier = plistlib.loads((self.machine/'Machine.plist').read_bytes()).get('Identifier', '')
+        self.channel = self.work/'diagnostics'/identifier.upper()
+        arguments = [str(self.options.app/'Contents/MacOS/Light Click'), '--open-vm', str(self.machine)]
+        if self.case.desktop is not None:
+            (self.work/'diagnostics').mkdir(mode=0o700)
+            arguments += ['--guest-diagnostics-root', str(self.work/'diagnostics')]
+        env = dict(os.environ, **self.case.env, CFFIXED_USER_HOME=str(home))
+        if self.case.env.get('LC_HVDBT') == '1':
+            env['LC_HVDBT_TALLY'] = str(self.tally)
+        # Its own session: the terminal's Ctrl-C comes to us, and we stop it after saving the evidence.
+        with (self.work/'app.log').open('w') as log:
+            self.process = subprocess.Popen(arguments, env=env, stdin=subprocess.DEVNULL, stdout=log,
+                                            stderr=subprocess.STDOUT, start_new_session=True)
+
+    def wait_for_qemu(self):
+        deadline = time.monotonic()+120
+        while self.qemu is None:
+            self.tick()
+            if time.monotonic() > deadline:
+                raise RuntimeError('no QEMU after two minutes; see app.log')
+            time.sleep(0.5)
+        self.started = time.monotonic()
+        time.sleep(1)  # as boot-clone: QEMU has exec'd by now
+        try:
+            self.launch = save_launch(self.qemu, self.work/'launch.json')
+        except OSError:
+            self.tick()  # QEMU already gone is the failure to report, not this
+            raise
+
+    def stop_processes(self):
+        """Only our app and what descended from it, by PID and start time. Returns what's still alive."""
+        def remaining():
+            table = self.track()
+            return [pid for pid in self.known if self.alive(pid, table)]
+
+        def signal_and_wait(pids, number, seconds):
+            for pid in pids:
+                try:
+                    os.kill(pid, number)
+                except ProcessLookupError:
+                    pass
+            deadline = time.monotonic()+seconds
+            while time.monotonic() < deadline and any(pid in remaining() for pid in pids):
+                time.sleep(0.5)
+
+        if self.process is None:
+            return []
+        self.track()
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(6)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        signal_and_wait(remaining(), signal.SIGTERM, 10)  # QEMU writes the final tally as it exits
+        signal_and_wait(remaining(), signal.SIGKILL, 5)
+        return remaining()
+
+    def forget_preferences(self):
+        # CFFIXED_USER_HOME doesn't redirect preferences: remove what this clone's paths left in them.
+        exported = subprocess.run(['defaults', 'export', self.options.domain, '-'], capture_output=True)
+        if exported.returncode:
+            return
+        for key in plistlib.loads(exported.stdout):
+            if str(self.work) in key:
+                subprocess.run(['defaults', 'delete', self.options.domain, key], capture_output=True)
+
+    def keep(self, names):
+        self.evidence.mkdir(parents=True, exist_ok=True)
+        sources = {'tally.txt': self.tally, 'launch.json': self.work/'launch.json', 'app.log': self.work/'app.log'}
+        if hasattr(self, 'machine'):
+            sources |= {'session.log': self.session_log, 'GuestStatus.plist': self.machine/'State/GuestStatus.plist'}
+        for name in names:
+            if name in sources and sources[name].is_file():
+                shutil.copyfile(sources[name], self.evidence/name)
+
+    def run(self):
+        failures = []
+        try:
+            self.launch_app()
+            self.wait_for_qemu()
+            for key, value in self.case.env.items():
+                if self.launch and self.launch['env'].get(key) != value:
+                    # The app filters some variables, such as PVG_*: a comparison row would be testing nothing.
+                    raise RuntimeError(f'{key}={value} did not reach QEMU')
+            if self.case.desktop is not None and self.wait_for_desktop() and self.case.program:
+                self.run_program()
+            self.pause(max(0, self.started+self.case.seconds-time.monotonic()))
+        except EndBoot:
+            pass
+        except Exception as error:  # still a line in the output, and the cleanup below still runs
+            failures.append(f'{type(error).__name__}: {error}')
+        left = []
+        try:
+            left = self.stop_processes()
+        except Exception as error:
+            failures.append(f'stopping failed: {error}')
+        session_log = self.read(self.session_log) if hasattr(self, 'session_log') else None
+        tally = self.read(self.tally)
+        failures = judge(session_log or '', tally, self.qemu_exited, self.app_exited,
+                         self.case.env.get('LC_HVDBT') == '1' and self.qemu is not None, self.desktop_missing,
+                         self.program_failure)+failures
+        if self.interrupted:
+            failures.insert(0, 'interrupted')
+        if failures or self.options.keep_passed:
+            try:
+                self.keep(('tally.txt', 'session.log', 'launch.json', 'app.log', 'GuestStatus.plist'))
+            except OSError as error:
+                failures.append(f'keeping evidence failed: {error}')
+        if left:
+            failures.append(f'still running, not deleting the work directory: pids {left}')
+        else:
+            try:
+                self.forget_preferences()
+                if self.work.exists() and not remove_tree(self.work):
+                    failures.append(f'something is mounted inside {self.work}: left it in place')
+            except Exception as error:
+                failures.append(f'cleanup failed: {error}')
+        seconds = int(time.monotonic()-self.started) if self.started else 0
+        desktop = f' desktop={self.desktop_seconds}s' if self.desktop_seconds is not None else ''
+        if failures:
+            line = f'FAIL {self.label} {seconds}s{desktop} {"; ".join(failures)} evidence {self.evidence}'
+        else:
+            line = f'PASS {self.label} {seconds}s{desktop} {" ".join(notes(tally))}'.rstrip()
+        say(' '.join(line.split())[:600])
+        return self.label, failures
+
+
+def read_only_preflight(options):
+    """Reasons not to start. Nothing here writes to anything."""
+    problems = []
+    if not (options.app/'Contents/MacOS/Light Click').is_file():
+        problems.append(f'no Light Click app at {options.app}')
+    if not (options.machine/'Machine.plist').is_file():
+        problems.append(f'no Machine.plist in {options.machine}')
+    elif options.machine.is_relative_to(options.work.parent) or options.work.parent.is_relative_to(options.machine):
+        problems.append('--work and --machine overlap; the cleanup could reach the machine')
+    if problems:
+        return problems
+    # A clone of a running VM's disk is torn, and a failure there would say nothing about the code under test.
+    holders = subprocess.run(['lsof', '-t', '--', str(options.machine/'State/Session.lock')], capture_output=True,
+                             text=True)
+    if holders.stdout.strip():
+        holder = ' '.join(holders.stdout.split())
+        problems.append(f'{options.machine.name} is running (pid {holder}); shut it down first')
+    # Preferences aren't redirected, and these two would point the private-home app at real packages.
+    for key in ('VIMLibraryPath', 'VIMRegisteredPackages'):
+        value = subprocess.run(['defaults', 'read', options.domain, key], capture_output=True)
+        if value.returncode == 0:
+            problems.append(f'{key} is set in {options.domain}: a clone\'s app would see those real machines')
+    return problems
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('app', type=Path)
+    parser.add_argument('--machine', type=Path, required=True, help='only ever read, to clone it')
+    parser.add_argument('cases', nargs='+', metavar='CASE')
+    parser.add_argument('--env', action='append', default=[], metavar='K=V', help='for every case')
+    parser.add_argument('--parallel', type=int, default=1, help='boots at once; each takes the machine\'s full RAM')
+    parser.add_argument('--capture', type=int, metavar='SECONDS', help='screencapture the window this often')
+    parser.add_argument('--results', type=Path, help='default Build/boot-matrix/results-<time>')
+    parser.add_argument('--work', type=Path, default=source/'Build/boot-matrix', help='parent of the work directories')
+    parser.add_argument('--keep-passed', action='store_true', help='keep the evidence of passing boots as well')
+    parser.add_argument('--dry-run', action='store_true', help='print the plan and start nothing')
+    options = parser.parse_args()
+    if any('=' not in item for item in options.env):
+        parser.error('--env takes K=V')
+    try:
+        cases = [parse_case(text, options.env) for text in options.cases]
+    except ValueError as error:
+        parser.error(str(error))
+    if len({case.name for case in cases}) != len(cases) or options.parallel < 1:
+        parser.error('case names must differ, and --parallel starts at 1')
+    options.app, options.machine = options.app.resolve(), options.machine.resolve()
+    root = options.work.resolve()
+    options.work = root/f'run-{os.getpid()}'
+    options.results = (options.results or root/time.strftime('results-%Y%m%d-%H%M%S')).resolve()
+    info = options.app/'Contents/Info.plist'
+    options.domain = plistlib.loads(info.read_bytes()).get('CFBundleIdentifier', '') if info.is_file() else ''
+    problems = read_only_preflight(options)
+    if problems:
+        print('REFUSED', '; '.join(problems), file=sys.stderr)
+        return 2
+    print(f'WARNING: windows titled "Clone of {options.machine.stem}" are throwaway clones. Anything changed in one is '
+          'deleted when its boot ends; the real VM keeps its own name.', file=sys.stderr, flush=True)
+    boots = [Boot(options, case, run) for case in cases for run in range(1, case.runs+1)]
+    if options.dry_run:
+        for boot in boots:
+            case = boot.case
+            env = shlex.join(f'{key}={value}' for key, value in case.env.items())
+            print(f'PLAN {boot.label} clone "Clone of {options.machine.name}" in {boot.work} '
+                  f'cpus={case.cpus or "machine"} seconds={case.seconds} desktop={case.desktop} '
+                  f'program={case.program} env={env}')
+        print(f'PLAN {len(boots)} boots, {options.parallel} at a time, results in {options.results}')
+        return 0
+
+    def interrupted(number, frame):
+        stopping.set()
+        say('Stopping: cleaning up what this run started.')
+
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, interrupted)  # never raises, so the cleanup can't be cut short by a second Ctrl-C
+    options.work.mkdir(parents=True)
+
+    def run_one(boot):
+        return (boot.label, ['not run']) if stopping.is_set() else boot.run()
+
+    with concurrent.futures.ThreadPoolExecutor(options.parallel) as pool:
+        outcomes = dict(pool.map(run_one, boots))
+    try:
+        options.work.rmdir()
+    except OSError:
+        pass
+    failed = [(label, failures) for label, failures in outcomes.items() if failures]
+    for case in cases:
+        mine = [boot.label for boot in boots if boot.case is case]
+        bad = [label for label in mine if outcomes[label]]
+        first = f' first: {outcomes[bad[0]][0]}' if bad else ''
+        say(f'SUMMARY {case.name} {len(mine)-len(bad)}/{len(mine)} passed{first}'[:300])
+    if stopping.is_set():
+        say(f'FAIL interrupted, {len(failed)} of {len(boots)} boots not passed, results {options.results}')
+        return 130
+    if failed:
+        first_label, first_failures = failed[0]
+        say(f'FAIL {len(failed)} of {len(boots)} boots, first {first_label}: {first_failures[0]} '
+            f'results {options.results}'[:600])
+        return 1
+    say(f'PASS {len(boots)} boots in {len(cases)} cases')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
