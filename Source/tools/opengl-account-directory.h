@@ -17,21 +17,26 @@ typedef VIMLeopardRecord VIMAccountRecord;
 #define kODAttributeTypeUserShell @kDS1AttrUserShell
 #define kODAttributeTypePassword @kDS1AttrPassword
 #define kODAttributeTypeAllAttributes @kDSAttributesAll
-static inline VIMAccountNode *VIMAccountLocalNode(void){return [VIMLeopardDirectory localDirectory:NULL];}
-static inline NSArray *VIMAccountHomeShares(VIMAccountNode *node,NSString *name){
+static inline VIMAccountNode *VIMAccountLocalNode(void) { return [VIMLeopardDirectory localDirectory:NULL]; }
+static inline NSArray *VIMAccountHomeShares(VIMAccountNode *node, NSString *name) {
     return [node recordsOfType:kODRecordTypeSharePoints named:name error:NULL];
 }
 #else
 #import <OpenDirectory/OpenDirectory.h>
 typedef ODNode VIMAccountNode;
 typedef ODRecord VIMAccountRecord;
-static inline VIMAccountNode *VIMAccountLocalNode(void){
+static inline VIMAccountNode *VIMAccountLocalNode(void) {
     return [ODNode nodeWithSession:[ODSession defaultSession] type:kODNodeTypeLocalNodes error:NULL];
 }
-static inline NSArray *VIMAccountHomeShares(VIMAccountNode *node,NSString *name){
-    ODQuery *query=[ODQuery queryWithNode:node forRecordTypes:kODRecordTypeSharePoints
-        attribute:kODAttributeTypeRecordName matchType:kODMatchEqualTo queryValues:name
-        returnAttributes:kODAttributeTypeAllAttributes maximumResults:0 error:NULL];
-    return query?[query resultsAllowingPartial:NO error:NULL]:nil;
+static inline NSArray *VIMAccountHomeShares(VIMAccountNode *node, NSString *name) {
+    ODQuery *query = [ODQuery queryWithNode:node
+                             forRecordTypes:kODRecordTypeSharePoints
+                                  attribute:kODAttributeTypeRecordName
+                                  matchType:kODMatchEqualTo
+                                queryValues:name
+                           returnAttributes:kODAttributeTypeAllAttributes
+                             maximumResults:0
+                                      error:NULL];
+    return query ? [query resultsAllowingPartial:NO error:NULL] : nil;
 }
 #endif

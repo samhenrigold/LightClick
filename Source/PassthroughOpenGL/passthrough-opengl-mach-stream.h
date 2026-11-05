@@ -8,10 +8,10 @@
 struct DGMachStream;
 typedef void (*DGMachWorker)(struct DGMachStream *);
 struct DGMachStream *DGMachOpen(void);
-ssize_t DGMachRead(struct DGMachStream *,void *,size_t);
-ssize_t DGMachWrite(struct DGMachStream *,const void *,size_t);
-ssize_t DGMachReadv(struct DGMachStream *,const struct iovec *,int);
-ssize_t DGMachWritev(struct DGMachStream *,const struct iovec *,int);
+ssize_t DGMachRead(struct DGMachStream *, void *, size_t);
+ssize_t DGMachWrite(struct DGMachStream *, const void *, size_t);
+ssize_t DGMachReadv(struct DGMachStream *, const struct iovec *, int);
+ssize_t DGMachWritev(struct DGMachStream *, const struct iovec *, int);
 int DGMachShutdown(struct DGMachStream *);
 int DGMachClose(struct DGMachStream *);
 unsigned DGMachLiveCount(void);

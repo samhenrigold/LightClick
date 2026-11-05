@@ -141,8 +141,12 @@ public final class LaunchPlan: NSObject {
         // The documented shared network is IPv4. Do not advertise a second IPv6
         // default route that can black-hole connections on IPv4-only host networks.
         var network = "user,id=net0,ipv6=off"
-        if flag("SSHEnabled") { network += ",hostfwd=tcp:127.0.0.1:\((config["SSHPort"] as? NSNumber)?.intValue ?? 0)-:22" }
-        if flag("FileSharingEnabled") { network += ",hostfwd=tcp:127.0.0.1:\((config["FileSharingPort"] as? NSNumber)?.intValue ?? 0)-:445" }
+        if flag("SSHEnabled") {
+            network += ",hostfwd=tcp:127.0.0.1:\((config["SSHPort"] as? NSNumber)?.intValue ?? 0)-:22"
+        }
+        if flag("FileSharingEnabled") {
+            network += ",hostfwd=tcp:127.0.0.1:\((config["FileSharingPort"] as? NSNumber)?.intValue ?? 0)-:445"
+        }
         if input.networkMode != "shared" { network = "socket,id=net0,fd=0" }
 
         var cpu = "Penryn,vendor=GenuineIntel,+sse4.2,+popcnt,+aes,+pclmulqdq,+pcid"
@@ -167,7 +171,8 @@ public final class LaunchPlan: NSObject {
         // native NVMe. Keep the controller stable across later update boots;
         // leave Intel, earlier systems and ongoing installations on SATA.
         let installState = config["InstallState"] as? String
-        let installedBigSur = appleSilicon && guest == .bigsur && (installState == "installed" || installState == "imported-prepared")
+        let installedBigSur =
+            appleSilicon && guest == .bigsur && (installState == "installed" || installState == "imported-prepared")
         var systemDisk = installedBigSur ? nvmeDisk : sataDisk
         if let interface = input.systemDiskInterface { systemDisk = interface == "nvme" ? nvmeDisk : sataDisk }
 
@@ -194,15 +199,21 @@ public final class LaunchPlan: NSObject {
             // safeguard, rather than the sole defense against an idle timer.
             "-global", "ICH9-LPC.disable_s3=1", "-global", "ICH9-LPC.disable_s4=1",
             "-cpu", cpu, "-smp", cpuCount, "-m", memory,
-            "-object", appleSilicon ? "memory-backend-shm,id=pvg-ram,size=\(memory)M,share=on" : "memory-backend-ram,id=pvg-ram,size=\(memory)M",
+            "-object",
+            appleSilicon
+                ? "memory-backend-shm,id=pvg-ram,size=\(memory)M,share=on"
+                : "memory-backend-ram,id=pvg-ram,size=\(memory)M",
             "-machine", "memory-backend=pvg-ram", "-nodefaults",
-            "-vga", installerDisplay ? (openGLSVGA ? "vmware" : "std") : "none",
+            "-vga", installerDisplay ? (openGLSVGA ? "vmware" : "std") : "none"
         ]
         // The installer display has no PVG. Otherwise the existing QEMU property
         // supplies the initial native display mode; no fixed 1920-wide default or
         // wait for the desktop/guest tool.
         if !installerDisplay {
-            a += ["-device", "{\"display-modes\":[\"\(input.guestWidth)x\(input.guestHeight)@60\"],\"driver\":\"apple-gfx-pci\"}"]
+            a += [
+                "-device",
+                "{\"display-modes\":[\"\(input.guestWidth)x\(input.guestHeight)@60\"],\"driver\":\"apple-gfx-pci\"}"
+            ]
         }
         a += [
             "-display", "none",
@@ -223,21 +234,29 @@ public final class LaunchPlan: NSObject {
             // Older systems have Apple16X50Serial but no AppleVirtIOConsole.
             // Keep metadata local and on the same app-owned QGA socket. Graphics
             // and bulk support-media delivery never travel over this slow UART.
-            "-device", preMetal ? "isa-serial,chardev=guestagent,index=1" : "virtserialport,bus=guestserial.0,chardev=guestagent,name=org.qemu.guest_agent.0",
+            "-device",
+            preMetal
+                ? "isa-serial,chardev=guestagent,index=1"
+                : "virtserialport,bus=guestserial.0,chardev=guestagent,name=org.qemu.guest_agent.0",
             // A distinct channel, never another client of the guest-agent socket.
             // Present it even when sharing is off so enabling it needs no restart.
             "-chardev", "socket,id=clipboard,path=\(socket("clipboard")),server=on,wait=off",
-            "-device", preMetal ? "isa-serial,chardev=clipboard,index=0" : "virtserialport,bus=guestserial.0,chardev=clipboard,name=org.vim.clipboard",
+            "-device",
+            preMetal
+                ? "isa-serial,chardev=clipboard,index=0"
+                : "virtserialport,bus=guestserial.0,chardev=clipboard,name=org.vim.clipboard",
             // Old donated framebuffer drivers do not report DPMS to host PVG.
             // Dedicated metadata events remain available with clipboard disabled.
             "-chardev", "socket,id=displaypower,path=\(socket("displaypower")),server=on,wait=off",
-            "-device", "virtserialport,bus=guestserial.0,chardev=displaypower,name=org.vim.display",
+            "-device", "virtserialport,bus=guestserial.0,chardev=displaypower,name=org.vim.display"
         ]
         if guest.recoveryAgentOverSerial {
             // Installed macOS keeps its native VirtIO channel; only the Recovery
             // service opens COM2. No graphics or payload archive uses this UART.
-            a += ["-chardev", "socket,id=recoveryagent,path=\(socket("recovery-agent")),server=on,wait=off",
-                "-device", "isa-serial,chardev=recoveryagent,index=1"]
+            a += [
+                "-chardev", "socket,id=recoveryagent,path=\(socket("recovery-agent")),server=on,wait=off",
+                "-device", "isa-serial,chardev=recoveryagent,index=1"
+            ]
         }
         // Native Tiger's 16X50 driver requires the dedicated ISA edge/high
         // contract, not upstream AML's shared level interrupt. Repeated native
@@ -247,7 +266,10 @@ public final class LaunchPlan: NSObject {
             // One immutable EFI per OS. OpenCore reads these eight bytes once through
             // QEMU fw_cfg, after OpenCore's baseline and before macOS starts.
             let preparedGL = guest == .bigsur && input.hasPublishedGuestGraphics
-            a += ["-fw_cfg", "name=opt/org.virtualintelmac/boot-policy,string=VIM1\(input.bootPolicySignatureOnly ? "S" : "L")\(preparedGL ? "1" : "0")00"]
+            a += [
+                "-fw_cfg",
+                "name=opt/org.virtualintelmac/boot-policy,string=VIM1\(input.bootPolicySignatureOnly ? "S" : "L")\(preparedGL ? "1" : "0")00"
+            ]
         }
         // Boot-time only; older per-OS firmware ignores this named item. The
         // unified image uses it before loading the unchanged OpenCore profile.
@@ -280,20 +302,25 @@ public final class LaunchPlan: NSObject {
                 a += ["-device", "intel-hda,id=hda", "-device", "hda-duplex,bus=hda.0,audiodev=audio0"]
                 // Explicit development-only cold-codec trace through the normal app
                 // launch. No QEMU debugger or additional control connection is needed.
-                if options.contains("--trace-hda-codec") { a += ["-global", "intel-hda.debug=2", "-global", "hda-duplex.debug=2"] }
+                if options.contains("--trace-hda-codec") {
+                    a += ["-global", "intel-hda.debug=2", "-global", "hda-duplex.debug=2"]
+                }
             }
         }
         // Report a period-appropriate nominal speed in SMBIOS, not a host
         // bandwidth claim. Capacity, memory timing and the TSC are unchanged.
         if !input.bootMediaOverridden && guest.reportsDIMMSpeed { a += ["-smbios", "type=17,speed=1066"] }
-        if !input.bootMediaOverridden && preMetal, let identifier = config["Identifier"] as? String, let uuid = UUID(uuidString: identifier) {
+        if !input.bootMediaOverridden && preMetal, let identifier = config["Identifier"] as? String,
+            let uuid = UUID(uuidString: identifier)
+        {
             // Older bundled profiles leave the serial empty. Supply a clearly
             // virtual, stable identifier without borrowing the host's identity
             // or changing the firmware profile, hardware UUID, or board ID.
             a += ["-smbios", "type=1,serial=\(uuid.uuidString.suffix(12))"]
         }
         a += [
-            "-device", "isa-applesmc,osk=ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc", "-smbios", "type=2",
+            "-device", "isa-applesmc,osk=ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc", "-smbios",
+            "type=2",
             "-drive", "if=pflash,format=raw,readonly=on,file=\(optionPath(input.firmwarePath))",
             "-drive", "if=pflash,format=raw,file=\(optionPath(input.nvramPath))",
             "-drive", "id=opencore,if=none,format=raw,snapshot=on,file=\(optionPath(input.bootMediaPath))",
@@ -302,7 +329,10 @@ public final class LaunchPlan: NSObject {
             // an ESP-only IDE disk otherwise races Tiger's unreadable-media dialog
             // before its guest agent can register a per-disk no-mount policy.
             // The installed OS disk stays on the same native IDE controller.
-            "-device", guest == .tiger ? "nvme,bus=pcie.0,addr=0x8,drive=opencore,bootindex=1,serial=VIMFirmwareEFI" : "ide-hd,bus=ide.0,drive=opencore,bootindex=1,rotation_rate=1",
+            "-device",
+            guest == .tiger
+                ? "nvme,bus=pcie.0,addr=0x8,drive=opencore,bootindex=1,serial=VIMFirmwareEFI"
+                : "ide-hd,bus=ide.0,drive=opencore,bootindex=1,rotation_rate=1",
             "-drive", "id=macos,if=none,format=qcow2,file=\(optionPath(input.diskPath))",
             "-device", systemDisk,
             // On q35 the auto-assigned slot 5 shares INTx with EHCI (IRQ 21).
@@ -316,7 +346,7 @@ public final class LaunchPlan: NSObject {
             // options above a comma here must not be doubled. -debugcon below too.
             "-serial", preMetal ? "none" : "file:\(input.machinePath)/State/serial.log",
             "-monitor", "none", "-action", "reboot=shutdown",
-            "-netdev", network,
+            "-netdev", network
         ]
         // Establish an unplugged cable before executing any guest instruction.
         // Keep the backend available so reconnecting never needs a guest reboot.
@@ -324,7 +354,9 @@ public final class LaunchPlan: NSObject {
         if openGLInprocess || (config["NetworkConnected"] != nil && !flag("NetworkConnected")) { a.append("-S") }
         // Explicit development diagnosis only: capture boot-time PHY accesses
         // through QEMU's disabled-by-default tracing, not a second QMP client.
-        if options.contains("--trace-network") { a += ["-trace", "enable=e1000_*", "-trace", "enable=e1000x_link_negotiation_*"] }
+        if options.contains("--trace-network") {
+            a += ["-trace", "enable=e1000_*", "-trace", "enable=e1000x_link_negotiation_*"]
+        }
         if options.contains("--trace-cursor") { a += ["-trace", "enable=vmware_cursor_define"] }
         if options.contains("--trace-image-enumeration") { a += ["-trace", "enable=usb_msd_maxlun"] }
         if options.contains("--firmware-diagnostics") {
@@ -336,34 +368,57 @@ public final class LaunchPlan: NSObject {
         if input.openGLResearchGuest && gdbPort > 0 && gdbPort <= 65535 { a += ["-gdb", "tcp:127.0.0.1:\(gdbPort)"] }
         // Independent read-only support media: never take over the user's CD/DVD
         // or the macOS installer. Insert only during setup and eject after copying.
-        a += ["-drive", "id=setup-support,if=none,media=cdrom,readonly=on", "-device", "ide-cd,id=setup-support-device,bus=ide.4,drive=setup-support"]
+        a += [
+            "-drive", "id=setup-support,if=none,media=cdrom,readonly=on", "-device",
+            "ide-cd,id=setup-support-device,bus=ide.4,drive=setup-support"
+        ]
         let diskImage = input.opticalFormat == "dmg"
         let optical = input.opticalPath.map(optionPath)
-        a += ["-drive", optical != nil && !diskImage ? "id=cdrom,if=none,media=cdrom,format=raw,readonly=on,file=\(optical!)" : "id=cdrom,if=none,media=cdrom,readonly=on",
-            "-device", "ide-cd,id=cdrom-device,bus=ide.3,drive=cdrom"]
+        a += [
+            "-drive",
+            optical != nil && !diskImage
+                ? "id=cdrom,if=none,media=cdrom,format=raw,readonly=on,file=\(optical!)"
+                : "id=cdrom,if=none,media=cdrom,readonly=on",
+            "-device", "ide-cd,id=cdrom-device,bus=ide.3,drive=cdrom"
+        ]
         // DMGs are disks, not optical sectors: preserve their 512-byte geometry
         // through a stock USB/SCSI removable device. Both backends are read-only;
         // the unused drive has no medium, not a converted or cached placeholder.
-        a += ["-drive", diskImage ? "id=removable-image,if=none,media=disk,format=dmg,readonly=on,file=\(optical ?? "")" : "id=removable-image,if=none,media=disk,readonly=on",
+        a += [
+            "-drive",
+            diskImage
+                ? "id=removable-image,if=none,media=disk,format=dmg,readonly=on,file=\(optical ?? "")"
+                : "id=removable-image,if=none,media=disk,readonly=on",
             "-device", "usb-bot,id=image-usb,bus=\(input.imageUSBBus),port=\(input.imageUSBBasePort)",
-            "-device", "scsi-hd,id=image-device,bus=image-usb.0,drive=removable-image,removable=on,logical_block_size=512,physical_block_size=512"]
+            "-device",
+            "scsi-hd,id=image-device,bus=image-usb.0,drive=removable-image,removable=on,logical_block_size=512,physical_block_size=512"
+        ]
         for image in input.additionalImages {
             let backend = "image-backend-\(image.slot)"
             let transport = "image-usb-\(image.slot)"
-            a += ["-drive", "id=\(backend),if=none,media=disk,readonly=on,format=\(image.format),file=\(optionPath(image.path))",
-                "-device", "usb-bot,id=\(transport),bus=\(input.imageUSBBus),port=\(input.imageUSBBasePort + image.slot)",
-                "-device", "scsi-hd,id=image-disk-\(image.slot),bus=\(transport).0,drive=\(backend),removable=on,logical_block_size=512,physical_block_size=512"]
+            a += [
+                "-drive",
+                "id=\(backend),if=none,media=disk,readonly=on,format=\(image.format),file=\(optionPath(image.path))",
+                "-device",
+                "usb-bot,id=\(transport),bus=\(input.imageUSBBus),port=\(input.imageUSBBasePort + image.slot)",
+                "-device",
+                "scsi-hd,id=image-disk-\(image.slot),bus=\(transport).0,drive=\(backend),removable=on,logical_block_size=512,physical_block_size=512"
+            ]
         }
         if let setup = input.setupMediaPath {
-            a += ["-drive", "id=opengl-setup,if=none,media=cdrom,format=raw,readonly=on,file=\(optionPath(setup))",
-                "-device", "ide-cd,id=opengl-setup-device,bus=ide.5,drive=opengl-setup"]
+            a += [
+                "-drive", "id=opengl-setup,if=none,media=cdrom,format=raw,readonly=on,file=\(optionPath(setup))",
+                "-device", "ide-cd,id=opengl-setup-device,bus=ide.5,drive=opengl-setup"
+            ]
         }
         if openGLSVGA && input.passthroughOpenGLEnabled {
-            a += ["-global", "vmware-svga.passthrough-opengl-bridge=on", "-global", "vmware-svga.vgamem_mb=512",
+            a += [
+                "-global", "vmware-svga.passthrough-opengl-bridge=on", "-global", "vmware-svga.vgamem_mb=512",
                 // This research layout's SVGA/EHCI use native GSI21.
                 // Remove only their duplicate PIC fanout after _PIC(1),
                 // preserving SATA's real legacy route and boot PIC mode.
-                "-global", "ICH9-LPC.x-apic-pirq-f-native-only=on"]
+                "-global", "ICH9-LPC.x-apic-pirq-f-native-only=on"
+            ]
             // This installed research guest uses the installer display
             // transport, not installer display semantics. A real panel
             // contract lets Mavericks choose HiDPI without a preference.
@@ -376,15 +431,23 @@ public final class LaunchPlan: NSObject {
             // both choices available; guest-display selects the requested
             // 1x/2x mode through the existing production path afterward.
             let retinaPanel = input.supportsRetinaDisplay && (retina || input.backingScaleFactor > 1)
-            a += ["-global", "vmware-svga.passthrough-opengl-panel-width=\(retinaPanel ? 2560 : 1280)",
+            a += [
+                "-global", "vmware-svga.passthrough-opengl-panel-width=\(retinaPanel ? 2560 : 1280)",
                 "-global", "vmware-svga.passthrough-opengl-panel-height=\(retinaPanel ? 1600 : 800)",
-                "-global", "vmware-svga.passthrough-opengl-ui-scale=\(retinaPanel ? 2 : 1)"]
+                "-global", "vmware-svga.passthrough-opengl-ui-scale=\(retinaPanel ? 2 : 1)"
+            ]
         }
         if installerDisplay && !openGLSVGA { a += ["-global", "VGA.xres=1280", "-global", "VGA.yres=800"] }
         if let installer = input.installerPath {
             let disk = config["InstallerMediaKind"] as? String == "disk"
-            a += ["-drive", "id=installer,if=none,format=raw,\(disk ? "snapshot=on" : "readonly=on"),file=\(optionPath(installer))",
-                "-device", disk ? "ide-hd,bus=ide.2,unit=0,drive=installer,bootindex=3,rotation_rate=1" : "ide-cd,bus=ide.2,unit=0,drive=installer,bootindex=3"]
+            a += [
+                "-drive",
+                "id=installer,if=none,format=raw,\(disk ? "snapshot=on" : "readonly=on"),file=\(optionPath(installer))",
+                "-device",
+                disk
+                    ? "ide-hd,bus=ide.2,unit=0,drive=installer,bootindex=3,rotation_rate=1"
+                    : "ide-cd,bus=ide.2,unit=0,drive=installer,bootindex=3"
+            ]
         }
         return a
     }
@@ -395,7 +458,9 @@ public final class LaunchPlan: NSObject {
         if let library = input.inprocessOpenGLLibrary {
             env["VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY"] = library
             if env["VIM_PASSTHROUGH_OPENGL_INLINE"] == nil { env["VIM_PASSTHROUGH_OPENGL_INLINE"] = "1" }
-            if env["VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT"] == nil { env["VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT"] = "1" }
+            if env["VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT"] == nil {
+                env["VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT"] = "1"
+            }
             if env["VIM_DISPLAY_EVENT_DRIVEN"] == nil { env["VIM_DISPLAY_EVENT_DRIVEN"] = "1" }
             setIfEmpty("VIM_OPENGL_VRAM_SERVICE", "gold.samhenri.LightClick.ram." + input.vramServiceIdentifier)
             setIfEmpty("VIM_OPENGL_VRAM_ENDPOINT", input.runtimeDirectory + "/vram-endpoint.plist")
@@ -419,7 +484,7 @@ public final class LaunchPlan: NSObject {
             // live Retina selection. The guest-display tool selects 1x or 2x.
             "PVG_OOP_SCALE_FACTOR": "2", "PVG_APP_DISPLAY_SCALE": "2",
             "PVG_PRESERVE_IOSURFACE": "1", "PVG_SHADOW_COALESCE": "1",
-            "PVG_SHADOW_MAX_CHUNK": "1048576", "PVG_SHADOW_TEXTURE_PAGING": "1",
+            "PVG_SHADOW_MAX_CHUNK": "1048576", "PVG_SHADOW_TEXTURE_PAGING": "1"
         ]) { _, new in new }
         // The framework cannot raw-blit packed multisample depth/stencil. The
         // ordered transfer adapter was qualified in the CLI harness, but omitted

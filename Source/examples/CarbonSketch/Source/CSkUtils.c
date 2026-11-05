@@ -1,6 +1,6 @@
 /*
     File:       CSkUtils.h
-    
+
     Contains:	Some utility routines for CarbonSketch
 
     Disclaimer:	IMPORTANT:  This Apple software is supplied to you by Apple Computer, Inc.
@@ -41,125 +41,113 @@
     Copyright © 2004 Apple Computer, Inc., All Rights Reserved
 */
 
-
 #include "CSkUtils.h"
 
 //--------------------------------------------------
-void SendWindowCloseEvent( WindowRef window )
-{
+void SendWindowCloseEvent(WindowRef window) {
     EventRef event;
-    
-    CreateEvent( NULL, kEventClassWindow, kEventWindowClose, GetCurrentEventTime(), kEventAttributeUserEvent, &event );
-    SetEventParameter( event, kEventParamDirectObject, typeWindowRef, sizeof(window), &window );
-    SendEventToWindow( event, window );
-    ReleaseEvent( event );
+
+    CreateEvent(NULL, kEventClassWindow, kEventWindowClose, GetCurrentEventTime(), kEventAttributeUserEvent, &event);
+    SetEventParameter(event, kEventParamDirectObject, typeWindowRef, sizeof(window), &window);
+    SendEventToWindow(event, window);
+    ReleaseEvent(event);
 }
 
 //--------------------------------------------------
-void SendWindowCommandEvent( WindowRef window, HICommand* command )
-{
+void SendWindowCommandEvent(WindowRef window, HICommand *command) {
     EventRef event;
-    
-    CreateEvent( NULL, kEventClassCommand, kEventCommandProcess, GetCurrentEventTime(), kEventAttributeUserEvent, &event );
-    SetEventParameter( event, kEventParamDirectObject, typeHICommand, sizeof(HICommand), command );
-    SendEventToWindow( event, window );
-    ReleaseEvent( event );
+
+    CreateEvent(NULL, kEventClassCommand, kEventCommandProcess, GetCurrentEventTime(), kEventAttributeUserEvent,
+                &event);
+    SetEventParameter(event, kEventParamDirectObject, typeHICommand, sizeof(HICommand), command);
+    SendEventToWindow(event, window);
+    ReleaseEvent(event);
 }
 
 //--------------------------------------------------
-void SendControlEventHit(ControlRef control)
-{
+void SendControlEventHit(ControlRef control) {
     EventRef event;
-    
-    CreateEvent( NULL, kEventClassControl, kEventControlHit, GetCurrentEventTime(), kEventAttributeUserEvent, &event );
-    SetEventParameter( event, kEventParamDirectObject, typeControlRef, sizeof(control), control );
-    SendEventToEventTarget( event, GetControlEventTarget(control) );
-    ReleaseEvent( event );
+
+    CreateEvent(NULL, kEventClassControl, kEventControlHit, GetCurrentEventTime(), kEventAttributeUserEvent, &event);
+    SetEventParameter(event, kEventParamDirectObject, typeControlRef, sizeof(control), control);
+    SendEventToEventTarget(event, GetControlEventTarget(control));
+    ReleaseEvent(event);
 }
 
 //---------------------------------------------------------------------------------
-void ConvertRGBColorToCGrgba(const RGBColor* inRGB, float alpha, CGrgba* outCGrgba)
-{
-    outCGrgba->r = (float)inRGB->red   / 65535.0;
+void ConvertRGBColorToCGrgba(const RGBColor *inRGB, float alpha, CGrgba *outCGrgba) {
+    outCGrgba->r = (float)inRGB->red / 65535.0;
     outCGrgba->g = (float)inRGB->green / 65535.0;
-    outCGrgba->b = (float)inRGB->blue  / 65535.0;
+    outCGrgba->b = (float)inRGB->blue / 65535.0;
     outCGrgba->a = alpha;
 }
 
-static void ConvertCGrgbaToRGB(const CGrgba* inCGrgba, RGBColor* outRGB)
-{
-    outRGB->red     = 65535 * inCGrgba->r;
-    outRGB->green   = 65535 * inCGrgba->g;
-    outRGB->blue    = 65535 * inCGrgba->b;
+static void ConvertCGrgbaToRGB(const CGrgba *inCGrgba, RGBColor *outRGB) {
+    outRGB->red = 65535 * inCGrgba->r;
+    outRGB->green = 65535 * inCGrgba->g;
+    outRGB->blue = 65535 * inCGrgba->b;
 }
 
 #define USECALCOLOR 1
 //-------------------------------------------
-OSStatus PickSomeColor(CGrgba* theColor)
-{
-    RGBColor            rgb;
-    NColorPickerInfo    info;
-    OSStatus            err;
+OSStatus PickSomeColor(CGrgba *theColor) {
+    RGBColor rgb;
+    NColorPickerInfo info;
+    OSStatus err;
 #if USECALCOLOR
     static CMProfileRef genericProfileRef = NULL;
-#endif    
-    
+#endif
+
     memset(&info, 0, sizeof(NColorPickerInfo));
     ConvertCGrgbaToRGB(theColor, &rgb);
 
-    info.placeWhere         = kCenterOnMainScreen;
-    info.flags              = kColorPickerDialogIsMoveable | kColorPickerDialogIsModal;
-    info.theColor.color.rgb.red     = rgb.red;
-    info.theColor.color.rgb.green   = rgb.green;
-    info.theColor.color.rgb.blue    = rgb.blue;
+    info.placeWhere = kCenterOnMainScreen;
+    info.flags = kColorPickerDialogIsMoveable | kColorPickerDialogIsModal;
+    info.theColor.color.rgb.red = rgb.red;
+    info.theColor.color.rgb.green = rgb.green;
+    info.theColor.color.rgb.blue = rgb.blue;
 
 #if USECALCOLOR
-    if (genericProfileRef == NULL)
-    {
-		/*  We only call OpenGenericProfile once. It returns a reference that
-			we "own". Since we hang on to that reference for the life of this application we
-			don't close it after we are done in this function; we keep it in a static variable
-			so we don't have to get a reference at any later time.
-		*/
-		genericProfileRef = OpenGenericProfile();
+    if (genericProfileRef == NULL) {
+        /*  We only call OpenGenericProfile once. It returns a reference that
+            we "own". Since we hang on to that reference for the life of this application we
+            don't close it after we are done in this function; we keep it in a static variable
+            so we don't have to get a reference at any later time.
+        */
+        genericProfileRef = OpenGenericProfile();
     }
-	
+
     info.dstProfile = genericProfileRef;
 #endif
 
     err = NPickColor(&info);
     require_noerr(err, NPickColorFAILED);
-    
-    if ((err == noErr) && info.newColorChosen)
-    {
-        rgb.red     = info.theColor.color.rgb.red;
-        rgb.green   = info.theColor.color.rgb.green;
-        rgb.blue    = info.theColor.color.rgb.blue;
+
+    if ((err == noErr) && info.newColorChosen) {
+        rgb.red = info.theColor.color.rgb.red;
+        rgb.green = info.theColor.color.rgb.green;
+        rgb.blue = info.theColor.color.rgb.blue;
         ConvertRGBColorToCGrgba(&rgb, theColor->a, theColor);
     }
-            
+
 NPickColorFAILED:
     return err;
 }
 
 //---------------------------------------------------------------------------------------------
-void  CGRectToQDRect(const int windowHeight, const CGRect cgRect, Rect* outQDRect)
-{
+void CGRectToQDRect(const int windowHeight, const CGRect cgRect, Rect *outQDRect) {
     outQDRect->left = cgRect.origin.x;
-    outQDRect->top  = windowHeight - (cgRect.origin.y + cgRect.size.height);
+    outQDRect->top = windowHeight - (cgRect.origin.y + cgRect.size.height);
     outQDRect->right = cgRect.origin.x + cgRect.size.width;
-    outQDRect->bottom  = windowHeight - cgRect.origin.y;
+    outQDRect->bottom = windowHeight - cgRect.origin.y;
 }
 
-
 //---------------------------------------------------------------------------------------------
-void QDPortToCGCoordinates(Point* inPtArray, Point* outPtArray, int numPoints, Rect* portBounds)
-{
+void QDPortToCGCoordinates(Point *inPtArray, Point *outPtArray, int numPoints, Rect *portBounds) {
     int i;
     int height = portBounds->bottom - portBounds->top;
-    
-    for (i = 0; i < numPoints; ++i)
-    {
+
+    for (i = 0; i < numPoints; ++i) {
         outPtArray[i].v = height - inPtArray[i].v;
         outPtArray[i].h = inPtArray[i].h;
     }
@@ -167,44 +155,37 @@ void QDPortToCGCoordinates(Point* inPtArray, Point* outPtArray, int numPoints, R
 
 //---------------------------------------------------------------------------------------------
 // Map kLineTool, kRectTool, kOvalTool, kRRectTool to kLineShape, kRectShape, kOvalShape, kRRectShape
-int MapToolToShape(int toolID)
-{
-	return toolID - 1;
-}
+int MapToolToShape(int toolID) { return toolID - 1; }
 
-#define	kGenericRGBProfilePathStr       "/System/Library/ColorSync/Profiles/Generic RGB Profile.icc"
+#define kGenericRGBProfilePathStr "/System/Library/ColorSync/Profiles/Generic RGB Profile.icc"
 /*
-    This function locates, opens, and returns the profile reference for the calibrated 
+    This function locates, opens, and returns the profile reference for the calibrated
     Generic RGB color space. It is up to the caller to call CMCloseProfile when done
     with the profile reference this function returns.
 */
-CMProfileRef OpenGenericProfile(void)
-{
+CMProfileRef OpenGenericProfile(void) {
     static CMProfileRef cachedRGBProfileRef = NULL;
-    
+
     // we only create the profile reference once
-    if (cachedRGBProfileRef == NULL)
-    {
-		OSStatus 			err;
-		CMProfileLocation 	loc;
-	
-		loc.locType = cmPathBasedProfile;
-		strcpy(loc.u.pathLoc.path, kGenericRGBProfilePathStr);
-	
-		err = CMOpenProfile(&cachedRGBProfileRef, &loc);
-		
-		if (err != noErr)
-		{
-			cachedRGBProfileRef = NULL;
-			// log a message to the console
-			fprintf(stderr, "couldn't open generic profile due to error %d\n", (int)err);
-		}
+    if (cachedRGBProfileRef == NULL) {
+        OSStatus err;
+        CMProfileLocation loc;
+
+        loc.locType = cmPathBasedProfile;
+        strcpy(loc.u.pathLoc.path, kGenericRGBProfilePathStr);
+
+        err = CMOpenProfile(&cachedRGBProfileRef, &loc);
+
+        if (err != noErr) {
+            cachedRGBProfileRef = NULL;
+            // log a message to the console
+            fprintf(stderr, "couldn't open generic profile due to error %d\n", (int)err);
+        }
     }
 
-    if (cachedRGBProfileRef)
-    {
-		// clone the profile reference so that the caller has their own reference, not our cached one
-		CMCloneProfileRef(cachedRGBProfileRef);   
+    if (cachedRGBProfileRef) {
+        // clone the profile reference so that the caller has their own reference, not our cached one
+        CMCloneProfileRef(cachedRGBProfileRef);
     }
 
     return cachedRGBProfileRef;
@@ -215,43 +196,37 @@ CMProfileRef OpenGenericProfile(void)
     not release the returned value unless the caller retains it first. Usually callers
     of this routine will immediately use the returned colorspace with CoreGraphics
     so they typically do not need to retain it themselves.
-    
+
     This function creates the generic RGB color space once and hangs onto it so it can
     return it whenever this function is called.
 */
-CGColorSpaceRef GetGenericRGBColorSpace(void)
-{
+CGColorSpaceRef GetGenericRGBColorSpace(void) {
     static CGColorSpaceRef genericRGBColorSpace = NULL;
 
-	if (genericRGBColorSpace == NULL)
-	{
-		CMProfileRef genericRGBProfile = OpenGenericProfile();
-	
-		if (genericRGBProfile)
-		{
-			genericRGBColorSpace = CGColorSpaceCreateWithPlatformColorSpace(genericRGBProfile);
-			if (genericRGBColorSpace == NULL)
-				fprintf(stderr, "couldn't create the generic RGB color space\n");
-			
-			// we opened the profile so it is up to us to close it
-			CMCloseProfile(genericRGBProfile); 
-		}
-	}
+    if (genericRGBColorSpace == NULL) {
+        CMProfileRef genericRGBProfile = OpenGenericProfile();
+
+        if (genericRGBProfile) {
+            genericRGBColorSpace = CGColorSpaceCreateWithPlatformColorSpace(genericRGBProfile);
+            if (genericRGBColorSpace == NULL)
+                fprintf(stderr, "couldn't create the generic RGB color space\n");
+
+            // we opened the profile so it is up to us to close it
+            CMCloseProfile(genericRGBProfile);
+        }
+    }
     return genericRGBColorSpace;
 }
 
 //-------------------------------------------------------------
-PasteboardRef GetPasteboard(void)
-{
-	static PasteboardRef sPasteboard = NULL;
-	
-	if (sPasteboard == NULL)
-	{
-		PasteboardCreate( kPasteboardClipboard, &sPasteboard );
-		if (sPasteboard == NULL)
-		{
-			fprintf(stderr, "PasteboardCreate failed - I wonder why?!\n");
-		}
-	}
-	return sPasteboard;
+PasteboardRef GetPasteboard(void) {
+    static PasteboardRef sPasteboard = NULL;
+
+    if (sPasteboard == NULL) {
+        PasteboardCreate(kPasteboardClipboard, &sPasteboard);
+        if (sPasteboard == NULL) {
+            fprintf(stderr, "PasteboardCreate failed - I wonder why?!\n");
+        }
+    }
+    return sPasteboard;
 }

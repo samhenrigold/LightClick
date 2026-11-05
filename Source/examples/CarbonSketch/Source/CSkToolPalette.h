@@ -1,8 +1,8 @@
 /*
     File:       CSkToolPalette.h
-        
+
     Contains:	Externally visible prototypes of CSkToolPalette routines.
-				
+
     Disclaimer:	IMPORTANT:  This Apple software is supplied to you by Apple Computer, Inc.
                 ("Apple") in consideration of your agreement to the following terms, and your
                 use, installation, modification or redistribution of this Apple software
@@ -41,7 +41,6 @@
     Copyright © 2004 Apple Computer, Inc., All Rights Reserved
 */
 
-
 #ifndef __TOOLPALETTEWINDOW__
 #define __TOOLPALETTEWINDOW__
 
@@ -49,18 +48,17 @@
 #include "CSkUtils.h"
 #include "CSkObjects.h"
 
-
-WindowRef   CSkToolPalette              ( IBNibRef mainNib );
-int         CSkToolPaletteGetTool       ( WindowRef toolPalette );
-float       CSkToolPaletteGetLineWidth  ( WindowRef toolPalette );
-CGLineCap   CSkToolPaletteGetLineCap    ( WindowRef toolPalette );
-CGLineJoin  CSkToolPaletteGetLineJoin   ( WindowRef toolPalette );
-int         CSkToolPaletteGetLineStyle  ( WindowRef toolPalette );
-CGrgba*     CSkToolPaletteGetStrokeColor( WindowRef toolPalette, CGrgba* outStrokeColor );
-void        CSkToolPaletteSetStrokeColor( WindowRef toolPalette, CGrgba* strokeColor );
-CGrgba*     CSkToolPaletteGetFillColor  ( WindowRef toolPalette, CGrgba* outFillColor );
-void        CSkToolPaletteSetFillColor  ( WindowRef toolPalette, CGrgba* fillColor );
-void        CSkToolPaletteSetContextState( CGContextRef ctx, WindowRef toolPalette );
-void        CSkToolPaletteSyncPopups    ( const CSkObject* obj );
+WindowRef CSkToolPalette(IBNibRef mainNib);
+int CSkToolPaletteGetTool(WindowRef toolPalette);
+float CSkToolPaletteGetLineWidth(WindowRef toolPalette);
+CGLineCap CSkToolPaletteGetLineCap(WindowRef toolPalette);
+CGLineJoin CSkToolPaletteGetLineJoin(WindowRef toolPalette);
+int CSkToolPaletteGetLineStyle(WindowRef toolPalette);
+CGrgba *CSkToolPaletteGetStrokeColor(WindowRef toolPalette, CGrgba *outStrokeColor);
+void CSkToolPaletteSetStrokeColor(WindowRef toolPalette, CGrgba *strokeColor);
+CGrgba *CSkToolPaletteGetFillColor(WindowRef toolPalette, CGrgba *outFillColor);
+void CSkToolPaletteSetFillColor(WindowRef toolPalette, CGrgba *fillColor);
+void CSkToolPaletteSetContextState(CGContextRef ctx, WindowRef toolPalette);
+void CSkToolPaletteSyncPopups(const CSkObject *obj);
 
 #endif

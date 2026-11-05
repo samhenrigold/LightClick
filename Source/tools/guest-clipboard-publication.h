@@ -7,12 +7,16 @@ typedef struct {
     NSInteger change;
     NSTimeInterval nextRead, delay;
 } VIMClipboardPendingPublication;
-static inline BOOL VIMClipboardPublicationDue(VIMClipboardPendingPublication *state,
-    NSInteger change,NSTimeInterval now) {
-    if(!state->delay||state->change!=change){state->change=change;state->nextRead=0;state->delay=.2;}
-    return now>=state->nextRead;
+static inline BOOL VIMClipboardPublicationDue(VIMClipboardPendingPublication *state, NSInteger change,
+                                              NSTimeInterval now) {
+    if (!state->delay || state->change != change) {
+        state->change = change;
+        state->nextRead = 0;
+        state->delay = .2;
+    }
+    return now >= state->nextRead;
 }
-static inline void VIMClipboardPublicationPending(VIMClipboardPendingPublication *state,
-    NSTimeInterval now) {
-    state->nextRead=now+state->delay;state->delay=MIN(1,state->delay*2);
+static inline void VIMClipboardPublicationPending(VIMClipboardPendingPublication *state, NSTimeInterval now) {
+    state->nextRead = now + state->delay;
+    state->delay = MIN(1, state->delay * 2);
 }

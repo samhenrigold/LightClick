@@ -7,9 +7,9 @@ NSString *_Nullable VIMDevelopmentSourceRoot(void);
 /// Test actual Intel execution on Apple silicon, not a version-specific receipt
 /// or the Linux Rosetta API (which no longer proves Mac Rosetta on macOS 27).
 /// The bundled graphics helper exits immediately with no arguments or GPU work.
-void VIMCheckRosetta(void (^completion)(BOOL missing,NSError *_Nullable error));
+void VIMCheckRosetta(void (^completion)(BOOL missing, NSError *_Nullable error));
 /// Fail-closed start preflight, including a missing/broken graphics helper.
-void VIMCheckRosettaForBoot(void (^completion)(BOOL missing,NSError *_Nullable error));
+void VIMCheckRosettaForBoot(void (^completion)(BOOL missing, NSError *_Nullable error));
 @class NSWindow;
 /// Shared launch/start alert. Installing never queues an automatic VM start.
 void VIMPresentRosettaRequiredAlert(NSWindow *_Nullable window);

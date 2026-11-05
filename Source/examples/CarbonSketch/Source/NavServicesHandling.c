@@ -1,6 +1,6 @@
 /*
     File:       NavServicesHandling.c
-    
+
     Contains:	Code to handle the save dialog for our sample application.
 
     Disclaimer:	IMPORTANT:  This Apple software is supplied to you by Apple Computer, Inc.
@@ -41,147 +41,119 @@
     Copyright © 1999-2004 Apple Computer, Inc., All Rights Reserved
 */
 
-
 #include "NavServicesHandling.h"
 #include "CSkDocStorage.h"
 #include "CSkWindow.h"
 
-#define	kFileCreator			'prvw'
-#define kFileTypePDF			'PDF '
+#define kFileCreator 'prvw'
+#define kFileTypePDF 'PDF '
 
-#define kFileTypePDFCFStr		CFSTR("%@.pdf")		// our format string for making the save as file name
+#define kFileTypePDFCFStr CFSTR("%@.pdf") // our format string for making the save as file name
 
 // these are values are used to keep "unique" set of preferences for each Nav dialog,
 // for example: using more than one NavChooseObject style dialog in one application:
-//#define kSavePrefKey		1
-
+// #define kSavePrefKey		1
 
 // the structure we're going to give to the save dialog to hang our data off of
-typedef struct OurSaveDialogData {	
-    NavDialogRef	dialogRef;
-    void*               documentDataP;
+typedef struct OurSaveDialogData {
+    NavDialogRef dialogRef;
+    void *documentDataP;
 } OurSaveDialogData;
 
-
 //-----------------------------------------------------------------------------------------------------------------------
-static OSStatus MakePDFDocument(const DocStorage* docSt, CFURLRef url)	
-{
-    OSStatus                err         = -1;   // generic error code: watch console output!
-    CGRect                  docBounds   = CGRectMake(0, 0, docSt->docSize.h, docSt->docSize.v);
-    CFMutableDictionaryRef  dict        = CFDictionaryCreateMutable( kCFAllocatorDefault, 0,
-                                                                    &kCFTypeDictionaryKeyCallBacks, 
-                                                                    &kCFTypeDictionaryValueCallBacks); 
-     
-    if (dict != NULL) 
-    {
-        CGContextRef    ctx         = CGPDFContextCreateWithURL(url, &docBounds, dict);
-        CFStringRef     stringRef;    // Add some producer information to our PDF file
-        
-        CopyWindowTitleAsCFString(docSt->ownerWindow, &stringRef);
-		CFDictionaryAddValue(dict, CFSTR("Title"), stringRef);
-		CFRelease(stringRef);
-		CFDictionaryAddValue(dict, CFSTR("Creator"), CFSTR("CarbonSketch"));
+static OSStatus MakePDFDocument(const DocStorage *docSt, CFURLRef url) {
+    OSStatus err = -1; // generic error code: watch console output!
+    CGRect docBounds = CGRectMake(0, 0, docSt->docSize.h, docSt->docSize.v);
+    CFMutableDictionaryRef dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
+                                                            &kCFTypeDictionaryValueCallBacks);
 
-        if (ctx != NULL)
-        {
-			DrawIntoPDFPage(ctx, docBounds, docSt, 1);
-			CGContextRelease(ctx);
+    if (dict != NULL) {
+        CGContextRef ctx = CGPDFContextCreateWithURL(url, &docBounds, dict);
+        CFStringRef stringRef; // Add some producer information to our PDF file
+
+        CopyWindowTitleAsCFString(docSt->ownerWindow, &stringRef);
+        CFDictionaryAddValue(dict, CFSTR("Title"), stringRef);
+        CFRelease(stringRef);
+        CFDictionaryAddValue(dict, CFSTR("Creator"), CFSTR("CarbonSketch"));
+
+        if (ctx != NULL) {
+            DrawIntoPDFPage(ctx, docBounds, docSt, 1);
+            CGContextRelease(ctx);
             err = noErr;
         }
-		CFRelease(dict);
-    }
-    else 
-    {
+        CFRelease(dict);
+    } else {
         fprintf(stderr, "CFDictionaryCreateMutable FAILED\n");
     }
-    
+
     return err;
 }
 
+static OSStatus DoFSRefSave(const OurSaveDialogData *dialogDataP, NavReplyRecord *reply, AEDesc *actualDescP) {
+    OSStatus err;
+    FSRef fileRefParent;
 
-static OSStatus DoFSRefSave(const OurSaveDialogData* dialogDataP, NavReplyRecord* reply, AEDesc* actualDescP)
-{
-    OSStatus 	err;
-    FSRef 	fileRefParent;
-	    
-    err = AEGetDescData( actualDescP, &fileRefParent, sizeof( FSRef ) );
-    if (err == noErr )
-    {
-        // get the name data and its length:	
-        HFSUniStr255	nameBuffer;
-        UniCharCount 	sourceLength = 0;
-        
-        sourceLength = (UniCharCount)CFStringGetLength( reply->saveFileName );
-        CFStringGetCharacters( reply->saveFileName, CFRangeMake( 0, sourceLength ),  (UniChar*)&nameBuffer.unicode );
-        
-        if ( sourceLength > 0 )
-        {	
-            if ( reply->replacing )
-            {
+    err = AEGetDescData(actualDescP, &fileRefParent, sizeof(FSRef));
+    if (err == noErr) {
+        // get the name data and its length:
+        HFSUniStr255 nameBuffer;
+        UniCharCount sourceLength = 0;
+
+        sourceLength = (UniCharCount)CFStringGetLength(reply->saveFileName);
+        CFStringGetCharacters(reply->saveFileName, CFRangeMake(0, sourceLength), (UniChar *)&nameBuffer.unicode);
+
+        if (sourceLength > 0) {
+            if (reply->replacing) {
                 // delete the file we are replacing:
                 FSRef fileToDelete;
-                err = FSMakeFSRefUnicode( &fileRefParent, sourceLength, nameBuffer.unicode, kTextEncodingUnicodeDefault, &fileToDelete );
-                if (err == noErr )
-                {
-                    err = FSDeleteObject( &fileToDelete );
-                    if ( err == fBsyErr )
-                    {
+                err = FSMakeFSRefUnicode(&fileRefParent, sourceLength, nameBuffer.unicode, kTextEncodingUnicodeDefault,
+                                         &fileToDelete);
+                if (err == noErr) {
+                    err = FSDeleteObject(&fileToDelete);
+                    if (err == fBsyErr) {
                         fprintf(stderr, "FSDeleteObject returned \"File Busy\" Error %d\n", fBsyErr);
                     }
                 }
             }
-                            
-            if ( err == noErr )
-            {
+
+            if (err == noErr) {
                 // create the file based on Unicode, but we can write the file's data with an FSSpec:
                 FSSpec newFileSpec;
 
                 // get the FSSpec back so we can write the file's data
-                if ((err = FSCreateFileUnicode( &fileRefParent, sourceLength, 
-                                                    nameBuffer.unicode,
-                                                    kFSCatInfoNone,
-                                                    NULL,
-                                                    NULL,	
-                                                    &newFileSpec)) == noErr)
-                {
-                    FInfo fileInfo = { kFileTypePDF, kFileCreator, 0, { 0, 0 }, 0 };
-//                    fileInfo.fdType     = kFileTypePDF;
-//                    fileInfo.fdCreator  = kFileCreator;
-                    err = FSpSetFInfo( &newFileSpec, &fileInfo );
+                if ((err = FSCreateFileUnicode(&fileRefParent, sourceLength, nameBuffer.unicode, kFSCatInfoNone, NULL,
+                                               NULL, &newFileSpec)) == noErr) {
+                    FInfo fileInfo = {kFileTypePDF, kFileCreator, 0, {0, 0}, 0};
+                    //                    fileInfo.fdType     = kFileTypePDF;
+                    //                    fileInfo.fdCreator  = kFileCreator;
+                    err = FSpSetFInfo(&newFileSpec, &fileInfo);
                     // now that we have the FSSpec, we can proceed with the save operation:
-                    if (err == noErr)
-                    {
+                    if (err == noErr) {
                         FSRef fsRef;
-                        err = FSpMakeFSRef(&newFileSpec, &fsRef);	// make an FSRef
-                        if (!err)
-                        {
+                        err = FSpMakeFSRef(&newFileSpec, &fsRef); // make an FSRef
+                        if (!err) {
                             CFURLRef saveURL = CFURLCreateFromFSRef(NULL, &fsRef);
-                            if (saveURL)
-                            {
+                            if (saveURL) {
                                 // delete the file we just made for making the FSRef
-                                err = FSpDelete(&newFileSpec);	
+                                err = FSpDelete(&newFileSpec);
                                 if (!err)
                                     err = MakePDFDocument(dialogDataP->documentDataP, saveURL);
                                 if (err)
                                     fprintf(stderr, "MakePDFDocument returned error %d\n", (int)err);
-                                else
-                                {
-                                    err = NavCompleteSave( reply, kNavTranslateInPlace );
+                                else {
+                                    err = NavCompleteSave(reply, kNavTranslateInPlace);
                                     if (err)
                                         fprintf(stderr, "NavCompleteSave returned error %d\n", (int)err);
                                 }
-                                
-                                if (err) 
-                                {
+
+                                if (err) {
                                     // an error ocurred saving the file, so delete the copy left over:
-                                    (void)FSpDelete( &newFileSpec );
+                                    (void)FSpDelete(&newFileSpec);
                                 }
                                 CFRelease(saveURL);
-                            }
-                            else
-                            {
+                            } else {
                                 // delete the file we just made for making the FSRef
-                               (void)FSpDelete(&newFileSpec);
+                                (void)FSpDelete(&newFileSpec);
                                 err = -1;
                                 fprintf(stderr, "CFURLCreateFromFSRef FAILED\n");
                             }
@@ -194,134 +166,110 @@ static OSStatus DoFSRefSave(const OurSaveDialogData* dialogDataP, NavReplyRecord
     return err;
 }
 
+static pascal void NavEventProc(NavEventCallbackMessage callBackSelector, NavCBRecPtr callBackParms, void *callBackUD) {
+    OurSaveDialogData *dialogDataP = (OurSaveDialogData *)callBackUD;
+    OSStatus err = noErr;
 
-static pascal void NavEventProc( NavEventCallbackMessage callBackSelector, NavCBRecPtr callBackParms, void* callBackUD )
-{
-    OurSaveDialogData *dialogDataP = (OurSaveDialogData*)callBackUD;
-    OSStatus 	err = noErr;		        
-	
-    switch ( callBackSelector )
-    {
-	case kNavCBUserAction:
-	{
-	    NavReplyRecord 	reply;
-	    NavUserAction 	userAction = 0;
-	    
-	    if ((err = NavDialogGetReply( callBackParms->context, &reply )) == noErr )
-	    {
-		OSStatus tempErr;
-		userAction = NavDialogGetUserAction( callBackParms->context );
-				
-		switch ( userAction )
-		{
-		    case kNavUserActionSaveAs:
-		    {
-			if ( dialogDataP != NULL )
-                        {
-			    AEDesc actualDesc;
-                            err = AECoerceDesc( &reply.selection, typeFSRef, &actualDesc );
-			    if ( err == noErr )
-			    {	
-				// the coercion succeeded as an FSRef, so use HFS+ APIs to save the file:
-				err = DoFSRefSave( dialogDataP, &reply, &actualDesc);
-				AEDisposeDesc( &actualDesc );
-			    }
-			}
-			break;
-		    }
-				    				    
-		    case kNavUserActionCancel:
+    switch (callBackSelector) {
+        case kNavCBUserAction: {
+            NavReplyRecord reply;
+            NavUserAction userAction = 0;
+
+            if ((err = NavDialogGetReply(callBackParms->context, &reply)) == noErr) {
+                OSStatus tempErr;
+                userAction = NavDialogGetUserAction(callBackParms->context);
+
+                switch (userAction) {
+                    case kNavUserActionSaveAs: {
+                        if (dialogDataP != NULL) {
+                            AEDesc actualDesc;
+                            err = AECoerceDesc(&reply.selection, typeFSRef, &actualDesc);
+                            if (err == noErr) {
+                                // the coercion succeeded as an FSRef, so use HFS+ APIs to save the file:
+                                err = DoFSRefSave(dialogDataP, &reply, &actualDesc);
+                                AEDisposeDesc(&actualDesc);
+                            }
+                        }
                         break;
-					    
-		    case kNavUserActionNewFolder:
+                    }
+
+                    case kNavUserActionCancel:
                         break;
-		}
-	          
-		tempErr = NavDisposeReply( &reply );
-		if (!err)
-		    err = tempErr;
+
+                    case kNavUserActionNewFolder:
+                        break;
+                }
+
+                tempErr = NavDisposeReply(&reply);
+                if (!err)
+                    err = tempErr;
             }
             break;
-	}
-			
-	case kNavCBTerminate:
-	{
-//	    fprintf(stderr, "kNavCBTerminate\n");
-	    if ( dialogDataP != NULL )
-	    {
-			if (dialogDataP->dialogRef)
-			{
-	//		    fprintf(stderr, "  kNavCBTerminate: calling NavDialogDispose\n");
-				NavDialogDispose(dialogDataP->dialogRef );
-			}
-            dialogDataP->dialogRef = NULL;
-			free(dialogDataP);
-		}
-	}
-	break;
+        }
+
+        case kNavCBTerminate: {
+            //	    fprintf(stderr, "kNavCBTerminate\n");
+            if (dialogDataP != NULL) {
+                if (dialogDataP->dialogRef) {
+                    //		    fprintf(stderr, "  kNavCBTerminate: calling NavDialogDispose\n");
+                    NavDialogDispose(dialogDataP->dialogRef);
+                }
+                dialogDataP->dialogRef = NULL;
+                free(dialogDataP);
+            }
+        } break;
     }
 }
 
-
 // this code originates from the NavServices sample code in the CarbonLib SDK
-OSStatus SaveAsPDFDocument (WindowRef w, void* ourDataP)
-{
-    OSStatus 			err = noErr;
-    static NavEventUPP          gNavEventProc = NULL;		// event proc for our Nav Dialogs 
-    NavDialogCreationOptions	dialogOptions;
+OSStatus SaveAsPDFDocument(WindowRef w, void *ourDataP) {
+    OSStatus err = noErr;
+    static NavEventUPP gNavEventProc = NULL; // event proc for our Nav Dialogs
+    NavDialogCreationOptions dialogOptions;
 
-    if (gNavEventProc == NULL)
-    {
+    if (gNavEventProc == NULL) {
         gNavEventProc = NewNavEventUPP(NavEventProc);
         if (!gNavEventProc)
             return memFullErr;
     }
 
-    err = NavGetDefaultDialogCreationOptions( &dialogOptions );
-    if (err == noErr )
-    {
-	OurSaveDialogData*  dialogDataP = NULL;
-	CFStringRef         tempString;
-        
-	CopyWindowTitleAsCFString(w, &tempString);
+    err = NavGetDefaultDialogCreationOptions(&dialogOptions);
+    if (err == noErr) {
+        OurSaveDialogData *dialogDataP = NULL;
+        CFStringRef tempString;
+
+        CopyWindowTitleAsCFString(w, &tempString);
         dialogOptions.saveFileName = CFStringCreateWithFormat(kCFAllocatorDefault, NULL, kFileTypePDFCFStr, tempString);
-	CFRelease(tempString);
-	
-	// make the dialog modal to our parent doc, AKA sheets
+        CFRelease(tempString);
+
+        // make the dialog modal to our parent doc, AKA sheets
         dialogOptions.parentWindow = w;
-	dialogOptions.modality = kWindowModalityWindowModal;
-	
-	dialogDataP = (OurSaveDialogData*)malloc(sizeof(OurSaveDialogData));
-	if (dialogDataP)
-        {
-	    dialogDataP->dialogRef      = NULL;
-	    dialogDataP->documentDataP  = ourDataP;
-            
-	    err = NavCreatePutFileDialog(&dialogOptions, kFileTypePDF, kFileCreator,
-						    gNavEventProc, dialogDataP,
-						    &dialogDataP->dialogRef);
-	    if ((err == noErr) && (dialogDataP->dialogRef != NULL))
-	    {
-		err = NavDialogRun( dialogDataP->dialogRef );
-		if (err != noErr)
-		{
+        dialogOptions.modality = kWindowModalityWindowModal;
+
+        dialogDataP = (OurSaveDialogData *)malloc(sizeof(OurSaveDialogData));
+        if (dialogDataP) {
+            dialogDataP->dialogRef = NULL;
+            dialogDataP->documentDataP = ourDataP;
+
+            err = NavCreatePutFileDialog(&dialogOptions, kFileTypePDF, kFileCreator, gNavEventProc, dialogDataP,
+                                         &dialogDataP->dialogRef);
+            if ((err == noErr) && (dialogDataP->dialogRef != NULL)) {
+                err = NavDialogRun(dialogDataP->dialogRef);
+                if (err != noErr) {
                     fprintf(stderr, "NavDialogRun returned error %d\n", (int)err);
-/*
-		    NavDialogDispose( dialogDataP->dialogRef );
-		    dialogDataP->dialogRef = NULL;
-*/
-		}
-	    }
-            else
-            {
+                    /*
+                                NavDialogDispose( dialogDataP->dialogRef );
+                                dialogDataP->dialogRef = NULL;
+                    */
+                }
+            } else {
                 fprintf(stderr, "NavCreatePutFileDialog returned error %d\n", (int)err);
             }
-	}
-        else
-	    err = memFullErr;
-       	
-     	if ( dialogOptions.saveFileName != NULL )
-	    CFRelease( dialogOptions.saveFileName );
+        } else
+            err = memFullErr;
+
+        if (dialogOptions.saveFileName != NULL)
+            CFRelease(dialogOptions.saveFileName);
     }
     return err;
 }

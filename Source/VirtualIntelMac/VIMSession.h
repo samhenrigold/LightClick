@@ -20,12 +20,22 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)hasRunningMachines;
 + (BOOL)isRunningMachine:(VIMMachine *)machine;
 + (NSDictionary *)networkDetailsForMachine:(VIMMachine *)machine;
-+ (void)changeNetworkMode:(NSString *)mode connected:(BOOL)connected machine:(VIMMachine *)machine window:(NSWindow *)window completion:(void (^)(NSError *_Nullable))completion;
-+ (void)setNetworkConnected:(BOOL)connected machine:(VIMMachine *)machine completion:(void (^)(NSError *_Nullable))completion;
++ (void)changeNetworkMode:(NSString *)mode
+                connected:(BOOL)connected
+                  machine:(VIMMachine *)machine
+                   window:(NSWindow *)window
+               completion:(void (^)(NSError *_Nullable))completion;
++ (void)setNetworkConnected:(BOOL)connected
+                    machine:(VIMMachine *)machine
+                 completion:(void (^)(NSError *_Nullable))completion;
 + (void)enableGuestRemoteLogin:(VIMMachine *)machine completion:(void (^)(NSError *_Nullable))completion;
 + (void)clipboardPreferencesChangedForMachine:(VIMMachine *)machine;
-+ (void)openGuestPreferences:(NSString *)pane machine:(VIMMachine *)machine completion:(void (^)(NSError *_Nullable))completion;
-+ (void)openHostConnection:(NSURL *)URL inMachine:(VIMMachine *)machine completion:(void (^)(NSError *_Nullable))completion;
++ (void)openGuestPreferences:(NSString *)pane
+                     machine:(VIMMachine *)machine
+                  completion:(void (^)(NSError *_Nullable))completion;
++ (void)openHostConnection:(NSURL *)URL
+                 inMachine:(VIMMachine *)machine
+                completion:(void (^)(NSError *_Nullable))completion;
 + (NSString *)statusForMachine:(VIMMachine *)machine;
 + (void)stopAll;
 + (NSArray<NSString *> *)runningMachineNames;
@@ -63,8 +73,13 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSArray<NSDictionary *> *)connectedImagesForMachine:(VIMMachine *)machine;
 + (void)chooseImageForMachine:(VIMMachine *)machine slot:(NSUInteger)slot window:(NSWindow *)window;
 + (void)ejectImageForMachine:(VIMMachine *)machine slot:(NSUInteger)slot window:(NSWindow *)window;
-+ (void)insertImage:(NSString *)path slot:(NSUInteger)slot machine:(VIMMachine *)machine completion:(void (^)(NSError *_Nullable))completion;
++ (void)insertImage:(NSString *)path
+               slot:(NSUInteger)slot
+            machine:(VIMMachine *)machine
+         completion:(void (^)(NSError *_Nullable))completion;
 /// Same media operation used by the picker/eject UI. Empty path ejects.
-+ (void)insertOpticalMedia:(NSString *)path machine:(VIMMachine *)machine completion:(void (^)(NSError *_Nullable))completion;
++ (void)insertOpticalMedia:(NSString *)path
+                   machine:(VIMMachine *)machine
+                completion:(void (^)(NSError *_Nullable))completion;
 @end
 NS_ASSUME_NONNULL_END

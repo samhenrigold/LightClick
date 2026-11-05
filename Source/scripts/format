@@ -16,6 +16,7 @@ clang_format="$(xcrun --find clang-format)" || exit 2
 kind() {
     case "$1" in
         Source/vendor/* | Source/prebuilt/*) ;;
+        Source/compat/PassthroughOpenGLBootPolicy.h) ;; # the prebuilt OpenCore payload pins its exact bytes
         *.swift) echo swift ;;
         *.c | *.h | *.m | *.mm | *.cc | *.cpp | *.hpp) echo c ;;
     esac

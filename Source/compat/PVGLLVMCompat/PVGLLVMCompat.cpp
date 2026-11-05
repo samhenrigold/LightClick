@@ -10,12 +10,9 @@ struct EVT {
     std::string getEVTString() const;
 };
 
-std::string EVT::getEVTString() const
-{
-    static const char *const names[] = {
-        "INVALID", "Other", "i1", "i8", "i16", "i32", "i64", "i128",
-        "f16", "f32", "f64", "f80", "f128", "ppcf128"
-    };
+std::string EVT::getEVTString() const {
+    static const char *const names[] = {"INVALID", "Other", "i1",  "i8",  "i16", "i32",  "i64",
+                                        "i128",    "f16",   "f32", "f64", "f80", "f128", "ppcf128"};
     if (simple_type < sizeof(names) / sizeof(names[0]))
         return names[simple_type];
     if (simple_type == 108)

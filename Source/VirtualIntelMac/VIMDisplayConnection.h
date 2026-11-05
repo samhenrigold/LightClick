@@ -9,7 +9,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)disableSurfaceTransport;
 /// Creates a private listener before QEMU/helper launch. Error callback is main-thread.
 - (nullable instancetype)initWithView:(VIMMetalView *)view
-    failure:(void (^)(NSError *error))failure error:(NSError **)error;
+                              failure:(void (^)(NSError *error))failure
+                                error:(NSError **)error;
 - (void)stop;
 - (void)requestWidth:(NSUInteger)width height:(NSUInteger)height density:(NSUInteger)density;
 - (void)requestDisplaySleeping:(BOOL)sleeping;

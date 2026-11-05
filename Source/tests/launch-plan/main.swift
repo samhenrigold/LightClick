@@ -2,9 +2,14 @@ import Foundation
 
 let directory = URL(fileURLWithPath: CommandLine.arguments[1])
 let record = CommandLine.arguments.contains("--record")
-let scenarios = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appending(path: "scenarios.json"))) as! [[String: Any]]
+let scenarios =
+    try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appending(path: "scenarios.json")))
+    as! [[String: Any]]
 nonisolated let usb3 = ["elcapitan", "sierra", "highsierra", "mojave", "catalina", "bigsur"]
-nonisolated let preMetal = ["tiger", "leopard", "snowleopard", "lion", "mountainlion", "mavericks", "yosemite", "elcapitan", "sierra", "highsierra"]
+nonisolated let preMetal = [
+    "tiger", "leopard", "snowleopard", "lion", "mountainlion", "mavericks", "yosemite", "elcapitan", "sierra",
+    "highsierra"
+]
 
 // Mirrors how VIMSession.m resolves these values before asking for a plan.
 func makeInput(_ s: [String: Any]) -> LaunchInput {
@@ -70,7 +75,8 @@ func makeInput(_ s: [String: Any]) -> LaunchInput {
         input.opticalPath = optical
         input.opticalFormat = format(optical)
     }
-    for (index, path) in (config["AdditionalMedia"] as? [String] ?? []).enumerated() where !path.isEmpty && !path.contains("missing") {
+    for (index, path) in (config["AdditionalMedia"] as? [String] ?? []).enumerated()
+    where !path.isEmpty && !path.contains("missing") {
         input.additionalImages.append(LaunchImage(slot: index + 1, path: path, format: format(path)))
     }
     input.imageUSBBus = usb3.contains(guest) ? "xhci.0" : "usb.0"
@@ -80,7 +86,8 @@ func makeInput(_ s: [String: Any]) -> LaunchInput {
 }
 
 let expectedURL = directory.appending(path: "expected.json")
-let expected = record ? [:] : try JSONSerialization.jsonObject(with: Data(contentsOf: expectedURL)) as! [String: [String: Any]]
+let expected =
+    record ? [:] : try JSONSerialization.jsonObject(with: Data(contentsOf: expectedURL)) as! [String: [String: Any]]
 var recorded: [String: Any] = [:]
 var failures = 0
 for scenario in scenarios {
@@ -95,18 +102,26 @@ for scenario in scenarios {
     let args = expected[name]?["args"] as? [String] ?? []
     let env = expected[name]?["env"] as? [String: String] ?? [:]
     if plan.arguments != args {
-        let index = zip(plan.arguments, args).enumerated().first { $0.element.0 != $0.element.1 }?.offset ?? min(plan.arguments.count, args.count)
-        print("FAIL \(name) argument \(index):\n  plan     \(plan.arguments.dropFirst(index).first ?? "<end>")\n  expected \(args.dropFirst(index).first ?? "<end>")")
+        let index =
+            zip(plan.arguments, args).enumerated().first { $0.element.0 != $0.element.1 }?.offset
+            ?? min(plan.arguments.count, args.count)
+        print(
+            "FAIL \(name) argument \(index):\n  plan     \(plan.arguments.dropFirst(index).first ?? "<end>")\n  expected \(args.dropFirst(index).first ?? "<end>")"
+        )
         failures += 1
     }
     if plan.environment != env {
         let keys = Set(plan.environment.keys).union(env.keys).filter { plan.environment[$0] != env[$0] }.sorted()
-        print("FAIL \(name) environment: \(keys.map { "\($0): plan \(plan.environment[$0] ?? "<unset>"), expected \(env[$0] ?? "<unset>")" })")
+        print(
+            "FAIL \(name) environment: \(keys.map { "\($0): plan \(plan.environment[$0] ?? "<unset>"), expected \(env[$0] ?? "<unset>")" })"
+        )
         failures += 1
     }
 }
 if record {
-    try JSONSerialization.data(withJSONObject: recorded, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]).write(to: expectedURL)
+    try JSONSerialization.data(
+        withJSONObject: recorded, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    ).write(to: expectedURL)
     print("RECORDED \(recorded.count) scenarios")
 } else if failures > 0 {
     print("FAIL \(failures) of \(scenarios.count) scenarios differ")

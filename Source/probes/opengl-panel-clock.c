@@ -23,40 +23,50 @@ typedef vm_size_t VIMClockSize;
 typedef mach_vm_address_t VIMClockAddress;
 typedef mach_vm_size_t VIMClockSize;
 #endif
-static uint64_t read_clock_word(const volatile void *source)
-{
+static uint64_t read_clock_word(const volatile void *source) {
     /* Native i386 publishes a split word. Avoid aliasing AbsoluteTime's
      * period struct or assuming this diagnostic read is an atomic snapshot. */
-    uint64_t word;unsigned char *out=(unsigned char *)&word;
-    const volatile unsigned char *in=(const volatile unsigned char *)source;
-    for(unsigned i=0;i<sizeof(word);++i)out[i]=in[i];
+    uint64_t word;
+    unsigned char *out = (unsigned char *)&word;
+    const volatile unsigned char *in = (const volatile unsigned char *)source;
+    for (unsigned i = 0; i < sizeof(word); ++i)
+        out[i] = in[i];
     return word;
 }
-int main(void)
-{
-    io_service_t service=CGDisplayIOServicePort(CGMainDisplayID());
-    io_connect_t connection=0;VIMClockAddress address=0;VIMClockSize size=0;
-    IOReturn status=service?IOServiceOpen(service,mach_task_self(),kIOFBSharedConnectType,&connection):kIOReturnNotFound;
-    if(!status)status=IOConnectMapMemory64(connection,kIOFBCursorMemory,mach_task_self(),&address,&size,kIOMapAnywhere|kIOMapReadOnly);
-    if(status||size<sizeof(StdFBShmem_t)){
-        fprintf(stderr,"public shared clock unavailable status=%x bytes=%llu\n",status,(unsigned long long)size);
-        if(address)IOConnectUnmapMemory64(connection,kIOFBCursorMemory,mach_task_self(),address);
-        if(connection)IOServiceClose(connection);return 1;
+int main(void) {
+    io_service_t service = CGDisplayIOServicePort(CGMainDisplayID());
+    io_connect_t connection = 0;
+    VIMClockAddress address = 0;
+    VIMClockSize size = 0;
+    IOReturn status =
+        service ? IOServiceOpen(service, mach_task_self(), kIOFBSharedConnectType, &connection) : kIOReturnNotFound;
+    if (!status)
+        status = IOConnectMapMemory64(connection, kIOFBCursorMemory, mach_task_self(), &address, &size,
+                                      kIOMapAnywhere | kIOMapReadOnly);
+    if (status || size < sizeof(StdFBShmem_t)) {
+        fprintf(stderr, "public shared clock unavailable status=%x bytes=%llu\n", status, (unsigned long long)size);
+        if (address)
+            IOConnectUnmapMemory64(connection, kIOFBCursorMemory, mach_task_self(), address);
+        if (connection)
+            IOServiceClose(connection);
+        return 1;
     }
-    const volatile StdFBShmem_t *clock=(const volatile StdFBShmem_t *)(uintptr_t)address;
-    mach_timebase_info_data_t timebase;mach_timebase_info(&timebase);
-    CGRect display=CGDisplayBounds(CGMainDisplayID());
-    printf("display=%.0f,%.0f %.0fx%.0f version=%x timebase=%u/%u\n",
-        display.origin.x,display.origin.y,display.size.width,display.size.height,
-        clock->version,timebase.numer,timebase.denom);
-    for(unsigned i=0;i<11;++i){
-        uint64_t now=mach_absolute_time(),time=read_clock_word(&clock->vblTime);
-        uint64_t delta=read_clock_word(&clock->vblDelta),count=read_clock_word(&clock->vblCount);
-        int stable=time==read_clock_word(&clock->vblTime);
-        printf("now=%llu vbl=%llu delta=%llu count=%llu stable_time=%d\n",
-            (unsigned long long)now,(unsigned long long)time,(unsigned long long)delta,(unsigned long long)count,stable);
-        if(i<10)usleep(100000);
+    const volatile StdFBShmem_t *clock = (const volatile StdFBShmem_t *)(uintptr_t)address;
+    mach_timebase_info_data_t timebase;
+    mach_timebase_info(&timebase);
+    CGRect display = CGDisplayBounds(CGMainDisplayID());
+    printf("display=%.0f,%.0f %.0fx%.0f version=%x timebase=%u/%u\n", display.origin.x, display.origin.y,
+           display.size.width, display.size.height, clock->version, timebase.numer, timebase.denom);
+    for (unsigned i = 0; i < 11; ++i) {
+        uint64_t now = mach_absolute_time(), time = read_clock_word(&clock->vblTime);
+        uint64_t delta = read_clock_word(&clock->vblDelta), count = read_clock_word(&clock->vblCount);
+        int stable = time == read_clock_word(&clock->vblTime);
+        printf("now=%llu vbl=%llu delta=%llu count=%llu stable_time=%d\n", (unsigned long long)now,
+               (unsigned long long)time, (unsigned long long)delta, (unsigned long long)count, stable);
+        if (i < 10)
+            usleep(100000);
     }
-    IOConnectUnmapMemory64(connection,kIOFBCursorMemory,mach_task_self(),address);
-    IOServiceClose(connection);return 0;
+    IOConnectUnmapMemory64(connection, kIOFBCursorMemory, mach_task_self(), address);
+    IOServiceClose(connection);
+    return 0;
 }

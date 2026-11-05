@@ -5,18 +5,24 @@
 #import <DirectoryService/DirectoryService.h>
 @class VIMLeopardRecord;
 @interface VIMLeopardDirectory : NSObject {
-@public
+  @public
     tDirReference service;
     tDirNodeReference node;
 }
 + (id)localDirectory:(NSError **)error;
-- (VIMLeopardRecord *)recordWithRecordType:(NSString *)type name:(NSString *)name attributes:(NSArray *)attributes error:(NSError **)error;
-- (VIMLeopardRecord *)createRecordWithRecordType:(NSString *)type name:(NSString *)name attributes:(NSDictionary *)attributes error:(NSError **)error;
+- (VIMLeopardRecord *)recordWithRecordType:(NSString *)type
+                                      name:(NSString *)name
+                                attributes:(NSArray *)attributes
+                                     error:(NSError **)error;
+- (VIMLeopardRecord *)createRecordWithRecordType:(NSString *)type
+                                            name:(NSString *)name
+                                      attributes:(NSDictionary *)attributes
+                                           error:(NSError **)error;
 - (NSArray *)recordsOfType:(NSString *)type named:(NSString *)name error:(NSError **)error;
 @end
 @interface VIMLeopardRecord : NSObject {
     VIMLeopardDirectory *directory;
-    NSString *recordType,*recordName;
+    NSString *recordType, *recordName;
 }
 - (id)initWithDirectory:(VIMLeopardDirectory *)owner type:(NSString *)type name:(NSString *)name;
 - (NSArray *)valuesForAttribute:(NSString *)attribute error:(NSError **)error;

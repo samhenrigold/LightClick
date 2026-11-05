@@ -1,7 +1,7 @@
 /*
     File:       NavServicesHandling.h
-    
-    Contains:	Prototypes for our routines to handle the save dialog 
+
+    Contains:	Prototypes for our routines to handle the save dialog
                 for our sample application.
 
     Disclaimer:	IMPORTANT:  This Apple software is supplied to you by Apple Computer, Inc.
@@ -44,4 +44,4 @@
 
 #include <Carbon/Carbon.h>
 
-OSStatus SaveAsPDFDocument (WindowRef w, void* ourDataP);
+OSStatus SaveAsPDFDocument(WindowRef w, void *ourDataP);

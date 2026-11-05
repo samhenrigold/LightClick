@@ -8,8 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 
-static void transfer(int fd, int writing)
-{
+static void transfer(int fd, int writing) {
     char value = 1;
     ssize_t n;
     do {
@@ -21,8 +20,7 @@ static void transfer(int fd, int writing)
     }
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     int a[2], b[2], status;
     long count = argc == 2 ? strtol(argv[1], NULL, 10) : 10000;
     struct timespec start, end;
@@ -54,7 +52,6 @@ int main(int argc, char **argv)
         return 1;
     }
     double seconds = end.tv_sec - start.tv_sec + (end.tv_nsec - start.tv_nsec) / 1e9;
-    printf("roundtrips=%ld seconds=%.6f us_per_roundtrip=%.3f\n",
-           count, seconds, seconds * 1e6 / count);
+    printf("roundtrips=%ld seconds=%.6f us_per_roundtrip=%.3f\n", count, seconds, seconds * 1e6 / count);
     return 0;
 }

@@ -8,8 +8,9 @@ int main(void) {
     int (*connection)(void) = dlsym(s, "SLSMainConnectionID");
     bool (*server)(void) = dlsym(s, "SLSServerMightHaveAcceleration");
     bool (*display)(CGDirectDisplayID) = dlsym(s, "SLDisplayUsesOpenGLAcceleration");
-    if (!connection || !server || !display) return 1;
-    printf("connection=%d server_might_have_acceleration=%d display_uses_opengl_acceleration=%d\n",
-           connection(), server(), display(CGMainDisplayID()));
+    if (!connection || !server || !display)
+        return 1;
+    printf("connection=%d server_might_have_acceleration=%d display_uses_opengl_acceleration=%d\n", connection(),
+           server(), display(CGMainDisplayID()));
     return 0;
 }

@@ -1,8 +1,8 @@
 /*
     File:       CSkWindow.h
-        
+
     Contains:	Prototype for NewCSkWindow().
-				
+
     Disclaimer:	IMPORTANT:  This Apple software is supplied to you by Apple Computer, Inc.
                 ("Apple") in consideration of your agreement to the following terms, and your
                 use, installation, modification or redistribution of this Apple software
@@ -41,15 +41,13 @@
     Copyright © 2004 Apple Computer, Inc., All Rights Reserved
 */
 
-
 #ifndef __CSKWINDOW__
 #define __CSKWINDOW__
 
 #include <Carbon/Carbon.h>
 #include "CSkDocStorage.h"
 
-OSStatus    NewCSkWindow(IBNibRef theNibRef, WindowRef toolPalette);
-void		DrawIntoPDFPage(CGContextRef pdfContext, CGRect pageBounds, const DocStorage* docStP, UInt32 pageNumber);
-
+OSStatus NewCSkWindow(IBNibRef theNibRef, WindowRef toolPalette);
+void DrawIntoPDFPage(CGContextRef pdfContext, CGRect pageBounds, const DocStorage *docStP, UInt32 pageNumber);
 
 #endif

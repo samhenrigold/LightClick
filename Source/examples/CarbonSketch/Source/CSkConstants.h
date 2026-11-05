@@ -1,6 +1,6 @@
 /*
     File:       CSkConstants.h
-        
+
     Contains:	Application-wide constant definitions.
 
     Disclaimer:	IMPORTANT:  This Apple software is supplied to you by Apple Computer, Inc.
@@ -41,7 +41,6 @@
     Copyright © 2004 Apple Computer, Inc., All Rights Reserved
 */
 
-
 #ifndef __CSKCONSTANTS__
 #define __CSKCONSTANTS__
 
@@ -49,119 +48,78 @@
 #include <Carbon/Carbon.h>
 
 // Geometry (shape) selectors - the items 1 through 4
-enum {
-	kUndefined		= 0,
-	kLineShape		= 1,
-	kRectShape		= 2,
-	kOvalShape		= 3,
-	kRRectShape		= 4
-};
+enum { kUndefined = 0, kLineShape = 1, kRectShape = 2, kOvalShape = 3, kRRectShape = 4 };
 // maybe we want to add later polygons, regular closed polygons, quadratics, cubics, or even general paths?
-
 
 // Window controls
 
-enum {
-    kControlSignatureMainWindow = 'CSkM',
-    kScrollHorizontalID		= 1,
-    kScrollVerticalID		= 2,
-    kScalePopupID		= 3
-};
+enum { kControlSignatureMainWindow = 'CSkM', kScrollHorizontalID = 1, kScrollVerticalID = 2, kScalePopupID = 3 };
 
 //---------------------------------------------------------------------------------------------
 //	Floating palette buttons - cf. CSkUtils, MapToolToShape()
 //---------------------------------------------------------------------------------------------
 
 enum {
-    kControlSignaturePalette	= 'Tool',
-    kArrowTool			= 1,
-    kLineTool			= 2,
-    kRectTool			= 3,
-    kOvalTool			= 4,
-    kRRectTool			= 5,
-    kLineWidthPopup		= 6,
-    kLineCapPopup		= 7,
-    kLineJoinPopup		= 8,
-    kLineStylePopup		= 9,
-    kStrokeColorBtn		= 10,
-    kFillColorBtn		= 11,
-    kStrokeAlphaSlider		= 12,
-    kFillAlphaSlider		= 13
+    kControlSignaturePalette = 'Tool',
+    kArrowTool = 1,
+    kLineTool = 2,
+    kRectTool = 3,
+    kOvalTool = 4,
+    kRRectTool = 5,
+    kLineWidthPopup = 6,
+    kLineCapPopup = 7,
+    kLineJoinPopup = 8,
+    kLineStylePopup = 9,
+    kStrokeColorBtn = 10,
+    kFillColorBtn = 11,
+    kStrokeAlphaSlider = 12,
+    kFillAlphaSlider = 13
 };
 
 // Line Width menu items
 enum {
-    kCmdWidthNone		= 'WdNn',
-    kCmdWidthOne		= 'Wd01',
-    kCmdWidthTwo		= 'Wd02',
-    kCmdWidthFour		= 'Wd04',
-    kCmdWidthEight		= 'Wd08',
-    kCmdWidthSixteen		= 'Wd16',
-    kCmdWidthThinner		= 'Wd< ',
-    kCmdWidthThicker		= 'Wd> ',
-    kMakeItThinner		= -2,
-    kMakeItThicker		= -1,
-    kLastLineWidthItem		= 8,
-    kCmdStrokeColor		= 'StrC',
-    kCmdFillColor		= 'FilC'
+    kCmdWidthNone = 'WdNn',
+    kCmdWidthOne = 'Wd01',
+    kCmdWidthTwo = 'Wd02',
+    kCmdWidthFour = 'Wd04',
+    kCmdWidthEight = 'Wd08',
+    kCmdWidthSixteen = 'Wd16',
+    kCmdWidthThinner = 'Wd< ',
+    kCmdWidthThicker = 'Wd> ',
+    kMakeItThinner = -2,
+    kMakeItThicker = -1,
+    kLastLineWidthItem = 8,
+    kCmdStrokeColor = 'StrC',
+    kCmdFillColor = 'FilC'
 };
 
 // Line Cap commandIDs
-enum {
-    kCmdCapButt			= 'Cap1',
-    kCmdCapRound		= 'Cap2',
-    kCmdCapSquare		= 'Cap3'
-};
-
+enum { kCmdCapButt = 'Cap1', kCmdCapRound = 'Cap2', kCmdCapSquare = 'Cap3' };
 
 // Line Join menu items
-enum {
-    kCmdJoinMiter		= 'Jon1',
-    kCmdJoinRound		= 'Jon2',
-    kCmdJoinBevel		= 'Jon3'
-};
+enum { kCmdJoinMiter = 'Jon1', kCmdJoinRound = 'Jon2', kCmdJoinBevel = 'Jon3' };
 
 // Line Style menu items
-enum
-{
-    kStyleSolid			= 1,
-    kStyleDashed		= 2,
-    kCmdStyleSolid		= 'Stl1',
-    kCmdStyleDashed		= 'Stl2'
-};
+enum { kStyleSolid = 1, kStyleDashed = 2, kCmdStyleSolid = 'Stl1', kCmdStyleDashed = 'Stl2' };
 
 // Scalefactor menu item commands
-enum
-{
-    kCmdScale50			= 'S050',
-    kCmdScale100		= 'S100',
-    kCmdScale200		= 'S200',
-    kMaxScaleMenuItem		= 3
-};
+enum { kCmdScale50 = 'S050', kCmdScale100 = 'S100', kCmdScale200 = 'S200', kMaxScaleMenuItem = 3 };
 
 // Arrange menu item commands
-enum 
-{
-    kCmdMoveForward	    = 'Fwrd',
-    kCmdMoveToFront	    = 'Frnt',
-    kCmdMoveBackward	    = 'Bwrd',
-    kCmdMoveToBack	    = 'Back'
-};
+enum { kCmdMoveForward = 'Fwrd', kCmdMoveToFront = 'Frnt', kCmdMoveBackward = 'Bwrd', kCmdMoveToBack = 'Back' };
 
 // Other menu or window commands
-enum
-{   
-    kCmdWritePDF            = 'WPDF',
-    kCmdDuplicate           = 'Dupl',
-    kCmdLineWidthChanged    = 'LwCh',
-    kCmdLineCapChanged      = 'LcCh',
-    kCmdLineJoinChanged     = 'LjCh',
-    kCmdLineStyleChanged    = 'LsCh',
-    kCmdStrokeColorChanged  = 'SCCh',
-    kCmdFillColorChanged    = 'FCCh',
-    kCmdStrokeAlphaChanged  = 'Ssld',
-    kCmdFillAlphaChanged    = 'Fsld'
+enum {
+    kCmdWritePDF = 'WPDF',
+    kCmdDuplicate = 'Dupl',
+    kCmdLineWidthChanged = 'LwCh',
+    kCmdLineCapChanged = 'LcCh',
+    kCmdLineJoinChanged = 'LjCh',
+    kCmdLineStyleChanged = 'LsCh',
+    kCmdStrokeColorChanged = 'SCCh',
+    kCmdFillColorChanged = 'FCCh',
+    kCmdStrokeAlphaChanged = 'Ssld',
+    kCmdFillAlphaChanged = 'Fsld'
 };
-
 
 #endif

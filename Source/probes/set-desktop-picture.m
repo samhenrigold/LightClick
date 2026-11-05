@@ -7,8 +7,7 @@ int main(int argc, char **argv) {
     }
     @autoreleasepool {
         NSString *path = [NSString stringWithUTF8String:argv[1]];
-        if (![path isAbsolutePath] ||
-            ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        if (![path isAbsolutePath] || ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
             fprintf(stderr, "desktop image must be an existing absolute path\n");
             return 66;
         }
@@ -21,20 +20,15 @@ int main(int argc, char **argv) {
         NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
         for (NSScreen *screen in screens) {
             NSURL *old = [workspace desktopImageURLForScreen:screen];
-            fprintf(stderr, "prior desktop: %s\n",
-                    old ? old.fileSystemRepresentation : "(none)");
+            fprintf(stderr, "prior desktop: %s\n", old ? old.fileSystemRepresentation : "(none)");
             NSError *error = nil;
-            BOOL ok = [workspace setDesktopImageURL:image forScreen:screen
-                                           options:@{}
-                                             error:&error];
+            BOOL ok = [workspace setDesktopImageURL:image forScreen:screen options:@{} error:&error];
             if (!ok) {
-                fprintf(stderr, "set desktop failed: %s\n",
-                        error.localizedDescription.UTF8String);
+                fprintf(stderr, "set desktop failed: %s\n", error.localizedDescription.UTF8String);
                 return 1;
             }
             NSURL *current = [workspace desktopImageURLForScreen:screen];
-            fprintf(stderr, "current desktop: %s\n",
-                    current ? current.fileSystemRepresentation : "(none)");
+            fprintf(stderr, "current desktop: %s\n", current ? current.fileSystemRepresentation : "(none)");
         }
     }
     return 0;

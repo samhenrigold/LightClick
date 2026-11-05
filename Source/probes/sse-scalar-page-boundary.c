@@ -7,8 +7,7 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t offset;
-static void fault(int sig, siginfo_t *info, void *context)
-{
+static void fault(int sig, siginfo_t *info, void *context) {
     (void)context;
     /* Diagnostic only: use async-signal-safe output in the fault handler. */
     static const char message[] = "FAIL: scalar operand crossed a guard page\n";
@@ -17,11 +16,9 @@ static void fault(int sig, siginfo_t *info, void *context)
     _exit(128 + sig);
 }
 
-int main(void)
-{
+int main(void) {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
-    unsigned char *bytes = mmap(NULL, page * 3, PROT_READ | PROT_WRITE,
-                               MAP_PRIVATE | MAP_ANON, -1, 0);
+    unsigned char *bytes = mmap(NULL, page * 3, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (bytes == MAP_FAILED || mprotect(bytes + page * 2, page, PROT_NONE)) {
         perror("guard mapping");
         return 1;
@@ -44,7 +41,9 @@ int main(void)
             __asm__ volatile("movss %1, %%xmm2\n\t"
                              "subss %1, %%xmm2\n\t"
                              "movss %%xmm2, %0"
-                             : "=m"(result) : "m"(*operand) : "xmm2");
+                             : "=m"(result)
+                             : "m"(*operand)
+                             : "xmm2");
             if (result != 0.0f) {
                 fprintf(stderr, "FAIL: wrong scalar result at offset %d\n", offset);
                 return 2;
@@ -55,7 +54,9 @@ int main(void)
                 __asm__ volatile("movsd %1, %%xmm2\n\t"
                                  "subsd %1, %%xmm2\n\t"
                                  "movsd %%xmm2, %0"
-                                 : "=m"(wide_result) : "m"(*wide_operand) : "xmm2");
+                                 : "=m"(wide_result)
+                                 : "m"(*wide_operand)
+                                 : "xmm2");
                 if (wide_result != 0.0) {
                     fprintf(stderr, "FAIL: wrong double result at offset %d\n", offset);
                     return 3;

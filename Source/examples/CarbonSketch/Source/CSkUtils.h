@@ -1,6 +1,6 @@
 /*
     File:       CSkUtils.h
-    
+
     Contains:	Prototype of utility routines for CarbonSketch; definition of CGrgba structure.
 
     Disclaimer:	IMPORTANT:  This Apple software is supplied to you by Apple Computer, Inc.
@@ -41,34 +41,33 @@
     Copyright © 2004 Apple Computer, Inc., All Rights Reserved
 */
 
-
 #ifndef __CSKUTILS__
 #define __CSKUTILS__
 
 #include <Carbon/Carbon.h>
 
 struct CGrgba {
-    float   r;
-    float   g;
-    float   b;
-    float   a;
+    float r;
+    float g;
+    float b;
+    float a;
 };
 typedef struct CGrgba CGrgba;
 
-OSStatus	PickSomeColor(CGrgba* theColor);
-void		ConvertRGBColorToCGrgba(const RGBColor* inRGB, float alpha, CGrgba* outCGrgba);
-void		QDPortToCGCoordinates(Point* inPtArray, Point* outPtArray, int numPoints, Rect* portBounds);
-void		CGRectToQDRect(const int windowHeight, const CGRect cgRect, Rect* outQDRect);
+OSStatus PickSomeColor(CGrgba *theColor);
+void ConvertRGBColorToCGrgba(const RGBColor *inRGB, float alpha, CGrgba *outCGrgba);
+void QDPortToCGCoordinates(Point *inPtArray, Point *outPtArray, int numPoints, Rect *portBounds);
+void CGRectToQDRect(const int windowHeight, const CGRect cgRect, Rect *outQDRect);
 
-void		SendWindowCloseEvent( WindowRef window );
-void		SendWindowCommandEvent( WindowRef window, HICommand* command );
-void		SendControlEventHit(ControlRef control);
+void SendWindowCloseEvent(WindowRef window);
+void SendWindowCommandEvent(WindowRef window, HICommand *command);
+void SendControlEventHit(ControlRef control);
 
-int			MapToolToShape(int toolID);
+int MapToolToShape(int toolID);
 
-CMProfileRef    OpenGenericProfile(void);
+CMProfileRef OpenGenericProfile(void);
 CGColorSpaceRef GetGenericRGBColorSpace(void);
 
-PasteboardRef   GetPasteboard(void);
+PasteboardRef GetPasteboard(void);
 
 #endif

@@ -11,9 +11,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)validatePreparedMedia:(NSURL *)URL guest:(NSString *)guest error:(NSError **)error;
 /// Only app-owned completed Apple transfers can be retired; active downloads
 /// and user-selected installer applications are never removed.
-+ (void)retireCompletedDownloads:(NSDictionary<NSString *,NSURL *> *)files;
++ (void)retireCompletedDownloads:(NSDictionary<NSString *, NSURL *> *)files;
 /// Receipt-validated retained outputs, never partially prepared media.
-+ (NSDictionary<NSString *,NSURL *> *)retainedInstallerForGuest:(NSString *)guest library:(NSURL *)library;
++ (NSDictionary<NSString *, NSURL *> *)retainedInstallerForGuest:(NSString *)guest library:(NSURL *)library;
 @property(atomic) BOOL cancelled;
 /// Explicit CLI/build harness input; production defaults to bundled support.
 @property(nonatomic, nullable) NSURL *openGLSupportDirectory;
@@ -26,13 +26,17 @@ NS_ASSUME_NONNULL_BEGIN
 /// Blocking worker operation; never call on the main thread. Originals are read-only.
 /// Returns an assembled installer app, not a bootable ISO.
 - (nullable NSURL *)assembleGuest:(NSString *)guest
-                           files:(NSDictionary<NSString *, NSURL *> *)files
-                    jobDirectory:(NSURL *)directory error:(NSError **)error;
+                            files:(NSDictionary<NSString *, NSURL *> *)files
+                     jobDirectory:(NSURL *)directory
+                            error:(NSError **)error;
 /// Builds a Big Sur HFS/UDF installer image from an assembled installer.
 /// Uses a separate fresh external job; does not erase any volume or need root.
 - (nullable NSURL *)createBigSurMediaFromInstaller:(NSURL *)installer
-                                     jobDirectory:(NSURL *)directory error:(NSError **)error;
-- (nullable NSURL *)createRecoveryMediaFromInstaller:(NSURL *)installer guest:(NSString *)guest
-                                    jobDirectory:(NSURL *)directory error:(NSError **)error;
+                                      jobDirectory:(NSURL *)directory
+                                             error:(NSError **)error;
+- (nullable NSURL *)createRecoveryMediaFromInstaller:(NSURL *)installer
+                                               guest:(NSString *)guest
+                                        jobDirectory:(NSURL *)directory
+                                               error:(NSError **)error;
 @end
 NS_ASSUME_NONNULL_END

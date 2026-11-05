@@ -13,7 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, copy, nullable) void (^displayPowerChanged)(BOOL sleeping);
 - (BOOL)startWithSocketPath:(NSString *)path error:(NSError **)error;
 - (void)awaitGuestHandshake;
-- (NSDictionary<NSString *,NSNumber *> *)diagnosticState; // counters only, never text/token
+- (NSDictionary<NSString *, NSNumber *> *)diagnosticState; // counters only, never text/token
 - (void)stop;
 @end
 NS_ASSUME_NONNULL_END

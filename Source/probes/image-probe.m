@@ -3,11 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s image-binary [required-class ...]\n",
-                argv[0]);
+        fprintf(stderr, "usage: %s image-binary [required-class ...]\n", argv[0]);
         return 64;
     }
 

@@ -6,9 +6,15 @@ NS_ASSUME_NONNULL_BEGIN
 /// may normally restart a conclusively repaired pre-desktop boot.
 @interface VIMGuestBootPolicy : NSObject
 + (BOOL)readyAtURL:(NSURL *)journal guest:(NSString *)guest identifier:(NSString *)identifier;
-+ (nullable NSString *)verifierAtURL:(NSURL *)journal guest:(NSString *)guest identifier:(NSString *)identifier volume:(NSString *)volume;
-+ (void)prepareWithAgent:(VIMGuestAgent *)agent report:(NSDictionary *)report
-             identifier:(NSString *)identifier journal:(NSURL *)journal tools:(NSURL *)tools
-             completion:(void (^)(BOOL ready,NSError *_Nullable error))completion;
++ (nullable NSString *)verifierAtURL:(NSURL *)journal
+                               guest:(NSString *)guest
+                          identifier:(NSString *)identifier
+                              volume:(NSString *)volume;
++ (void)prepareWithAgent:(VIMGuestAgent *)agent
+                  report:(NSDictionary *)report
+              identifier:(NSString *)identifier
+                 journal:(NSURL *)journal
+                   tools:(NSURL *)tools
+              completion:(void (^)(BOOL ready, NSError *_Nullable error))completion;
 @end
 NS_ASSUME_NONNULL_END

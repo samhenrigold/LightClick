@@ -12,10 +12,8 @@ int main(void) {
     memset(path, 0, sizeof(path));
     int bytes = proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &info, sizeof(info));
     int length = proc_pidpath(getpid(), path, sizeof(path));
-    int valid = bytes == (int)sizeof(info) && info.pbi_pid == (uint32_t)getpid() &&
-        info.pbi_uid == getuid() && info.pbi_start_tvsec &&
-        info.pbi_start_tvusec < 1000000 && length > 0 && path[0] == '/';
-    printf("proc_bsdinfo expected=%zu actual=%d PID/UID/birth/path valid=%d\n",
-        sizeof(info), bytes, valid);
+    int valid = bytes == (int)sizeof(info) && info.pbi_pid == (uint32_t)getpid() && info.pbi_uid == getuid() &&
+                info.pbi_start_tvsec && info.pbi_start_tvusec < 1000000 && length > 0 && path[0] == '/';
+    printf("proc_bsdinfo expected=%zu actual=%d PID/UID/birth/path valid=%d\n", sizeof(info), bytes, valid);
     return valid ? 0 : 1;
 }

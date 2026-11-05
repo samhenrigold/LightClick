@@ -15,9 +15,12 @@ static bool oop_message_io(int fd, OOPMessage *message, bool sending) {
     size_t remaining = sizeof(*message);
     while (remaining) {
         ssize_t n = sending ? write(fd, p, remaining) : read(fd, p, remaining);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return false;
-        p += n; remaining -= n;
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            return false;
+        p += n;
+        remaining -= n;
     }
     return message->version == OOP_VERSION && !message->reserved;
 }

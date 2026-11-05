@@ -19,9 +19,12 @@
 static id (*originalBlitEncoder)(id, SEL);
 static void (*originalReplace)(id, SEL, MTLRegion, NSUInteger, const void *, NSUInteger);
 static void tracedReplace(id self, SEL sel, MTLRegion r, NSUInteger level, const void *data, NSUInteger row) {
-    fprintf(stderr,"PVG replace texture=%p region=%lu,%lu %lux%lu level=%lu row=%lu data=%p\n",self,r.origin.x,r.origin.y,r.size.width,r.size.height,level,row,data);
-    void *frames[12]; int n=backtrace(frames,12); backtrace_symbols_fd(frames,n,STDERR_FILENO);
-    originalReplace(self,sel,r,level,data,row);
+    fprintf(stderr, "PVG replace texture=%p region=%lu,%lu %lux%lu level=%lu row=%lu data=%p\n", self, r.origin.x,
+            r.origin.y, r.size.width, r.size.height, level, row, data);
+    void *frames[12];
+    int n = backtrace(frames, 12);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    originalReplace(self, sel, r, level, data, row);
 }
 static id tracedBlitEncoder(id self, SEL selector) {
     id result = originalBlitEncoder(self, selector);
@@ -100,9 +103,7 @@ static uint64_t unsignedProperty(id object, const char *selectorName) {
     return ((uint64_t (*)(id, SEL))objc_msgSend)(object, selector);
 }
 
-static TraceReference *captureReference(id commandBuffer, id object,
-                                        BOOL accepted, BOOL isState,
-                                        BOOL isWrite) {
+static TraceReference *captureReference(id commandBuffer, id object, BOOL accepted, BOOL isState, BOOL isWrite) {
     TraceReference *reference = calloc(1, sizeof(*reference));
     if (!reference)
         return NULL;
@@ -113,10 +114,8 @@ static TraceReference *captureReference(id commandBuffer, id object,
     reference->isState = isState;
     reference->isWrite = isWrite;
     const char *className = object ? object_getClassName(object) : "(null)";
-    snprintf(reference->className, sizeof(reference->className), "%s",
-             className ? className : "(unknown)");
-    reference->serializerResourceRef =
-        unsignedProperty(object, "serializerResourceRef");
+    snprintf(reference->className, sizeof(reference->className), "%s", className ? className : "(unknown)");
+    reference->serializerResourceRef = unsignedProperty(object, "serializerResourceRef");
     reference->textureRef = unsignedProperty(object, "textureRef");
     reference->bufferRef = unsignedProperty(object, "bufferRef");
     reference->pipelineRef = unsignedProperty(object, "pipelineRef");
@@ -149,31 +148,27 @@ enum {
 };
 
 #if PVG_TRACE_COMMANDS_ARMED
-static void dumpLargeBuffer(const char *directory, unsigned commitSequence,
-                            const TraceReference *reference) {
-    if (strcmp(reference->className, "AppleParavirtBuffer") != 0 ||
-        reference->length != 0x40000 || !reference->bufferRef)
+static void dumpLargeBuffer(const char *directory, unsigned commitSequence, const TraceReference *reference) {
+    if (strcmp(reference->className, "AppleParavirtBuffer") != 0 || reference->length != 0x40000 ||
+        !reference->bufferRef)
         return;
     id object = (__bridge id)reference->object;
     SEL contentsSelector = sel_registerName("contents");
     if (![object respondsToSelector:contentsSelector])
         return;
-    const void *contents = ((const void *(*)(id, SEL))objc_msgSend)(
-        object, contentsSelector);
+    const void *contents = ((const void *(*)(id, SEL))objc_msgSend)(object, contentsSelector);
     if (!contents)
         return;
     uint8_t *bytes = malloc((size_t)reference->length);
     if (!bytes)
         return;
     mach_vm_size_t copied = 0;
-    kern_return_t result = mach_vm_read_overwrite(
-        mach_task_self(), (mach_vm_address_t)(uintptr_t)contents,
-        (mach_vm_size_t)reference->length,
-        (mach_vm_address_t)(uintptr_t)bytes, &copied);
+    kern_return_t result =
+        mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(uintptr_t)contents,
+                               (mach_vm_size_t)reference->length, (mach_vm_address_t)(uintptr_t)bytes, &copied);
     if (result == KERN_SUCCESS && copied == reference->length) {
         char path[192];
-        snprintf(path, sizeof(path), "%s/commit-%03u-buffer-%llx.bin",
-                 directory, commitSequence,
+        snprintf(path, sizeof(path), "%s/commit-%03u-buffer-%llx.bin", directory, commitSequence,
                  (unsigned long long)reference->bufferRef);
         int output = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (output >= 0) {
@@ -185,8 +180,7 @@ static void dumpLargeBuffer(const char *directory, unsigned commitSequence,
 }
 #endif
 
-static void dumpReadableMemory(const char *directory, unsigned commitSequence,
-                               const char *label, const void *address,
+static void dumpReadableMemory(const char *directory, unsigned commitSequence, const char *label, const void *address,
                                size_t requestedLength) {
     if (!address || !requestedLength)
         return;
@@ -195,16 +189,14 @@ static void dumpReadableMemory(const char *directory, unsigned commitSequence,
 
     uint8_t bytes[4096];
     mach_vm_size_t copiedLength = 0;
-    kern_return_t result = mach_vm_read_overwrite(
-        mach_task_self(), (mach_vm_address_t)(uintptr_t)address,
-        (mach_vm_size_t)requestedLength,
-        (mach_vm_address_t)(uintptr_t)bytes, &copiedLength);
+    kern_return_t result =
+        mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(uintptr_t)address, (mach_vm_size_t)requestedLength,
+                               (mach_vm_address_t)(uintptr_t)bytes, &copiedLength);
     if (result != KERN_SUCCESS || copiedLength == 0)
         return;
 
     char path[192];
-    snprintf(path, sizeof(path), "%s/commit-%03u-%s-%p-%llu.bin", directory,
-             commitSequence, label, address,
+    snprintf(path, sizeof(path), "%s/commit-%03u-%s-%p-%llu.bin", directory, commitSequence, label, address,
              (unsigned long long)copiedLength);
     int output = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (output >= 0) {
@@ -213,18 +205,15 @@ static void dumpReadableMemory(const char *directory, unsigned commitSequence,
     }
 }
 
-static void dumpIvarTarget(const char *directory, unsigned commitSequence,
-                           id object, const char *ivarName,
+static void dumpIvarTarget(const char *directory, unsigned commitSequence, id object, const char *ivarName,
                            size_t requestedLength) {
     Ivar ivar = class_getInstanceVariable(object_getClass(object), ivarName);
     if (!ivar)
         return;
     ptrdiff_t offset = ivar_getOffset(ivar);
     void *target = NULL;
-    memcpy(&target, (const uint8_t *)(__bridge const void *)object + offset,
-           sizeof(target));
-    dumpReadableMemory(directory, commitSequence, ivarName, target,
-                       requestedLength);
+    memcpy(&target, (const uint8_t *)(__bridge const void *)object + offset, sizeof(target));
+    dumpReadableMemory(directory, commitSequence, ivarName, target, requestedLength);
 }
 
 static void appendManifestLine(int fd, const char *format, ...) {
@@ -234,8 +223,7 @@ static void appendManifestLine(int fd, const char *format, ...) {
     int length = vsnprintf(line, sizeof(line), format, arguments);
     va_end(arguments);
     if (length > 0) {
-        size_t count = (size_t)length < sizeof(line)
-            ? (size_t)length : sizeof(line) - 1;
+        size_t count = (size_t)length < sizeof(line) ? (size_t)length : sizeof(line) - 1;
         (void)write(fd, line, count);
     }
 }
@@ -252,28 +240,21 @@ static void dumpCommandBufferLocked(id commandBuffer, unsigned commitSequence) {
         return;
     struct timeval now;
     gettimeofday(&now, NULL);
-    appendManifestLine(manifest,
-                       "commit sequence=%u time=%lld.%06d commandBuffer=%p\n",
-                       commitSequence, (long long)now.tv_sec,
-                       (int)now.tv_usec, commandBuffer);
+    appendManifestLine(manifest, "commit sequence=%u time=%lld.%06d commandBuffer=%p\n", commitSequence,
+                       (long long)now.tv_sec, (int)now.tv_usec, commandBuffer);
 
-    dumpReadableMemory(directory, commitSequence, "object",
-                       (__bridge const void *)commandBuffer,
+    dumpReadableMemory(directory, commitSequence, "object", (__bridge const void *)commandBuffer,
                        class_getInstanceSize(object_getClass(commandBuffer)));
-    dumpIvarTarget(directory, commitSequence, commandBuffer, "_currentExec",
-                   1024);
-    dumpIvarTarget(directory, commitSequence, commandBuffer, "_currentChunk",
-                   256);
+    dumpIvarTarget(directory, commitSequence, commandBuffer, "_currentExec", 1024);
+    dumpIvarTarget(directory, commitSequence, commandBuffer, "_currentChunk", 256);
     dumpIvarTarget(directory, commitSequence, commandBuffer, "_storage", 4096);
 
 #if PVG_TRACE_COMMANDS_ARMED
     char recordPath[192];
-    snprintf(recordPath, sizeof(recordPath), "%s/commit-%03u-records.bin",
-             directory, commitSequence);
+    snprintf(recordPath, sizeof(recordPath), "%s/commit-%03u-records.bin", directory, commitSequence);
     int recordsFile = open(recordPath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 #endif
-    for (TraceAllocation *allocation = allocations; allocation;
-         allocation = allocation->next) {
+    for (TraceAllocation *allocation = allocations; allocation; allocation = allocation->next) {
         if (allocation->commandBuffer != commandBuffer)
             continue;
 #if PVG_TRACE_COMMANDS_ARMED
@@ -281,13 +262,11 @@ static void dumpCommandBufferLocked(id commandBuffer, unsigned commitSequence) {
             continue;
         off_t recordOffset = lseek(recordsFile, 0, SEEK_CUR);
         if (recordOffset < 0 ||
-            write(recordsFile, allocation->bytes, allocation->length) !=
-                (ssize_t)allocation->length)
+            write(recordsFile, allocation->bytes, allocation->length) != (ssize_t)allocation->length)
             continue;
 #else
         char path[192];
-        snprintf(path, sizeof(path), "%s/%06u-%zu.bin", directory,
-                 allocation->sequence, allocation->length);
+        snprintf(path, sizeof(path), "%s/%06u-%zu.bin", directory, allocation->sequence, allocation->length);
         int output = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (output >= 0) {
             (void)write(output, allocation->bytes, allocation->length);
@@ -298,20 +277,18 @@ static void dumpCommandBufferLocked(id commandBuffer, unsigned commitSequence) {
         uint32_t wireLength = 0;
         if (allocation->length >= 8) {
             memcpy(&opcode, allocation->bytes, sizeof(opcode));
-            memcpy(&wireLength, (uint8_t *)allocation->bytes + 4,
-                   sizeof(wireLength));
+            memcpy(&wireLength, (uint8_t *)allocation->bytes + 4, sizeof(wireLength));
         }
         appendManifestLine(manifest,
 #if PVG_TRACE_COMMANDS_ARMED
                            "record sequence=%u size=%zu opcode=0x%08x "
                            "wireLength=%u offset=%lld path=%s\n",
-                           allocation->sequence, allocation->length, opcode,
-                           wireLength, (long long)recordOffset, recordPath);
+                           allocation->sequence, allocation->length, opcode, wireLength, (long long)recordOffset,
+                           recordPath);
 #else
                            "record sequence=%u size=%zu opcode=0x%08x "
                            "wireLength=%u path=%s\n",
-                           allocation->sequence, allocation->length, opcode,
-                           wireLength, path);
+                           allocation->sequence, allocation->length, opcode, wireLength, path);
 #endif
     }
 #if PVG_TRACE_COMMANDS_ARMED
@@ -320,43 +297,35 @@ static void dumpCommandBufferLocked(id commandBuffer, unsigned commitSequence) {
 #endif
     uint64_t savedBufferRefs[16] = {0};
     unsigned savedBufferCount = 0;
-    for (TraceReference *reference = references; reference;
-         reference = reference->next) {
+    for (TraceReference *reference = references; reference; reference = reference->next) {
         if (reference->commandBuffer != commandBuffer)
             continue;
-        appendManifestLine(
-            manifest,
-            "reference sequence=%u kind=%s accepted=%u write=%u object=%p "
-            "class=%s serializer=0x%llx texture=0x%llx buffer=0x%llx "
-            "pipeline=0x%llx sampler=0x%llx fence=0x%llx "
-            "dimensions=%llux%llux%llu format=0x%llx type=0x%llx "
-            "usage=0x%llx storage=0x%llx length=0x%llx\n",
-            reference->sequence, reference->isState ? "state" : "resource",
-            reference->accepted, reference->isWrite, reference->object,
-            reference->className, reference->serializerResourceRef,
-            reference->textureRef, reference->bufferRef,
-            reference->pipelineRef, reference->samplerRef,
-            reference->fenceRef, reference->width, reference->height,
-            reference->depth, reference->pixelFormat,
-            reference->textureType, reference->usage,
-            reference->storageMode, reference->length);
+        appendManifestLine(manifest,
+                           "reference sequence=%u kind=%s accepted=%u write=%u object=%p "
+                           "class=%s serializer=0x%llx texture=0x%llx buffer=0x%llx "
+                           "pipeline=0x%llx sampler=0x%llx fence=0x%llx "
+                           "dimensions=%llux%llux%llu format=0x%llx type=0x%llx "
+                           "usage=0x%llx storage=0x%llx length=0x%llx\n",
+                           reference->sequence, reference->isState ? "state" : "resource", reference->accepted,
+                           reference->isWrite, reference->object, reference->className,
+                           reference->serializerResourceRef, reference->textureRef, reference->bufferRef,
+                           reference->pipelineRef, reference->samplerRef, reference->fenceRef, reference->width,
+                           reference->height, reference->depth, reference->pixelFormat, reference->textureType,
+                           reference->usage, reference->storageMode, reference->length);
         if (getenv("PVG_TRACE_RESOURCE_DESCRIPTION")) {
-            id object=(__bridge id)reference->object;
-            appendManifestLine(manifest,"description sequence=%u %s\n",reference->sequence,
+            id object = (__bridge id)reference->object;
+            appendManifestLine(manifest, "description sequence=%u %s\n", reference->sequence,
                                [[object description] UTF8String]);
         }
         char label[64];
 #if !PVG_TRACE_COMMANDS_ARMED
-        snprintf(label, sizeof(label), "reference-%06u-%s",
-                 reference->sequence, reference->className);
-        dumpReadableMemory(directory, commitSequence, label,
-                           reference->object, 512);
+        snprintf(label, sizeof(label), "reference-%06u-%s", reference->sequence, reference->className);
+        dumpReadableMemory(directory, commitSequence, label, reference->object, 512);
 #else
         (void)label;
 #endif
 #if PVG_TRACE_COMMANDS_ARMED
-        if (reference->bufferRef && reference->length == 0x40000 &&
-            savedBufferCount < 16) {
+        if (reference->bufferRef && reference->length == 0x40000 && savedBufferCount < 16) {
             BOOL seen = NO;
             for (unsigned index = 0; index < savedBufferCount; ++index) {
                 if (savedBufferRefs[index] == reference->bufferRef) {
@@ -396,16 +365,13 @@ static void *tracedGetCommandBytes(id self, SEL selector, size_t length) {
     return bytes;
 }
 
-static BOOL tracedAddResourceReference(id self, SEL selector, id resource,
-                                       BOOL isWrite) {
-    BOOL accepted = originalAddResourceReference(self, selector, resource,
-                                                 isWrite);
+static BOOL tracedAddResourceReference(id self, SEL selector, id resource, BOOL isWrite) {
+    BOOL accepted = originalAddResourceReference(self, selector, resource, isWrite);
     if (!traceArmed())
         return accepted;
     pthread_mutex_lock(&traceLock);
     if (commitCount < PVGCommandTraceCommitLimit) {
-        TraceReference *reference = captureReference(self, resource, accepted,
-                                                     NO, isWrite);
+        TraceReference *reference = captureReference(self, resource, accepted, NO, isWrite);
         if (reference) {
             reference->next = references;
             references = reference;
@@ -421,8 +387,7 @@ static BOOL tracedAddStateReference(id self, SEL selector, id state) {
         return accepted;
     pthread_mutex_lock(&traceLock);
     if (commitCount < PVGCommandTraceCommitLimit) {
-        TraceReference *reference = captureReference(self, state, accepted,
-                                                     YES, NO);
+        TraceReference *reference = captureReference(self, state, accepted, YES, NO);
         if (reference) {
             reference->next = references;
             references = reference;
@@ -434,9 +399,10 @@ static BOOL tracedAddStateReference(id self, SEL selector, id state) {
 
 static void tracedCommit(id self, SEL selector) {
     if (getenv("PVG_TRACE_COMMIT_STACK")) {
-        void *frames[20]; int n=backtrace(frames,20);
-        fprintf(stderr,"PVG commit buffer=%p\n",self);
-        backtrace_symbols_fd(frames,n,STDERR_FILENO);
+        void *frames[20];
+        int n = backtrace(frames, 20);
+        fprintf(stderr, "PVG commit buffer=%p\n", self);
+        backtrace_symbols_fd(frames, n, STDERR_FILENO);
     }
     if (!traceArmed()) {
         originalCommit(self, selector);
@@ -478,38 +444,27 @@ __attribute__((visibility("default"))) void PVGInstallCommandTrace(void) {
         return;
 
     SEL getBytesSelector = sel_registerName("getCommandBufferBytes:");
-    Method getBytesMethod = class_getInstanceMethod(commandBufferClass,
-                                                     getBytesSelector);
+    Method getBytesMethod = class_getInstanceMethod(commandBufferClass, getBytesSelector);
     SEL commitSelector = sel_registerName("commit");
-    Method commitMethod = class_getInstanceMethod(commandBufferClass,
-                                                   commitSelector);
-    SEL addResourceSelector =
-        sel_registerName("addResourceReference:isWrite:");
-    Method addResourceMethod = class_getInstanceMethod(commandBufferClass,
-                                                        addResourceSelector);
+    Method commitMethod = class_getInstanceMethod(commandBufferClass, commitSelector);
+    SEL addResourceSelector = sel_registerName("addResourceReference:isWrite:");
+    Method addResourceMethod = class_getInstanceMethod(commandBufferClass, addResourceSelector);
     SEL addStateSelector = sel_registerName("addStateReference:");
-    Method addStateMethod = class_getInstanceMethod(commandBufferClass,
-                                                    addStateSelector);
-    if (!getBytesMethod || !commitMethod || !addResourceMethod ||
-        !addStateMethod)
+    Method addStateMethod = class_getInstanceMethod(commandBufferClass, addStateSelector);
+    if (!getBytesMethod || !commitMethod || !addResourceMethod || !addStateMethod)
         return;
 
-    originalGetCommandBytes =
-        (GetCommandBytesFn)method_getImplementation(getBytesMethod);
+    originalGetCommandBytes = (GetCommandBytesFn)method_getImplementation(getBytesMethod);
     method_setImplementation(getBytesMethod, (IMP)tracedGetCommandBytes);
 
     originalCommit = (CommitFn)method_getImplementation(commitMethod);
     const char *commitTypes = method_getTypeEncoding(commitMethod);
-    if (!class_addMethod(commandBufferClass, commitSelector,
-                         (IMP)tracedCommit, commitTypes))
+    if (!class_addMethod(commandBufferClass, commitSelector, (IMP)tracedCommit, commitTypes))
         method_setImplementation(commitMethod, (IMP)tracedCommit);
 
-    originalAddResourceReference =
-        (AddResourceReferenceFn)method_getImplementation(addResourceMethod);
-    method_setImplementation(addResourceMethod,
-                             (IMP)tracedAddResourceReference);
-    originalAddStateReference =
-        (AddStateReferenceFn)method_getImplementation(addStateMethod);
+    originalAddResourceReference = (AddResourceReferenceFn)method_getImplementation(addResourceMethod);
+    method_setImplementation(addResourceMethod, (IMP)tracedAddResourceReference);
+    originalAddStateReference = (AddStateReferenceFn)method_getImplementation(addStateMethod);
     method_setImplementation(addStateMethod, (IMP)tracedAddStateReference);
     hooksInstalled = YES;
     Method blitMethod = class_getInstanceMethod(commandBufferClass, sel_registerName("blitCommandEncoder"));
@@ -523,6 +478,6 @@ __attribute__((visibility("default"))) void PVGInstallCommandTrace(void) {
     if (replaceMethod) {
         originalReplace = (void *)method_getImplementation(replaceMethod);
         class_addMethod(texture, replace, (IMP)tracedReplace, method_getTypeEncoding(replaceMethod));
-        method_setImplementation(class_getInstanceMethod(texture,replace),(IMP)tracedReplace);
+        method_setImplementation(class_getInstanceMethod(texture, replace), (IMP)tracedReplace);
     }
 }

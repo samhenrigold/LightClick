@@ -5,10 +5,11 @@
 #include <sys/sysctl.h>
 #include <stdio.h>
 #include <errno.h>
-int main(void){
-    int native=-1;size_t bytes=sizeof(native);
-    int result=sysctlbyname("sysctl.proc_native",&native,&bytes,NULL,0);
-    printf("pointer-bytes=%lu result=%d errno=%d bytes=%lu native=%d\n",
-        (unsigned long)sizeof(void *),result,result?errno:0,(unsigned long)bytes,native);
-    return result?1:0;
+int main(void) {
+    int native = -1;
+    size_t bytes = sizeof(native);
+    int result = sysctlbyname("sysctl.proc_native", &native, &bytes, NULL, 0);
+    printf("pointer-bytes=%lu result=%d errno=%d bytes=%lu native=%d\n", (unsigned long)sizeof(void *), result,
+           result ? errno : 0, (unsigned long)bytes, native);
+    return result ? 1 : 0;
 }

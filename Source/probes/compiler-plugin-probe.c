@@ -14,17 +14,16 @@ int main(int argc, char **argv) {
         fprintf(stderr, "dlopen failed: %s\n", dlerror());
         return 1;
     }
-    CreateCompilerFn create = (CreateCompilerFn)dlsym(image,
-                                                       "MTLCompilerCreate");
-    DeleteCompilerFn destroy = (DeleteCompilerFn)dlsym(image,
-                                                       "MTLCompilerDelete");
+    CreateCompilerFn create = (CreateCompilerFn)dlsym(image, "MTLCompilerCreate");
+    DeleteCompilerFn destroy = (DeleteCompilerFn)dlsym(image, "MTLCompilerDelete");
     if (!create || !destroy) {
         fprintf(stderr, "compiler entry points missing\n");
         return 2;
     }
     void *compiler = create();
     printf("compiler=%p\n", compiler);
-    if (!compiler) return 3;
+    if (!compiler)
+        return 3;
     destroy(compiler);
     return 0;
 }

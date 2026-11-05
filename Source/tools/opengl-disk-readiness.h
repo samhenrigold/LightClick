@@ -5,15 +5,18 @@
  * delivery when already idle. Boot services can precede asynchronous volume
  * publication. Wait for that native state without polling or weakening the
  * caller's volume checks. This short-lived caller remains cancellable. */
-extern void DARegisterIdleCallback(DASessionRef,void (*)(void *),void *);
+extern void DARegisterIdleCallback(DASessionRef, void (*)(void *), void *);
 static void VIMOpenGLDisksIdle(void *context) {
-    *(Boolean *)context=true;CFRunLoopStop(CFRunLoopGetCurrent());
+    *(Boolean *)context = true;
+    CFRunLoopStop(CFRunLoopGetCurrent());
 }
 static inline void VIMOpenGLWaitForDisks(DASessionRef session) {
-    Boolean ready=false;CFRunLoopRef loop=CFRunLoopGetCurrent();
-    DARegisterIdleCallback(session,VIMOpenGLDisksIdle,&ready);
-    DASessionScheduleWithRunLoop(session,loop,kCFRunLoopDefaultMode);
-    while(!ready)CFRunLoopRun();
-    DASessionUnscheduleFromRunLoop(session,loop,kCFRunLoopDefaultMode);
-    DAUnregisterCallback(session,(void *)VIMOpenGLDisksIdle,&ready);
+    Boolean ready = false;
+    CFRunLoopRef loop = CFRunLoopGetCurrent();
+    DARegisterIdleCallback(session, VIMOpenGLDisksIdle, &ready);
+    DASessionScheduleWithRunLoop(session, loop, kCFRunLoopDefaultMode);
+    while (!ready)
+        CFRunLoopRun();
+    DASessionUnscheduleFromRunLoop(session, loop, kCFRunLoopDefaultMode);
+    DAUnregisterCallback(session, (void *)VIMOpenGLDisksIdle, &ready);
 }

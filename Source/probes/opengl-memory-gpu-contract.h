@@ -10,6 +10,8 @@
 #define VIM_GATE_EVENT_COUNTS 5u
 #define VIM_GATE_MAP_ALIAS 6u
 #define VIM_GATE_MAX_PAGES 16u
-struct VIMGatePages { uint64_t length,serial,pages[VIM_GATE_MAX_PAGES]; };
-typedef char VIMGatePagesSize[(sizeof(struct VIMGatePages)==144)?1:-1];
+struct VIMGatePages {
+    uint64_t length, serial, pages[VIM_GATE_MAX_PAGES];
+};
+typedef char VIMGatePagesSize[(sizeof(struct VIMGatePages) == 144) ? 1 : -1];
 #endif

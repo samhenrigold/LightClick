@@ -40,8 +40,7 @@ inline bool mapSelector(uint32_t native, uint32_t &donor) {
 }
 
 inline bool returnsSurface(uint32_t native) {
-    return native == 0 || native == 2 || native == 4 ||
-        native == 6 || native == 7 || native == 27;
+    return native == 0 || native == 2 || native == 4 || native == 6 || native == 7 || native == 27;
 }
 
 inline void translateResult(void *output, const void *input) {

@@ -19,19 +19,28 @@ int main(int argc, char **argv) {
         NSString *identifier = @(argv[1]);
         NSNotificationCenter *center = NSWorkspace.sharedWorkspace.notificationCenter;
         NSMutableArray *tokens = [NSMutableArray array];
-        for (NSString *name in @[NSWorkspaceWillLaunchApplicationNotification,
-                                 NSWorkspaceDidLaunchApplicationNotification,
-                                 NSWorkspaceDidTerminateApplicationNotification]) {
-            id token = [center addObserverForName:name object:nil queue:nil
-                usingBlock:^(NSNotification *notification) {
-                NSRunningApplication *app = notification.userInfo[NSWorkspaceApplicationKey];
-                if (![app.bundleIdentifier isEqual:identifier]) return;
-                NSDictionary *record = @{@"Event":name, @"Seconds":@(Now()),
-                    @"PID":@(app.processIdentifier), @"FinishedLaunching":@(app.finishedLaunching)};
-                NSData *json = [NSJSONSerialization dataWithJSONObject:record options:0 error:nil];
-                printf("%s\n", [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding].UTF8String);
-                fflush(stdout);
-            }];
+        for (NSString *name in @[
+                 NSWorkspaceWillLaunchApplicationNotification, NSWorkspaceDidLaunchApplicationNotification,
+                 NSWorkspaceDidTerminateApplicationNotification
+             ]) {
+            id token = [center
+                addObserverForName:name
+                            object:nil
+                             queue:nil
+                        usingBlock:^(NSNotification *notification) {
+                          NSRunningApplication *app = notification.userInfo[NSWorkspaceApplicationKey];
+                          if (![app.bundleIdentifier isEqual:identifier])
+                              return;
+                          NSDictionary *record = @{
+                              @"Event" : name,
+                              @"Seconds" : @(Now()),
+                              @"PID" : @(app.processIdentifier),
+                              @"FinishedLaunching" : @(app.finishedLaunching)
+                          };
+                          NSData *json = [NSJSONSerialization dataWithJSONObject:record options:0 error:nil];
+                          printf("%s\n", [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding].UTF8String);
+                          fflush(stdout);
+                        }];
             [tokens addObject:token];
         }
         printf("{\"Ready\":true,\"Seconds\":%.6f}\n", Now());
@@ -39,7 +48,8 @@ int main(int argc, char **argv) {
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:60];
         while (deadline.timeIntervalSinceNow > 0)
             [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
-        for (id token in tokens) [center removeObserver:token];
+        for (id token in tokens)
+            [center removeObserver:token];
         return 0;
     }
 }

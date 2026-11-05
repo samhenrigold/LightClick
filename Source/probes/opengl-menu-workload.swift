@@ -7,9 +7,10 @@ import Foundation
 
 let args = CommandLine.arguments
 guard args.count == 7, let pid = Int32(args[1]), let windowID = Int(args[2]),
-      let y = Double(args[3]), let file = Double(args[4]), let edit = Double(args[5]),
-      let view = Double(args[6]), let app = NSRunningApplication(processIdentifier: pid),
-      CGPreflightPostEventAccess() else { exit(64) }
+    let y = Double(args[3]), let file = Double(args[4]), let edit = Double(args[5]),
+    let view = Double(args[6]), let app = NSRunningApplication(processIdentifier: pid),
+    CGPreflightPostEventAccess()
+else { exit(64) }
 
 func windows() -> [[String: Any]] {
     CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
@@ -20,25 +21,28 @@ func bounds(_ window: [String: Any]) -> CGRect? {
     }
 }
 func owns(_ window: [String: Any]) -> Bool {
-    window["kCGWindowOwnerPID"] as? Int == Int(pid) &&
-    window["kCGWindowNumber"] as? Int == windowID
+    window["kCGWindowOwnerPID"] as? Int == Int(pid) && window["kCGWindowNumber"] as? Int == windowID
 }
 guard let frame = windows().first(where: owns).flatMap(bounds),
-      [y, file, edit, view].allSatisfy(\.isFinite),
-      y >= 0, y < frame.height,
-      [file, edit, view].allSatisfy({ $0 >= 0 && $0 < frame.width }) else { exit(65) }
+    [y, file, edit, view].allSatisfy(\.isFinite),
+    y >= 0, y < frame.height,
+    [file, edit, view].allSatisfy({ $0 >= 0 && $0 < frame.width })
+else { exit(65) }
 let points = [file, edit, view].map { CGPoint(x: frame.minX + $0, y: frame.minY + y) }
 app.activate(options: [])
 usleep(300_000)
-guard points.allSatisfy({ point in
-    windows().first(where: {
-        $0["kCGWindowLayer"] as? Int == 0 && bounds($0)?.contains(point) == true
-    }).map(owns) == true
-}) else { exit(66) }
+guard
+    points.allSatisfy({ point in
+        windows().first(where: {
+            $0["kCGWindowLayer"] as? Int == 0 && bounds($0)?.contains(point) == true
+        }).map(owns) == true
+    })
+else { exit(66) }
 
 func post(_ type: CGEventType, at point: CGPoint, wait: useconds_t = 55_000) {
-    CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point,
-            mouseButton: .left)?.post(tap: .cghidEventTap)
+    CGEvent(
+        mouseEventSource: nil, mouseType: type, mouseCursorPosition: point,
+        mouseButton: .left)?.post(tap: .cghidEventTap)
     usleep(wait)
 }
 func mark(_ phase: String) {

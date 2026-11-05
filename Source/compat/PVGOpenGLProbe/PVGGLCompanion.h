@@ -14,8 +14,7 @@ typedef struct PVGGLCompanionScope {
     unsigned stage;
 } PVGGLCompanionScope;
 
-void PVGGLCompanionEnter(PVGGLCompanionScope *, void *context,
-                         unsigned stage, void (*release)(void *));
+void PVGGLCompanionEnter(PVGGLCompanionScope *, void *context, unsigned stage, void (*release)(void *));
 /* On success ownership of pp moves to the scope. On failure caller owns pp.
  * NULL IR is rejected, allowing immediate cleanup of failed compilation. */
 int PVGGLCompanionPut(void *ir, void *pp);

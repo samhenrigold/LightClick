@@ -9,10 +9,13 @@
 @protocol VIMUSBHelperProtocol
 - (void)statusWithReply:(void (^)(NSDictionary *status))reply;
 /// Read-only development diagnosis; never claims, captures or transfers USB data.
-- (void)checkStorageInterface:(NSDictionary *)identity inUserSession:(BOOL)userSession
-                        reply:(void (^)(NSDictionary *result,NSError *error))reply;
-- (void)beginDevice:(NSDictionary *)identity listener:(NSFileHandle *)listener
-          processID:(NSNumber *)processID reply:(void (^)(NSString *sessionID,NSError *error))reply;
+- (void)checkStorageInterface:(NSDictionary *)identity
+                inUserSession:(BOOL)userSession
+                        reply:(void (^)(NSDictionary *result, NSError *error))reply;
+- (void)beginDevice:(NSDictionary *)identity
+           listener:(NSFileHandle *)listener
+          processID:(NSNumber *)processID
+              reply:(void (^)(NSString *sessionID, NSError *error))reply;
 - (void)waitForCapture:(NSString *)sessionID reply:(void (^)(NSError *error))reply;
 - (void)endSession:(NSString *)sessionID reply:(void (^)(void))reply;
 @end
@@ -21,5 +24,5 @@ static inline NSXPCInterface *VIMUSBInterface(void) {
     return [NSXPCInterface interfaceWithProtocol:@protocol(VIMUSBHelperProtocol)];
 }
 static inline NSError *VIMUSBError(NSString *message) {
-    return [NSError errorWithDomain:@"VirtualIntelMac.USB" code:1 userInfo:@{NSLocalizedDescriptionKey:message}];
+    return [NSError errorWithDomain:@"VirtualIntelMac.USB" code:1 userInfo:@{NSLocalizedDescriptionKey : message}];
 }

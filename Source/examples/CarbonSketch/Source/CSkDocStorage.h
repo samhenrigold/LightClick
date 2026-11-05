@@ -1,6 +1,6 @@
 /*
     File:       CSkDocStorage.h
-        
+
     Contains:	Document storage structure (to be attached to window).
                 ToDo: Should make it opaque, and move some code from CSkWindow.c into
                 a new file CSkDocStorage.c.
@@ -43,7 +43,6 @@
     Copyright © 2004 Apple Computer, Inc., All Rights Reserved
 */
 
-
 #ifndef __CSKDOCSTORAGE__
 #define __CSKDOCSTORAGE__
 
@@ -53,29 +52,26 @@
 #include "CSkObjects.h"
 #endif
 
-struct DocStorage	
-{
-    WindowRef           ownerWindow;        // reference back to owning window
-    WindowRef           toolPalette;        // holds current tool selection and drawing attributes
-    Rect                windowRect;         // keep it around, for convenience (topLeft = (0, 0))
-    DrawObjList         objList;            // our drawing objects
-	CFDataRef			pdfData;			// in case we pasted in a pdf from the pasteboard
-    CGContextRef        bmCtx;              // 1x1 bitmap context for hit testing
-    Point               docSize;            // unscaled
-    float				gridWidth;          // unscaled
-    CGAffineTransform   displayCTM;         // apply to windowContext before drawing document content into it (scales + offsets)
-    Point               scrollPosition;     // topLeft of window content relative to document background origin
-    float               scale;              // passed to CGContextScaleCTM
-    Point               docTopLeft;         // unscaled
-    CGPoint             dupOffset;          // offset when duplicating selected objects
-    PMPageFormat		pageFormat;
-    PMPrintSettings		printSettings;
-    Handle              flattenedPageFormat;
+struct DocStorage {
+    WindowRef ownerWindow; // reference back to owning window
+    WindowRef toolPalette; // holds current tool selection and drawing attributes
+    Rect windowRect; // keep it around, for convenience (topLeft = (0, 0))
+    DrawObjList objList; // our drawing objects
+    CFDataRef pdfData; // in case we pasted in a pdf from the pasteboard
+    CGContextRef bmCtx; // 1x1 bitmap context for hit testing
+    Point docSize; // unscaled
+    float gridWidth; // unscaled
+    CGAffineTransform displayCTM; // apply to windowContext before drawing document content into it (scales + offsets)
+    Point scrollPosition; // topLeft of window content relative to document background origin
+    float scale; // passed to CGContextScaleCTM
+    Point docTopLeft; // unscaled
+    CGPoint dupOffset; // offset when duplicating selected objects
+    PMPageFormat pageFormat;
+    PMPrintSettings printSettings;
+    Handle flattenedPageFormat;
 };
 typedef struct DocStorage DocStorage, *DocStoragePtr;
 
-
-void ReleaseDocumentStorage(DocStorage* docStP);
-
+void ReleaseDocumentStorage(DocStorage *docStP);
 
 #endif

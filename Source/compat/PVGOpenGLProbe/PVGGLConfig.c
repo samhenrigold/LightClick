@@ -10,25 +10,24 @@ struct PVGGLConfig {
 };
 
 PVGGLConfig *PVGGLConfigCreate(void *native, size_t nativeSize) {
-    if (!native || nativeSize != PVGGLNativeConfigSize) return NULL;
+    if (!native || nativeSize != PVGGLNativeConfigSize)
+        return NULL;
     PVGGLConfig *config = calloc(1, sizeof(*config));
-    if (!config) return NULL;
+    if (!config)
+        return NULL;
     config->native = native;
     memcpy(config->donor, native, PVGGLNativeConfigSize);
     return config;
 }
 
-void *PVGGLConfigDonor(PVGGLConfig *config) {
-    return config ? config->donor : NULL;
-}
+void *PVGGLConfigDonor(PVGGLConfig *config) { return config ? config->donor : NULL; }
 
 int PVGGLConfigPublish(PVGGLConfig *config) {
-    if (!config) return 0;
+    if (!config)
+        return 0;
     config->donor[0x19] &= 0x80;
     memcpy(config->native, config->donor, PVGGLNativeConfigSize);
     return 1;
 }
 
-void PVGGLConfigDestroy(PVGGLConfig *config) {
-    free(config);
-}
+void PVGGLConfigDestroy(PVGGLConfig *config) { free(config); }

@@ -1,6 +1,6 @@
 /*
     File:       main.c
-    
+
     Contains:	Initialization code and RunApplicationEventLoop.
 
     Disclaimer:	IMPORTANT:  This Apple software is supplied to you by Apple Computer, Inc.
@@ -47,73 +47,62 @@
 #include "CSkConstants.h"
 
 // Keep our nibRef around as global (CreateNibReference is expensive)
-IBNibRef    gOurNibRef;
+IBNibRef gOurNibRef;
 
 //-----------------------------------------------------------------------------------------------------------------------
-static	pascal	OSStatus AppEventHandlerProc( EventHandlerCallRef inCallRef, EventRef inEvent, void* inUserData )
-{
-    #pragma unused(inCallRef, inUserData)
-    OSStatus    err         = eventNotHandledErr;
-    UInt32      eventClass  = GetEventClass(inEvent);
-    UInt32      eventKind   = GetEventKind(inEvent);
-    
-    if ( (eventClass == kEventClassCommand) && (eventKind == kEventCommandProcess) )
-    {
+static pascal OSStatus AppEventHandlerProc(EventHandlerCallRef inCallRef, EventRef inEvent, void *inUserData) {
+#pragma unused(inCallRef, inUserData)
+    OSStatus err = eventNotHandledErr;
+    UInt32 eventClass = GetEventClass(inEvent);
+    UInt32 eventKind = GetEventKind(inEvent);
+
+    if ((eventClass == kEventClassCommand) && (eventKind == kEventCommandProcess)) {
         HICommand command;
 
-        GetEventParameter( inEvent, kEventParamDirectObject, typeHICommand, NULL, sizeof(HICommand), NULL, &command );
-        
-        switch ( command.commandID)
-        {
+        GetEventParameter(inEvent, kEventParamDirectObject, typeHICommand, NULL, sizeof(HICommand), NULL, &command);
+
+        switch (command.commandID) {
             case kHICommandNew:
                 NewCSkWindow(gOurNibRef, CSkToolPalette(gOurNibRef));
-				err = noErr;
-				break;
-            
-            case kHICommandAbout:
-            {
-    //          DisplayAboutBox();  -- the built-in one is good enough, for now
-            }
-            break;
-            
-            case kHICommandOpen:
-            {
-    //          OpenFiles();	-- real soon now ...
-            }
-            break;
+                err = noErr;
+                break;
+
+            case kHICommandAbout: {
+                //          DisplayAboutBox();  -- the built-in one is good enough, for now
+            } break;
+
+            case kHICommandOpen: {
+                //          OpenFiles();	-- real soon now ...
+            } break;
         }
     }
     return err;
 }
 
 // --------------------------------------------------------------------------------------------------------------
-static pascal OSErr	DoOpenApp(const AppleEvent* inputEvent, AppleEvent* outputEvent, SInt32 handlerRefCon)
-{
-#pragma unused (inputEvent, outputEvent, handlerRefCon)
-	return NewCSkWindow(gOurNibRef, CSkToolPalette(gOurNibRef));
+static pascal OSErr DoOpenApp(const AppleEvent *inputEvent, AppleEvent *outputEvent, SInt32 handlerRefCon) {
+#pragma unused(inputEvent, outputEvent, handlerRefCon)
+    return NewCSkWindow(gOurNibRef, CSkToolPalette(gOurNibRef));
 } // DoOpenApp
 
-
 //---------------------------------------------------------------------------------------------
-int main()
-{
-    static const EventTypeSpec  sApplicationEvents[] = {{ kEventClassCommand, kEventCommandProcess }};
-    OSErr                       err;
-    
-    err = CreateNibReference(CFSTR("CarbonSketch"), &gOurNibRef );
-    require_noerr( err, CantGetNibRef );
+int main() {
+    static const EventTypeSpec sApplicationEvents[] = {{kEventClassCommand, kEventCommandProcess}};
+    OSErr err;
 
-    err = SetMenuBarFromNib( gOurNibRef, CFSTR("MenuBar") );
-    require_noerr( err, SetMenuBarFromNib_FAILED );
+    err = CreateNibReference(CFSTR("CarbonSketch"), &gOurNibRef);
+    require_noerr(err, CantGetNibRef);
 
-	AEInstallEventHandler(kCoreEventClass, kAEOpenApplication, DoOpenApp, 0, false);
-//	AEInstallEventHandler(kCoreEventClass, kAEOpenApplication, DoOpenDocument, 0, false);
-//	AEInstallEventHandler(kCoreEventClass, kAEOpenApplication, DoPrintDocument, 0, false);
-//	AEInstallEventHandler(kCoreEventClass, kAEOpenApplication, DoQuitApp, 0, false);
+    err = SetMenuBarFromNib(gOurNibRef, CFSTR("MenuBar"));
+    require_noerr(err, SetMenuBarFromNib_FAILED);
 
-    InstallApplicationEventHandler( NewEventHandlerUPP(AppEventHandlerProc), 
-                                    GetEventTypeCount(sApplicationEvents), 
-                                    sApplicationEvents, 0, NULL );
+    AEInstallEventHandler(kCoreEventClass, kAEOpenApplication, DoOpenApp, 0, false);
+    //	AEInstallEventHandler(kCoreEventClass, kAEOpenApplication, DoOpenDocument, 0, false);
+    //	AEInstallEventHandler(kCoreEventClass, kAEOpenApplication, DoPrintDocument, 0, false);
+    //	AEInstallEventHandler(kCoreEventClass, kAEOpenApplication, DoQuitApp, 0, false);
+
+    InstallApplicationEventHandler(NewEventHandlerUPP(AppEventHandlerProc), GetEventTypeCount(sApplicationEvents),
+                                   sApplicationEvents, 0, NULL);
 
     RunApplicationEventLoop();
 
@@ -123,4 +112,3 @@ SetMenuBarFromNib_FAILED:
 CantGetNibRef:
     return err;
 }
-

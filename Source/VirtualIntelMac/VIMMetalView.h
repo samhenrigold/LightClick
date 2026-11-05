@@ -5,14 +5,14 @@ NS_ASSUME_NONNULL_BEGIN
 @interface VIMMetalView : NSView
 @property(nonatomic, copy, nullable) void (^inputHandler)(NSArray<NSDictionary *> *events);
 /// Explicit diagnostic only; the session reports the normal QMP input reply.
-@property(nonatomic, copy, nullable) void (^diagnosticInputObserver)(CFTimeInterval queued, NSError * _Nullable error);
+@property(nonatomic, copy, nullable) void (^diagnosticInputObserver)(CFTimeInterval queued, NSError *_Nullable error);
 @property(nonatomic) BOOL displaySleeping;
 /// PVG display power is independent of the emulator's system run state.
 @property(nonatomic) BOOL guestDisplaySleeping;
 @property(nonatomic) BOOL softwareCursor;
 /// Compositor sampling only; no guest mode, pixel copy or extra render pass.
 @property(nonatomic) BOOL nearestNeighborScaling;
-@property(nonatomic,readonly) BOOL inputCaptured;
+@property(nonatomic, readonly) BOOL inputCaptured;
 - (void)releaseInputCapture;
 - (void)capturePNG:(void (^)(NSData *_Nullable png))completion;
 - (void)releasePressedKeys;
@@ -23,7 +23,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// fallback storage and the current guest/system power state.
 - (void)invalidatePresentation;
 - (void)setGuestCursorVisible:(BOOL)visible;
-- (void)setGuestCursorPixels:(NSData *)pixels width:(NSUInteger)width height:(NSUInteger)height hotspot:(NSPoint)hotspot;
+- (void)setGuestCursorPixels:(NSData *)pixels
+                       width:(NSUInteger)width
+                      height:(NSUInteger)height
+                     hotspot:(NSPoint)hotspot;
 /// Read-only development snapshot; no guest calls or screen capture.
 - (NSDictionary *)cursorDiagnostics;
 /// Geometry only; no GPU readback, pixel copies or guest calls.
@@ -44,12 +47,16 @@ NS_ASSUME_NONNULL_BEGIN
 /// Takes ownership of fd on every path; never copies the shared frame pixels.
 - (BOOL)installFrameDescriptor:(int)fd length:(NSUInteger)length error:(NSError **)error;
 /// Main-thread only. Completion fires once, after GPU use or a skipped frame.
-- (void)presentWidth:(NSUInteger)width height:(NSUInteger)height stride:(NSUInteger)stride
-    completion:(void (^)(BOOL presented))completion;
+- (void)presentWidth:(NSUInteger)width
+              height:(NSUInteger)height
+              stride:(NSUInteger)stride
+          completion:(void (^)(BOOL presented))completion;
 /// GPU-only source path. Producer must finish writes before calling and must
 /// not mutate/recycle the surface until completion. Retains storage through
 /// Metal use; completion is a resource-release signal, not scanout evidence.
-- (void)presentSurface:(IOSurfaceRef)surface width:(NSUInteger)width height:(NSUInteger)height
-    completion:(void (^)(BOOL presented))completion;
+- (void)presentSurface:(IOSurfaceRef)surface
+                 width:(NSUInteger)width
+                height:(NSUInteger)height
+            completion:(void (^)(BOOL presented))completion;
 @end
 NS_ASSUME_NONNULL_END

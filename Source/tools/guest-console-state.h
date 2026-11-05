@@ -6,15 +6,16 @@
 #import <CoreFoundation/CoreFoundation.h>
 
 static inline NSInteger VIMConsoleLockStateFromProperty(CFTypeRef value) {
-    return value&&CFGetTypeID(value)==CFBooleanGetTypeID()?
-        (CFBooleanGetValue((CFBooleanRef)value)?1:0):-1;
+    return value && CFGetTypeID(value) == CFBooleanGetTypeID() ? (CFBooleanGetValue((CFBooleanRef)value) ? 1 : 0) : -1;
 }
 static inline NSInteger VIMConsoleLockState(void) {
-    io_registry_entry_t root=IORegistryGetRootEntry(MACH_PORT_NULL);
-    if(!root)return -1;
-    CFTypeRef value=IORegistryEntryCreateCFProperty(root,CFSTR("IOConsoleLocked"),NULL,0);
+    io_registry_entry_t root = IORegistryGetRootEntry(MACH_PORT_NULL);
+    if (!root)
+        return -1;
+    CFTypeRef value = IORegistryEntryCreateCFProperty(root, CFSTR("IOConsoleLocked"), NULL, 0);
     IOObjectRelease(root);
-    NSInteger state=VIMConsoleLockStateFromProperty(value);
-    if(value)CFRelease(value);
+    NSInteger state = VIMConsoleLockStateFromProperty(value);
+    if (value)
+        CFRelease(value);
     return state;
 }

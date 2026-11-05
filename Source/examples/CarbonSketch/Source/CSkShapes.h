@@ -1,8 +1,8 @@
 /*
     File:       CSkShapes.h
-        
+
     Contains:	Externally visible interface to CSkShape implementation.
-                
+
     Disclaimer:	IMPORTANT:  This Apple software is supplied to you by Apple Computer, Inc.
                 ("Apple") in consideration of your agreement to the following terms, and your
                 use, installation, modification or redistribution of this Apple software
@@ -41,7 +41,6 @@
     Copyright © 2004 Apple Computer, Inc., All Rights Reserved
 */
 
-
 #ifndef __CSKSHAPES__
 #define __CSKSHAPES__
 
@@ -49,21 +48,21 @@
 
 typedef struct CSkShape CSkShape, *CSkShapePtr;
 
-ByteCount   CSkShapeSize(void);
+ByteCount CSkShapeSize(void);
 CSkShapePtr CSkShapeCreate(int shapeType);
-void        CSkShapeRelease(CSkShape* sh);
+void CSkShapeRelease(CSkShape *sh);
 
-int         CSkShapeGetType(const CSkShape* sh);
-CGRect      CSkShapeGetBounds(const CSkShape* sh);
-void        CSkShapeGetLine(const CSkShape* sh, CGPoint* a, CGPoint* b);
-void        CSkShapeGetRRectRadii(const CSkShape* sh, float* rX, float* rY);
+int CSkShapeGetType(const CSkShape *sh);
+CGRect CSkShapeGetBounds(const CSkShape *sh);
+void CSkShapeGetLine(const CSkShape *sh, CGPoint *a, CGPoint *b);
+void CSkShapeGetRRectRadii(const CSkShape *sh, float *rX, float *rY);
 
-void        CSkShapeSetLine(CSkShape* sh, CGPoint a, CGPoint b);
-void        CSkShapeSetBounds(CSkShape* sh, CGRect rect);
+void CSkShapeSetLine(CSkShape *sh, CGPoint a, CGPoint b);
+void CSkShapeSetBounds(CSkShape *sh, CGRect rect);
 
-void        CSkShapeOffset(CSkShape* sh, float offsetX, float offsetY);
-void        CSkShapeResize(CSkShape* sh, UInt32* dragger, CGPoint newPt);
-UInt32      FindGrabberHit(const CSkShape* shape, CGPoint pt);
-Boolean		NextGrabberRect(const CSkShape* sh, UInt32* previousGrabNum, CGRect* grabRect);
+void CSkShapeOffset(CSkShape *sh, float offsetX, float offsetY);
+void CSkShapeResize(CSkShape *sh, UInt32 *dragger, CGPoint newPt);
+UInt32 FindGrabberHit(const CSkShape *shape, CGPoint pt);
+Boolean NextGrabberRect(const CSkShape *sh, UInt32 *previousGrabNum, CGRect *grabRect);
 
 #endif

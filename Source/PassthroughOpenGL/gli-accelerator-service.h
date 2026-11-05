@@ -9,15 +9,15 @@
 #include <IOKit/IOKitLib.h>
 #include "iokit-bridge-compat.h"
 static io_service_t vim_renderer_accelerator;
-static void VIMSetRendererAccelerator(io_service_t service)
-{
-    io_service_t next=0;
-    if(service && VIMIOCanRetainObject() && VIMIOObjectConformsTo(service,"VMsvga2Accel") &&
-       IOObjectRetain(service)==kIOReturnSuccess)next=service;
-    io_service_t previous=vim_renderer_accelerator;
-    vim_renderer_accelerator=next;
-    if(previous)IOObjectRelease(previous);
+static void VIMSetRendererAccelerator(io_service_t service) {
+    io_service_t next = 0;
+    if (service && VIMIOCanRetainObject() && VIMIOObjectConformsTo(service, "VMsvga2Accel") &&
+        IOObjectRetain(service) == kIOReturnSuccess)
+        next = service;
+    io_service_t previous = vim_renderer_accelerator;
+    vim_renderer_accelerator = next;
+    if (previous)
+        IOObjectRelease(previous);
 }
-__attribute__((destructor)) static void VIMReleaseRendererAccelerator(void)
-{VIMSetRendererAccelerator(0);}
+__attribute__((destructor)) static void VIMReleaseRendererAccelerator(void) { VIMSetRendererAccelerator(0); }
 #endif

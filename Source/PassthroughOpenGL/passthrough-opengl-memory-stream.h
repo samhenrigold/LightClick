@@ -13,13 +13,13 @@
 struct DGMemoryStream;
 typedef void (*DGMemoryWorker)(struct DGMemoryStream *);
 struct DGMemoryStream *DGMemoryStreamOpen(DGMemoryWorker);
-ssize_t DGMemoryClientRead(struct DGMemoryStream *,void *,size_t);
-ssize_t DGMemoryClientWrite(struct DGMemoryStream *,const void *,size_t);
-ssize_t DGMemoryClientReadv(struct DGMemoryStream *,const struct iovec *,int);
-ssize_t DGMemoryClientWritev(struct DGMemoryStream *,const struct iovec *,int);
-ssize_t DGMemoryServerRead(struct DGMemoryStream *,void *,size_t);
-ssize_t DGMemoryServerWrite(struct DGMemoryStream *,const void *,size_t);
-ssize_t DGMemoryServerWritev(struct DGMemoryStream *,const struct iovec *,int);
+ssize_t DGMemoryClientRead(struct DGMemoryStream *, void *, size_t);
+ssize_t DGMemoryClientWrite(struct DGMemoryStream *, const void *, size_t);
+ssize_t DGMemoryClientReadv(struct DGMemoryStream *, const struct iovec *, int);
+ssize_t DGMemoryClientWritev(struct DGMemoryStream *, const struct iovec *, int);
+ssize_t DGMemoryServerRead(struct DGMemoryStream *, void *, size_t);
+ssize_t DGMemoryServerWrite(struct DGMemoryStream *, const void *, size_t);
+ssize_t DGMemoryServerWritev(struct DGMemoryStream *, const struct iovec *, int);
 int DGMemoryStreamShutdown(struct DGMemoryStream *);
 int DGMemoryStreamClose(struct DGMemoryStream *);
 /* Retains the caller reference until the worker callback has returned. The

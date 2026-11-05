@@ -20,14 +20,11 @@ extern size_t LLVMGetBufferSize(LLVMMemoryBufferRef);
 extern void LLVMDisposeMemoryBuffer(LLVMMemoryBufferRef);
 
 typedef void *(*CreateCompilerFn)(void);
-typedef int (*BuildRequestFn)(void *, const void *, size_t, unsigned,
-                              LLVMModuleRef, const void **, size_t *,
-                              const void **, size_t *, const void **, size_t *,
-                              const char **);
+typedef int (*BuildRequestFn)(void *, const void *, size_t, unsigned, LLVMModuleRef, const void **, size_t *,
+                              const void **, size_t *, const void **, size_t *, const char **);
 typedef void (*ReleaseReplyFn)(void *);
 typedef void (*DeleteCompilerFn)(void *);
-typedef LLVMMemoryBufferRef (*CreateBufferFn)(const char *, size_t,
-                                               const char *);
+typedef LLVMMemoryBufferRef (*CreateBufferFn)(const char *, size_t, const char *);
 typedef int (*ParseBitcodeFn)(LLVMMemoryBufferRef, LLVMModuleRef *);
 typedef void (*DisposeModuleFn)(LLVMModuleRef);
 typedef void (*DisposeBufferFn)(LLVMMemoryBufferRef);
@@ -58,9 +55,8 @@ static DisposeModuleFn gDisposeModule;
 static DisposeBufferFn gDisposeBuffer;
 static const char *gLoadError;
 
-static const char kLLVM7Path[] =
-    "/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/"
-    "31001/Libraries/libLLVM.dylib";
+static const char kLLVM7Path[] = "/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/"
+                                 "31001/Libraries/libLLVM.dylib";
 
 static void setLoadError(const char *message) {
     if (!gLoadError)
@@ -76,28 +72,23 @@ static void loadImplementations(void) {
         setLoadError(dlerror());
         return;
     }
-    gCreateBuffer = (CreateBufferFn)dlsym(
-        gLLVM7Image, "LLVMCreateMemoryBufferWithMemoryRangeCopy");
+    gCreateBuffer = (CreateBufferFn)dlsym(gLLVM7Image, "LLVMCreateMemoryBufferWithMemoryRangeCopy");
     gParseBitcode = (ParseBitcodeFn)dlsym(gLLVM7Image, "LLVMParseBitcode2");
     gDisposeModule = (DisposeModuleFn)dlsym(gLLVM7Image, "LLVMDisposeModule");
-    gDisposeBuffer =
-        (DisposeBufferFn)dlsym(gLLVM7Image, "LLVMDisposeMemoryBuffer");
-    if (!gCreateBuffer || !gParseBitcode || !gDisposeModule ||
-        !gDisposeBuffer) {
+    gDisposeBuffer = (DisposeBufferFn)dlsym(gLLVM7Image, "LLVMDisposeMemoryBuffer");
+    if (!gCreateBuffer || !gParseBitcode || !gDisposeModule || !gDisposeBuffer) {
         setLoadError("Big Sur libLLVM lacks a required bitcode C API");
         return;
     }
 
     Dl_info ownImage;
     char realPluginPath[PATH_MAX];
-    if (!dladdr((const void *)&loadImplementations, &ownImage) ||
-        !ownImage.dli_fname) {
+    if (!dladdr((const void *)&loadImplementations, &ownImage) || !ownImage.dli_fname) {
         setLoadError("cannot locate the PVG compiler bridge image");
         return;
     }
     const char *lastSlash = strrchr(ownImage.dli_fname, '/');
-    size_t directoryLength = lastSlash ?
-        (size_t)(lastSlash - ownImage.dli_fname + 1) : 0;
+    size_t directoryLength = lastSlash ? (size_t)(lastSlash - ownImage.dli_fname + 1) : 0;
     const char realName[] = "libAppleParavirtCompilerPluginReal.dylib";
     if (directoryLength + sizeof(realName) > sizeof(realPluginPath)) {
         setLoadError("PVG compiler plugin path is too long");
@@ -111,10 +102,8 @@ static void loadImplementations(void) {
         return;
     }
     gCreate = (CreateCompilerFn)dlsym(gPluginImage, "MTLCompilerCreate");
-    gBuild = (BuildRequestFn)dlsym(
-        gPluginImage, "MTLCompilerBuildRequestWithOptions");
-    gRelease =
-        (ReleaseReplyFn)dlsym(gPluginImage, "MTLCompilerReleaseReply");
+    gBuild = (BuildRequestFn)dlsym(gPluginImage, "MTLCompilerBuildRequestWithOptions");
+    gRelease = (ReleaseReplyFn)dlsym(gPluginImage, "MTLCompilerReleaseReply");
     gDelete = (DeleteCompilerFn)dlsym(gPluginImage, "MTLCompilerDelete");
     if (!gCreate || !gBuild || !gRelease || !gDelete)
         setLoadError("real PVG compiler plugin lacks a required entry point");
@@ -157,18 +146,16 @@ void *MTLCompilerCreate(void) {
     return bridge;
 }
 
-int MTLCompilerBuildRequestWithOptions(
-    void *opaque, const void *options, size_t optionsLength,
-    unsigned requestType, LLVMModuleRef oldModule, const void **libraryData,
-    size_t *libraryLength, const void **reflectionData,
-    size_t *reflectionLength, const void **diagnosticsData,
-    size_t *diagnosticsLength, const char **error) {
+int MTLCompilerBuildRequestWithOptions(void *opaque, const void *options, size_t optionsLength, unsigned requestType,
+                                       LLVMModuleRef oldModule, const void **libraryData, size_t *libraryLength,
+                                       const void **reflectionData, size_t *reflectionLength,
+                                       const void **diagnosticsData, size_t *diagnosticsLength, const char **error) {
     PVGCompilerBridge *bridge = opaque;
     if (!bridge || !oldModule) {
         if (error)
-            *error = gLoadError ? gLoadError :
-                (!bridge ? "PVG compiler bridge creation failed" :
-                 "PVG compiler bridge received no LLVM module");
+            *error = gLoadError ? gLoadError
+                                : (!bridge ? "PVG compiler bridge creation failed"
+                                           : "PVG compiler bridge received no LLVM module");
         return 1;
     }
 
@@ -180,22 +167,17 @@ int MTLCompilerBuildRequestWithOptions(
 
     bridge->oldSerialized = LLVMWriteBitcodeToMemoryBuffer(oldModule);
     if (!bridge->oldSerialized) {
-        snprintf(bridge->error, sizeof(bridge->error),
-                 "Catalina LLVM failed to serialize the AIR module");
+        snprintf(bridge->error, sizeof(bridge->error), "Catalina LLVM failed to serialize the AIR module");
         if (error)
             *error = bridge->error;
         pthread_mutex_unlock(&bridge->lock);
         return 1;
     }
 
-    bridge->newBacking = gCreateBuffer(
-        LLVMGetBufferStart(bridge->oldSerialized),
-        LLVMGetBufferSize(bridge->oldSerialized), "PVG LLVM 5-to-7 bridge");
-    if (!bridge->newBacking ||
-        gParseBitcode(bridge->newBacking, &bridge->newModule) != 0 ||
-        !bridge->newModule) {
-        snprintf(bridge->error, sizeof(bridge->error),
-                 "Big Sur LLVM failed to parse Catalina AIR bitcode");
+    bridge->newBacking = gCreateBuffer(LLVMGetBufferStart(bridge->oldSerialized),
+                                       LLVMGetBufferSize(bridge->oldSerialized), "PVG LLVM 5-to-7 bridge");
+    if (!bridge->newBacking || gParseBitcode(bridge->newBacking, &bridge->newModule) != 0 || !bridge->newModule) {
+        snprintf(bridge->error, sizeof(bridge->error), "Big Sur LLVM failed to parse Catalina AIR bitcode");
         if (error)
             *error = bridge->error;
         disposeBridgedModule(bridge);
@@ -205,7 +187,8 @@ int MTLCompilerBuildRequestWithOptions(
 
 #ifdef PVG_GL_FIX_FETCH_METADATA
     if (PVGCompleteGLFetchMetadata(gLLVM7Image, bridge->newModule) < 0) {
-        if(error) *error="PVG GL vertex-fetch metadata could not be completed";
+        if (error)
+            *error = "PVG GL vertex-fetch metadata could not be completed";
         disposeBridgedModule(bridge);
         pthread_mutex_unlock(&bridge->lock);
         return 1;
@@ -215,12 +198,16 @@ int MTLCompilerBuildRequestWithOptions(
      * Normalize GL modules with Apple's own upgrader before that downgrade. */
     void *(*namedFunction)(void *, const char *) = dlsym(gLLVM7Image, "LLVMGetNamedFunction");
     if (namedFunction && namedFunction(bridge->newModule, "#internal_main")) {
-        void *gpu = dlopen("/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/31001/Libraries/libGPUCompiler.dylib", RTLD_NOW | RTLD_LOCAL);
+        void *gpu = dlopen(
+            "/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/31001/Libraries/libGPUCompiler.dylib",
+            RTLD_NOW | RTLD_LOCAL);
         bool (*upgrade)(void *, uint64_t, uint32_t) = gpu ? dlsym(gpu, "MTLUpgradeAIRModule") : NULL;
         bool upgraded = upgrade && upgrade(bridge->newModule, UINT64_C(0x300000002), 0);
-        if (gpu) dlclose(gpu);
+        if (gpu)
+            dlclose(gpu);
         if (!upgraded) {
-            if (error) *error = "PVG GL AIR upgrade failed";
+            if (error)
+                *error = "PVG GL AIR upgrade failed";
             disposeBridgedModule(bridge);
             pthread_mutex_unlock(&bridge->lock);
             return 1;
@@ -234,16 +221,16 @@ int MTLCompilerBuildRequestWithOptions(
     void (*freeIR)(char *) = dlsym(gLLVM7Image, "LLVMDisposeMessage");
     char *ir = printIR ? printIR(bridge->newModule) : NULL;
     snprintf(bridge->error, sizeof(bridge->error), "PVG diagnostic AIR:\n%s", ir ?: "unavailable");
-    if (ir && freeIR) freeIR(ir);
-    if (error) *error = bridge->error;
+    if (ir && freeIR)
+        freeIR(ir);
+    if (error)
+        *error = bridge->error;
     disposeBridgedModule(bridge);
     pthread_mutex_unlock(&bridge->lock);
     return 1;
 #endif
-    int result = gBuild(
-        bridge->realCompiler, options, optionsLength, requestType,
-        bridge->newModule, libraryData, libraryLength, reflectionData,
-        reflectionLength, diagnosticsData, diagnosticsLength, error);
+    int result = gBuild(bridge->realCompiler, options, optionsLength, requestType, bridge->newModule, libraryData,
+                        libraryLength, reflectionData, reflectionLength, diagnosticsData, diagnosticsLength, error);
     /* The real plugin transfers a successful module into
      * LLVMExtraMakeSharedModule and releases that shared owner before it
      * returns. Disposing it here would be a second destruction. A failed

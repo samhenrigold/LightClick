@@ -25,36 +25,39 @@ extern __typeof__(vm_region) vm_region __attribute__((weak_import));
 extern __typeof__(vm_read_overwrite) vm_read_overwrite __attribute__((weak_import));
 extern __typeof__(vm_protect) vm_protect __attribute__((weak_import));
 extern __typeof__(_dyld_get_image_vmaddr_slide) _dyld_get_image_vmaddr_slide __attribute__((weak_import));
-static pthread_once_t vim_tiger_rosetta_once=PTHREAD_ONCE_INIT;
+static pthread_once_t vim_tiger_rosetta_once = PTHREAD_ONCE_INIT;
 static int vim_tiger_rosetta_active;
-static void VIMTigerDetectRosetta(void)
-{
-    int native=1;size_t size=sizeof(native);
-    vim_tiger_rosetta_active=!sysctlbyname("sysctl.proc_native",&native,&size,NULL,0)&&
-        size==sizeof(native)&&!native&&dlsym(RTLD_DEFAULT,"bdl_lookup_subject_symbol")!=NULL;
+static void VIMTigerDetectRosetta(void) {
+    int native = 1;
+    size_t size = sizeof(native);
+    vim_tiger_rosetta_active = !sysctlbyname("sysctl.proc_native", &native, &size, NULL, 0) && size == sizeof(native) &&
+                               !native && dlsym(RTLD_DEFAULT, "bdl_lookup_subject_symbol") != NULL;
 }
-static int VIMTigerIsRosetta(void)
-{pthread_once(&vim_tiger_rosetta_once,VIMTigerDetectRosetta);return vim_tiger_rosetta_active;}
-static size_t VIMTigerStringLength(const char *text)
-{
-    if(strlen)return strlen(text);
+static int VIMTigerIsRosetta(void) {
+    pthread_once(&vim_tiger_rosetta_once, VIMTigerDetectRosetta);
+    return vim_tiger_rosetta_active;
+}
+static size_t VIMTigerStringLength(const char *text) {
+    if (strlen)
+        return strlen(text);
     /* Volatile prevents a compiler from replacing this fallback with the
      * very libc entry that is unavailable in the measured Rosetta shim. */
-    const volatile char *cursor=text;while(*cursor)++cursor;
-    return (size_t)(cursor-text);
+    const volatile char *cursor = text;
+    while (*cursor)
+        ++cursor;
+    return (size_t)(cursor - text);
 }
 #define strlen VIMTigerStringLength
 #endif
 /* These four product features previously required setenv at GLI startup.
  * Tiger's native Rosetta libSystem has getenv but no setenv. Read the same
  * process-local override without allocating/mutating the environment. */
-static inline int VIMGLProductFeature(const char *name)
-{
-    const char *value=getenv(name);
+static inline int VIMGLProductFeature(const char *name) {
+    const char *value = getenv(name);
 #if defined(__i386__) && __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ == 1040
-    return !value||strcmp(value,"0");
+    return !value || strcmp(value, "0");
 #else
-    return value!=NULL;
+    return value != NULL;
 #endif
 }
 #endif

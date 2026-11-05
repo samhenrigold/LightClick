@@ -30,13 +30,26 @@ NS_ASSUME_NONNULL_BEGIN
 /// across its reboots until freshly published support for the new OS is ready.
 - (BOOL)prepareUpdaterDisplayForBoot:(NSError **)error;
 + (nullable instancetype)loadURL:(NSURL *)URL error:(NSError **)error;
-+ (nullable instancetype)importDisk:(NSURL *)disk guest:(NSString *)guest name:(NSString *)name
-    library:(NSURL *)library firmware:(NSURL *)firmware nvram:(NSURL *)nvram
-    bootMedia:(NSURL *)bootMedia qemuImage:(NSURL *)qemuImage error:(NSError **)error;
++ (nullable instancetype)importDisk:(NSURL *)disk
+                              guest:(NSString *)guest
+                               name:(NSString *)name
+                            library:(NSURL *)library
+                           firmware:(NSURL *)firmware
+                              nvram:(NSURL *)nvram
+                          bootMedia:(NSURL *)bootMedia
+                          qemuImage:(NSURL *)qemuImage
+                              error:(NSError **)error;
 /// Creates an independent formatted disk and references shared installer media.
-+ (nullable instancetype)createGuest:(NSString *)guest name:(NSString *)name diskGiB:(NSUInteger)diskGiB
-    library:(NSURL *)library firmware:(NSURL *)firmware nvram:(NSURL *)nvram
-    bootMedia:(NSURL *)bootMedia installer:(NSURL *)installer qemuImage:(NSURL *)qemuImage error:(NSError **)error;
++ (nullable instancetype)createGuest:(NSString *)guest
+                                name:(NSString *)name
+                             diskGiB:(NSUInteger)diskGiB
+                             library:(NSURL *)library
+                            firmware:(NSURL *)firmware
+                               nvram:(NSURL *)nvram
+                           bootMedia:(NSURL *)bootMedia
+                           installer:(NSURL *)installer
+                           qemuImage:(NSURL *)qemuImage
+                               error:(NSError **)error;
 - (BOOL)rename:(NSString *)name error:(NSError **)error;
 - (BOOL)saveSettings:(NSDictionary *)settings error:(NSError **)error;
 /// Pre-first-boot, non-secret policy only; credentials stay private on the host.

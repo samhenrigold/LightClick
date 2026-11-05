@@ -7,12 +7,12 @@
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
-int main(void)
-{
-    uint8_t (*operation)(uint32_t)=dlsym(RTLD_DEFAULT,"CGSServerOperationState");
-    uint8_t (*accelerated)(CGDirectDisplayID)=dlsym(RTLD_DEFAULT,"CGDisplayUsesOpenGLAcceleration");
-    if(!operation || !accelerated)return 2;
-    CGDirectDisplayID display=CGMainDisplayID();
-    printf("display=%u OpenGLAcceleration=%u DockOperation15=%u\n",display,accelerated(display),operation(15));
+int main(void) {
+    uint8_t (*operation)(uint32_t) = dlsym(RTLD_DEFAULT, "CGSServerOperationState");
+    uint8_t (*accelerated)(CGDirectDisplayID) = dlsym(RTLD_DEFAULT, "CGDisplayUsesOpenGLAcceleration");
+    if (!operation || !accelerated)
+        return 2;
+    CGDirectDisplayID display = CGMainDisplayID();
+    printf("display=%u OpenGLAcceleration=%u DockOperation15=%u\n", display, accelerated(display), operation(15));
     return 0;
 }

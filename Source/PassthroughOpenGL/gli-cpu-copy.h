@@ -8,11 +8,11 @@
 #include <IOKit/IOKitLib.h>
 #include <IOKit/graphics/IOGraphicsInterfaceTypes.h>
 #define VIM_GLI_CPU_COPY_SYMBOL "VIMGLINotifyCPUSurfaceCopy"
-typedef IOReturn (*VIMGLICPUCopyProc)(uint32_t surface,const IOAccelDeviceRegion *region,
-    int32_t destination_x,int32_t destination_y);
+typedef IOReturn (*VIMGLICPUCopyProc)(uint32_t surface, const IOAccelDeviceRegion *region, int32_t destination_x,
+                                      int32_t destination_y);
 /* Optional pre-copy route. Zero means untouched/not eligible; a nonzero
  * result owns completion (including errors), so never repeat it on the CPU. */
 #define VIM_GLI_GPU_COPY_SYMBOL "VIMGLITryGPUFramebufferCopy"
-typedef uint32_t (*VIMGLIGPUCopyProc)(io_connect_t connection,uint32_t surface,
-    const IOAccelDeviceRegion *region,int32_t destination_x,int32_t destination_y,IOReturn *status);
+typedef uint32_t (*VIMGLIGPUCopyProc)(io_connect_t connection, uint32_t surface, const IOAccelDeviceRegion *region,
+                                      int32_t destination_x, int32_t destination_y, IOReturn *status);
 #endif

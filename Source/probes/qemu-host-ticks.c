@@ -5,8 +5,7 @@
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
 
-int main(void)
-{
+int main(void) {
     int64_t previous = cpu_get_host_ticks();
     int64_t minimum = INT64_MAX;
     uint64_t changes = 0, backwards = 0;
@@ -22,8 +21,8 @@ int main(void)
         }
         previous = current;
     }
-    printf("host ticks: changes=%" PRIu64 " backwards=%" PRIu64
-           " minimum_delta=%" PRId64 "\n", changes, backwards, minimum);
+    printf("host ticks: changes=%" PRIu64 " backwards=%" PRIu64 " minimum_delta=%" PRId64 "\n", changes, backwards,
+           minimum);
     if (backwards || !changes) {
         return 1;
     }

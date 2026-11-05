@@ -4,16 +4,14 @@
 
 typedef void *LLVMModuleRef;
 
-extern bool MTLDowngradeAIRModule(LLVMModuleRef module, uint64_t version,
-                                  uint32_t build);
+extern bool MTLDowngradeAIRModule(LLVMModuleRef module, uint64_t version, uint32_t build);
 extern void LLVMSetTarget(LLVMModuleRef module, const char *triple);
 
 /* The shipping PVG plugin asks GPUCompiler to downgrade AIR, but that helper
  * stamps the host generation's deployment target onto render functions. Keep
  * the official downgrade and then restore the Catalina target through LLVM's
  * stable C API. The plugin's bind is renamed to this equal-length symbol. */
-bool PVGDowngradeAIRModule(LLVMModuleRef module, uint64_t version,
-                           uint32_t build) {
+bool PVGDowngradeAIRModule(LLVMModuleRef module, uint64_t version, uint32_t build) {
 #if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 101500
     // Mojave's native Metal compiler accepts AIR through 2.1 (not 2.2).
     // The donor GL frontend is upgraded before reaching us. Use Apple's

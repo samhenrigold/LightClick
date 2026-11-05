@@ -11,7 +11,7 @@ int main(void) {
         double start = now();
         for (unsigned i = 0; i < 100000; i++) {
             uint32_t a = 0, b, c = 0, d;
-            __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d) :: "memory");
+            __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d)::"memory");
         }
         printf("leaf0: %.3f us/call\n", (now() - start) * 10);
     }

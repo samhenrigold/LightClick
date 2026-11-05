@@ -15,11 +15,12 @@ int main(void) {
         SCNetworkInterfaceRef interface = (SCNetworkInterfaceRef)CFArrayGetValueAtIndex(interfaces, i);
         CFShow(SCNetworkInterfaceGetInterfaceType(interface));
         CFStringRef name = SCNetworkInterfaceGetBSDName(interface);
-        if (name) CFShow(name);
+        if (name)
+            CFShow(name);
     }
-    if (interfaces) CFRelease(interfaces);
+    if (interfaces)
+        CFRelease(interfaces);
     int result = VIMOpenGLReserveControlNetworkPorts();
-    printf("Control serial-port reservation: %s (%d)\n",
-           result == 0 ? "complete" : "not committed", result);
+    printf("Control serial-port reservation: %s (%d)\n", result == 0 ? "complete" : "not committed", result);
     return result;
 }

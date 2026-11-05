@@ -17,9 +17,15 @@ typedef struct {
     UINT32 Type, Pad;
     UINT64 PhysicalStart, VirtualStart, NumberOfPages, Attribute;
 } EFI_MEMORY_DESCRIPTOR;
-enum { EfiLoaderCode=1, EfiLoaderData=2, EfiBootServicesCode=3,
-       EfiBootServicesData=4, EfiRuntimeServicesCode=5,
-       EfiRuntimeServicesData=6, EfiConventionalMemory=7 };
+enum {
+    EfiLoaderCode = 1,
+    EfiLoaderData = 2,
+    EfiBootServicesCode = 3,
+    EfiBootServicesData = 4,
+    EfiRuntimeServicesCode = 5,
+    EfiRuntimeServicesData = 6,
+    EfiConventionalMemory = 7
+};
 #define IN
 #define OUT
 #define TRUE 1
@@ -27,17 +33,20 @@ enum { EfiLoaderCode=1, EfiLoaderData=2, EfiBootServicesCode=3,
 #define EFI_SUCCESS 0
 #define EFI_NOT_FOUND 14
 #define EFI_MEMORY_RUNTIME UINT64_C(0x8000000000000000)
-#define EFI_PAGES_TO_SIZE(p) ((UINT64)(p)<<12)
-#define NEXT_MEMORY_DESCRIPTOR(d,s) ((EFI_MEMORY_DESCRIPTOR *)((UINT8 *)(d)+(s)))
+#define EFI_PAGES_TO_SIZE(p) ((UINT64)(p) << 12)
+#define NEXT_MEMORY_DESCRIPTOR(d, s) ((EFI_MEMORY_DESCRIPTOR *)((UINT8 *)(d) + (s)))
 #define CopyMem memmove
 #ifndef VIM_TEST_OPENCORE_FUNCTION
 #error Run this fixture through check-opencore-memory-map.py
 #endif
 #include VIM_TEST_OPENCORE_FUNCTION
-typedef struct { EFI_MEMORY_DESCRIPTOR d; UINT64 opaque; } Record;
-_Static_assert(sizeof(EFI_MEMORY_DESCRIPTOR)==40, "UEFI descriptor prefix");
-_Static_assert(sizeof(Record)==48, "actual captured descriptor stride");
-#define ROW(t,p,v,n,a) {{t,0,UINT64_C(p),UINT64_C(v),UINT64_C(n),UINT64_C(a)},0}
+typedef struct {
+    EFI_MEMORY_DESCRIPTOR d;
+    UINT64 opaque;
+} Record;
+_Static_assert(sizeof(EFI_MEMORY_DESCRIPTOR) == 40, "UEFI descriptor prefix");
+_Static_assert(sizeof(Record) == 48, "actual captured descriptor stride");
+#define ROW(t, p, v, n, a) {{t, 0, UINT64_C(p), UINT64_C(v), UINT64_C(n), UINT64_C(a)}, 0}
 
 static const Record captured[] = {
     ROW(7, 0x0, 0x0, 0xa0, 0xf),
@@ -80,53 +89,58 @@ static const Record captured[] = {
     ROW(1, 0x140000000, 0x0, 0x4, 0xf),
 };
 
-int main(void)
-{
-    assert(sizeof(captured)/sizeof(captured[0])==38);
-    const EFI_MEMORY_DESCRIPTOR *whole=&captured[36].d, *selector=&captured[37].d;
-    assert(whole->Type==7 && selector->Type==1 && selector->NumberOfPages==4);
-    assert(whole->PhysicalStart==UINT64_C(0x100000000));
-    assert(selector->PhysicalStart==UINT64_C(0x140000000));
+int main(void) {
+    assert(sizeof(captured) / sizeof(captured[0]) == 38);
+    const EFI_MEMORY_DESCRIPTOR *whole = &captured[36].d, *selector = &captured[37].d;
+    assert(whole->Type == 7 && selector->Type == 1 && selector->NumberOfPages == 4);
+    assert(whole->PhysicalStart == UINT64_C(0x100000000));
+    assert(selector->PhysicalStart == UINT64_C(0x140000000));
     /* Reconstruct the legitimate final split: conventional / loaded selector /
      * conventional. The faulty actual compactor produces the captured overlap.
      */
-    Record tail[]={captured[36],captured[37],captured[36]};
-    tail[0].d.NumberOfPages=(selector->PhysicalStart-whole->PhysicalStart)/4096;
-    tail[2].d.PhysicalStart=selector->PhysicalStart+selector->NumberOfPages*4096;
-    tail[2].d.NumberOfPages=whole->NumberOfPages-tail[0].d.NumberOfPages-selector->NumberOfPages;
-    for(unsigned i=0;i<3;i++)tail[i].opaque=UINT64_C(0xcafe000000000000)+i;
-    Record original[3]; memcpy(original,tail,sizeof(tail));
-    UINTN size=sizeof(tail);
-    assert(OcShrinkMemoryMap(&size,&tail[0].d,sizeof(Record))==EFI_SUCCESS);
-    assert(tail[0].d.PhysicalStart==whole->PhysicalStart);
-    assert(tail[0].d.NumberOfPages==whole->NumberOfPages);
-    assert(tail[0].d.Attribute==whole->Attribute && tail[0].opaque==original[0].opaque);
+    Record tail[] = {captured[36], captured[37], captured[36]};
+    tail[0].d.NumberOfPages = (selector->PhysicalStart - whole->PhysicalStart) / 4096;
+    tail[2].d.PhysicalStart = selector->PhysicalStart + selector->NumberOfPages * 4096;
+    tail[2].d.NumberOfPages = whole->NumberOfPages - tail[0].d.NumberOfPages - selector->NumberOfPages;
+    for (unsigned i = 0; i < 3; i++)
+        tail[i].opaque = UINT64_C(0xcafe000000000000) + i;
+    Record original[3];
+    memcpy(original, tail, sizeof(tail));
+    UINTN size = sizeof(tail);
+    assert(OcShrinkMemoryMap(&size, &tail[0].d, sizeof(Record)) == EFI_SUCCESS);
+    assert(tail[0].d.PhysicalStart == whole->PhysicalStart);
+    assert(tail[0].d.NumberOfPages == whole->NumberOfPages);
+    assert(tail[0].d.Attribute == whole->Attribute && tail[0].opaque == original[0].opaque);
 #ifdef VIM_EXPECT_UPSTREAM_BUG
-    assert(size==2*sizeof(Record));
-    assert(memcmp(&tail[1],&original[1],sizeof(Record))==0);
+    assert(size == 2 * sizeof(Record));
+    assert(memcmp(&tail[1], &original[1], sizeof(Record)) == 0);
     puts("REPRODUCED: actual upstream compactor counts stale selector inside merged high RAM");
 #else
-    assert(size==sizeof(Record));
+    assert(size == sizeof(Record));
     puts("PASS: merged high RAM counted once; no stale selector descriptor");
 #endif
 
     /* An ordinary nonmerging map, including opaque tails, is untouched. */
-    Record separate[]={ROW(0,0x1000,0,1,0xf),ROW(6,0x9000,0,1,0x800000000000000f)};
-    separate[0].opaque=17;separate[1].opaque=42;
-    Record before[2];memcpy(before,separate,sizeof(before));size=sizeof(separate);
-    OcShrinkMemoryMap(&size,&separate[0].d,sizeof(Record));
-    assert(size==sizeof(separate) && memcmp(separate,before,size)==0);
+    Record separate[] = {ROW(0, 0x1000, 0, 1, 0xf), ROW(6, 0x9000, 0, 1, 0x800000000000000f)};
+    separate[0].opaque = 17;
+    separate[1].opaque = 42;
+    Record before[2];
+    memcpy(before, separate, sizeof(before));
+    size = sizeof(separate);
+    OcShrinkMemoryMap(&size, &separate[0].d, sizeof(Record));
+    assert(size == sizeof(separate) && memcmp(separate, before, size) == 0);
 
     /* Mid-list merging already worked: preserve the following reserved record. */
-    Record middle[]={ROW(7,0x1000,0,1,0xf),ROW(1,0x2000,0,1,0xf),ROW(0,0x5000,0,1,0xf)};
-    middle[2].opaque=99;size=sizeof(middle);
-    OcShrinkMemoryMap(&size,&middle[0].d,sizeof(Record));
-    assert(size==2*sizeof(Record) && middle[0].d.NumberOfPages==2);
-    assert(middle[1].d.Type==0 && middle[1].d.PhysicalStart==0x5000 && middle[1].opaque==99);
-    size=sizeof(Record);Record single=separate[0];
-    assert(OcShrinkMemoryMap(&size,&single.d,sizeof(Record))==EFI_NOT_FOUND);
-    assert(memcmp(&single,&separate[0],sizeof(Record))==0);
+    Record middle[] = {ROW(7, 0x1000, 0, 1, 0xf), ROW(1, 0x2000, 0, 1, 0xf), ROW(0, 0x5000, 0, 1, 0xf)};
+    middle[2].opaque = 99;
+    size = sizeof(middle);
+    OcShrinkMemoryMap(&size, &middle[0].d, sizeof(Record));
+    assert(size == 2 * sizeof(Record) && middle[0].d.NumberOfPages == 2);
+    assert(middle[1].d.Type == 0 && middle[1].d.PhysicalStart == 0x5000 && middle[1].opaque == 99);
+    size = sizeof(Record);
+    Record single = separate[0];
+    assert(OcShrinkMemoryMap(&size, &single.d, sizeof(Record)) == EFI_NOT_FOUND);
+    assert(memcmp(&single, &separate[0], sizeof(Record)) == 0);
     puts("PASS: nonmerged, middle merge, reserved/runtime and opaque-stride records");
     return 0;
 }
-

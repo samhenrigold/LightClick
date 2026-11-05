@@ -9,6 +9,4 @@ struct archive;
 extern int archive_write_finish(struct archive *);
 extern int archive_write_set_compression_bzip2(struct archive *);
 int archive_write_free(struct archive *a) { return archive_write_finish(a); }
-int archive_write_add_filter_bzip2(struct archive *a) {
-    return archive_write_set_compression_bzip2(a);
-}
+int archive_write_add_filter_bzip2(struct archive *a) { return archive_write_set_compression_bzip2(a); }

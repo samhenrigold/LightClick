@@ -11,8 +11,7 @@ static const char *required_classes[] = {
     "MTLSerializerRenderCommandEncoder",
 };
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: %s framework-binary\n", argv[0]);
         return 64;
@@ -25,9 +24,7 @@ int main(int argc, char **argv)
     }
 
     int missing = 0;
-    for (unsigned int index = 0;
-         index < sizeof(required_classes) / sizeof(required_classes[0]);
-         index++) {
+    for (unsigned int index = 0; index < sizeof(required_classes) / sizeof(required_classes[0]); index++) {
         Class candidate = objc_getClass(required_classes[index]);
         printf("%s: %s\n", required_classes[index], candidate ? "present" : "MISSING");
         missing += candidate == Nil;

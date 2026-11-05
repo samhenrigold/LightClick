@@ -33,26 +33,30 @@ private final class MenuFrames: NSObject, SCStreamOutput, @unchecked Sendable {
             // Bound image writes and keep them out of the counting-only path.
             let time = ProcessInfo.processInfo.systemUptime
             if crops < 120 && time >= nextCrop {
-                nextCrop = time + 1.0/15
+                nextCrop = time + 1.0 / 15
                 let frame = CIImage(cvPixelBuffer: buffer)
-                let area = CGRect(x: 0, y: max(0,frame.extent.height-300),
-                                  width: min(480,frame.extent.width), height: min(300,frame.extent.height))
+                let area = CGRect(
+                    x: 0, y: max(0, frame.extent.height - 300),
+                    width: min(480, frame.extent.width), height: min(300, frame.extent.height))
                 let crop = frame.cropped(to: area).transformed(by: CGAffineTransform(translationX: 0, y: -area.minY))
-                let output = cropDirectory.appendingPathComponent(String(format:"%04d.png",crops))
-                try? cropContext.writePNGRepresentation(of: crop, to: output, format: .RGBA8,
+                let output = cropDirectory.appendingPathComponent(String(format: "%04d.png", crops))
+                try? cropContext.writePNGRepresentation(
+                    of: crop, to: output, format: .RGBA8,
                     colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
                 crops += 1
             }
             return
         }
         guard
-              CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA,
-              CVPixelBufferGetWidth(buffer) >= 640, CVPixelBufferGetHeight(buffer) >= 152,
-              CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { return }
+            CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA,
+            CVPixelBufferGetWidth(buffer) >= 640, CVPixelBufferGetHeight(buffer) >= 152,
+            CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess
+        else { return }
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: UInt8.self) else { return }
         let stride = CVPixelBufferGetBytesPerRow(buffer)
-        var run = 0, longest = 0
+        var run = 0
+        var longest = 0
         var thinMenuStrip = false
         var selected = Set<Int>()
         func opaqueBlack(_ x: Int, _ y: Int) -> Bool {
@@ -69,9 +73,11 @@ private final class MenuFrames: NSObject, SCStreamOutput, @unchecked Sendable {
         let hasDesktop = [width / 6, width / 2, width * 5 / 6].contains { x in
             bodyRows.filter { !opaqueBlack(x, $0) }.count >= 3
         }
-        let transition = spaces && hasDesktop && Swift.stride(from: 20, to: width - 20, by: 8).contains { x in
-            bodyRows.allSatisfy { opaqueBlack(x, $0) && opaqueBlack(x + 7, $0) }
-        }
+        let transition =
+            spaces && hasDesktop
+            && Swift.stride(from: 20, to: width - 20, by: 8).contains { x in
+                bodyRows.allSatisfy { opaqueBlack(x, $0) && opaqueBlack(x + 7, $0) }
+            }
         for y in 0..<120 {
             let row = base + y * stride
             func black(_ range: Range<Int>) -> Int {
@@ -80,7 +86,8 @@ private final class MenuFrames: NSObject, SCStreamOutput, @unchecked Sendable {
                     return n + (p[0] < 18 && p[1] < 18 && p[2] < 18 && p[3] > 235 ? 1 : 0)
                 }
             }
-            let leftDark = spaces
+            let leftDark =
+                spaces
                 ? black(8..<52) > 27 && (8..<52).filter { !opaqueBlack($0, y + 22) }.count > 32
                 : black(12..<360) > 255
             if leftDark && black(right) < 50 {
@@ -96,7 +103,9 @@ private final class MenuFrames: NSObject, SCStreamOutput, @unchecked Sendable {
                 if Int(p[0]) - Int(p[2]) > 70 && p[0] > 170 && p[3] > 235 {
                     blueRun += 1
                     if blueRun == 20 { selected.insert((x - 19) / 10) }
-                } else { blueRun = 0 }
+                } else {
+                    blueRun = 0
+                }
             }
         }
         lock.lock()
@@ -115,7 +124,9 @@ private final class MenuFrames: NSObject, SCStreamOutput, @unchecked Sendable {
 
     func report() {
         lock.lock()
-        print("host-menu-flash frames=\(frames) transition_frames=\(transitionFrames) black_frames=\(blackFrames) peak_black_rows=\(peakRows) blue_left_bins=\(selectionPositions.sorted())")
+        print(
+            "host-menu-flash frames=\(frames) transition_frames=\(transitionFrames) black_frames=\(blackFrames) peak_black_rows=\(peakRows) blue_left_bins=\(selectionPositions.sorted())"
+        )
         lock.unlock()
     }
 }
@@ -146,8 +157,7 @@ private final class MenuFrames: NSObject, SCStreamOutput, @unchecked Sendable {
     }
 
     @MainActor static func main() async {
-        do { try await run() }
-        catch {
+        do { try await run() } catch {
             FileHandle.standardError.write(Data("\(error)\n".utf8))
             exit(1)
         }
@@ -158,18 +168,23 @@ private final class MenuFrames: NSObject, SCStreamOutput, @unchecked Sendable {
         let args = CommandLine.arguments
         let spaces = (3...4).contains(args.count) && args[2] == "--spaces"
         let crops = args.count == 5 && args[2] == "--menu-crops"
-        guard (args.count == 2 || spaces || crops),
-              let pid = Int32(args[1]),
-              CGPreflightScreenCaptureAccess() else {
+        guard args.count == 2 || spaces || crops,
+            let pid = Int32(args[1]),
+            CGPreflightScreenCaptureAccess()
+        else {
             throw NSError(domain: "Provide the app PID and existing Screen Recording access", code: 1)
         }
         let title = crops ? args[3] : "Yosemite"
-        let cropDirectory = crops ? URL(fileURLWithPath: args[4],isDirectory:true) : nil
-        if let cropDirectory { try FileManager.default.createDirectory(at: cropDirectory,withIntermediateDirectories:false) }
+        let cropDirectory = crops ? URL(fileURLWithPath: args[4], isDirectory: true) : nil
+        if let cropDirectory {
+            try FileManager.default.createDirectory(at: cropDirectory, withIntermediateDirectories: false)
+        }
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
-        guard let window = content.windows.first(where: {
-            $0.owningApplication?.processID == pid && $0.title == title && $0.frame.width >= 640
-        }) else { throw NSError(domain: "The requested visible VM window was not found", code: 2) }
+        guard
+            let window = content.windows.first(where: {
+                $0.owningApplication?.processID == pid && $0.title == title && $0.frame.width >= 640
+            })
+        else { throw NSError(domain: "The requested visible VM window was not found", code: 2) }
         let config = SCStreamConfiguration()
         config.width = Int(window.frame.width)
         config.height = Int(window.frame.height)
@@ -177,9 +192,11 @@ private final class MenuFrames: NSObject, SCStreamOutput, @unchecked Sendable {
         config.ignoreShadowsSingleWindow = true
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        let output = MenuFrames(spaces: spaces,cropDirectory: cropDirectory)
-        let stream = SCStream(filter: SCContentFilter(desktopIndependentWindow: window), configuration: config, delegate: nil)
-        try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "org.vim.menu-capture"))
+        let output = MenuFrames(spaces: spaces, cropDirectory: cropDirectory)
+        let stream = SCStream(
+            filter: SCContentFilter(desktopIndependentWindow: window), configuration: config, delegate: nil)
+        try stream.addStreamOutput(
+            output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "org.vim.menu-capture"))
         try await stream.startCapture()
         FileHandle.standardOutput.write(Data("READY window=\(window.windowID)\n".utf8))
         do {

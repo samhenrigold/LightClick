@@ -1,6 +1,6 @@
 /*
     File:       CSkPrinting.h
-    
+
     Contains:	Prototype of ProcessPrintCommand()
 
     Disclaimer:	IMPORTANT:  This Apple software is supplied to you by Apple Computer, Inc.
@@ -40,7 +40,6 @@
 
     Copyright © 2004 Apple Computer, Inc., All Rights Reserved
 */
-
 
 #include <Carbon/Carbon.h>
 
