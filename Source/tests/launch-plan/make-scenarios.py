@@ -58,6 +58,7 @@ for guest in ('tiger', 'mavericks', 'catalina', 'bigsur'):
     variant('guest-efi', argv=['--guest-efi', '/Fixture/Override.img'])
     variant('disk-nvme', argv=['--system-disk-interface', 'nvme'])
     variant('disk-sata', argv=['--system-disk-interface', 'sata'])
+    variant('expose-x2apic', argv=['--expose-x2apic'])
     variant('signature-only', signatureOnly=True)
     variant('published-graphics', hasGraphics=True)
     variant('import-prepared', {'InstallState': 'imported-prepared'})

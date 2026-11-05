@@ -155,6 +155,13 @@ public final class LaunchPlan: NSObject {
         // commpage routine. This is not an instruction-speed limit. Intel HVF
         // keeps its hardware counter.
         if appleSilicon { cpu += ",tsc-frequency=1200000000" }
+        // xnu's rtc_timer_init takes the TSC-deadline timer whenever CPUID offers it, from Lion's
+        // source through Big Sur's. Each LAPIC timer arm costs three MMIO accesses; this costs one
+        // WRMSR. Enabled only for the guest it has been qualified on: extend once others boot.
+        if appleSilicon && guest == .mavericks { cpu += ",+tsc-deadline" }
+        // Development only. Per xnu's lapic_init, this alone switches Big Sur to x2APIC under a
+        // hypervisor; Mountain Lion through Catalina also need the -x2apic boot argument.
+        if appleSilicon && options.contains("--expose-x2apic") { cpu += ",+x2apic" }
         // Mavericks rejects newer Intel models in cpuid_set_info before drivers
         // start (verified "Unsupported CPU" on the Ice Lake HVF host). Keep the
         // same supported Penryn identity as its TCG path; HVF still executes guest
