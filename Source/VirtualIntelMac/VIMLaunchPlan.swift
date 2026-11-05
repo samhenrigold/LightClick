@@ -1,7 +1,3 @@
-#if !compiler(>=6.4)
-#error("Build with Swift 6.4 or later")
-#endif
-
 import Foundation
 
 /// An image attached beyond the primary optical/disk slot.
