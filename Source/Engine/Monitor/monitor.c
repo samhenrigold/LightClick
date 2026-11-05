@@ -96,6 +96,12 @@ static inline void mon_unlock(void) {
     if (smp && me->lock_depth && !--me->lock_depth)
         __atomic_store_n(&mon_lock_word, 0, __ATOMIC_RELEASE);
 }
+// The shadow pool and its lists go wrong silently without the lock, and show up much later as a loop that nothing can report.
+#define LOCK_REQUIRED() \
+    do { \
+        if (smp && !me->lock_depth) \
+            stop(STOP_MONITOR_FAULT, 0, 0x10cc, 0, c->elr); \
+    } while (0)
 static inline void mon_unlock_all(void) {
     if (smp && me->lock_depth) {
         me->lock_depth = 0;
@@ -211,6 +217,7 @@ static inline bool is_direct(u64 gpa) { return gpa < c->ram_size && (page_info[g
 
 
 static u32 pool_alloc(u32 view, u32 level, u64 guest_table, u64 va_base) {
+    LOCK_REQUIRED();
     u32 idx;
     if (pool_free_head) {
         idx = pool_free_head - 1;
@@ -361,6 +368,7 @@ static bool guest_write(u64 va, const void *in, u32 n, u32 access) {
 
 // ---- rmap: who maps this frame writable ----
 static void rmap_add(u64 gpa, u64 *pte) {
+    LOCK_REQUIRED();
     u32 node;
     if (rmap_free) {
         node = rmap_free;
@@ -1177,6 +1185,7 @@ static void zap_entry(u64 *e, const ShadowDesc *d) {
 }
 
 static void zap_table(u32 idx) {
+    LOCK_REQUIRED();
     ShadowDesc *d = &desc[idx];
     u64 *t = pool_page(idx);
     for (int i = 0; i < 512; i++) {
@@ -2076,9 +2085,11 @@ again:
         return;
     }
     if (c->direct_flush) {
+        mon_lock();
         c->direct_flush = 0;
         zap_why = KILL_DEVICE_MOVED;
         shadow_drop_all();
+        mon_unlock();
     }
     if (c->hybrid) {
         notes_drain();

@@ -1222,7 +1222,7 @@ static void test_linked_loop(void) {
 
 // A second vCPU joins through the C API, as an application processor does under QEMU: it takes fallbacks and kicks here
 // while the first works on, with blocks shared between them.
-static volatile u64 second_count, second_done;
+static volatile u64 second_count, second_done, second_direct_reads;
 static u8 second_stack[16384] __attribute__((aligned(16)));
 
 void second_vcpu(void) {
@@ -1237,8 +1237,11 @@ void second_vcpu(void) {
         second_count++;
     }
     second_done = 1;
-    for (;;)
-        __asm__ volatile("pause");
+    for (;;) { // the first vCPU's device memory comes and goes under this
+        u64 now = *(volatile u64 *)PHYS(0xC0000000ULL);
+        CHECK(now == 0x0123456789ABCDEFULL || now == 0xC0000000ULL * 3);
+        second_direct_reads++;
+    }
 }
 
 static void test_second_vcpu(u64 root) {
@@ -1266,6 +1269,16 @@ static void test_second_vcpu(u64 root) {
         CHECK(turns < 100000000);
     }
     CHECK(second_count == 2000);
+    // A device's memory leaves while the other vCPU reads it: its shadows need dropping there, under the lock, and it may
+    // get to the hole before it next enters the monitor.
+    for (int round = 0; round < 200; round++) {
+        command(13);
+        for (u64 until = second_direct_reads + 100; second_direct_reads < until;)
+            __asm__ volatile("pause");
+        command(19);
+        for (u64 until = second_direct_reads + 100; second_direct_reads < until;)
+            __asm__ volatile("pause");
+    }
 }
 
 static void test_process_log(u64 root) {

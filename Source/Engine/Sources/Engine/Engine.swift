@@ -364,6 +364,8 @@ public final class Engine {
 
     // For the tally: ticks inside hv_vcpu_run, and per host call their number and the ticks from the exit to the end of handling.
     var ticksInVCPU: UInt64 = 0
+    var pcAtKick: UInt64 = 0
+    var lrAtKick: UInt64 = 0
     var hostCallCount = [UInt64](repeating: 0, count: 32)
     var hostCallTicks = [UInt64](repeating: 0, count: 32)
 
@@ -386,6 +388,11 @@ public final class Engine {
             case HV_EXIT_REASON_EXCEPTION:
                 let syndrome = vcpuExit.pointee.exception.syndrome
                 let ec = syndrome >> 26
+                // Another vCPU's unmapDirect took this memory while this one's shadows still lead there. The kick path's IRQ drops them.
+                if ec == 0x24, ctx.pointee.direct_flush != 0 {
+                    irqLine = true
+                    continue
+                }
                 if ec != 0x16 {
                     var pc: UInt64 = 0
                     hv_vcpu_get_reg(vcpu, HV_REG_PC, &pc)
@@ -432,6 +439,8 @@ public final class Engine {
                             + "ctx.elr \(hex(ctx.pointee.elr)) x16 \(hex(regs[16])) x30 \(hex(regs[30]))")
                 }
                 // A kick means a device interrupt, a posted vector or a stop request: the monitor sorts out which.
+                hv_vcpu_get_reg(vcpu, HV_REG_PC, &pcAtKick)  // the only live view of a vCPU that stays in the monitor, for the stall report
+                hv_vcpu_get_reg(vcpu, HV_REG_LR, &lrAtKick)
                 irqLine = true
                 continue
             case HV_EXIT_REASON_VTIMER_ACTIVATED:
@@ -832,6 +841,7 @@ public final class Engine {
         let ns = (mach_absolute_time() &- vtimerOffset) &* 125 / 3 &+ c.tsc_ns_offset
         let tsc = ns &+ ns &* c.tsc_num / c.tsc_den &+ c.tsc_offset
         var o = "in hv_vcpu_run: \(inVCPURun), last host call \(lastHostCall), exits \(exitCount), progress \(progress())\n"
+        o += "at the last kick: pc \(hex(pcAtKick)) lr \(hex(lrAtKick))\n"
         o += "monitor: elr \(hex(c.elr)) esr \(hex(c.esr)) far \(hex(c.far)) spsr \(hex(c.spsr)) cpl \(c.cpl) view \(c.view) cr0 \(hex(c.cr0)) cr3 \(hex(c.cr3)) cr4 \(hex(c.cr4))\n"
         o += "interrupts: rflags_sys \(hex(c.rflags_sys)) irq_line \(c.irq_line) irq_pending \(c.irq_pending) stop_requested \(c.stop_requested) stepping \(c.stepping) steps \(c.stat_steps) irqs \(c.stat_irq)\n"
         o += "engine TSC by its formula: \(hex(tsc))\n"

@@ -77,6 +77,7 @@ final class HybridHarness {
                 engine_set_irq_line(target, true)
                 engine_kick(target)
             }
+        case 19: engine_unmap_direct(handle, 0xC000_0000, 1 << 16)
         case 17:
             if deadline != 0x1234_89AB_CDEF { failed = "the TSC deadline did not reach the APIC: \(deadline)" }
         case 18:
