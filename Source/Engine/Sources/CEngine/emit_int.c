@@ -1144,7 +1144,7 @@ static void emit_string(const Insn *in) {
     }
     u32 *start = tr_cc;
     u32 *skip = 0;
-    if (in->rep && (sub == 0 || (sub == 2 && !tr_hybrid))) { // stos's dup is outside the stub, where CR0.TS could not be backed out of
+    if (in->rep && !tr_no_bulk_rep && (sub == 0 || (sub == 2 && !tr_hybrid))) { // stos's dup is outside the stub, where CR0.TS could not be backed out of
         // Bulk first: a stub moves whole 32-byte chunks with exact registers between them. The plain loop below does what is left.
         movimm(S1, (u64)(32 / sz));
         if (sub == 2)

@@ -32,6 +32,7 @@ public final class Tally: @unchecked Sendable {
     private var fallbacks: UInt64 = 0
     private var notes: [String] = []
     private var portWrites: [String] = []
+    private var processLog: [String] = []
 
     init(engine: Engine, path: String) {
         self.engine = engine
@@ -123,6 +124,68 @@ public final class Tally: @unchecked Sendable {
         write()
     }
 
+    private func guestString(_ va: UInt64) -> String {
+        var out: [UInt8] = []
+        for i in 0..<200 {
+            guard let b = engine.readGuest(va + UInt64(i), count: 1), b[0] != 0 else { break }
+            out.append(b[0])
+        }
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    private func guestArguments(_ va: UInt64) -> String {
+        var out: [String] = []
+        for i in 0..<12 {
+            guard let raw = engine.readGuest(va + UInt64(i * 8), count: 8) else { break }
+            let at = raw.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
+            if at == 0 { break }
+            out.append(guestString(at))
+        }
+        return out.joined(separator: " ")
+    }
+
+    /// One line per process event, each starting `proc `, so a batch of runs can be compared with a grep.
+    func processNote() {
+        let c = engine.ctx.pointee
+        let r = withUnsafeBytes(of: c.x) { Array($0.bindMemory(to: UInt64.self)) }
+        var o = String(format: "proc %8.3f ", seconds(mach_absolute_time() &- startTicks)) + "cr3 \(hex(c.cr3)) "
+        switch c.req_a.0 {
+        case 1:
+            switch r[0] & 0xFFFFFF {
+            case 1: o += "exit \(r[7] & 0xFF)"
+            case 0x37: o += "reboot how \(hex(r[7]))"
+            case 0x3B: o += "execve " + guestString(r[7]) + " [" + guestArguments(r[6]) + "]"
+            case 0xF4: o += "posix_spawn " + guestString(r[6]) + " [" + guestArguments(r[10]) + "]"
+            default: o += "wait4 pid \(Int32(truncatingIfNeeded: r[7]))"
+            }
+        case 2:
+            let status = engine.readGuest(c.req_a.2, count: 4)?.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+            let result = Int64(bitPattern: r[0])
+            o += "wait4 returned \(result) status " + (status.map { hex(UInt64($0)) } ?? "unreadable")
+            if let status, status & 0x7F != 0 {
+                o += " SIGNAL \(status & 0x7F)\n  last user page faults, rip, address, error, cr3:\n"
+                let faults = withUnsafeBytes(of: c.user_pf) { Array($0.bindMemory(to: EngineEvent.self)) }
+                for i in 0..<UInt64(faults.count) {
+                    let e = faults[Int((c.user_pf_next &+ i) % UInt64(faults.count))]
+                    if e.cr3 != 0 { o += "    \(hex(e.rip)) \(hex(e.a)) \(hex(UInt64(e.vector))) \(hex(e.cr3))\n" }
+                }
+                o.removeLast()
+            } else if let status {
+                o += " exit \((status >> 8) & 0xFF)"
+            }
+        default:
+            o +=
+                "FAULT vector \(c.req_a.2) error \(hex(c.req_a.3)) rip \(hex(c.req_a.1))  "
+                + engine.bytes(at: c.req_a.1, count: 16) + "\n  "
+            for i in 0..<16 { o += hex(r[i]) + (i == 15 ? "" : " ") }
+            // dyld's fatal error is an int3 with its message in rdi: that is the process's own account of why it died.
+            if c.req_a.2 == 3 { o += "\n  rdi as a string: " + guestString(r[7]) }
+        }
+        lock.lock()
+        if processLog.count < 2000 { processLog.append(o) }
+        lock.unlock()
+    }
+
     func tcgSample(rip: UInt64, cpl: UInt32, cr3: UInt64) { addSample("tcg", rip, cpl, cr3) }
 
     private func addSample(_ place: String, _ rip: UInt64, _ cpl: UInt32, _ cr3: UInt64) {
@@ -206,6 +269,15 @@ public final class Tally: @unchecked Sendable {
         o += "hand-off rip: " + (firstRIP.map(hex) ?? "none") + "\n"
         o += "last rip sample: " + (samples.last ?? "none") + "\n"
         for note in notes { o += note + "\n" }
+        let halted = portWrites.first { $0.contains("port 0x604 size 2 value 0x2") || $0.contains("port 0x605") }
+        o +=
+            "outcome: " + (hardStop != nil ? "hard stop" : halted != nil ? "guest powered off" : "running")
+            + String(
+                format: " at %.1f s, syscalls %d, page faults %d, bad hash see dump\n", elapsed, c.stat_syscall,
+                c.stat_pf_delivered)
+        o += "\n"
+        o += "== process log: spawns, exits, wait4 results, user faults other than #PF and #NM, oldest first ==\n"
+        for line in processLog { o += line + "\n" }
         o += "\n"
         if !portWrites.isEmpty {
             o +=

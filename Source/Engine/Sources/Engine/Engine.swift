@@ -113,6 +113,10 @@ public final class Engine {
         config.ram_size = ramTop
         config.ram_below_4g = ramTop > options.ramBytes ? below : 0
         config.hybrid = options.hybrid
+        let environment = ProcessInfo.processInfo.environment
+        config.no_bulk_rep = options.hybrid && environment["LC_HVDBT_NO_BULK"] == "1"
+        config.no_return_prediction = options.hybrid && environment["LC_HVDBT_NO_RETURN_PREDICTION"] == "1"
+        config.all_flags_live = options.hybrid && environment["LC_HVDBT_ALL_FLAGS"] == "1"
         config.precise_flags = options.preciseFlags
         config.has_tzcnt_lzcnt = options.tzcntLzcnt
         config.code_cache_bytes = options.codeCacheBytes
@@ -436,6 +440,8 @@ public final class Engine {
             boundaryRIP = c.pointee.req_a.0
             tally?.boundary(rip: boundaryRIP, cpl: c.pointee.cpl, cr3: c.pointee.cr3)
             return .boundary(rip: boundaryRIP)
+        case Int(HC_NOTE):
+            tally?.processNote()
         case Int(HC_FALLBACK):
             boundaryRIP = c.pointee.req_a.1
             fallbackCount += 1

@@ -12,7 +12,7 @@
 #define MAP_SIZE (1u << MAP_BITS)
 
 u32 *tr_cc;
-bool tr_precise_flags, tr_has_tzcnt, tr_hybrid;
+bool tr_precise_flags, tr_has_tzcnt, tr_hybrid, tr_no_bulk_rep;
 int tr_cpl;
 u64 tr_stub_lookup, tr_stub_ret_miss, tr_stub_pushf, tr_stub_sahf;
 
@@ -353,6 +353,10 @@ static void emit_control(const Insn *in, int idx, int live_after) {
                     add_reg(1, 0, 0, 4, 4, S1, 0);
                 }
             }
+            if (cfg.no_return_prediction) { // the guest's value decides, by lookup
+                b_rel((int)((i64)(tr_stub_ret_miss - tr_cc_va(tr_cc)) / 4));
+                break;
+            }
             E(0xA8C00000u | 2 << 15 | LR << 10 | RS << 5 | S1); // ldp x17, x30, [x26], #16
             logic_reg(1, 2, 0, S1, S1, S0);
             cbz(1, 1, S1, 2);
@@ -438,7 +442,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
             live = F_ARITH; // the callee and the landing pad are unknown
         else if (in->op == OP_JMP || in->op == OP_JMPI || in->op == OP_RET)
             live = i == count - 1 ? live : F_ARITH;
-        live_after[i] = (u8)live;
+        live_after[i] = (u8)(cfg.all_flags_live ? F_ARITH : live);
         live = (live & ~in->writes) | insn_reads(in);
     }
 
@@ -783,6 +787,7 @@ void tr_init(const TrConfig *config) {
     tr_precise_flags = cfg.precise_flags;
     tr_has_tzcnt = cfg.has_tzcnt_lzcnt;
     tr_hybrid = cfg.hybrid;
+    tr_no_bulk_rep = cfg.no_bulk_rep;
     cc_limit = cfg.code_cache_bytes ? cfg.code_cache_bytes : CC_SIZE;
     tr_stub_lookup = cfg.stub_lookup;
     tr_stub_ret_miss = cfg.stub_ret_miss;

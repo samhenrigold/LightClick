@@ -13,6 +13,8 @@ typedef struct {
     uint64_t code_cache_bytes; // 0 for all of it; tests shrink it to exercise the flush
     bool has_tzcnt_lzcnt; // CPUID advertises BMI1 and ABM; without them these encodings are bsf and bsr
     bool hybrid; // CR0.TS is live, so integer instructions must not need NEON outside a stub that can back out
+    // Comparison switches, each giving up one optimisation to see whether a fault goes with it.
+    bool no_bulk_rep, no_return_prediction, all_flags_live;
     uint64_t ram_below_4g; // 0: RAM is one piece. Otherwise GPA 4 GB and up is host RAM at this offset
 } TrConfig;
 

@@ -43,7 +43,7 @@ static void done(u32 code) {
         }                                                                                                              \
     } while (0)
 
-static u64 gdt[3] __attribute__((aligned(16))) = {0, 0x00AF9A000000FFFFULL, 0x00CF92000000FFFFULL};
+static u64 gdt[8] __attribute__((aligned(16))) = {0, 0x00AF9A000000FFFFULL, 0x00CF92000000FFFFULL};
 typedef struct {
     u16 off0, sel;
     u8 ist, attr;
@@ -573,6 +573,83 @@ static void test_rep_into_table(u64 root) {
         CHECK(*(volatile u64 *)(va + (u64)i * 4096) == 0xB);
 }
 
+// ---- A small process in ring 3, for the tally's process log: a fault, a wait4 that returns a status, an exit ----
+static u64 tss[13];
+u64 user_saved_rsp;
+__asm__(".text\n"
+        "_user_blob:\n"
+        "  int3\n"
+        "  leaq -16(%rsp), %rsi\n"
+        "  movq $-1, %rdi\n"
+        "  movl $0x2000007, %eax\n"
+        "  syscall\n"
+        "  movl $7, %edi\n"
+        "  movl $0x2000001, %eax\n"
+        "  syscall\n"
+        "  ud2\n"
+        "_user_blob_end:\n"
+        "_user_int3:\n"
+        "  iretq\n"
+        "_user_syscall:\n"
+        "  cmpl $0x2000001, %eax\n"
+        "  je 1f\n"
+        "  movl $0x300, (%rsi)\n"
+        "  movl $77, %eax\n"
+        "  sysretq\n"
+        "1: movq _user_saved_rsp(%rip), %rsp\n"
+        "  retq\n"
+        ".globl _enter_user\n"
+        "_enter_user:\n" // rdi rip, rsi rsp. Registers the C caller expects kept are kept by its asm clobbers.
+        "  movq %rsp, _user_saved_rsp(%rip)\n"
+        "  pushq $0x23\n pushq %rsi\n pushq $0x202\n pushq $0x2B\n pushq %rdi\n"
+        "  iretq\n");
+extern char user_blob[] __asm__("_user_blob"), user_blob_end[] __asm__("_user_blob_end"),
+    user_int3[] __asm__("_user_int3"), user_syscall[] __asm__("_user_syscall");
+void enter_user(u64 rip, u64 rsp);
+
+static void test_process_log(u64 root) {
+    u64 t = (u64)tss;
+    gdt[3] = 0x00CFF2000000FFFFULL;
+    gdt[4] = 0x00CFF2000000FFFFULL;
+    gdt[5] = 0x00AFFA000000FFFFULL;
+    gdt[6] =
+        ((t & 0xffff) << 16) | ((t >> 16 & 0xff) << 32) | (0x89ULL << 40) | ((t >> 24 & 0xff) << 56) | (sizeof tss - 1);
+    gdt[7] = t >> 32;
+    static u8 kernel_stack[4096] __attribute__((aligned(16)));
+    tss[0] = (u64)(kernel_stack + sizeof kernel_stack) << 32; // rsp0 sits at byte 4
+    tss[1] = (u64)(kernel_stack + sizeof kernel_stack) >> 32;
+    struct {
+        u16 limit;
+        u64 base;
+    } __attribute__((packed)) g = {sizeof gdt - 1, (u64)gdt};
+    __asm__ volatile("lgdt %0\n ltr %%ax" : : "m"(g), "a"(0x30));
+    u64 a = (u64)user_int3;
+    idt[3] = (Gate){(u16)a, 8, 0, 0xEE, (u16)(a >> 16), (u32)(a >> 32), 0};
+    __asm__ volatile("wrmsr" : : "c"(0xC0000081), "a"(0), "d"(0x00180008));
+    a = (u64)user_syscall;
+    __asm__ volatile("wrmsr" : : "c"(0xC0000082), "a"((u32)a), "d"((u32)(a >> 32)));
+
+    u64 va = TEST_VA + 0x800000;
+    u64 *slot = pte_of(root, va);
+    u64 table = root;
+    for (int level = 3; level > 0; level--) { // user access needs U at every level
+        volatile u64 *e = &PHYS(table)[(va >> (12 + 9 * level)) & 0x1ff];
+        *e |= 4;
+        table = *e & 0x000FFFFFFFFFF000ULL;
+    }
+    u64 page = frame();
+    u8 *to = (u8 *)PHYS(page);
+    for (int i = 0; i < user_blob_end - user_blob; i++)
+        to[i] = (u8)user_blob[i];
+    *slot = page | PRESENT_RW | 4;
+    __asm__ volatile("call _enter_user"
+                     :
+                     : "D"(va), "S"(va + 4096)
+                     : "rax", "rbx", "rcx", "rdx", "rbp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+                       "memory");
+    // The harness checks the log. The gate needs putting back for nothing else: nothing here takes a breakpoint again.
+}
+
 void kmain(void) {
     __asm__ volatile("mov $0x10, %%ax\n mov %%ax, %%ds\n mov %%ax, %%es\n mov %%ax, %%ss\n" : : : "ax");
     tables();
@@ -590,6 +667,7 @@ void kmain(void) {
     test_port_forms();
     test_rep_into_table(root);
     test_lazy_fp();
+    test_process_log(root);
     test_view_churn(root);
     CHECK(!bad_vector);
     puts_("hybrid checks passed\n");

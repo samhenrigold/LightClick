@@ -687,6 +687,31 @@ static void track_root(View *v, u64 va, const Walk *w) {
 }
 
 // ---- Delivering x86 events ----
+// For the tally: what processes start, how they end, and their faults. Rare, so a host call each. shortcut: one wait4 tracked per address space, and the next
+// return in that space counts as its return, which another thread of the same process could get wrong.
+static u64 note_wait_cr3, note_wait_status;
+static void note_process_syscall(u64 next) {
+    u64 n = c->x[0];
+    if (!c->hybrid || (n != 0x2000001 && n != 0x2000007 && n != 0x2000190 && n != 0x200003b && n != 0x20000f4 && n != 0x2000037))
+        return;
+    c->req_a[0] = 1;
+    c->req_a[1] = next;
+    hostcall(HC_NOTE);
+    if (n == 0x2000007 || n == 0x2000190) {
+        note_wait_cr3 = c->cr3;
+        note_wait_status = c->x[6];
+    }
+}
+static void note_wait_returned(u64 rip) {
+    if (!note_wait_cr3 || note_wait_cr3 != c->cr3)
+        return;
+    c->req_a[0] = 2;
+    c->req_a[1] = rip;
+    c->req_a[2] = note_wait_status;
+    note_wait_cr3 = 0;
+    hostcall(HC_NOTE);
+}
+
 static inline void note_event(u32 kind, u64 rip, u64 a, u32 vector) {
     if (!c->hybrid)
         return;
@@ -1371,6 +1396,21 @@ static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int)
     c->vector_last_err[vector & 255] = err;
     c->vector_last_cr3[vector & 255] = c->cr3;
     note_event('E', ret_rip, err, vector);
+    if (c->hybrid && c->cpl == 3 && vector < 32 && vector != 7) {
+        if (vector == 14) {
+            EngineEvent *e = &c->user_pf[c->user_pf_next++ % 32];
+            e->rip = ret_rip;
+            e->a = c->cr2;
+            e->vector = err;
+            e->cr3 = c->cr3;
+        } else {
+            c->req_a[0] = 3;
+            c->req_a[1] = ret_rip;
+            c->req_a[2] = vector;
+            c->req_a[3] = err;
+            hostcall(HC_NOTE);
+        }
+    }
     if (deliver_depth >= 3)
         stop(STOP_TRIPLE_FAULT, ret_rip, vector, err, c->cr2);
     deliver_depth++;
@@ -1608,6 +1648,7 @@ static void do_syscall(void) {
     }
     c->stat_syscall++;
     note_event('S', next, c->x[0], 0);
+    note_process_syscall(next);
     c->x[1] = next;
     u64 fl = rflags_get();
     c->x[11] = fl;
@@ -1633,6 +1674,7 @@ static void do_sysret(void) {
         return;
     }
     note_event('R', rip, c->x[0], 0);
+    note_wait_returned(rip);
     u64 fl = (c->x[11] & 0x3C7FD7ULL) | RFLAGS_FIXED;
     rflags_set(fl);
     u16 base = (u16)((c->star >> 48) & 0xffff);
@@ -1657,6 +1699,8 @@ static void do_iret(void) {
     note_event('I', here, rip, (u32)f[1] & 0xffff);
     u32 cs = (u32)f[1] & 0xffff, ss = (u32)f[4] & 0xffff;
     u32 new_cpl = cs & 3;
+    if (new_cpl == 3)
+        note_wait_returned(rip);
     if (new_cpl < c->cpl) {
         raise_gp(cs & ~3u, here);
         return;

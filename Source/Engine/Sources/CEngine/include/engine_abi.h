@@ -146,6 +146,7 @@ enum {
     HC_BOUNDARY, // a[0] x86 rip: the vCPU stopped at an instruction boundary on request. r[0] rip to continue at
     HC_VIEW_DROP, // a[0] view, being reused for another address space
     HC_DEBUG, // a[0] a[1] printable
+    HC_NOTE, // hybrid, for the tally. a[0] 1 process syscall (a[1] next rip), 2 wait4 returning (a[1] rip, a[2] status pointer), 3 user fault (a[1] rip, a[2] vector, a[3] error)
     HC_FALLBACK, // layout as HC_STOP. The host runs this x86 instruction elsewhere and sets the state; r[0] is the rip to continue at
 };
 
@@ -251,6 +252,8 @@ typedef struct {
     uint64_t stat_vector[256], vector_last_rip[256], vector_last_err[256], vector_last_cr3[256]; // every delivery, software int and #GP included
     uint64_t event_next;
     EngineEvent events[EVENT_RING];
+    uint64_t user_pf_next;
+    EngineEvent user_pf[32]; // user page faults: rip, a is CR2, vector is the error code. What a process that dies of a signal touched last
 } EngineCtx;
 
 // Block table, one entry per translated block, ordered by arm_off because the code cache only grows.

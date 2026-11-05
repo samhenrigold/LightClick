@@ -203,7 +203,8 @@ final class HybridHarness {
                     return 6
                 }
                 if tally.contains("CR4 write") || !tally.contains("refused for the test")
-                    || !tally.contains("tcg 0x1234") || !tally.contains("vmport")
+                    || !tally.contains("tcg 0x1234") || !tally.contains("vmport") || !tally.contains("FAULT vector 3")
+                    || !tally.contains("wait4 returned 77 status 0x300 exit 3") || !tally.contains(" exit 7")
                     || !tally.contains("port 0x604 size 2")
                     || !tally.contains("unslid") || !tally.contains("vector 0x7")
                     || !tally.contains("\nC 0x0 ")
