@@ -43,7 +43,8 @@ static void done(u32 code) {
         }                                                                                                              \
     } while (0)
 
-static u64 gdt[9] __attribute__((aligned(16))) = {0, 0x00AF9A000000FFFFULL, 0x00CF92000000FFFFULL, [8] = 0x00CFFA000000FFFFULL};
+static u64 gdt[9]
+    __attribute__((aligned(16))) = {0, 0x00AF9A000000FFFFULL, 0x00CF92000000FFFFULL, [8] = 0x00CFFA000000FFFFULL};
 typedef struct {
     u16 off0, sel;
     u8 ist, attr;
@@ -209,7 +210,7 @@ static void test_fallback_state(void) {
                      :
                      : "r13", "r14", "rcx", "rdx");
     CHECK(rax == 7);
-    __asm__ volatile("mov $0, %%r13\n mov $2, %%r14\n mov $0x6E0, %%ecx\n xor %%eax, %%eax\n xor %%edx, %%edx\n wrmsr\n"
+    __asm__ volatile("mov $0, %%r13\n mov $2, %%r14\n mov $0x277, %%ecx\n xor %%eax, %%eax\n xor %%edx, %%edx\n wrmsr\n"
                      :
                      :
                      : "r13", "r14", "rcx", "rax", "rdx");
@@ -1004,6 +1005,17 @@ static void test_shared_return(u64 root) {
 
 // rcpps and rsqrtps as TCG computes them: exact, against divps and sqrtps here, with no flag raised even where those
 // raise one.
+// The TSC deadline goes to the APIC with no step on TCG, whose stand-in here would leave this alone. r13 0: nothing
+// played.
+static void test_tsc_deadline(void) {
+    __asm__ volatile(
+        "mov $0, %%r13\n mov $2, %%r14\n mov $0x6E0, %%ecx\n mov $0x89ABCDEF, %%eax\n mov $0x1234, %%edx\n wrmsr\n"
+        :
+        :
+        : "r13", "r14", "rcx", "rax", "rdx");
+    command(17); // the harness checks what reached it
+}
+
 static void test_reciprocals(void) {
     static const u32 values[12]
         __attribute__((aligned(16))) = {0x3F800000, 0x40490FDB, 0xC0000000, 0x00000000, 0x80000000, 0x7F800000,
@@ -1385,8 +1397,8 @@ static void test_split_store_fault(u64 root) {
     PHYS(table)[511] = 0;
 }
 
-// 32-bit ring 3 with the host taking instructions: state as the host sees it, top halves the host left, and the host moving the vCPU to 64-bit mode at a stop.
-// In by iretq, out by sysenter, to here.
+// 32-bit ring 3 with the host taking instructions: state as the host sees it, top halves the host left, and the host
+// moving the vCPU to 64-bit mode at a stop. In by iretq, out by sysenter, to here.
 __asm__(".text\n"
         "_compat_ride:\n" // rdi: rip, r13 and r14 are the harness's
         "  movq %rsp, _compat_rsp(%rip)\n"
@@ -1426,7 +1438,10 @@ static void test_compat(u64 root) {
         ((volatile u8 *)&PHYS(f)[0])[i] = code[i];
     __asm__ volatile("wrmsr" : : "c"(0x174), "a"(0x08), "d"(0));
     __asm__ volatile("wrmsr" : : "c"(0x176), "a"((u32)(u64)compat_back), "d"((u32)((u64)compat_back >> 32)));
-    __asm__ volatile("mov $11, %%r13\n mov $1, %%r14\n call _compat_ride" : : "D"(va) : "rax", "rbx", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "r13", "r14", "memory", "cc");
+    __asm__ volatile("mov $11, %%r13\n mov $1, %%r14\n call _compat_ride"
+                     :
+                     : "D"(va)
+                     : "rax", "rbx", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "r13", "r14", "memory", "cc");
     CHECK(compat_out[0] == 0x100000055ULL); // the host's, in 64-bit mode
     CHECK(compat_out[1] == 0x100000055ULL);
     CHECK(compat_out[2] == 5); // lea through a register whose top half the host left
@@ -1689,6 +1704,7 @@ void kmain(void) {
     test_ptest_flags();
     test_inline_ops(root);
     test_direct_map();
+    test_tsc_deadline();
     test_reciprocals();
     test_kernel_domain(root);
     test_many_blocks(root);

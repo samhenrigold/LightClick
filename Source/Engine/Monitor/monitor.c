@@ -2028,7 +2028,7 @@ static void exit_check(void) {
     }
     if (c->direct_flush) {
         c->direct_flush = 0;
-        zap_why = KILL_RECLAIM;
+        zap_why = KILL_DEVICE_MOVED;
         shadow_drop_all();
     }
     if (c->hybrid) {
@@ -3023,8 +3023,16 @@ void mon_sync(void) {
                 break;
             }
             case SVC_WRMSR:
-                if (c->hybrid && !msr_is_monitors((u32)c->x[1]))
+                if (c->hybrid && !msr_is_monitors((u32)c->x[1])) {
+                    if ((u32)c->x[1] == 0x6E0) { // the TSC deadline, written at every timer change: a call to QEMU's APIC is all that TCG would do for it
+                        c->req_a[0] = 0x6E0;
+                        c->req_a[1] = (u64)(u32)c->x[2] << 32 | (u32)c->x[0];
+                        hostcall(HC_WRMSR);
+                        if (!c->req_r[1])
+                            break;
+                    }
                     stop(STOP_FALLBACK, rip_here(c->elr - 4), FB_WRMSR, (u32)c->x[1], 0);
+                }
                 if (!wrmsr((u32)c->x[1], (u64)(u32)c->x[2] << 32 | (u32)c->x[0]))
                     x86_gp0();
                 break;

@@ -249,9 +249,20 @@ static bool hvdbt_read_msr(void *opaque, uint32_t msr, uint64_t *value)
     return false;
 }
 
+/* What helper_wrmsr does for the only MSR the monitor brings here. False: TCG takes the instruction, and its #GP if the CPU has no such timer. */
 static bool hvdbt_write_msr(void *opaque, uint32_t msr, uint64_t value)
 {
-    return false;
+    CPUState *cs = opaque;
+    X86CPU *cpu = X86_CPU(cs);
+
+    if (msr != MSR_IA32_TSCDEADLINE || !(cpu->env.features[FEAT_1_ECX] & CPUID_EXT_TSC_DEADLINE_TIMER)) {
+        return false;
+    }
+    bql_lock();
+    apic_set_tsc_deadline(cpu->apic_state, value);
+    hvdbt_after_device(cs);
+    bql_unlock();
+    return true;
 }
 
 static void hvdbt_cpuid(void *opaque, uint32_t leaf, uint32_t subleaf, uint32_t out[4])

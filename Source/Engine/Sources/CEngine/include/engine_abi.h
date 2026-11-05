@@ -199,7 +199,7 @@ typedef struct {
 #define EVENT_RING 128
 
 // Why translated blocks die, for the tally.
-enum { KILL_STORE, KILL_NOTE, KILL_PT_LEAF, KILL_PT_TABLE, KILL_PT_FLOOD, KILL_RECLAIM, KILL_VIEW_DROP, KILL_KINDS };
+enum { KILL_STORE, KILL_NOTE, KILL_PT_LEAF, KILL_PT_TABLE, KILL_PT_FLOOD, KILL_RECLAIM, KILL_VIEW_DROP, KILL_DEVICE_MOVED, KILL_KINDS };
 
 typedef struct {
     uint64_t x[31]; // +0: x0-x30, saved on every monitor entry

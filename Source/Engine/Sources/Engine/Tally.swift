@@ -363,7 +363,7 @@ public final class Tally: @unchecked Sendable {
         let kinds = [
             "a store onto code", "DMA or TCG wrote code", "a leaf page-table store", "a store higher in the tables",
             "a table written too often to shadow",
-            "the shadow pool ran out", "its view was reused"
+            "the shadow pool ran out", "its view was reused", "device memory left the VM"
         ]
         for (i, kind) in kinds.enumerated() {
             o += String(format: "%12llu %12llu %12llu  ", killed[i], unmoved[i], calls[i]) + kind + "\n"

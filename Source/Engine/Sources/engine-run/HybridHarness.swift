@@ -13,6 +13,7 @@ final class HybridHarness {
     var exitCode: UInt32 = 255
     var failed: String?
     var direct: UnsafeMutableRawPointer?
+    var deadline: UInt64 = 0
     var deviceWrites: UInt64 = 0
     var pendingVector = false
     var acks = 0
@@ -75,6 +76,8 @@ final class HybridHarness {
                 engine_set_irq_line(target, true)
                 engine_kick(target)
             }
+        case 17:
+            if deadline != 0x1234_89AB_CDEF { failed = "the TSC deadline did not reach the APIC: \(deadline)" }
         case 10: timerOn = true
         case 11: timerOn = false
         case 9:
@@ -140,8 +143,11 @@ final class HybridHarness {
         case 10:
             if s.fp_tags != 0 { failed = "emms at a fallback: tags \(s.fp_tags)" }
         case 11:  // daa in 32-bit code: everything the host needs is in the state
-            if s.compat != 1 || s.sel.1 != 0x43 || s.sel.2 != 0x23 || s.cpl != 3 || s.gpr.0 != 0x4433_2211 || s.rip != 0x4000_0005 || s.gpr.4 != 0x4000_1000 {
-                failed = "32-bit state at a fallback: compat \(s.compat) cs \(s.sel.1) ss \(s.sel.2) cpl \(s.cpl) eax \(s.gpr.0) rip \(s.rip)"
+            if s.compat != 1 || s.sel.1 != 0x43 || s.sel.2 != 0x23 || s.cpl != 3 || s.gpr.0 != 0x4433_2211
+                || s.rip != 0x4000_0005 || s.gpr.4 != 0x4000_1000
+            {
+                failed =
+                    "32-bit state at a fallback: compat \(s.compat) cs \(s.sel.1) ss \(s.sel.2) cpl \(s.cpl) eax \(s.gpr.0) rip \(s.rip)"
             }
             s.gpr.2 = 0xABCD_0000_0000_0005
             s.gpr.13 = 12
@@ -187,7 +193,11 @@ final class HybridHarness {
                 }
             },
             read_msr: { _, _, _ in false },
-            write_msr: { _, _, _ in false },
+            write_msr: { _, msr, value in
+                guard msr == 0x6E0 else { return false }
+                HybridHarness.current!.deadline = value
+                return true
+            },
             cpuid: { _, _, _, _ in },
             acknowledge_interrupt: { _ in
                 let h = HybridHarness.current!
@@ -265,7 +275,7 @@ final class HybridHarness {
                 engine_tally_write(handle)
                 let tally = (try? String(contentsOfFile: tallyPath, encoding: .utf8)) ?? ""
                 for reason in [
-                    "unknown opcode", "x87: fcos", "hlt", "far return", "mov cr8", "rdmsr 0x1b", "wrmsr 0x6e0",
+                    "unknown opcode", "x87: fcos", "hlt", "far return", "mov cr8", "rdmsr 0x1b", "wrmsr 0x277",
                     "popcnt", "mmio form", "verr", "BCD adjust"
                 ]
                 where !tally.contains(reason) {

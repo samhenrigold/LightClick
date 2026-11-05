@@ -83,6 +83,10 @@ clang "${flags[@]}" -w -I"$here/../../../probes" -c "$here/t_lcbench.c" -o "$out
 clang "${flags[@]}" -w -c "$here/t_lcbench_stubs.c" -o "$out/t_lcbench_stubs.o"
 link t_lcbench "$out/t_lcbench.o" "$out/t_lcbench_stubs.o" "$out/flatlibc.o"
 xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 "$here/../../../probes/fork-loop.c" -o "$out/fork-loop"
+for mb in 4 64 512; do
+    xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -DMEGABYTES=$mb "$here/../../../probes/fork-loop.c" -o "$out/fork-loop-$mb"
+done
+xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -DHAD_THREAD "$here/../../../probes/fork-loop.c" -o "$out/fork-loop-thread"
 xcrun clang -arch arm64 -O2 "$here/../../../probes/lc-bench.c" -o "$out/lc-bench-arm64"
 xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -w "$here/../../../probes/lc-bench.c" -o "$out/lc-bench-x86"
 
