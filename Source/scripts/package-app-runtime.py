@@ -379,8 +379,10 @@ def main():
             # rebuild. Guest executables intentionally retain guest signing.
             host_binary = binary.parent in (runtime/'bin', runtime/'lib')
             command = ['/usr/bin/codesign', '--force', '--sign', args.signing_identity if host_binary else '-']
-            if binary == runtime/'bin/qemu-system-x86_64':
-                command += ['--entitlements', str(args.qemu/'accel/hvf/entitlements.plist')]
+            if host_binary:
+                command += ['--options', 'runtime']
+            if binary in (runtime/'bin/qemu-system-x86_64', runtime/'bin/apple-gfx-helper'):
+                command += ['--entitlements', str(source/'support/Runtime.entitlements')]
             run(*command, binary)
         remaining = [p for p in dependencies(binary) if not p.startswith(('/System/Library/', '/usr/lib/', '@loader_path/'))]
         if remaining:
@@ -433,7 +435,8 @@ def main():
         source, args.output, args.signing_identity, dependencies=args.dependencies, kind='network')
     with (runtime/'Packaging.plist').open('wb') as stream:
         plistlib.dump(receipt, stream)
-    run('/usr/bin/codesign', '--force', '--sign', args.signing_identity, args.output)
+    run('/usr/bin/codesign', '--force', '--sign', args.signing_identity, '--options', 'runtime',
+        '--entitlements', source/'support/App.entitlements', args.output)
     run('/usr/bin/codesign', '--verify', '--deep', '--strict', args.output)
     print(f'Packaged {args.output}; {len(copied)} linked libraries. Stock-host testing remains required.')
 
