@@ -201,6 +201,50 @@ same_context_target:
     jne fail
     dec ecx
     jnz switch_loop
+    ; A flushing write under another root still invalidates that PCID's banks.
+    mov rax, 0x8000000000010003
+    mov cr3, rax
+    cmp dword [rbx], 0x1234
+    jne fail
+    mov dword [0x16000], 0x19003
+    mov rax, 0x11003
+    mov cr3, rax
+    cmp dword [rbx], 0x5678
+    jne fail
+    mov rax, 0x8000000000010003
+    mov cr3, rax
+    cmp dword [rbx], 0x5678
+    jne fail
+    ; A PGE toggle invalidates every PCID, including other retained banks.
+    mov dword [0x16000], 0x18003
+    mov rax, 0x8000000000010001
+    mov cr3, rax
+    mov rax, cr4
+    btc rax, 7
+    mov cr4, rax
+    btc rax, 7
+    mov cr4, rax
+    cmp dword [rbx], 0x1234
+    jne fail
+    mov rax, 0x8000000000011002
+    mov cr3, rax
+    cmp dword [rbx], 0x5678
+    jne fail
+    mov dword [0x16000], 0x19003
+    mov rax, cr4
+    btc rax, 7
+    mov cr4, rax
+    btc rax, 7
+    mov cr4, rax
+    mov rax, 0x8000000000010001
+    mov cr3, rax
+    cmp dword [rbx], 0x5678
+    jne fail
+    mov dword [0x16000], 0x18003
+    mov rax, 0x10001
+    mov cr3, rax
+    cmp dword [rbx], 0x1234
+    jne fail
     ; Replace a mapping then invalidate the current PCID by flushing CR3.
     mov dword [0x17000], 0x18003
     mov eax, 0x11002

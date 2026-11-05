@@ -431,7 +431,8 @@ static void tlb_context_invalidate_locked(CPUState *cpu, bool forget_active)
     }
 }
 
-void tlb_context_switch(CPUState *cpu, uint64_t key, bool preserve)
+void tlb_context_switch(CPUState *cpu, uint64_t key, uint64_t tag_mask,
+                        bool preserve)
 {
     CPUTLBContextCache *cache;
     CPUTLBContextBank *bank;
@@ -452,12 +453,24 @@ void tlb_context_switch(CPUState *cpu, uint64_t key, bool preserve)
                    cache->bank[cache->active].valid &&
                    cache->bank[cache->active].key == key;
     cache->same_key_keeps += same_context;
-    if (!preserve || !cache->known) {
+    if (!preserve && cache->known) {
+        /* x86 invalidates only the named PCID, under any root it was cached
+         * with. Banks of other PCIDs stay, as they do in hardware: the guest
+         * must still invalidate those before relying on a mapping change, and
+         * every such path (this one, INVLPG, CR4) reaches their banks. */
         cache->flushes++;
-        /* A flushing CR3 write must invalidate all cached instances of its
-         * PCID, even if a previous instance used another root. Flush every
-         * bank conservatively, retaining the current allocation. */
-        tlb_context_invalidate_locked(cpu, true);
+        for (slot = 0; slot < TLB_CONTEXT_BANKS; slot++) {
+            if (slot != cache->active &&
+                !((cache->bank[slot].key ^ key) & tag_mask)) {
+                cache->bank[slot].valid = false;
+            }
+        }
+    }
+    if (!cache->known ||
+        (!preserve && !((cache->bank[cache->active].key ^ key) & tag_mask))) {
+        /* Flush in place. An unknown active context comes from a full flush,
+         * which already invalidated every other bank. */
+        cache->flushes += !cache->known;
         for (int i = 0; i < NB_MMU_MODES; i++) {
             tlb_flush_one_mmuidx_locked(cpu, i, get_clock_realtime());
         }
