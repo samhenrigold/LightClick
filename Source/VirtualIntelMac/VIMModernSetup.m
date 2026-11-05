@@ -243,7 +243,8 @@ static NSError *SetupError(NSString *text) {
                       return;
                   }
                   if (finishing && ![report[@"DesktopRunning"] isEqual:@YES]) {
-                      completion(@{@"Handled" : @YES, @"Message" : @"Signing in to your virtual Mac…"}, nil);
+                      // Automatic login can be lost, so someone may have to sign in by hand.
+                      completion(@{@"Handled" : @YES, @"Message" : @"Waiting for sign-in on your virtual Mac…"}, nil);
                       return;
                   }
                   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -265,8 +266,11 @@ static NSError *SetupError(NSString *text) {
                           completion:^(NSDictionary *reply, NSError *failure) {
                             if (!failure && [reply[@"exitcode"] isEqual:@75]) {
                                 completion(
-                                    @{@"Handled" : @YES,
-                                      @"Message" : @"Preparing your account and sharing…"},
+                                    @{
+                                        @"Handled" : @YES,
+                                        @"Message" : finishing ? @"Waiting for the signed-in desktop and sharing…"
+                                                               : @"Preparing your account and sharing…"
+                                    },
                                     nil);
                                 return;
                             }
@@ -302,6 +306,8 @@ static NSError *SetupError(NSString *text) {
                                 self.profile = profile;
                                 [VIMAutomaticSetup removePasswordForIdentifier:profile[@"CredentialIdentifier"]
                                                                          error:NULL];
+                                self.state[@"CreatedAccountDesktopVerified"] =
+                                    result[@"CreatedAccountDesktopVerified"] ?: @NO;
                                 [self savePhase:@"complete" error:&saveError];
                                 completion(@{@"Handled" : @NO}, saveError);
                             } else {
