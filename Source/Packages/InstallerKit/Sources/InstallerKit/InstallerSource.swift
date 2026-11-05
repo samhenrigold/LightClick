@@ -4,8 +4,8 @@
 // Trust boundaries, each ported from the Objective-C and pinned by a test:
 // - Catalog (network): size cap, integer revision, one recipe per guest, exact roles, approved URLs, digest format,
 //   mandatory recovery digest, and no downgrade at publication (InstallerCatalog, InstallerCatalogStore).
-// - Source URL: no credentials, port, query or fragment; exact scheme, host and path shape (`isApproved`). Plain HTTP only
-//   for the one recovery asset, whose digest is then mandatory. The debug server must be plain loopback (`downloadURL`).
+// - Source URL: no credentials, port, query, fragment, encoded host or dot segment; exact scheme, host and path shape
+//   (`isApproved`). Plain HTTP only for the one recovery asset, whose digest is then mandatory. The debug server must be plain loopback (`downloadURL`).
 // - Recovery service: ephemeral session, 64 KiB replies, hex challenge, the returned asset must equal the requested one,
 //   and the token is bounded, free of control characters and never persisted (RecoveryAuthorization).
 // - Disk: O_NOFOLLOW and flock on the lock and partial, regular-file checks, foreign and mistyped journals refused, and
@@ -21,11 +21,20 @@ public enum InstallerSource {
     public static func isMavericksRecoveryAsset(_ url: URL) -> Bool {
         url.scheme == "http" && url.host == "oscdn.apple.com" && url.path.hasPrefix("/content/downloads/")
             && url.lastPathComponent == "InstallESD.dmg" && url.query == nil && url.user == nil
-            && url.password == nil && url.port == nil && url.fragment == nil
+            && url.password == nil && url.port == nil && url.fragment == nil && isUnambiguous(url)
+    }
+
+    /// `URL.host` and `URL.path` decode, and a client or server may normalize dot segments, so a percent-encoded host
+    /// or a `..` in any spelling could pass these checks and then name something else.
+    private static func isUnambiguous(_ url: URL) -> Bool {
+        url.host(percentEncoded: true) == url.host
+            && !url.path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).contains { $0 == "." || $0 == ".." }
     }
 
     public static func isApproved(_ url: URL) -> Bool {
-        guard url.user == nil, url.password == nil, url.port == nil, url.fragment == nil, url.query == nil else {
+        guard url.user == nil, url.password == nil, url.port == nil, url.fragment == nil, url.query == nil,
+            isUnambiguous(url)
+        else {
             return false
         }
         if isMavericksRecoveryAsset(url) { return true }

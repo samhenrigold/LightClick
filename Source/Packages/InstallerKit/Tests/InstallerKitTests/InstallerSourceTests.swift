@@ -9,11 +9,8 @@ import Testing
         "https://archive.org/download/a/b.dmg",
         "https://dn720202.ca.archive.org/0/items/a/b%2C1.dmg",
         "https://archive.org:/download/a/b.dmg",
-        "https://%61rchive.org/download/a/b.dmg",
-        "https://archive%2Eorg/download/a/b.dmg",
         "https://archive.org/%64ownload/a/b.dmg",
         "https://archive.org/download%2Fa/b.dmg",
-        "https://archive.org/download/../secret/b.dmg",
         "https://archive.org/download/a/b.dmg/",
         "https://archive.org/download/a/b%2Edmg",
         "https://archive.org/download/a b.dmg",
@@ -78,6 +75,35 @@ import Testing
         let url = try #require(URL(string: text))
         #expect(!InstallerSource.isApproved(url))
         #expect(!InstallerSource.isMavericksRecoveryAsset(url))
+    }
+
+    /// VIMInstallerSource.m approved these: it judged the decoded host and an unnormalized path.
+    @Test(arguments: [
+        "https://%61rchive.org/download/a/b.dmg",
+        "https://archive%2Eorg/download/a/b.dmg",
+        "https://swcdn%2Eapple.com/content/downloads/a/b.pkg",
+        "https://updates.cdn-apple%2Ecom/2019/InstallOS.dmg",
+        "http://oscdn%2Eapple.com/content/downloads/InstallESD.dmg",
+        "https://archive.org/download/../secret/b.dmg",
+        "https://archive.org/download/./b.dmg",
+        "https://archive.org/download/%2E%2E/secret/b.dmg",
+        "https://archive.org/download/%2e./secret/b.dmg",
+        "https://archive.org/download/a%2F..%2F..%2Fsecret/b.dmg",
+        "https://archive.org/download/..%5Csecret/b.dmg",
+        "https://archive.org/0/items/../../secret/b.dmg",
+        "https://swcdn.apple.com/content/downloads/../../secret/b.pkg",
+        "https://updates.cdn-apple.com/../secret/InstallOS.dmg",
+        "http://oscdn.apple.com/content/downloads/../../secret/InstallESD.dmg"
+    ])
+    func rejectsPercentEncodedHostsAndDotSegments(_ text: String) throws {
+        let url = try #require(URL(string: text))
+        #expect(!InstallerSource.isApproved(url))
+        #expect(!InstallerSource.isMavericksRecoveryAsset(url))
+    }
+
+    @Test(arguments: ["https://archive.org/download/a..b/c...dmg", "https://archive.org/download/.a/b.dmg"])
+    func dotsInsideANameAreNotDotSegments(_ text: String) throws {
+        #expect(InstallerSource.isApproved(try #require(URL(string: text))))
     }
 
     @Test func onlyTheRecoveryPayloadIsARecoveryAsset() throws {
