@@ -19,6 +19,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/pvg-events.h"
 #include "cpu.h"
 #include "qemu/log.h"
 #include "exec/helper-proto.h"
@@ -1084,6 +1085,7 @@ static void do_interrupt64(CPUX86State *env, int intno, int is_int,
 
 void helper_sysret(CPUX86State *env, int dflag)
 {
+    PVG_EVENT(SYSRET);
     int cpl, selector;
 
     if (!(env->efer & MSR_EFER_SCE)) {
@@ -2258,6 +2260,7 @@ static inline void helper_ret_protected(CPUX86State *env, int shift,
 
 void helper_iret_protected(CPUX86State *env, int shift, int next_eip)
 {
+    PVG_EVENT(IRET);
     int tss_selector, type;
     uint32_t e1, e2;
 
@@ -2295,6 +2298,7 @@ void helper_lret_protected(CPUX86State *env, int shift, int addend)
 
 void helper_sysenter(CPUX86State *env)
 {
+    PVG_EVENT(SYSCALL);
     if (env->sysenter_cs == 0) {
         raise_exception_err_ra(env, EXCP0D_GPF, 0, GETPC());
     }
@@ -2328,6 +2332,7 @@ void helper_sysenter(CPUX86State *env)
 
 void helper_sysexit(CPUX86State *env, int dflag)
 {
+    PVG_EVENT(SYSRET);
     int cpl;
 
     cpl = env->hflags & HF_CPL_MASK;

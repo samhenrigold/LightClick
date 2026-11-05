@@ -17,6 +17,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>
  */
 #include "qemu/osdep.h"
+#include "qemu/pvg-events.h"
 #include "qemu/thread.h"
 #include "qemu/error-report.h"
 #include "hw/i386/apic_internal.h"
@@ -646,6 +647,7 @@ static void apic_deliver(APICCommonState *s, uint32_t dest, uint8_t dest_mode,
                          uint8_t delivery_mode, uint8_t vector_num,
                          uint8_t trigger_mode, uint8_t dest_shorthand)
 {
+    PVG_EVENT(IPI);
     APICCommonState *apic_iter;
     uint32_t deliver_bitmask_size = max_apic_words * sizeof(uint32_t);
     g_autofree uint32_t *deliver_bitmask = g_new(uint32_t, max_apic_words);

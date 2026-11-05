@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/pvg-events.h"
 #include "qemu/pvg-tcg.h"
 #include "qemu/qemu-print.h"
 #include "qapi/error.h"
@@ -46,6 +47,35 @@
 #include "tb-hash.h"
 
 /* Local diagnosis only; do not interpret instrumented runs as timings. */
+unsigned long pvg_events[PVG_EVENT_COUNT];
+bool pvg_events_enabled;
+
+static void *pvg_events_record(void *path)
+{
+    FILE *file = fopen(path, "w");
+
+    while (file) {
+        sleep(1);
+        for (int i = 0; i < PVG_EVENT_COUNT; i++) {
+            fprintf(file, "%lu ", __atomic_load_n(&pvg_events[i], __ATOMIC_RELAXED));
+        }
+        fputc('\n', file);
+        fflush(file);
+    }
+    return NULL;
+}
+
+static void __attribute__((constructor)) pvg_events_init(void)
+{
+    const char *path = getenv("PVG_TCG_EVENTS");
+    pthread_t thread;
+
+    pvg_events_enabled = path != NULL;
+    if (path) {
+        pthread_create(&thread, NULL, pvg_events_record, (void *)path);
+    }
+}
+
 static bool pvg_lookup_diagnostics;
 static bool pvg_lookup_alternate;
 bool pvg_alternate_lookup_enabled(void) { return pvg_lookup_alternate; }

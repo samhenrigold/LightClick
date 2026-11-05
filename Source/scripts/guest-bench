@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run probes/lc-bench inside a clone of a VM and save its results.
 
-    scripts/guest-bench <app> <machine.vintelmac> <tag> [--env K=V ...] [--qemu ARG ...] [-t SECONDS]
+    scripts/guest-bench <app> <machine.vintelmac> <tag> [--env K=V ...] [--qemu ARG ...] [-t SECONDS] [--repeat N]
+                        [--events] [--workload SHELL_COMMAND]
 
 Clones the app and machine with APFS under Build/bench/<tag>, so the real library isn't touched. A small
 wrapper replaces the clone's QEMU so experiments can set environment variables and extra QEMU arguments
@@ -26,8 +27,14 @@ parser.add_argument('--env', action='append', default=[])
 parser.add_argument('--qemu', action='append', default=[])
 parser.add_argument('-t', default='1')
 parser.add_argument('--boot-wait', type=int, default=45)
+parser.add_argument('--repeat', type=int, default=1, help='benchmark runs in the same boot; results are the fastest of each test')
+parser.add_argument('--events', action='store_true', help='record guest event counts in Build/bench/<tag>.events')
+parser.add_argument('--workload', help='run this in the guest with /bin/sh instead of lc-bench')
 args = parser.parse_args()
 bench = source/'Build/bench/lc-bench'
+events = source/'Build/bench'/f'{args.tag}.events'
+if args.events:
+    args.env.append(f'PVG_TCG_EVENTS={events}')
 work = source/'Build/bench'/args.tag
 shutil.rmtree(work, ignore_errors=True)
 home = work/'home'
@@ -80,19 +87,42 @@ try:
         if time.time() > deadline:
             raise SystemExit('The diagnostics channel never appeared')
         time.sleep(1)
-    shutil.copyfile(bench, channel/'Transfer.bin')
-    start = time.time()
-    staged = request({'Action': 'stage-probe'}, 900)
-    if 'Error' in staged:
-        raise SystemExit(f'Staging failed: {staged}')
-    print(f'staged in {time.time()-start:.0f}s', flush=True)
-    program = staged['Transfer']['Directory']+'/Transfer.bin'
-    print(request({'Executable': '/bin/chmod', 'Arguments': ['0755', program]}, 120).get('ExitCode'), flush=True)
-    result = request({'Executable': program, 'Arguments': ['-t', args.t]}, 900)
-    if result.get('ExitCode') != 0:
-        raise SystemExit(f'Benchmark failed: {str(result)[:400]}')
-    (source/'Build/bench'/f'{args.tag}.txt').write_text(result['Stdout'])
-    print(result['Stdout'])
+    if args.workload:
+        phases = source/'Build/bench'/f'{args.tag}.phases'
+        lines = sum(1 for _ in events.open()) if events.exists() else 0
+        result = request({'Executable': '/bin/sh', 'Arguments': ['-c', args.workload]}, 1200)
+        after = sum(1 for _ in events.open()) if events.exists() else 0
+        phases.write_text(f'{lines} {after}\n')
+        print(f'workload exit {result.get("ExitCode")}, event seconds {lines} to {after}')
+        print(str(result.get('Stderr'))[:300])
+    else:
+        shutil.copyfile(bench, channel/'Transfer.bin')
+        start = time.time()
+        staged = request({'Action': 'stage-probe'}, 900)
+        if 'Error' in staged:
+            raise SystemExit(f'Staging failed: {staged}')
+        print(f'staged in {time.time()-start:.0f}s', flush=True)
+        program = staged['Transfer']['Directory']+'/Transfer.bin'
+        request({'Executable': '/bin/chmod', 'Arguments': ['0755', program]}, 120)
+        best = {}
+        order = []
+        for _ in range(args.repeat):
+            result = request({'Executable': program, 'Arguments': ['-t', args.t]}, 900)
+            if result.get('ExitCode') != 0:
+                raise SystemExit(f'Benchmark failed: {str(result)[:400]}')
+            for line in result['Stdout'].splitlines():
+                parts = line.split()
+                if line.startswith('#') or len(parts) != 3:
+                    continue
+                value = float(parts[1])
+                if parts[0] not in best:
+                    order.append(parts[0])
+                    best[parts[0]] = (value, parts[2])
+                elif (value > best[parts[0]][0]) == (parts[2] == 'MB/s'):
+                    best[parts[0]] = (value, parts[2])
+        text = '# lc-bench arch=x86_64 t='+args.t+'\n'+''.join(f'{n} {best[n][0]:.3f} {best[n][1]}\n' for n in order)
+        (source/'Build/bench'/f'{args.tag}.txt').write_text(text)
+        print(text)
 finally:
     process.send_signal(signal.SIGTERM)
     time.sleep(6)

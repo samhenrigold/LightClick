@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/pvg-events.h"
 #include "qemu/pvg-tcg.h"
 #include "cpu.h"
 #include "accel/tcg/cpu-ldst.h"
@@ -642,6 +643,7 @@ bool x86_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                       bool probe, uintptr_t retaddr)
 {
     CPUX86State *env = cpu_env(cs);
+    PVG_EVENT(TLB_MISS);
     TranslateResult out;
     TranslateFault err;
 

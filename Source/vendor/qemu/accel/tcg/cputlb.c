@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/pvg-events.h"
 #include "qemu/pvg-tcg.h"
 #include "qemu/main-loop.h"
 #include "qemu/target-info.h"
@@ -649,6 +650,7 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
 
 void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
 {
+    PVG_EVENT(TLB_FLUSH);
     tlb_debug("mmu_idx: 0x%" PRIx16 "\n", idxmap);
 
     assert_cpu_is_self(cpu);
@@ -663,6 +665,7 @@ void tlb_flush(CPUState *cpu)
 
 void tlb_flush_by_mmuidx_all_cpus_synced(CPUState *src_cpu, MMUIdxMap idxmap)
 {
+    PVG_EVENT(REMOTE_FLUSH);
     const run_on_cpu_func fn = tlb_flush_by_mmuidx_async_work;
 
     tlb_debug("mmu_idx: 0x%"PRIx16"\n", idxmap);
@@ -1583,6 +1586,7 @@ static bool victim_tlb_hit(CPUState *cpu, size_t mmu_idx, size_t index,
 static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
                            CPUTLBEntryFull *full, uintptr_t retaddr)
 {
+    PVG_EVENT(CODE_WRITE);
     ram_addr_t ram_addr = mem_vaddr + full->xlat_offset;
 
     trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
@@ -2214,6 +2218,7 @@ static uint64_t do_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
                                uint64_t ret_be, vaddr addr, int size,
                                int mmu_idx, MMUAccessType type, uintptr_t ra)
 {
+    PVG_EVENT(MMIO_READ);
     MemoryRegionSection *section;
     MemoryRegion *mr;
     hwaddr mr_offset;
@@ -2728,6 +2733,7 @@ static uint64_t do_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
                                uint64_t val_le, vaddr addr, int size,
                                int mmu_idx, uintptr_t ra)
 {
+    PVG_EVENT(MMIO_WRITE);
     MemoryRegionSection *section;
     hwaddr mr_offset;
     MemoryRegion *mr;

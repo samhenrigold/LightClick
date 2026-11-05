@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/pvg-events.h"
 #include "qemu/pvg-tcg.h"
 #include "qapi/error.h"
 #include "qapi/qapi-events-run-state.h"
@@ -187,6 +188,7 @@ static void __attribute__((constructor)) init_keep_phys_tlb(void)
 
 void cpu_x86_update_cr3(CPUX86State *env, target_ulong new_cr3)
 {
+    PVG_EVENT(CR3);
 #ifndef CONFIG_USER_ONLY
     bool preserve = (env->cr[4] & CR4_PCIDE_MASK) &&
                     ((uint64_t)new_cr3 >> 63);

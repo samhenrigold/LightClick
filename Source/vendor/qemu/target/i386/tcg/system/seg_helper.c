@@ -19,6 +19,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/pvg-events.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "cpu.h"
@@ -29,6 +30,7 @@
 
 void helper_syscall(CPUX86State *env, int next_eip_addend)
 {
+    PVG_EVENT(SYSCALL);
     int selector;
 
     if (!(env->efer & MSR_EFER_SCE)) {
@@ -115,6 +117,8 @@ void x86_cpu_do_interrupt(CPUState *cs)
     X86CPU *cpu = X86_CPU(cs);
     CPUX86State *env = &cpu->env;
 
+    PVG_EVENT(EXCEPTION);
+
     if (cs->exception_index == EXCP_VMEXIT) {
         assert(env->old_exception == -1);
         do_vmexit(env);
@@ -167,6 +171,8 @@ bool x86_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     X86CPU *cpu = X86_CPU(cs);
     CPUX86State *env = &cpu->env;
     int intno;
+
+    PVG_EVENT(HW_INTERRUPT);
 
     interrupt_request = x86_cpu_pending_interrupt(cs, interrupt_request);
     if (!interrupt_request) {

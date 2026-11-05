@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/pvg-events.h"
 #include "qemu/main-loop.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
@@ -141,6 +142,7 @@ void helper_write_crN(CPUX86State *env, int reg, target_ulong t0)
 
 void helper_wrmsr(CPUX86State *env)
 {
+    PVG_EVENT(MSR);
     uint64_t val;
     CPUState *cs = env_cpu(env);
 
@@ -338,6 +340,7 @@ error:
 
 void helper_rdmsr(CPUX86State *env)
 {
+    PVG_EVENT(MSR);
     X86CPU *x86_cpu = env_archcpu(env);
     uint64_t val;
 
@@ -513,6 +516,7 @@ void helper_rdmsr(CPUX86State *env)
 
 void helper_flush_page(CPUX86State *env, target_ulong addr)
 {
+    PVG_EVENT(INVLPG);
     tlb_flush_page(env_cpu(env), addr);
 }
 
