@@ -1775,6 +1775,26 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       session.legacyTabletGuest = VIMUsesLegacyTabletCalibration(session.machine.guest);
       session.legacyTabletObserved = NO;
       session.tabletTrim = VIMInitialTabletTrim(session.machine.guest, classicInstaller);
+      void (^sendInput)(NSArray *, void (^)(void)) = ^(NSArray *events, void (^answered)(void)) {
+        void (^observer)(CFTimeInterval, NSError *) = weakSelf.displayView.diagnosticInputObserver;
+        CFTimeInterval inputQueued = observer ? CACurrentMediaTime() : 0;
+        [weakSelf.control execute:@"input-send-event"
+                        arguments:@{@"events" : events}
+                       completion:^(id result, NSError *error) {
+                         if (observer)
+                             observer(inputQueued, error);
+                         [weakSelf.displayView noteInputReply];
+                         if (error && weakSelf.task.running)
+                             weakSelf.status.stringValue = error.localizedDescription;
+                         if (answered)
+                             answered();
+                       }];
+      };
+      // VIM_INPUT_COALESCE=0 sends every move as its own round trip again.
+      VIMInputMotionCoalescer *motionCoalescer =
+          [NSProcessInfo.processInfo.environment[@"VIM_INPUT_COALESCE"] isEqualToString:@"0"]
+              ? nil
+              : [[VIMInputMotionCoalescer alloc] initWithSend:sendInput];
       if (!failure)
           session.displayView.inputHandler = ^(NSArray *events) {
             if ([weakSelf.lastRunState isEqual:@"suspended"]) {
@@ -1817,17 +1837,11 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                 if (calibrated)
                     events = calibrated;
             }
-            void (^observer)(CFTimeInterval, NSError *) = weakSelf.displayView.diagnosticInputObserver;
-            CFTimeInterval inputQueued = observer ? CACurrentMediaTime() : 0;
-            [weakSelf.control execute:@"input-send-event"
-                            arguments:@{@"events" : events}
-                           completion:^(id result, NSError *error) {
-                             if (observer)
-                                 observer(inputQueued, error);
-                             [weakSelf.displayView noteInputReply];
-                             if (error && weakSelf.task.running)
-                                 weakSelf.status.stringValue = error.localizedDescription;
-                           }];
+            // Research workloads account for one reply per input they queue.
+            if (motionCoalescer && !weakSelf.displayView.diagnosticInputObserver)
+                [motionCoalescer submitEvents:events];
+            else
+                sendInput(events, nil);
           };
       if (!failure) {
           if (config[@"NetworkConnected"] && ![config[@"NetworkConnected"] boolValue])
