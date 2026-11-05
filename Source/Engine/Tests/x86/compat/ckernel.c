@@ -511,7 +511,9 @@ static void test_timer(void) {
         return;
     outl(0xF0, 1000);
     u64 start = ticks;
+    u64 t = rdtsc();
     u64 r = run32(T_SPIN, 300000000);
+    kprintf("measure 32-bit spin iteration, ten instructions: %x ps (hex)\n", (rdtsc() - t) * 1000 / 300000000);
     CHECK(r == 0, "registers or flags changed across interrupts: status %x", r);
     CHECK(ticks - start >= 5, "ticks %x", ticks - start);
     outl(0xF0, 0);
@@ -519,10 +521,16 @@ static void test_timer(void) {
 }
 
 static void test_payloads(void) {
+    u64 t = rdtsc();
     run32(M_FUZZ, 0);
     CHECK(user_status == 0, "fuzz status %x", user_status);
+    if (on_engine())
+        kprintf("measure fuzz: %x ms (hex)\n", (rdtsc() - t) / 1000000);
+    t = rdtsc();
     run32(M_I386, 0);
     CHECK(user_status == 0, "test-i386 status %x", user_status);
+    if (on_engine())
+        kprintf("measure test-i386: %x ms (hex)\n", (rdtsc() - t) / 1000000);
 }
 
 void kmain(u64 ram) {

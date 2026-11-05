@@ -818,6 +818,17 @@ static void emit_shd(const Insn *in, int live) {
         }
         return;
     }
+    if (sz == 4 && in->by_cl && !mem && !live) {
+        // 32-bit code's 64-bit shifts, in every libgcc division: with flags dead, a wide shift of the pair. The helper is a trap each.
+        and_imm_w(S1, 1, 31);
+        mov_reg(0, S0, right ? d : in->reg);
+        logic_sh(1, 1, 0, S0, S0, right ? in->reg : d, 0, 32);
+        var_shift(1, right ? 1 : 0, S0, S0, S1);
+        if (!right)
+            lsr_imm(1, S0, S0, 32);
+        mov_reg(0, in->rm, S0);
+        return;
+    }
     if (d != S0)
         mov_reg(1, S0, d);
     mov_reg(1, S1, in->reg);

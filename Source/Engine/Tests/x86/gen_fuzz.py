@@ -495,6 +495,11 @@ for imm in (0, 1, 2, 3, 4, 8, 9, 10, 11, 12):
         form(f"{op} ${imm} m", f"{op} ${imm},{m},%xmm1", ALL, FP)
         form(f"{op} ${imm} high", f"{op} ${imm},%xmm12,%xmm9", ALL, FP)
 
+for op in ["shld", "shrd"]:
+    form(f"{op}l %cl,r flags dead", [f"{op}l %cl,%ebx,%eax", "testl %eax,%eax"], ALL & ~F_A)
+    form(f"{op}l %cl,r same", [f"{op}l %cl,%eax,%eax", "testl %eax,%eax"], ALL & ~F_A)
+
+# New forms go here, at the end: a form's index seeds its inputs, so one in the middle changes what all later ones are tried on.
 out = [".text", ".globl _fuzz_forms", ".p2align 4"]
 for i, (name, body, mask, kind) in enumerate(forms):
     out.append(f"Lf{i}:")

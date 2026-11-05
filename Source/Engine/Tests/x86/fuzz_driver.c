@@ -103,7 +103,19 @@ static void mix(uint64_t v) {
     hash ^= hash >> 29;
 }
 
+#ifdef __i386__
+// Compared with TCG, which takes the x87 rule for two NaNs where the SDM gives SSE the first source, and keeps a denormal in min and max under DAZ where the engine
+// gives zero, as Rosetta does. So no second source holds a NaN, and DAZ stays off: the 64-bit run holds those to Rosetta, and the emitters don't look at the mode.
+static const uint64_t mxcsr_choices[] = {0x1F80, 0x1F80, 0x1F80, 0x1F80, 0x3F80, 0x5F80, 0x7F80, 0x9F80};
+static void no_nan(uint64_t *v) {
+    uint32_t *lanes = (uint32_t *)v;
+    for (int i = 0; i < 4; i++)
+        if ((lanes[i] & 0x7f800000) == 0x7f800000)
+            lanes[i] &= ~0x00800000u;
+}
+#else
 static const uint64_t mxcsr_choices[] = {0x1F80, 0x1F80, 0x1F80, 0x1F80, 0x3F80, 0x5F80, 0x7F80, 0x9F80, 0x1FC0, 0x9FC0};
+#endif
 
 static void run_round(const Form *f, bool verbose) {
     for (int i = 0; i < BUF_BYTES / 8; i++)
@@ -124,6 +136,12 @@ static void run_round(const Form *f, bool verbose) {
     fuzz_st.r[R_INDEX] &= 7;
     for (int i = 0; i < 16; i++)
         fp_pair(fuzz_st.x[i]);
+#ifdef __i386__
+    no_nan(&buffer[4]);
+    no_nan(mem);
+    for (int i = 2; i < 5; i++)
+        no_nan(fuzz_st.x[i]);
+#endif
     fuzz_st.rflags = (rnd() & 0x8D5) | 2 | 0x200;
     fuzz_st.mxcsr = f->fp ? mxcsr_choices[rnd() % (sizeof mxcsr_choices / sizeof mxcsr_choices[0])] : 0x1F80;
     uint64_t in_rax = fuzz_st.r[0], in_rbx = fuzz_st.r[3], in_rcx = fuzz_st.r[1], in_flags = fuzz_st.rflags, in_mx = fuzz_st.mxcsr;
