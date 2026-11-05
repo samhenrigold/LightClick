@@ -493,6 +493,9 @@ static void view_build(u32 idx, u64 key, u32 cpl) {
     u64 *sent = (u64 *)v->rs_top;
     sent[0] = ~0ULL; // never equals a canonical return address, so popping the sentinel misses
     sent[1] = 0;
+    // The monitor is about to fetch through this root. Unlike a guest access, a walk that sees the private slot before these stores reach memory can't refault
+    // and retry: it is a fatal instruction abort at EL1.
+    __asm__ volatile("dsb ishst");
 }
 
 
@@ -600,6 +603,8 @@ static void view_activate(View *v) {
     View *old = view_current();
     if (old == v)
         return;
+    if (((u64 *)v->root0)[(PRIV_VA >> 39) & 0x1ff] != hole_entry_priv) // caught here, a stomped root is a stop with a name and not an abort at EL1
+        stop(STOP_UNSUPPORTED, 0, 17, v - views, ((u64 *)v->root0)[(PRIV_VA >> 39) & 0x1ff]);
     static u64 stamp;
     v->last_used = ++stamp;
     old->rs_saved = c->x[R_RS];
@@ -2336,6 +2341,10 @@ void mon_sync(void) {
             case SVC_INVPCID:
             case SVC_WBINVD:
                 break; // the shadow is always in step: see the CR3 note
+            case SVC_CLTS:
+                c->cr0 &= ~8ULL;
+                fp_trap_sync();
+                break;
             case SVC_LGDT:
                 c->gdtr_base = c->x[R_S0];
                 c->gdtr_limit = (u32)c->x[R_S1];

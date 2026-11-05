@@ -493,6 +493,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
             case OP_INVLPG:
             case OP_INVPCID:
             case OP_WBINVD:
+            case OP_CLTS:
             case OP_LGDT:
             case OP_LTR:
             case OP_MOV_SEG:
@@ -571,6 +572,7 @@ static void emit_monitor_op(const Insn *in) {
         case OP_INVLPG:
         case OP_INVPCID:
         case OP_WBINVD:
+        case OP_CLTS:
         case OP_SYSRET:
         case OP_SWAPGS:
             cpl0_only = true;
@@ -662,6 +664,9 @@ static void emit_monitor_op(const Insn *in) {
             break;
         case OP_WBINVD:
             svc(SVC_WBINVD);
+            break;
+        case OP_CLTS:
+            svc(SVC_CLTS);
             break;
         case OP_LGDT: {
             // Limit word, then base. The load comes before anything changes.

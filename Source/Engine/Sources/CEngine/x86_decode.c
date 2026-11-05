@@ -565,7 +565,7 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
                     set_bad(in, "smsw, lmsw");
             }
         } else if (opc == 0x06) {
-            set_bad(in, "clts");
+            in->op = OP_CLTS;
         } else if (opc == 0x08 || opc == 0x09) {
             in->op = OP_WBINVD;
         } else if (opc == 0x20 || opc == 0x22) {
@@ -813,6 +813,7 @@ bool insn_is_terminator(const Insn *in) {
         case OP_INVLPG:
         case OP_INVPCID:
         case OP_WBINVD:
+        case OP_CLTS:
         case OP_LGDT:
         case OP_LTR:
         case OP_MOV_SEG:

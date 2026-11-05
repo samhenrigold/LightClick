@@ -114,6 +114,7 @@ enum {
     SVC_FXSAVE, // x16 address of 512-byte buffer, already probed writable
     SVC_FXRSTOR,
     SVC_MFENCE_UNUSED,
+    SVC_CLTS,
     // Helpers: operands in x16, x17, x22, x23. Results as documented in monitor.c. Flags come back in x22 (nzcv), x23 (pf), x24 (aux).
     SVC_H_SHIFT = 64, // narrow and rotate-through-carry shifts: x16 value, x17 count, x22 kind|size<<8. x16 result
     SVC_H_SHD, // shld/shrd: x16 dst, x17 src, x22 count, x23 size|isright<<8. x16 result

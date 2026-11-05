@@ -343,6 +343,31 @@ static void test_cr4(void) {
     CHECK(back == (cr4 | 0x40 | 0x100));
 }
 
+#ifndef CHURN_ROUNDS
+#define CHURN_ROUNDS 2
+#endif
+#define CHURN_TABLES 200
+#define CHURN_VA 0x0000300000000000ULL
+// More address spaces than views, each with hundreds of shadow tables: the shape of a real boot's EL1 fault, in a root
+// built by an eviction. This did not reproduce that fault, even at 800 tables over 2880 evictions, so it guards
+// eviction in general and not the barrier in view_build.
+static void test_view_churn(u64 root) {
+    static u64 roots[72];
+    u64 data = frame();
+    for (int i = 0; i < CHURN_TABLES; i++)
+        *pte_of(root, CHURN_VA + ((u64)i << 21)) = data | PRESENT_RW;
+    for (int i = 0; i < 72; i++)
+        roots[i] = root_copy(root);
+    for (int round = 0; round < CHURN_ROUNDS; round++)
+        for (int i = 0; i < 72; i++) {
+            write_cr3(roots[i]);
+            for (int t = 0; t < CHURN_TABLES; t++)
+                *(volatile u64 *)(CHURN_VA + ((u64)t << 21)) = (u64)t;
+        }
+    write_cr3(root);
+    CHECK(PHYS(data)[0] == CHURN_TABLES - 1);
+}
+
 // The VMware backdoor reads the CPU's registers in its device model: it has to run where those are.
 static void test_vmport(void) {
     u64 rax = 0;
@@ -367,6 +392,7 @@ void kmain(void) {
     test_busy();
     test_cr4();
     test_vmport();
+    test_view_churn(root);
     CHECK(!bad_vector);
     puts_("hybrid checks passed\n");
     done(0);

@@ -113,6 +113,7 @@ enum {
     OP_INVLPG,
     OP_INVPCID,
     OP_WBINVD,
+    OP_CLTS,
     OP_LGDT, // sub 0 lgdt, 1 lidt, 2 sgdt, 3 sidt
     OP_LTR, // sub 0 ltr, 1 str, 2 lldt, 3 sldt
     OP_MOV_SEG, // to_reg: read segment into reg

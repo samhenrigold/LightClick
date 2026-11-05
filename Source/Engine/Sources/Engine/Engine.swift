@@ -510,7 +510,8 @@ public final class Engine {
             let why = String(cString: tr_stop_reason(UInt32(truncatingIfNeeded: a.2)))
             throw EngineError.stop("\(why) at x86 rip \(hex(rip)): \(bytes(at: rip))")
         case Int(STOP_MONITOR_FAULT):
-            throw EngineError.stop("monitor fault: esr \(hex(a.2)) far \(hex(a.3)) elr \(hex(a.4))")
+            // In any dump that follows, the registers are the monitor's at the fault, and the rip is the last boundary or fallback.
+            throw EngineError.stop("monitor fault: esr \(hex(a.2)) far \(hex(a.3)) elr \(hex(a.4)), the registers below are the monitor's, not the guest's")
         case Int(STOP_UNSUPPORTED):
             throw EngineError.stop("unsupported case \(a.2) at x86 rip \(hex(rip)): \(hex(a.3)) \(hex(a.4))")
         case Int(STOP_TRIPLE_FAULT):
