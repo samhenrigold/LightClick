@@ -13,5 +13,7 @@
 
 DEF(aa64_sshl_vec, 1, 2, 0, TCG_OPF_VECTOR)
 DEF(aa64_sli_vec, 1, 2, 1, TCG_OPF_VECTOR)
+/* ZIP1 or ZIP2, by the constant. */
+DEF(aa64_zip_vec, 1, 2, 1, TCG_OPF_VECTOR)
 /* Scalar FP on raw bits held in GPRs; the constant selects a TCGAa64Fp. */
 DEF(aa64_fp, 1, 2, 1, TCG_OPF_INT)

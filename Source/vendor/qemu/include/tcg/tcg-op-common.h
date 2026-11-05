@@ -66,6 +66,10 @@ typedef enum TCGAa64Fp {
 } TCGAa64Fp;
 
 void tcg_gen_aa64_fp(TCGv_i64 ret, TCGv_i64 a, TCGv_i64 b, TCGAa64Fp kind);
+
+/* Local experiment. Interleave the low or high halves of a and b. */
+void tcg_gen_aa64_zip_vec(unsigned vece, TCGv_vec ret, TCGv_vec a, TCGv_vec b,
+                          bool high);
 #endif
 
 /**

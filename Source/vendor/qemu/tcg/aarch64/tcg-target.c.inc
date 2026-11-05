@@ -3382,6 +3382,10 @@ static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,
                          (16 << vece) - a2);
         }
         break;
+    case INDEX_op_aa64_zip_vec:
+        tcg_out32(s, 0x0e003800 | is_q << 30 | vece << 22 | (a2 & 0x1f) << 16 |
+                     args[3] << 14 | (a1 & 0x1f) << 5 | (a0 & 0x1f));
+        break;
     case INDEX_op_aa64_sli_vec:
         if (is_scalar) {
             tcg_out_insn(s, q_shift, SLI, a0, a2, args[3] + (8 << vece));
@@ -3643,6 +3647,7 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_shrv_vec:
     case INDEX_op_sarv_vec:
     case INDEX_op_aa64_sshl_vec:
+    case INDEX_op_aa64_zip_vec:
         return C_O1_I2(w, w, w);
     case INDEX_op_not_vec:
     case INDEX_op_neg_vec:

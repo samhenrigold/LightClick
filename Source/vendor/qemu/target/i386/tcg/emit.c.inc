@@ -886,6 +886,81 @@ static inline void gen_sse_fp_join(TCGLabel *done)
 }
 
 /*
+ * Local AArch64 experiment: flag-free packed integer shuffles without a helper
+ * call. Both sources load first, so the destination may also be a source. VEX
+ * stays with the helper, since it would have to clear the upper ymm lanes.
+ */
+#if defined(__aarch64__) && defined(TARGET_X86_64)
+static bool gen_zip_xmm(DisasContext *s, X86DecodedInsn *decode, unsigned vece, bool high)
+{
+    TCGv_vec a, b, r;
+
+    if (!emit_inline_sse_packed || (s->prefix & PREFIX_VEX)) {
+        return false;
+    }
+    a = tcg_temp_new_vec(TCG_TYPE_V128);
+    b = tcg_temp_new_vec(TCG_TYPE_V128);
+    r = tcg_temp_new_vec(TCG_TYPE_V128);
+    tcg_gen_ld_vec(a, tcg_env, vector_reg_offset(&decode->op[1]));
+    tcg_gen_ld_vec(b, tcg_env, vector_reg_offset(&decode->op[2]));
+    tcg_gen_aa64_zip_vec(vece, r, a, b, high);
+    tcg_gen_st_vec(r, tcg_env, vector_reg_offset(&decode->op[0]));
+    return true;
+}
+
+static bool gen_movmsk_xmm(DisasContext *s, X86DecodedInsn *decode)
+{
+    int ofs = vector_reg_offset(&decode->op[2]);
+    int bits = s->prefix & PREFIX_DATA ? 64 : 32;
+    int lane, sign;
+
+    if (!emit_inline_sse_packed || s->vex_l) {
+        return false;
+    }
+    tcg_gen_movi_tl(s->T0, 0);
+    for (lane = 0, sign = 0; sign < 128; lane++, sign += bits) {
+        TCGv_i64 t = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(t, tcg_env, ofs + offsetof(ZMMReg, ZMM_Q(sign >> 6)));
+        tcg_gen_extract_i64(t, t, (sign & 63) + bits - 1, 1);
+        tcg_gen_deposit_i64(s->T0, s->T0, t, lane, 1);
+    }
+    return true;
+}
+
+/* PSHUFLW and PSHUFHW: one half is shuffled and the other is copied. */
+static bool gen_pshufw_xmm(DisasContext *s, X86DecodedInsn *decode, bool high)
+{
+    int order = decode->immediate;
+    TCGv_i64 kept, from, to;
+    int i;
+
+    if (!emit_inline_sse_packed || (s->prefix & PREFIX_VEX)) {
+        return false;
+    }
+    kept = tcg_temp_new_i64();
+    from = tcg_temp_new_i64();
+    to = tcg_temp_new_i64();
+    tcg_gen_ld_i64(kept, tcg_env, vector_reg_offset(&decode->op[1]) + offsetof(ZMMReg, ZMM_Q(!high)));
+    tcg_gen_ld_i64(from, tcg_env, vector_reg_offset(&decode->op[1]) + offsetof(ZMMReg, ZMM_Q(high)));
+    tcg_gen_movi_i64(to, 0);
+    for (i = 0; i < 4; i++) {
+        TCGv_i64 t = tcg_temp_new_i64();
+
+        tcg_gen_extract_i64(t, from, ((order >> (i * 2)) & 3) * 16, 16);
+        tcg_gen_deposit_i64(to, to, t, i * 16, 16);
+    }
+    tcg_gen_st_i64(kept, tcg_env, vector_reg_offset(&decode->op[0]) + offsetof(ZMMReg, ZMM_Q(!high)));
+    tcg_gen_st_i64(to, tcg_env, vector_reg_offset(&decode->op[0]) + offsetof(ZMMReg, ZMM_Q(high)));
+    return true;
+}
+#else
+#define gen_zip_xmm(s, decode, vece, high) false
+#define gen_movmsk_xmm(s, decode)          false
+#define gen_pshufw_xmm(s, decode, high)    false
+#endif
+
+/*
  * 00 = v*ps Vps, Hps, Wpd
  * 66 = v*pd Vpd, Hpd, Wps
  * f3 = v*ss Vss, Hss, Wps
@@ -1028,9 +1103,12 @@ FMA_SSE_PACKED(VFMSUBADD231, OP_PTR1, OP_PTR2, OP_PTR0, 0, float_muladd_negate_c
 FMA_SSE_PACKED(VFMSUBADD213, OP_PTR1, OP_PTR0, OP_PTR2, 0, float_muladd_negate_c)
 FMA_SSE_PACKED(VFMSUBADD132, OP_PTR0, OP_PTR2, OP_PTR1, 0, float_muladd_negate_c)
 
-#define FP_UNPACK_SSE(uname, lname)                                                \
+#define FP_UNPACK_SSE(uname, lname, high)                                          \
 static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                   \
 {                                                                                  \
+    if (gen_zip_xmm(s, decode, s->prefix & PREFIX_DATA ? MO_64 : MO_32, high)) {   \
+        return;                                                                    \
+    }                                                                              \
     /* PS maps to the DQ integer instruction, PD maps to QDQ.  */                  \
     gen_fp_sse(s, decode,                                                          \
                gen_helper_##lname##qdq_xmm,                                        \
@@ -1039,8 +1117,8 @@ static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                
                gen_helper_##lname##dq_ymm,                                         \
                NULL, NULL, SSE_FP_NONE);                                                        \
 }
-FP_UNPACK_SSE(VUNPCKLPx, punpckl)
-FP_UNPACK_SSE(VUNPCKHPx, punpckh)
+FP_UNPACK_SSE(VUNPCKLPx, punpckl, false)
+FP_UNPACK_SSE(VUNPCKHPx, punpckh, true)
 
 /*
  * 00 = v*ps Vps, Wpd
@@ -1266,14 +1344,27 @@ static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                
                           gen_helper_##lname##_xmm,                                \
                           gen_helper_##lname##_ymm);                               \
 }
-BINARY_INT_MMX(PUNPCKLBW,  punpcklbw)
-BINARY_INT_MMX(PUNPCKLWD,  punpcklwd)
-BINARY_INT_MMX(PUNPCKLDQ,  punpckldq)
+
+/* The MMX forms have no data prefix and stay with the helper. */
+#define PUNPCK_MMX(uname, lname, vece, high)                                       \
+static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                   \
+{                                                                                  \
+    if ((s->prefix & PREFIX_DATA) && gen_zip_xmm(s, decode, vece, high)) {         \
+        return;                                                                    \
+    }                                                                              \
+    gen_binary_int_sse(s, decode,                                                  \
+                          gen_helper_##lname##_mmx,                                \
+                          gen_helper_##lname##_xmm,                                \
+                          gen_helper_##lname##_ymm);                               \
+}
+PUNPCK_MMX(PUNPCKLBW,  punpcklbw, MO_8,  false)
+PUNPCK_MMX(PUNPCKLWD,  punpcklwd, MO_16, false)
+PUNPCK_MMX(PUNPCKLDQ,  punpckldq, MO_32, false)
 BINARY_INT_MMX(PACKSSWB,   packsswb)
 BINARY_INT_MMX(PACKUSWB,   packuswb)
-BINARY_INT_MMX(PUNPCKHBW,  punpckhbw)
-BINARY_INT_MMX(PUNPCKHWD,  punpckhwd)
-BINARY_INT_MMX(PUNPCKHDQ,  punpckhdq)
+PUNPCK_MMX(PUNPCKHBW,  punpckhbw, MO_8,  true)
+PUNPCK_MMX(PUNPCKHWD,  punpckhwd, MO_16, true)
+PUNPCK_MMX(PUNPCKHDQ,  punpckhdq, MO_32, true)
 BINARY_INT_MMX(PACKSSDW,   packssdw)
 
 BINARY_INT_MMX(PAVGB,   pavgb)
@@ -1317,8 +1408,21 @@ static void gen_##uname(DisasContext *s, X86DecodedInsn *decode)                
 }
 
 /* Instructions with no MMX equivalent.  */
-BINARY_INT_SSE(PUNPCKLQDQ, punpcklqdq)
-BINARY_INT_SSE(PUNPCKHQDQ, punpckhqdq)
+
+static void gen_PUNPCKLQDQ(DisasContext *s, X86DecodedInsn *decode)
+{
+    if (!gen_zip_xmm(s, decode, MO_64, false)) {
+        gen_binary_int_sse(s, decode, NULL, gen_helper_punpcklqdq_xmm, gen_helper_punpcklqdq_ymm);
+    }
+}
+
+static void gen_PUNPCKHQDQ(DisasContext *s, X86DecodedInsn *decode)
+{
+    if (!gen_zip_xmm(s, decode, MO_64, true)) {
+        gen_binary_int_sse(s, decode, NULL, gen_helper_punpckhqdq_xmm, gen_helper_punpckhqdq_ymm);
+    }
+}
+
 BINARY_INT_SSE(VPACKUSDW,  packusdw)
 BINARY_INT_SSE(VPERMILPS,  vpermilps)
 BINARY_INT_SSE(VPERMILPD,  vpermilpd)
@@ -1439,8 +1543,20 @@ static void gen_PSHUFD(DisasContext *s, X86DecodedInsn *decode)
     gen_unary_imm_sse(s, decode, gen_helper_pshufd_xmm, gen_helper_pshufd_ymm);
 }
 
-UNARY_IMM_SSE(PSHUFHW,    pshufhw)
-UNARY_IMM_SSE(PSHUFLW,    pshuflw)
+static void gen_PSHUFHW(DisasContext *s, X86DecodedInsn *decode)
+{
+    if (!gen_pshufw_xmm(s, decode, true)) {
+        gen_unary_imm_sse(s, decode, gen_helper_pshufhw_xmm, gen_helper_pshufhw_ymm);
+    }
+}
+
+static void gen_PSHUFLW(DisasContext *s, X86DecodedInsn *decode)
+{
+    if (!gen_pshufw_xmm(s, decode, false)) {
+        gen_unary_imm_sse(s, decode, gen_helper_pshuflw_xmm, gen_helper_pshuflw_ymm);
+    }
+}
+
 #define gen_helper_vpermq_xmm NULL
 UNARY_IMM_SSE(VPERMQ,      vpermq)
 UNARY_IMM_SSE(VPERMILPS_i, vpermilps_imm)
@@ -2970,8 +3086,12 @@ static void gen_MOVDQ(DisasContext *s, X86DecodedInsn *decode)
 static void gen_MOVMSK(DisasContext *s, X86DecodedInsn *decode)
 {
     typeof(gen_helper_movmskps_ymm) *ps, *pd, *fn;
-    TCGv_i32 tmp = tcg_temp_new_i32();
+    TCGv_i32 tmp;
 
+    if (gen_movmsk_xmm(s, decode)) {
+        return;
+    }
+    tmp = tcg_temp_new_i32();
     ps = s->vex_l ? gen_helper_movmskps_ymm : gen_helper_movmskps_xmm;
     pd = s->vex_l ? gen_helper_movmskpd_ymm : gen_helper_movmskpd_xmm;
     fn = s->prefix & PREFIX_DATA ? pd : ps;
