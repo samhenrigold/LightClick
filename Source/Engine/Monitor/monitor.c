@@ -1,0 +1,1886 @@
+// EL1 monitor. Runs inside the VM beside translated x86 code, which stays at EL0 in both x86 rings: guest kernel code never
+// holds EL1, so a wild kernel store cannot reach this monitor's tables. Fast x86 paths (syscall, faults, iret, CR3, page-table
+// writes) finish here; only translation misses, devices and unknown MSRs reach the host through mon_hvc.
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include "engine_abi.h"
+
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef int64_t i64;
+
+register EngineCtx *c __asm__("x18");
+
+void mon_hvc(void);
+void mon_fp_save(void *);
+void mon_fp_restore(void *);
+void mon_enter_guest(void);
+
+static inline void sysreg_isb(void) { __asm__ volatile("isb"); }
+#define RSR(name) ({ u64 v_; __asm__ volatile("mrs %0, " #name : "=r"(v_)); v_; })
+#define WSR(name, v) __asm__ volatile("msr " #name ", %0" : : "r"((u64)(v)))
+
+void *memset(void *d, int v, unsigned long n) {
+    u8 *p = d;
+    while (n--)
+        *p++ = (u8)v;
+    return d;
+}
+void *memcpy(void *d, const void *s, unsigned long n) {
+    u8 *p = d;
+    const u8 *q = s;
+    while (n--)
+        *p++ = *q++;
+    return d;
+}
+
+// ---- Host calls ----
+_Noreturn static void stop(u64 reason, u64 rip, u64 a, u64 b, u64 d);
+
+static inline void hostcall(u64 code) {
+    register u64 x0 __asm__("x0") = code;
+    __asm__ volatile("hvc #1" : : "r"(x0) : "memory");
+}
+
+// ---- Layout ----
+#define PRIV(off) ((void *)(PRIV_VA + (off)))
+#define RAM(gpa) ((void *)(RAM_ALIAS_VA + (gpa)))
+#define IPA_TO_VA(ipa) (PRIV_VA + ((ipa) - PRIV_IPA))
+#define VA_TO_IPA(va) (PRIV_IPA + ((va) - PRIV_VA))
+#define SPSR_NZCV_C (1ULL << 29)
+#define SPSR_SS (1ULL << 21)
+
+#define PTE_VALID 3ULL
+#define PTE_AF (1ULL << 10)
+#define PTE_SH (3ULL << 8)
+#define PTE_NG (1ULL << 11)
+#define PTE_UXN (1ULL << 54)
+#define PTE_PXN (1ULL << 53)
+#define AP_RW (1ULL << 6) // EL0 and EL1 read/write
+#define AP_RO (3ULL << 6) // EL0 and EL1 read only
+#define PTE_X_MARK (1ULL << 55) // software: code was translated from this page in this view. Valid in invalid entries too.
+#define PTE_ADDR 0x0000FFFFFFFFF000ULL
+
+#define X_P 1ULL
+#define X_RW 2ULL
+#define X_US 4ULL
+#define X_A 0x20ULL
+#define X_D 0x40ULL
+#define X_PS 0x80ULL
+#define X_NX (1ULL << 63)
+#define X_ADDR 0x000FFFFFFFFFF000ULL
+
+#define RFLAGS_FIXED 2ULL
+#define RF_CF 1ULL
+#define RF_PF 4ULL
+#define RF_AF 0x10ULL
+#define RF_ZF 0x40ULL
+#define RF_SF 0x80ULL
+#define RF_TF 0x100ULL
+#define RF_IF 0x200ULL
+#define RF_DF 0x400ULL
+#define RF_OF 0x800ULL
+#define RF_IOPL 0x3000ULL
+#define RF_NT 0x4000ULL
+#define RF_RF 0x10000ULL
+#define RF_VM 0x20000ULL
+#define RF_AC 0x40000ULL
+#define RF_ARITH (RF_CF | RF_PF | RF_AF | RF_ZF | RF_SF | RF_OF)
+
+// ---- Views: an x86 address space seen from one privilege level ----
+typedef struct {
+    u64 cr3; // masked: table address and PCID
+    u32 cpl, valid;
+    u64 root0, root1; // VA of shadow roots
+    u64 ttbr0, ttbr1;
+    u64 rs_saved, rs_top;
+    u64 hash_va;
+} View;
+static View views[MAX_VIEWS];
+static u32 view_count;
+
+// ---- Shadow page pool ----
+typedef struct {
+    u64 guest_table; // GPA of the guest table this mirrors; ~0 for a fracture of a large page
+    u64 va_base;
+    u32 view;
+    u32 level; // 3 root .. 0 leaf table
+    u32 next_mirror; // pool index + 1: next shadow table mirroring the same guest frame
+    u32 live; // entries in use, unused beyond statistics
+} ShadowDesc;
+
+#define POOL_PAGES (SHADOW_POOL_BYTES / 4096)
+#define POOL_VA (PRIV_VA + OFF_PT + PT_STATIC_BYTES)
+static ShadowDesc *const desc = (ShadowDesc *)PRIV(OFF_SHADOW_META);
+#define MIRROR_HEAD_OFF (OFF_SHADOW_META + (16ULL << 20)) // u32 per guest frame
+#define RMAP_HEAD_OFF (OFF_SHADOW_META + (48ULL << 20)) // u32 per guest frame
+#define RMAP_NODES_OFF (OFF_SHADOW_META + (80ULL << 20))
+#define RMAP_NODES ((64ULL << 20) / 8)
+typedef struct {
+    u32 pte; // pool byte offset / 8
+    u32 next;
+} RmapNode;
+static u32 *const mirror_head = (u32 *)PRIV(MIRROR_HEAD_OFF);
+static u32 *const rmap_head = (u32 *)PRIV(RMAP_HEAD_OFF);
+static RmapNode *const rmap_nodes = (RmapNode *)PRIV(RMAP_NODES_OFF);
+static u8 *const page_info = (u8 *)PRIV(OFF_PAGEINFO);
+static u32 pool_next, pool_free_head, rmap_next = 1, rmap_free;
+static u64 hole_entry_priv, hole_entry_ram; // root-level descriptors for the private slots
+
+static inline u64 *pool_page(u32 idx) { return (u64 *)(POOL_VA + (u64)idx * 4096); }
+static inline u32 pool_index(const void *p) { return (u32)(((u64)p - POOL_VA) >> 12); }
+
+static void flush_everything_and_retry(void);
+
+static u32 pool_alloc(u32 view, u32 level, u64 guest_table, u64 va_base) {
+    u32 idx;
+    if (pool_free_head) {
+        idx = pool_free_head - 1;
+        pool_free_head = *(u32 *)pool_page(idx);
+    } else if (pool_next < POOL_PAGES) {
+        idx = pool_next++;
+    } else {
+        flush_everything_and_retry();
+        __builtin_unreachable();
+    }
+    memset(pool_page(idx), 0, 4096);
+    ShadowDesc *d = &desc[idx];
+    d->guest_table = guest_table;
+    d->va_base = va_base;
+    d->view = view;
+    d->level = level;
+    d->next_mirror = 0;
+    d->live = 1;
+    if (guest_table != ~0ULL && guest_table < c->ram_size) {
+        u32 fr = (u32)(guest_table >> 12);
+        d->next_mirror = mirror_head[fr];
+        mirror_head[fr] = idx + 1;
+    }
+    return idx;
+}
+
+// ---- TLB ----
+static inline void tlbi_va(u32 asid, u64 va) {
+    u64 op = (u64)asid << 48 | ((va >> 12) & 0xFFFFFFFFFFFULL);
+    __asm__ volatile("dsb ishst\n tlbi vae1is, %0\n dsb ish\n isb" : : "r"(op));
+}
+static inline void tlbi_all(void) { __asm__ volatile("dsb ishst\n tlbi vmalle1is\n dsb ish\n isb"); }
+static inline u32 view_asid(u32 v) { return v + 1; }
+
+// ---- x86 page walk ----
+typedef struct {
+    bool ok;
+    u32 fault_err; // x86 page-fault error code when !ok
+    u64 gpa; // of the addressed byte
+    u64 *leaf; // alias pointer to the leaf entry
+    u64 *chain[4]; // alias pointers to the entries used, chain[3] is the PML4E
+    int leaf_level;
+    bool user, write, nx; // effective permissions
+    bool dirty;
+} Walk;
+
+static inline bool canonical(u64 va) { return (u64)((i64)(va << 16) >> 16) == va; }
+
+// Permission logic mirrors the SDM for CR0.WP=1 (enforced at CR0 writes) without SMAP (not advertised, stopped at CR4 writes).
+// access: bit 1 write, bit 2 user, bit 4 fetch.
+static Walk x86_walk(u64 cr3, u64 va, u32 access, bool set_ad) {
+    Walk w = {0};
+    w.user = true;
+    w.write = true;
+    w.fault_err = access & (2 | 4 | 16);
+    if (!canonical(va)) {
+        w.fault_err = ~0u; // #GP, not #PF
+        return w;
+    }
+    u64 table = cr3 & X_ADDR;
+    bool nxe = c->efer & (1ULL << 11);
+    for (int level = 3; level >= 0; level--) {
+        if (table + 4096 > c->ram_size)
+            stop(STOP_UNSUPPORTED, 0, 1, table, va); // x86 page table outside RAM
+        u64 *ep = (u64 *)RAM(table + ((va >> (12 + 9 * level)) & 0x1ff) * 8);
+        u64 e = *ep;
+        w.chain[level] = ep;
+        if (!(e & X_P))
+            return w;
+        w.user = w.user && (e & X_US);
+        w.write = w.write && (e & X_RW);
+        if (nxe && (e & X_NX))
+            w.nx = true;
+        if (level == 0 || (level < 3 && (e & X_PS))) {
+            u64 size = 1ULL << (12 + 9 * level);
+            u64 base = level ? (e & X_ADDR & ~(size - 1) & ~(1ULL << 12)) : (e & X_ADDR);
+            w.gpa = base | (va & (size - 1));
+            w.leaf = ep;
+            w.leaf_level = level;
+            w.dirty = e & X_D;
+            w.fault_err |= 1; // present from here on
+            if ((access & 4) && !w.user)
+                return w;
+            if ((access & 2) && !w.write)
+                return w;
+            if ((access & 16) && w.nx)
+                return w;
+            if ((access & 16) && !(access & 4) && w.user && (c->cr4 & (1ULL << 20)))
+                return w; // SMEP
+            if (set_ad) {
+                for (int l = 3; l >= level; l--)
+                    if (!(*w.chain[l] & X_A))
+                        *w.chain[l] |= X_A;
+                if ((access & 2) && !(e & X_D)) {
+                    *ep |= X_D;
+                    w.dirty = true;
+                }
+            }
+            w.ok = true;
+            return w;
+        }
+        table = e & X_ADDR;
+    }
+    return w;
+}
+
+// Guest memory through the walker, for frames and descriptor tables. Returns false on a fault.
+static bool guest_read(u64 va, void *out, u32 n, u32 access) {
+    u8 *o = out;
+    while (n) {
+        Walk w = x86_walk(c->cr3, va, access, true);
+        if (!w.ok || w.gpa >= c->ram_size)
+            return false;
+        u32 chunk = 4096 - (u32)(va & 0xfff);
+        if (chunk > n)
+            chunk = n;
+        memcpy(o, RAM(w.gpa), chunk);
+        o += chunk;
+        va += chunk;
+        n -= chunk;
+    }
+    return true;
+}
+static bool guest_write(u64 va, const void *in, u32 n, u32 access) {
+    const u8 *o = in;
+    while (n) {
+        Walk w = x86_walk(c->cr3, va, access | 2, true);
+        if (!w.ok || w.gpa >= c->ram_size)
+            return false;
+        u32 chunk = 4096 - (u32)(va & 0xfff);
+        if (chunk > n)
+            chunk = n;
+        memcpy(RAM(w.gpa), o, chunk);
+        o += chunk;
+        va += chunk;
+        n -= chunk;
+    }
+    return true;
+}
+
+// ---- rmap: who maps this frame writable ----
+static void rmap_add(u64 gpa, u64 *pte) {
+    u32 node;
+    if (rmap_free) {
+        node = rmap_free;
+        rmap_free = rmap_nodes[node].next;
+    } else {
+        if (rmap_next >= RMAP_NODES)
+            stop(STOP_SHADOW_FULL, 0, 2, 0, 0);
+        node = rmap_next++;
+    }
+    u32 fr = (u32)(gpa >> 12);
+    rmap_nodes[node].pte = (u32)(((u64)pte - POOL_VA) >> 3);
+    rmap_nodes[node].next = rmap_head[fr];
+    rmap_head[fr] = node;
+}
+static void rmap_remove(u64 gpa, u64 *pte) {
+    u32 fr = (u32)(gpa >> 12), want = (u32)(((u64)pte - POOL_VA) >> 3);
+    u32 *link = &rmap_head[fr];
+    while (*link) {
+        RmapNode *n = &rmap_nodes[*link];
+        if (n->pte == want) {
+            u32 dead = *link;
+            *link = n->next;
+            n->next = rmap_free;
+            rmap_free = dead;
+            return;
+        }
+        link = &n->next;
+    }
+}
+
+static inline u64 *rmap_pte(u32 v) { return (u64 *)(POOL_VA + (u64)v * 8); }
+static u64 pte_va(const u64 *pte, const ShadowDesc *d) {
+    u64 idx = ((u64)pte & 0xfff) >> 3;
+    u64 va = d->va_base + (idx << (12 + 9 * d->level));
+    return va;
+}
+
+// Clears writability of every shadow mapping of this frame.
+static void write_protect_frame(u64 gpa) {
+    u32 fr = (u32)(gpa >> 12);
+    u32 it = rmap_head[fr];
+    rmap_head[fr] = 0;
+    while (it) {
+        RmapNode *n = &rmap_nodes[it];
+        u64 *pte = rmap_pte(n->pte);
+        u32 next = n->next;
+        n->next = rmap_free;
+        rmap_free = it;
+        ShadowDesc *d = &desc[pool_index(pte)];
+        u64 e = *pte;
+        if ((e & 1) && (e & AP_RO) == AP_RW) {
+            *pte = (e & ~AP_RW) | AP_RO;
+            tlbi_va(view_asid(d->view), pte_va(pte, d));
+        }
+        it = next;
+    }
+}
+
+// ---- Boundary lookup: ARM pc to x86 rip ----
+static BlockEntry *find_block(u64 pc) {
+    u64 cc = PRIV_VA + OFF_CC;
+    if (pc < cc || pc >= cc + CC_SIZE)
+        return 0;
+    u32 word = (u32)((pc - cc) >> 2);
+    BlockEntry *t = (BlockEntry *)PRIV(OFF_BLOCKS);
+    u64 lo = 0, hi = c->block_count;
+    while (lo < hi) {
+        u64 mid = (lo + hi) / 2;
+        if (t[mid].arm_off <= word)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (!lo)
+        return 0;
+    BlockEntry *b = &t[lo - 1];
+    return word < b->arm_off + b->arm_words ? b : 0;
+}
+
+// x86 rip of the instruction containing pc. exact is set when pc is its first word.
+static u64 rip_of_pc(u64 pc, bool *exact, bool *found) {
+    BlockEntry *b = find_block(pc);
+    *exact = false;
+    *found = b != 0;
+    if (!b)
+        return 0;
+    PcMap *m = (PcMap *)PRIV(OFF_PCMAP) + b->map_off;
+    u32 word = (u32)((pc - (PRIV_VA + OFF_CC)) >> 2) - b->arm_off;
+    u32 best = 0;
+    for (u32 i = 0; i < b->map_count; i++) {
+        if (m[i].arm_word <= word)
+            best = i;
+        else
+            break;
+    }
+    *exact = m[best].arm_word == word;
+    return b->rip + m[best].rip_off;
+}
+
+static u64 rip_here(u64 pc) {
+    bool e, f;
+    u64 rip = rip_of_pc(pc, &e, &f);
+    if (!f)
+        stop(STOP_MONITOR_FAULT, 0, c->esr, c->far, pc);
+    return rip;
+}
+
+// ---- Stops ----
+_Noreturn static void stop(u64 reason, u64 rip, u64 a, u64 b, u64 d) {
+    c->req_a[0] = reason;
+    c->req_a[1] = rip;
+    c->req_a[2] = a;
+    c->req_a[3] = b;
+    c->req_a[4] = d;
+    for (;;)
+        hostcall(HC_STOP);
+}
+
+void mon_bug(void) {
+    stop(STOP_MONITOR_FAULT, 0, RSR(esr_el1), RSR(far_el1), RSR(elr_el1));
+}
+
+// ---- RFLAGS ----
+static inline u32 parity_even(u64 v) { return !(__builtin_popcountll(v & 0xff) & 1); }
+
+static u64 rflags_get(void) {
+    u64 nz = c->spsr, r = c->rflags_sys;
+    if (!(nz & SPSR_NZCV_C))
+        r |= RF_CF;
+    if (nz & (1ULL << 30))
+        r |= RF_ZF;
+    if (nz & (1ULL << 31))
+        r |= RF_SF;
+    if (nz & (1ULL << 28))
+        r |= RF_OF;
+    if (parity_even(c->x[R_PF]))
+        r |= RF_PF;
+    if ((c->x[R_AF] ^ c->x[R_PF]) & 0x10)
+        r |= RF_AF;
+    if (c->df < 0)
+        r |= RF_DF;
+    return r;
+}
+
+static void rflags_set(u64 r) {
+    u64 s = c->spsr & ~(0xFULL << 28);
+    if (!(r & RF_CF))
+        s |= SPSR_NZCV_C;
+    if (r & RF_ZF)
+        s |= 1ULL << 30;
+    if (r & RF_SF)
+        s |= 1ULL << 31;
+    if (r & RF_OF)
+        s |= 1ULL << 28;
+    c->spsr = s;
+    c->x[R_PF] = (r & RF_PF) ? 0 : 1;
+    c->x[R_AF] = c->x[R_PF] ^ (r & RF_AF);
+    c->df = (r & RF_DF) ? -1 : 1;
+    c->rflags_sys = (r & ~(RF_ARITH | RF_DF)) | RFLAGS_FIXED;
+}
+
+// ---- Views ----
+static View *view_find(u64 cr3_key, u32 cpl) {
+    for (u32 i = 0; i < view_count; i++)
+        if (views[i].cr3 == cr3_key && views[i].cpl == cpl)
+            return &views[i];
+    if (view_count >= MAX_VIEWS)
+        stop(STOP_UNSUPPORTED, 0, 2, cr3_key, cpl); // shortcut: no view eviction yet; real guests need LRU
+    u32 idx = view_count;
+    View *v = &views[idx];
+    v->cr3 = cr3_key;
+    v->cpl = cpl;
+    v->valid = 1;
+    u32 r0 = pool_alloc(idx, 3, cr3_key & X_ADDR, 0);
+    u32 r1 = pool_alloc(idx, 3, cr3_key & X_ADDR, 0xFFFF000000000000ULL); // upper half of the same guest table
+    v->root0 = (u64)pool_page(r0);
+    v->root1 = (u64)pool_page(r1);
+    ((u64 *)v->root0)[(PRIV_VA >> 39) & 0x1ff] = hole_entry_priv;
+    ((u64 *)v->root0)[(RAM_ALIAS_VA >> 39) & 0x1ff] = hole_entry_ram;
+    v->ttbr0 = VA_TO_IPA(v->root0) | (u64)view_asid(idx) << 48;
+    v->ttbr1 = VA_TO_IPA(v->root1);
+    v->rs_top = PRIV_VA + OFF_RSTACKS + (u64)idx * RSTACK_SLOT + RSTACK_BYTES - 16;
+    v->rs_saved = v->rs_top;
+    v->hash_va = PRIV_VA + OFF_HASH + (u64)idx * HASH_BYTES;
+    u64 *sent = (u64 *)v->rs_top;
+    sent[0] = ~0ULL; // never equals a canonical return address, so popping the sentinel misses
+    sent[1] = 0;
+    view_count = idx + 1;
+    return v;
+}
+
+static inline u64 cr3_key(u64 cr3) { return (c->cr4 & (1ULL << 17)) ? (cr3 & (X_ADDR | 0xfff)) : (cr3 & X_ADDR); }
+
+static View *view_current(void) { return &views[c->view]; }
+
+static void view_activate(View *v) {
+    View *old = view_current();
+    if (old == v)
+        return;
+    old->rs_saved = c->x[R_RS];
+    c->x[R_RS] = v->rs_saved;
+    c->rs_top = v->rs_top;
+    c->x[R_HASH] = v->hash_va;
+    c->view = (u32)(v - views);
+    WSR(ttbr0_el1, v->ttbr0);
+    WSR(ttbr1_el1, v->ttbr1);
+    __asm__ volatile("isb");
+}
+
+static void reset_all_return_stacks(void) {
+    for (u32 i = 0; i < view_count; i++)
+        views[i].rs_saved = views[i].rs_top;
+    c->x[R_RS] = c->rs_top;
+}
+
+// ---- Shadow fill ----
+static u64 *shadow_slot(View *v, u64 va, const Walk *w, int leaf_level_target, u64 **parent_out) {
+    bool high = va >> 47;
+    u64 table_va = high ? v->root1 : v->root0;
+    u32 vi = (u32)(v - views);
+    (void)parent_out;
+    for (int level = 3; level > leaf_level_target; level--) {
+        u64 *t = (u64 *)table_va;
+        u64 *e = &t[(va >> (12 + 9 * level)) & 0x1ff];
+        if (!(*e & 1)) {
+            int child = level - 1;
+            // The child mirrors the guest table this entry points at. Below a large page there is none: it is a fracture.
+            u64 gt = level > w->leaf_level ? (*w->chain[level] & X_ADDR) : ~0ULL;
+            u64 mask = ~((1ULL << (12 + 9 * (child + 1))) - 1);
+            u64 base = va & mask;
+            u32 idx = pool_alloc(vi, (u32)child, gt, base);
+            if (gt != ~0ULL && gt < c->ram_size && !(page_info[gt >> 12] & PI_PT)) {
+                page_info[gt >> 12] |= PI_PT;
+                write_protect_frame(gt);
+            }
+            *e = VA_TO_IPA((u64)pool_page(idx)) | PTE_VALID;
+        }
+        table_va = IPA_TO_VA(*e & PTE_ADDR);
+    }
+    return &((u64 *)table_va)[(va >> (12 + 9 * leaf_level_target)) & 0x1ff];
+}
+
+static void track_root(View *v, u64 va, const Walk *w);
+
+// Installs a 4 KB entry for va. A large x86 page fractures into shadow leaves, each still honouring A/D at the x86 leaf.
+static u64 *shadow_install(View *v, u64 va, const Walk *w, bool want_write) {
+    track_root(v, va, w);
+    u64 *slot = shadow_slot(v, va, w, 0, 0);
+    u64 old = *slot;
+    u64 gpa = w->gpa & ~0xfffULL;
+    u64 pte = gpa | PTE_VALID | PTE_AF | PTE_SH | PTE_NG | PTE_PXN | PTE_UXN | (old & PTE_X_MARK);
+    bool writable = want_write && w->write && w->dirty;
+    u8 pi = gpa < c->ram_size ? page_info[gpa >> 12] : 0;
+    if (writable && (pi & (PI_CODE | PI_PT)))
+        writable = false;
+    pte |= writable ? AP_RW : AP_RO;
+    if ((old & 1) && (old & AP_RO) == AP_RW && (old & PTE_ADDR) != gpa)
+        rmap_remove(old & PTE_ADDR, slot);
+    bool was_rw = (old & 1) && (old & AP_RO) == AP_RW && (old & PTE_ADDR) == gpa;
+    *slot = pte;
+    if (writable && !was_rw && gpa < c->ram_size)
+        rmap_add(gpa, slot);
+    return slot;
+}
+
+static void track_root(View *v, u64 va, const Walk *w) {
+    (void)va;
+    (void)w;
+    u64 gt = v->cr3 & X_ADDR;
+    if (gt < c->ram_size && !(page_info[gt >> 12] & PI_PT)) {
+        page_info[gt >> 12] |= PI_PT;
+        write_protect_frame(gt);
+    }
+}
+
+// ---- Delivering x86 events ----
+static u64 translate_here(u64 rip, u64 site, u32 kind, bool single);
+static bool event_delivered;
+static void reset_all_return_stacks(void);
+static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int);
+
+static void raise_gp(u32 err, u64 rip) { deliver(13, err, true, rip, false); }
+
+static void shim_fault(u32 vector, u32 err, u64 rip, u64 cr2) {
+    c->req_a[5] = cr2;
+    stop(STOP_GUEST_FAULT_NO_IDT, rip, vector, err, cr2);
+}
+
+static void raise_pf(u64 va, u32 err, u64 rip) {
+    if (!c->model_kernel)
+        shim_fault(14, err, rip, va);
+    c->cr2 = va;
+    c->stat_pf_delivered++;
+    deliver(14, err, true, rip, false);
+}
+
+// ---- Translation requests ----
+static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
+    View *v = view_current();
+    Walk w = x86_walk(c->cr3, rip, 16 | (c->cpl == 3 ? 4 : 0), true);
+    if (!w.ok) {
+        if (w.fault_err == ~0u) {
+            if (!c->model_kernel)
+                shim_fault(13, 0, rip, rip);
+            raise_gp(0, rip);
+        } else
+            raise_pf(rip, w.fault_err, rip);
+        return c->elr;
+    }
+    c->req_a[0] = c->view;
+    c->req_a[1] = rip;
+    c->req_a[2] = site;
+    c->req_a[3] = kind;
+    c->req_a[4] = single;
+    c->req_a[5] = c->cr3;
+    hostcall(HC_TRANSLATE);
+    u64 fault = c->req_r[1];
+    if (fault) {
+        if (!c->model_kernel)
+            shim_fault(14, 0x10, rip, fault - 1);
+        Walk f = x86_walk(c->cr3, fault - 1, 16 | (c->cpl == 3 ? 4 : 0), false);
+        raise_pf(fault - 1, f.fault_err, rip);
+        return c->elr;
+    }
+    // Every frame code was read from is write-protected, so a later store invalidates it, and every page-table entry on the
+    // way is tracked by marking the leaf slot.
+    for (int i = 2; i < 4; i++) {
+        u64 fr = c->req_r[i];
+        if (!(fr & 1))
+            continue;
+        u64 gpa = fr & ~1ULL;
+        if (!(page_info[gpa >> 12] & PI_CODE)) {
+            page_info[gpa >> 12] |= PI_CODE;
+            write_protect_frame(gpa);
+        }
+    }
+    if (c->tr_flushed) {
+        c->tr_flushed = 0;
+        reset_all_return_stacks();
+    }
+    track_root(v, rip, &w);
+    *shadow_slot(v, rip, &w, 0, 0) |= PTE_X_MARK;
+    if (c->req_r[3]) { // a straddling instruction: a change to the next page's mapping must invalidate this block as well
+        u64 next = (rip & ~0xfffULL) + 4096;
+        Walk w2 = x86_walk(c->cr3, next, 0, false);
+        if (w2.ok)
+            *shadow_slot(v, next, &w2, 0, 0) |= PTE_X_MARK;
+    }
+    return c->req_r[0];
+}
+
+// ---- Page-table writes ----
+static void zap_table(u32 idx);
+
+static void zap_entry(u64 *e, const ShadowDesc *d) {
+    u64 v = *e;
+    if (!v)
+        return;
+    *e = 0;
+    if (d->level == 0) {
+        u64 va = pte_va(e, d);
+        if (v & 1) {
+            if ((v & AP_RO) == AP_RW && (v & PTE_ADDR) < c->ram_size)
+                rmap_remove(v & PTE_ADDR, e);
+            tlbi_va(view_asid(d->view), va);
+        }
+        if (v & PTE_X_MARK) {
+            c->req_a[0] = d->view;
+            c->req_a[1] = va;
+            hostcall(HC_VIEW_INVALIDATE_VA);
+            reset_all_return_stacks();
+        }
+    } else if (v & 1) {
+        zap_table(pool_index((void *)IPA_TO_VA(v & PTE_ADDR)));
+    }
+}
+
+static void zap_table(u32 idx) {
+    ShadowDesc *d = &desc[idx];
+    u64 *t = pool_page(idx);
+    for (int i = 0; i < 512; i++)
+        if (t[i])
+            zap_entry(&t[i], d);
+    if (d->guest_table != ~0ULL && d->guest_table < c->ram_size) {
+        u32 *link = &mirror_head[d->guest_table >> 12];
+        while (*link) {
+            if (*link == idx + 1) {
+                *link = d->next_mirror;
+                break;
+            }
+            link = &desc[*link - 1].next_mirror;
+        }
+    }
+    d->live = 0;
+    *(u32 *)t = pool_free_head;
+    pool_free_head = idx + 1;
+    __asm__ volatile("dsb ishst");
+}
+
+// A guest wrote a tracked table: drop every shadow entry that mirrors the slot. The next access refaults and refills.
+static void pt_slot_changed(u64 gpa_slot) {
+    u32 fr = (u32)(gpa_slot >> 12), i = (u32)((gpa_slot & 0xfff) >> 3);
+    for (u32 it = mirror_head[fr]; it; it = desc[it - 1].next_mirror) {
+        ShadowDesc *d = &desc[it - 1];
+        u64 *t = pool_page(it - 1);
+        if (d->level == 3) {
+            View *v = &views[d->view];
+            u64 *r = (i < 256) ? (u64 *)v->root0 : (u64 *)v->root1;
+            if (i == ((PRIV_VA >> 39) & 0x1ff) || i == ((RAM_ALIAS_VA >> 39) & 0x1ff))
+                continue;
+            if (r[i]) {
+                ShadowDesc rd = *d;
+                rd.level = 3;
+                zap_entry(&r[i], &rd);
+                __asm__ volatile("dsb ishst\n tlbi aside1is, %0\n dsb ish\n isb" : : "r"((u64)view_asid(d->view) << 48));
+            }
+            continue;
+        }
+        if (t[i]) {
+            bool table = d->level > 0;
+            zap_entry(&t[i], d);
+            if (table) {
+                __asm__ volatile("dsb ishst\n tlbi aside1is, %0\n dsb ish\n isb" : : "r"((u64)view_asid(d->view) << 48));
+                c->stat_pt_writes_zap++;
+            }
+        }
+    }
+}
+
+// ---- Faults ----
+static void step_on(void) {
+    c->spsr |= SPSR_SS;
+    if (!c->stepping) { // MDSCR_EL1.SS with SPSR.SS clear would trap at once, so it is only on while stepping
+        WSR(mdscr_el1, 1);
+        c->stepping = 1;
+    }
+}
+static void step_off(void) {
+    c->spsr &= ~SPSR_SS;
+    if (c->stepping) {
+        WSR(mdscr_el1, 0);
+        c->stepping = 0;
+    }
+}
+
+static u64 pt_step_slot; // nonzero while one store runs on a temporarily writable page-table page
+static u64 *pt_step_pte;
+static u64 pt_step_va;
+
+static void shadow_write_finish(void);
+
+static void handle_data_abort(bool lower) {
+    (void)lower;
+    u64 far = c->far, esr = c->esr;
+    u32 dfsc = esr & 0x3f;
+    bool write = esr & (1 << 6);
+    View *v = view_current();
+    if ((dfsc & 0x3c) == 0x20 || dfsc == 0x21)
+        stop(STOP_UNSUPPORTED, rip_here(c->elr), 3, far, esr); // an alignment fault: split locked access
+    // The return-stack guard: drop all the entries and retry the one ARM store.
+    u64 rs_base = PRIV_VA + OFF_RSTACKS;
+    if (far >= rs_base && far < rs_base + MAX_VIEWS * RSTACK_SLOT) {
+        c->x[R_RS] = c->rs_top;
+        return;
+    }
+    u64 rip;
+    {
+        bool e, f;
+        rip = rip_of_pc(c->elr, &e, &f);
+        if (!f)
+            stop(STOP_MONITOR_FAULT, 0, esr, far, c->elr);
+    }
+    if (!canonical(far)) {
+        if (!c->model_kernel)
+            shim_fault(13, 0, rip, far);
+        raise_gp(0, rip);
+        return;
+    }
+    u32 access = (write ? 2 : 0) | (c->cpl == 3 ? 4 : 0);
+    Walk w = x86_walk(c->cr3, far, access, true);
+    if (!w.ok) {
+        raise_pf(far, w.fault_err, rip);
+        return;
+    }
+    if (w.gpa >= c->ram_size) { // device hole: emulate the ARM access itself, so all x86 forms work.
+        u32 iss = (u32)esr;
+        if (!(iss & (1u << 24)))
+            stop(STOP_UNSUPPORTED, rip, 4, far, esr); // pair, atomic or SIMD access to a device
+        u32 sas = (iss >> 22) & 3, srt = (iss >> 16) & 31;
+        u64 val = srt == 31 ? 0 : c->x[srt];
+        c->req_a[0] = w.gpa;
+        c->req_a[1] = 1u << sas;
+        c->req_a[2] = write;
+        c->req_a[3] = val;
+        c->stat_mmio++;
+        hostcall(HC_MMIO);
+        if (!write && srt != 31) {
+            u64 r = c->req_r[0];
+            bool sf = iss & (1u << 15), sse = iss & (1u << 21);
+            if (sse) { // sign-extending load
+                u32 b = 8u << sas;
+                r = (u64)((i64)(r << (64 - b)) >> (64 - b));
+                if (!sf)
+                    r &= 0xffffffffULL;
+            }
+            c->x[srt] = r;
+        }
+        c->elr += 4;
+        return;
+    }
+    u64 gpa = w.gpa & ~0xfffULL;
+    u8 pi = page_info[gpa >> 12];
+    if (write && (pi & PI_CODE)) {
+        // A store to a frame holding translated code. Kill those translations, run the store from a one-off block so that later
+        // instructions in the same block see the new bytes, and leave the page writable until code runs from it again.
+        c->req_a[0] = gpa;
+        c->stat_smc++;
+        hostcall(HC_SMC);
+        page_info[gpa >> 12] = pi & ~PI_CODE;
+        reset_all_return_stacks();
+        shadow_install(v, far, &w, true);
+        tlbi_va(view_asid(c->view), far);
+        c->elr = translate_here(rip, 0, 0, true);
+        return;
+    }
+    if (write && (pi & PI_PT)) {
+        c->stat_pt_writes++;
+        u32 iss = (u32)esr;
+        if (iss & (1u << 24)) { // single register store with full syndrome
+            u32 sas = (iss >> 22) & 3, srt = (iss >> 16) & 31, n = 1u << sas;
+            u64 val = srt == 31 ? 0 : c->x[srt];
+            if ((far & 0xfff) + n > 4096)
+                stop(STOP_UNSUPPORTED, rip, 5, far, esr); // split store on a page table
+            memcpy(RAM(w.gpa), &val, n);
+            pt_slot_changed(w.gpa & ~7ULL);
+            if (((w.gpa & 7) + n) > 8)
+                pt_slot_changed((w.gpa & ~7ULL) + 8);
+            c->elr += 4;
+            return;
+        }
+        // Atomics and pairs: let the instruction itself run on a writable mapping for exactly one step, then resync.
+        c->stat_pt_step++;
+        Walk w2 = w;
+        w2.write = true;
+        u64 *slot = shadow_slot(v, far, &w, 0, 0);
+        u64 old = *slot;
+        *slot = (w.gpa & ~0xfffULL) | PTE_VALID | PTE_AF | PTE_SH | PTE_NG | PTE_PXN | PTE_UXN | (old & PTE_X_MARK) | AP_RW;
+        tlbi_va(view_asid(c->view), far);
+        pt_step_slot = w.gpa | 1;
+        pt_step_pte = slot;
+        pt_step_va = far;
+        step_on();
+        return;
+    }
+    bool perm = (dfsc & 0x3c) == 0x0c;
+    shadow_install(v, far, &w, write);
+    if (perm) {
+        c->stat_dirty++;
+        tlbi_va(view_asid(c->view), far);
+    } else {
+        c->stat_fills++;
+        __asm__ volatile("dsb ishst");
+    }
+}
+
+static void shadow_write_finish(void) {
+    u64 gpa = pt_step_slot & ~1ULL;
+    pt_step_slot = 0;
+    u64 e = *pt_step_pte;
+    *pt_step_pte = (e & ~AP_RW) | AP_RO;
+    tlbi_va(view_asid(c->view), pt_step_va);
+    for (int i = 0; i < 3; i++) { // the slot, and any further slots a 16-byte store reached
+        u64 g = (gpa & ~7ULL) + (u64)i * 8;
+        if ((g >> 12) == (gpa >> 12))
+            pt_slot_changed(g);
+    }
+}
+
+// ---- Event delivery ----
+typedef struct {
+    u32 lo, hi;
+} Desc32;
+
+static bool gdt_read(u32 sel, u64 *out) {
+    u32 idx = sel & ~7u;
+    if (sel & 4)
+        return false; // LDT selectors stop in the callers
+    if (idx + 7 > c->gdtr_limit)
+        return false;
+    return guest_read(c->gdtr_base + idx, out, 8, 0);
+}
+
+static void set_cpl(u32 cpl, u64 ring_rsp_unused) {
+    (void)ring_rsp_unused;
+    if (c->cpl == cpl)
+        return;
+    c->cpl = cpl;
+    c->stat_cr3 += 0;
+    view_activate(view_find(cr3_key(c->cr3), cpl));
+}
+
+static u32 deliver_depth;
+
+static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int) {
+    if (!c->model_kernel) {
+        shim_fault(vector, err, ret_rip, c->far);
+        return;
+    }
+    event_delivered = true;
+    if (deliver_depth >= 3)
+        stop(STOP_TRIPLE_FAULT, ret_rip, vector, err, c->cr2);
+    deliver_depth++;
+    u64 gate[2];
+    if ((vector * 16 + 15) > c->idtr_limit || !guest_read(c->idtr_base + vector * 16, gate, 16, 0)) {
+        deliver(vector == 8 ? 8 : 8, 0, true, ret_rip, false); // an unreadable or short IDT goes to #DF, then triple
+        deliver_depth--;
+        return;
+    }
+    u32 attr = (u32)(gate[0] >> 32);
+    u32 type = (attr >> 8) & 15, dpl = (attr >> 13) & 3, ist = attr & 7;
+    if (!(attr & 0x8000) || (type != 14 && type != 15)) {
+        deliver(13, vector * 8 + 2, true, ret_rip, false);
+        deliver_depth--;
+        return;
+    }
+    if (sw_int && dpl < c->cpl) {
+        deliver(13, vector * 8 + 2, true, ret_rip, false);
+        deliver_depth--;
+        return;
+    }
+    u64 target = (gate[0] & 0xffff) | ((gate[0] >> 32) & 0xffff0000ULL) | (gate[1] << 32);
+    u32 sel = (u32)(gate[0] >> 16) & 0xffff;
+    u64 cdesc;
+    if (!gdt_read(sel, &cdesc) || !(cdesc & (1ULL << 47)) || !(cdesc & (1ULL << 53))) {
+        deliver(13, sel & ~3u, true, ret_rip, false);
+        deliver_depth--;
+        return;
+    }
+    u32 new_cpl = (u32)(cdesc >> 45) & 3;
+    u64 rsp = c->x[4], old_rsp = rsp;
+    u64 rflags = rflags_get();
+    u32 old_cs = c->seg_sel[1], old_ss = c->seg_sel[2];
+    bool switched = new_cpl < c->cpl;
+    if (new_cpl > c->cpl) {
+        deliver(13, sel & ~3u, true, ret_rip, false);
+        deliver_depth--;
+        return;
+    }
+    if (switched || ist) {
+        u32 off = ist ? 36 + 8 * (ist - 1) : 4 + 8 * new_cpl;
+        if (off + 7 > c->tss_limit || !guest_read(c->tss_base + off, &rsp, 8, 0)) {
+            deliver(10, c->tr & ~3u, true, ret_rip, false);
+            deliver_depth--;
+            return;
+        }
+    }
+    rsp &= ~0xFULL;
+    u64 frame[6];
+    int n = 0;
+    if (has_err)
+        frame[n++] = err;
+    frame[n++] = ret_rip;
+    frame[n++] = old_cs;
+    frame[n++] = rflags;
+    frame[n++] = old_rsp;
+    frame[n++] = old_ss;
+    rsp -= (u64)n * 8;
+    // Frames are written with supervisor rights on the handler's stack. If that faults, the event becomes a double fault.
+    if (!guest_write(rsp, frame, (u32)n * 8, 0)) {
+        if (vector == 8)
+            stop(STOP_TRIPLE_FAULT, ret_rip, vector, err, rsp);
+        c->cr2 = rsp;
+        deliver(8, 0, true, ret_rip, false);
+        deliver_depth--;
+        return;
+    }
+    c->seg_sel[1] = (u16)((sel & ~3u) | new_cpl);
+    if (switched)
+        c->seg_sel[2] = (u16)new_cpl;
+    c->x[4] = rsp;
+    u64 keep = rflags & ~(RF_TF | RF_NT | RF_RF | RF_VM);
+    if (type == 14)
+        keep &= ~RF_IF;
+    rflags_set(keep);
+    set_cpl(new_cpl, 0);
+    c->halted = 0;
+    deliver_depth--;
+    c->elr = translate_here(target, 0, 0, false);
+}
+
+static void irq_deliver_now(u64 rip) {
+    u32 vector = c->irq_pending - 1;
+    c->irq_pending = 0;
+    c->stat_irq++;
+    deliver(vector, 0, false, rip, false);
+}
+
+// Called on every way out of the monitor. If an interrupt is due and the pc is at an x86 boundary, take it. Otherwise step ARM
+// instructions until it is: one trap per ARM word, only while an interrupt waits. Costs nothing when none does.
+static void exit_check(void) {
+    step_off();
+    if (pt_step_slot) {
+        step_on();
+        return;
+    }
+    if (!c->irq_pending || !(c->rflags_sys & RF_IF))
+        return; // none waiting, or masked: sti, popf and iret come back through here
+    bool exact, found;
+    u64 rip = rip_of_pc(c->elr, &exact, &found);
+    if (found && exact) {
+        if (rip != c->irq_shadow_rip) {
+            irq_deliver_now(rip);
+            exit_check();
+            return;
+        }
+        c->irq_shadow_rip = ~0ULL; // the instruction after sti runs first
+    }
+    c->stat_steps++;
+    step_on();
+}
+
+// ---- SVC dispatch ----
+static inline u64 *lit(u64 elr) { return (u64 *)elr; }
+
+static inline u64 next_rip_lit(void) { return *lit(c->elr + 4); } // the fall-through stub's literal after the svc
+
+static void x86_ud(void) {
+    u64 rip = rip_here(c->elr - 4);
+    deliver(6, 0, false, rip, false);
+}
+static void x86_gp0(void) { raise_gp(0, rip_here(c->elr - 4)); }
+
+static void sw_set_x86_flags_no_change(void) {}
+
+static void do_syscall(void) {
+    u64 next = next_rip_lit();
+    if (!c->model_kernel) {
+        // User-mode shim: the host plays the kernel. rcx and r11 are clobbered as the instruction defines.
+        c->x[1] = next;
+        c->x[11] = rflags_get();
+        c->req_a[0] = next;
+        hostcall(HC_SYSCALL);
+        return;
+    }
+    if (!(c->efer & 1)) {
+        x86_ud();
+        return;
+    }
+    c->stat_syscall++;
+    c->x[1] = next;
+    u64 fl = rflags_get();
+    c->x[11] = fl;
+    rflags_set((fl & ~c->sfmask) & ~RF_RF);
+    u16 cs = (u16)((c->star >> 32) & 0xfffc);
+    c->seg_sel[1] = cs;
+    c->seg_sel[2] = (u16)(cs + 8);
+    set_cpl(0, 0);
+    c->elr = translate_here(c->lstar, 0, 0, false);
+}
+
+static void do_sysret(void) {
+    u64 rip = c->x[1];
+    u64 op64 = c->x[R_S0];
+    if (!(c->efer & 1)) {
+        x86_ud();
+        return;
+    }
+    if (!op64)
+        stop(STOP_UNSUPPORTED, rip, 6, 0, 0); // sysret to compatibility mode
+    if (!canonical(rip)) {
+        x86_gp0();
+        return;
+    }
+    u64 fl = (c->x[11] & 0x3C7FD7ULL) | RFLAGS_FIXED;
+    rflags_set(fl);
+    u16 base = (u16)((c->star >> 48) & 0xffff);
+    c->seg_sel[1] = (u16)((base + 16) | 3);
+    c->seg_sel[2] = (u16)((base + 8) | 3);
+    set_cpl(3, 0);
+    c->elr = translate_here(rip, 0, 0, false);
+}
+
+static void do_iret(void) {
+    u64 here = rip_here(c->elr - 4);
+    if (c->x[R_S0] != 8)
+        stop(STOP_UNSUPPORTED, here, 7, c->x[R_S0], 0); // 16 or 32-bit iret
+    c->stat_iret++;
+    u64 f[5];
+    if (!guest_read(c->x[4], f, 40, c->cpl == 3 ? 4 : 0)) {
+        Walk w = x86_walk(c->cr3, c->x[4], c->cpl == 3 ? 4 : 0, false);
+        raise_pf(c->x[4], w.fault_err, here);
+        return;
+    }
+    u64 rip = f[0], rfl = f[2], rsp = f[3];
+    u32 cs = (u32)f[1] & 0xffff, ss = (u32)f[4] & 0xffff;
+    u32 new_cpl = cs & 3;
+    if (new_cpl < c->cpl) {
+        raise_gp(cs & ~3u, here);
+        return;
+    }
+    u64 cd;
+    if (!gdt_read(cs, &cd) || !(cd & (1ULL << 47)) || !(cd & (1ULL << 44)) || !(cd & (1ULL << 43))) {
+        raise_gp(cs & ~3u, here);
+        return;
+    }
+    if (!(cd & (1ULL << 53)))
+        stop(STOP_UNSUPPORTED, here, 8, cs, cd); // compatibility mode
+    if (!canonical(rip)) {
+        raise_gp(0, here);
+        return;
+    }
+    u64 mask = RF_ARITH | RF_DF | RF_TF | RF_NT | RF_RF | RF_AC | (1ULL << 21);
+    u64 cur = rflags_get();
+    u32 iopl = (u32)(cur >> 12) & 3;
+    if (c->cpl == 0)
+        mask |= RF_IOPL | RF_IF;
+    else if (c->cpl <= iopl)
+        mask |= RF_IF;
+    u64 fl = (cur & ~mask) | (rfl & mask) | RFLAGS_FIXED;
+    if (fl & RF_TF)
+        stop(STOP_UNSUPPORTED, here, 9, fl, 0); // single-step trap flag
+    rflags_set(fl);
+    c->x[4] = rsp;
+    c->seg_sel[1] = (u16)cs;
+    c->seg_sel[2] = (u16)ss;
+    set_cpl(new_cpl, 0);
+    c->elr = translate_here(rip, 0, 0, false);
+}
+
+static void do_popf(void) {
+    u64 here = rip_here(c->elr - 4);
+    u64 v = c->x[R_S0], next_rsp = c->x[R_S1];
+    u64 sz = c->x[R_S2];
+    u64 cur = rflags_get();
+    u32 iopl = (u32)(cur >> 12) & 3;
+    u64 mask = RF_ARITH | RF_DF | RF_TF | RF_NT | RF_AC | (1ULL << 21);
+    if (c->cpl == 0)
+        mask |= RF_IOPL | RF_IF;
+    else if (c->cpl <= iopl)
+        mask |= RF_IF;
+    if (sz == 2)
+        mask &= 0xffff;
+    u64 fl = (cur & ~mask) | (v & mask) | RFLAGS_FIXED;
+    if (fl & RF_TF)
+        stop(STOP_UNSUPPORTED, here, 9, fl, 0);
+    rflags_set(fl);
+    c->x[4] = next_rsp;
+}
+
+// Unsupported CR4 bits stop rather than half work.
+#define CR4_OK ((1ULL << 5) | (1ULL << 7) | (1ULL << 9) | (1ULL << 10) | (1ULL << 17) | (1ULL << 20) | (1ULL << 3) | (1ULL << 4) | (1ULL << 2))
+
+static void do_mov_cr_write(void) {
+    u64 cr = c->x[R_S0], v = c->x[R_S1];
+    u64 here = rip_here(c->elr - 4);
+    switch (cr) {
+        case 0:
+            if ((v & 0x80010001ULL) != 0x80010001ULL)
+                stop(STOP_UNSUPPORTED, here, 10, v, 0); // paging, protection or WP off
+            c->cr0 = v;
+            break;
+        case 2:
+            c->cr2 = v;
+            break;
+        case 3: {
+            c->stat_cr3++;
+            c->cr3 = v & ~(1ULL << 63);
+            // The shadow stays in step with x86 tables through write protection, so a flush needs no work: the x86 TLB
+            // may always be emptier than software assumed, and here it simply never holds a stale entry.
+            view_activate(view_find(cr3_key(c->cr3), c->cpl));
+            u64 next = next_rip_lit();
+            c->elr = translate_here(next, 0, 0, false);
+            break;
+        }
+        case 4:
+            if (v & ~CR4_OK)
+                stop(STOP_UNSUPPORTED, here, 11, v, 0);
+            c->cr4 = v;
+            break;
+        case 8:
+            c->req_a[0] = 0x80B;
+            c->req_a[1] = v;
+            break;
+    }
+}
+
+#define MSR_EFER 0xC0000080u
+#define MSR_STAR 0xC0000081u
+#define MSR_LSTAR 0xC0000082u
+#define MSR_CSTAR 0xC0000083u
+#define MSR_SFMASK 0xC0000084u
+#define MSR_FS 0xC0000100u
+#define MSR_GS 0xC0000101u
+#define MSR_KGS 0xC0000102u
+#define MSR_TSC 0x10u
+
+static inline u64 tsc_now(void) { return RSR(cntvct_el0) * 125 / 3 + c->tsc_offset; } // 24 MHz counter shown as 1 GHz
+
+static bool rdmsr(u32 m, u64 *v) {
+    switch (m) {
+        case MSR_EFER:
+            *v = c->efer;
+            return true;
+        case MSR_STAR:
+            *v = c->star;
+            return true;
+        case MSR_LSTAR:
+            *v = c->lstar;
+            return true;
+        case MSR_CSTAR:
+            *v = c->cstar;
+            return true;
+        case MSR_SFMASK:
+            *v = c->sfmask;
+            return true;
+        case MSR_FS:
+            *v = c->x[R_FS];
+            return true;
+        case MSR_GS:
+            *v = c->x[R_GS];
+            return true;
+        case MSR_KGS:
+            *v = c->kernel_gs_base;
+            return true;
+        case MSR_TSC:
+            *v = tsc_now();
+            return true;
+    }
+    c->req_a[0] = m;
+    hostcall(HC_RDMSR);
+    *v = c->req_r[0];
+    return !c->req_r[1];
+}
+
+static bool wrmsr(u32 m, u64 v) {
+    switch (m) {
+        case MSR_EFER:
+            c->efer = v;
+            return true;
+        case MSR_STAR:
+            c->star = v;
+            return true;
+        case MSR_LSTAR:
+            c->lstar = v;
+            return true;
+        case MSR_CSTAR:
+            c->cstar = v;
+            return true;
+        case MSR_SFMASK:
+            c->sfmask = v;
+            return true;
+        case MSR_FS:
+            c->x[R_FS] = v;
+            return true;
+        case MSR_GS:
+            c->x[R_GS] = v;
+            return true;
+        case MSR_KGS:
+            c->kernel_gs_base = v;
+            return true;
+    }
+    c->req_a[0] = m;
+    c->req_a[1] = v;
+    hostcall(HC_WRMSR);
+    return !c->req_r[1];
+}
+
+// FPCR: RMode from MXCSR.RC, FZ, FIZ from DAZ, and always AH and NEP.
+static void mxcsr_apply(u32 v) {
+    static const u8 rc_map[4] = {0, 2, 1, 3};
+    u64 fpcr = 2 | 4;
+    if (v & 0x40)
+        fpcr |= 1;
+    if (v & 0x8000)
+        fpcr |= 1ULL << 24;
+    fpcr |= (u64)rc_map[(v >> 13) & 3] << 22;
+    WSR(S3_3_C4_C4_0, fpcr);
+    u64 fpsr = 0;
+    if (v & 1)
+        fpsr |= 1;
+    if (v & 4)
+        fpsr |= 2;
+    if (v & 8)
+        fpsr |= 4;
+    if (v & 16)
+        fpsr |= 8;
+    if (v & 32)
+        fpsr |= 16;
+    if (v & 2)
+        fpsr |= 128;
+    WSR(S3_3_C4_C4_1, fpsr);
+    c->mxcsr = v & 0xFFC0;
+}
+
+static u32 mxcsr_read(void) {
+    u64 s = RSR(S3_3_C4_C4_1);
+    u32 v = c->mxcsr;
+    if (s & 1)
+        v |= 1;
+    if (s & 2)
+        v |= 4;
+    if (s & 4)
+        v |= 8;
+    if (s & 8)
+        v |= 16;
+    if (s & 16)
+        v |= 32;
+    if (s & 128)
+        v |= 2;
+    return v;
+}
+
+// Reads the flags as data for a helper; PF and AF stay in their lazy form.
+static inline u64 cur_nzcv(void) { return c->spsr & (0xFULL << 28); }
+#define NZCV_N (1ULL << 31)
+#define NZCV_Z (1ULL << 30)
+#define NZCV_C (1ULL << 29)
+#define NZCV_V (1ULL << 28)
+
+// Result flags from a value at a width: N, Z, PF. CF and OF supplied, AF as given.
+static void helper_flags(u64 r, u32 size, bool cf, bool of) {
+    u64 nz = 0;
+    u32 bits = size * 8;
+    u64 mask = bits == 64 ? ~0ULL : (1ULL << bits) - 1;
+    r &= mask;
+    if (r >> (bits - 1))
+        nz |= NZCV_N;
+    if (!r)
+        nz |= NZCV_Z;
+    if (!cf)
+        nz |= NZCV_C;
+    if (of)
+        nz |= NZCV_V;
+    c->x[R_S2] = nz;
+    c->x[R_S3] = r;
+    c->x[R_S4] = r; // AF is undefined for these operations; report 0
+}
+
+static void helper_keep_flags(void) {
+    c->x[R_S2] = cur_nzcv();
+    c->x[R_S3] = c->x[R_PF];
+    c->x[R_S4] = c->x[R_AF];
+}
+
+static void h_shift(void) {
+    u64 v = c->x[R_S0], cnt = c->x[R_S1], desc_ = c->x[R_S2];
+    u32 kind = desc_ & 7, size = (u32)(desc_ >> 8);
+    u32 bits = size * 8;
+    u64 mask = bits == 64 ? ~0ULL : (1ULL << bits) - 1;
+    cnt &= size == 8 ? 63 : 31;
+    v &= mask;
+    if (!cnt) {
+        helper_keep_flags();
+        c->x[R_S0] = v;
+        return;
+    }
+    u64 nz = cur_nzcv();
+    bool cf = !(nz & NZCV_C), of = nz & NZCV_V;
+    u64 r = v;
+    bool msb, setall = true;
+    switch (kind) {
+        case 4: // shl
+            r = cnt >= 64 ? 0 : (v << cnt) & mask;
+            cf = cnt <= bits ? (v >> (bits - cnt)) & 1 : 0;
+            of = ((r >> (bits - 1)) & 1) ^ cf;
+            break;
+        case 5: // shr
+            r = cnt >= bits ? 0 : v >> cnt;
+            cf = cnt <= bits ? (v >> (cnt - 1)) & 1 : 0;
+            of = (v >> (bits - 1)) & 1;
+            break;
+        case 7: { // sar
+            i64 s = (i64)(v << (64 - bits)) >> (64 - bits);
+            r = (u64)(cnt >= 64 ? s >> 63 : s >> cnt) & mask;
+            cf = cnt >= bits ? (u64)s >> 63 : (u64)(s >> (cnt - 1)) & 1;
+            of = 0;
+            break;
+        }
+        default: {
+            setall = false;
+            if (kind < 2) { // rol, ror
+                u32 k = cnt % bits;
+                r = k ? ((kind == 0 ? (v << k) | (v >> (bits - k)) : (v >> k) | (v << (bits - k))) & mask) : v;
+                msb = (r >> (bits - 1)) & 1;
+                cf = kind == 0 ? r & 1 : msb;
+                of = kind == 0 ? msb ^ cf : msb ^ ((r >> (bits - 2)) & 1);
+            } else { // rcl, rcr, modulo width + 1
+                u32 k = cnt % (bits + 1);
+                for (u32 i = 0; i < k; i++) {
+                    if (kind == 2) {
+                        bool out = (r >> (bits - 1)) & 1;
+                        r = ((r << 1) | cf) & mask;
+                        cf = out;
+                    } else {
+                        bool out = r & 1;
+                        r = (r >> 1) | ((u64)cf << (bits - 1));
+                        cf = out;
+                    }
+                }
+                msb = (r >> (bits - 1)) & 1;
+                of = kind == 2 ? msb ^ cf : msb ^ ((r >> (bits - 2)) & 1);
+            }
+        }
+    }
+    c->x[R_S0] = r;
+    if (setall)
+        helper_flags(r, size, cf, of);
+    else {
+        c->x[R_S2] = (nz & (NZCV_N | NZCV_Z)) | (cf ? 0 : NZCV_C) | (of ? NZCV_V : 0);
+        c->x[R_S3] = c->x[R_PF];
+        c->x[R_S4] = c->x[R_AF];
+    }
+}
+
+static void h_shd(void) {
+    u64 d = c->x[R_S0], s = c->x[R_S1], cnt = c->x[R_S2];
+    u32 size = (u32)c->x[R_S3] & 0xff;
+    bool right = c->x[R_S3] >> 8;
+    u32 bits = size * 8;
+    u64 mask = bits == 64 ? ~0ULL : (1ULL << bits) - 1;
+    cnt &= size == 8 ? 63 : 31;
+    d &= mask;
+    s &= mask;
+    if (!cnt) {
+        helper_keep_flags();
+        c->x[R_S0] = d;
+        return;
+    }
+    u64 r = 0;
+    bool cf = false;
+    if (size == 2 && cnt > 16) {
+        // Undefined in the manual. As hardware does: the rotation goes through a 48-bit composite.
+        u64 w = right ? (d | s << 16 | d << 32) : (s | d << 16 | s << 32);
+        r = right ? (w >> cnt) & 0xffff : (w >> (32 - cnt)) & 0xffff;
+        cf = right ? (w >> (cnt - 1)) & 1 : (w >> (48 - cnt)) & 1;
+    } else if (right) {
+        r = ((d >> cnt) | (s << (bits - cnt))) & mask;
+        cf = (d >> (cnt - 1)) & 1;
+    } else {
+        r = ((d << cnt) | (s >> (bits - cnt))) & mask;
+        cf = (d >> (bits - cnt)) & 1;
+    }
+    c->x[R_S0] = r;
+    helper_flags(r, size, cf, ((r ^ d) >> (bits - 1)) & 1);
+}
+
+// 128 by 64 unsigned division by shift-subtract. False on quotient overflow or zero divisor.
+static bool udiv128(u64 hi, u64 lo, u64 d, u64 *q, u64 *r) {
+    if (!d || hi >= d)
+        return false;
+    u64 rem = hi, quo = 0;
+    for (int i = 63; i >= 0; i--) {
+        bool top = rem >> 63;
+        rem = rem << 1 | ((lo >> i) & 1);
+        if (top || rem >= d) {
+            rem -= d;
+            quo |= 1ULL << i;
+        }
+    }
+    *q = quo;
+    *r = rem;
+    return true;
+}
+
+static void h_div(void) {
+    u64 lo = c->x[R_S0], hi = c->x[R_S1], d = c->x[R_S2];
+    u32 size = (u32)c->x[R_S3] & 0xff;
+    bool sign = c->x[R_S3] >> 8;
+    u64 here = rip_here(c->elr - 4);
+    u64 q = 0, r = 0;
+    bool ok;
+    if (size == 8) {
+        if (!sign)
+            ok = udiv128(hi, lo, d, &q, &r);
+        else {
+            bool nn = hi >> 63, nd = d >> 63;
+            u64 alo = lo, ahi = hi;
+            if (nn) {
+                alo = -lo;
+                ahi = ~hi + !lo;
+            }
+            u64 ad = nd ? -d : d;
+            ok = udiv128(ahi, alo, ad, &q, &r);
+            if (ok) {
+                if (nn != nd) {
+                    if (q > (1ULL << 63))
+                        ok = false;
+                    q = -q;
+                } else if (q >> 63)
+                    ok = false;
+                if (nn)
+                    r = -r;
+            }
+        }
+    } else {
+        // 8 and 16 bits: x16 holds ax or ax with x17 holding dx.
+        u64 n = size == 2 ? ((hi & 0xffff) << 16 | (lo & 0xffff)) : (lo & 0xffff);
+        u32 bits = size * 8;
+        u64 mask = (1ULL << bits) - 1;
+        d &= mask;
+        if (!d)
+            ok = false;
+        else if (!sign) {
+            q = n / d;
+            r = n % d;
+            ok = q <= mask;
+        } else {
+            i64 sn = size == 2 ? (i64)(int32_t)n : (i64)(int16_t)n;
+            i64 sd = (i64)(d << (64 - bits)) >> (64 - bits);
+            i64 sq = sn / sd, sr = sn % sd;
+            i64 lim = 1LL << (bits - 1);
+            ok = sq >= -lim && sq < lim;
+            q = (u64)sq & mask;
+            r = (u64)sr & mask;
+        }
+    }
+    if (!ok) {
+        deliver(0, 0, false, here, false);
+        return;
+    }
+    c->x[R_S0] = q;
+    c->x[R_S1] = r;
+}
+
+static void do_fx(bool save) {
+    static u8 area[512] __attribute__((aligned(16)));
+    u64 va = c->x[R_S0];
+    u64 here = rip_here(c->elr - 4);
+    if (save) {
+        memset(area, 0, 512);
+        *(u16 *)(area + 0) = 0x37F; // default x87 control: no x87 state exists here
+        u32 mx = mxcsr_read();
+        *(u32 *)(area + 24) = mx;
+        *(u32 *)(area + 28) = 0xFFFF;
+        mon_fp_save(area + 160);
+        if (!guest_write(va, area, 512, c->cpl == 3 ? 4 : 0))
+            stop(STOP_UNSUPPORTED, here, 12, va, 0);
+    } else {
+        if (!guest_read(va, area, 512, c->cpl == 3 ? 4 : 0))
+            stop(STOP_UNSUPPORTED, here, 12, va, 0);
+        mon_fp_restore(area + 160);
+        mxcsr_apply(*(u32 *)(area + 24));
+    }
+}
+
+static void do_cli_sti(bool sti) {
+    u32 iopl = (u32)(c->rflags_sys >> 12) & 3;
+    if (c->cpl > iopl) {
+        x86_gp0();
+        return;
+    }
+    if (sti) {
+        if (!(c->rflags_sys & RF_IF)) {
+            c->rflags_sys |= RF_IF;
+            c->irq_shadow_rip = next_rip_lit();
+        }
+    } else
+        c->rflags_sys &= ~RF_IF;
+}
+
+void mon_sync(void) {
+    u32 ec = (u32)(c->esr >> 26);
+    if (ec == 0x24) {
+        handle_data_abort(true);
+    } else if (ec == 0x15) {
+        u32 n = (u32)c->esr & 0xffff;
+        c->stat_svc[n & 127]++;
+        switch (n) {
+            case SVC_DIRECT:
+            case SVC_JCC:
+            case SVC_CALL:
+            case SVC_SINGLE_DONE: {
+                // The literal target sits right after the svc. The stub word (elr-4) is what gets patched.
+                u64 stub = c->elr - 4;
+                u64 target = *lit(c->elr);
+                u64 site = stub;
+                if (n == SVC_CALL)
+                    site = c->x[R_LR] - 4;
+                u64 arm = translate_here(target, site, n, false);
+                c->elr = arm;
+                break;
+            }
+            case SVC_LOOKUP_MISS: {
+                u64 target = c->x[R_S0];
+                event_delivered = false;
+                u64 arm = translate_here(target, 0, SVC_LOOKUP_MISS, false);
+                if (event_delivered) { // the target did not fetch: a fault handler runs instead
+                    c->elr = arm;
+                    break;
+                }
+                c->x[R_S2] = arm;
+                c->elr = c->x[R_LR];
+                break;
+            }
+            case SVC_DEAD: {
+                // Entry of an invalidated block: find it and go to a fresh translation.
+                u64 entry = c->elr - 4;
+                u64 rip = rip_here(entry);
+                u64 arm = translate_here(rip, entry, SVC_DIRECT, false);
+                c->elr = arm;
+                break;
+            }
+            case SVC_STOP:
+                stop(STOP_UNTRANSLATED, rip_here(c->elr - 4), *(u32 *)c->elr, 0, 0);
+            case SVC_SYSCALL:
+                do_syscall();
+                break;
+            case SVC_SYSRET:
+                do_sysret();
+                break;
+            case SVC_IRET:
+                do_iret();
+                break;
+            case SVC_INT:
+                deliver((u32)c->x[R_S1], 0, false, next_rip_lit(), true);
+                break;
+            case SVC_INT3:
+                deliver(3, 0, false, next_rip_lit(), true);
+                break;
+            case SVC_UD:
+                x86_ud();
+                break;
+            case SVC_DE:
+                deliver(0, 0, false, rip_here(c->elr - 4), false);
+                break;
+            case SVC_GP0:
+                x86_gp0();
+                break;
+            case SVC_HLT: {
+                if (!c->model_kernel) {
+                    stop(STOP_GUEST_HALT, rip_here(c->elr - 4), c->x[0], 0, 0);
+                }
+                u64 next = next_rip_lit();
+                c->halted = !(c->irq_pending && (c->rflags_sys & RF_IF));
+                while (c->halted) {
+                    c->req_a[0] = next;
+                    hostcall(HC_HLT); // returns when an interrupt may be pending
+                    if (c->req_r[0] != ~0ULL) {
+                        c->irq_pending = (u32)c->req_r[0] + 1;
+                        if (c->rflags_sys & RF_IF)
+                            c->halted = 0;
+                    }
+                    if (c->irq_pending && (c->rflags_sys & RF_IF))
+                        c->halted = 0;
+                    else if (c->req_r[1])
+                        stop(STOP_GUEST_HALT, next, c->x[0], 0, 0);
+                }
+                c->elr = translate_here(next, 0, 0, false);
+                break;
+            }
+            case SVC_CPUID:
+                c->req_a[0] = c->x[0] & 0xffffffff;
+                c->req_a[1] = c->x[1] & 0xffffffff;
+                hostcall(HC_CPUID);
+                c->x[0] = c->req_r[0];
+                c->x[3] = c->req_r[1];
+                c->x[1] = c->req_r[2];
+                c->x[2] = c->req_r[3];
+                break;
+            case SVC_RDTSC:
+            case SVC_RDTSCP: {
+                u64 t = tsc_now();
+                c->x[0] = (u32)t;
+                c->x[2] = t >> 32;
+                if (n == SVC_RDTSCP)
+                    c->x[1] = 0;
+                break;
+            }
+            case SVC_RDMSR: {
+                u64 v;
+                if (!rdmsr((u32)c->x[1], &v)) {
+                    x86_gp0();
+                    break;
+                }
+                c->x[0] = (u32)v;
+                c->x[2] = v >> 32;
+                break;
+            }
+            case SVC_WRMSR:
+                if (!wrmsr((u32)c->x[1], (u64)(u32)c->x[2] << 32 | (u32)c->x[0]))
+                    x86_gp0();
+                break;
+            case SVC_CLI:
+                do_cli_sti(false);
+                break;
+            case SVC_STI:
+                do_cli_sti(true);
+                break;
+            case SVC_POPF:
+                do_popf();
+                break;
+            case SVC_MOV_CR_READ:
+                switch (c->x[R_S0]) {
+                    case 0:
+                        c->x[R_S0] = c->cr0;
+                        break;
+                    case 2:
+                        c->x[R_S0] = c->cr2;
+                        break;
+                    case 3:
+                        c->x[R_S0] = c->cr3;
+                        break;
+                    case 4:
+                        c->x[R_S0] = c->cr4;
+                        break;
+                    default:
+                        c->x[R_S0] = 0;
+                }
+                break;
+            case SVC_MOV_CR_WRITE:
+                do_mov_cr_write();
+                break;
+            case SVC_INVLPG:
+            case SVC_INVPCID:
+            case SVC_WBINVD:
+                break; // the shadow is always in step: see the CR3 note
+            case SVC_LGDT:
+                c->gdtr_base = c->x[R_S0];
+                c->gdtr_limit = (u32)c->x[R_S1];
+                break;
+            case SVC_LIDT:
+                c->idtr_base = c->x[R_S0];
+                c->idtr_limit = (u32)c->x[R_S1];
+                break;
+            case SVC_SGDT:
+                c->x[R_S0] = c->gdtr_base;
+                c->x[R_S1] = c->gdtr_limit;
+                break;
+            case SVC_SIDT:
+                c->x[R_S0] = c->idtr_base;
+                c->x[R_S1] = c->idtr_limit;
+                break;
+            case SVC_LTR: {
+                u64 d[2];
+                u32 sel = (u32)c->x[R_S0] & 0xffff;
+                u32 idx = sel & ~7u;
+                if (idx + 15 > c->gdtr_limit || !guest_read(c->gdtr_base + idx, d, 16, 0)) {
+                    raise_gp(sel & ~3u, rip_here(c->elr - 4));
+                    break;
+                }
+                c->tr = (u16)sel;
+                c->tss_base = ((d[0] >> 16) & 0xffffff) | ((d[0] >> 32) & 0xff000000ULL) | (d[1] << 32);
+                c->tss_limit = (u32)((d[0] & 0xffff) | ((d[0] >> 32) & 0xf0000));
+                break;
+            }
+            case SVC_STR:
+                c->x[R_S0] = c->tr;
+                break;
+            case SVC_LLDT:
+                c->ldtr = (u16)c->x[R_S0];
+                break;
+            case SVC_SLDT:
+                c->x[R_S0] = c->ldtr;
+                break;
+            case SVC_MOV_SEG_READ:
+                c->x[R_S0] = c->seg_sel[c->x[R_S0] & 7];
+                break;
+            case SVC_MOV_SEG_WRITE: {
+                u32 sr = (u32)c->x[R_S0] & 7;
+                u32 sel = (u32)c->x[R_S1] & 0xffff;
+                if (sr == 1) {
+                    x86_ud();
+                    break;
+                }
+                // Long mode ignores bases and limits on es, ds, ss. Loading fs or gs by selector sets the base from the
+                // descriptor: nothing in this model makes that non-zero, so non-null ones are checked and stop if not flat.
+                if ((sr == 4 || sr == 5) && (sel & ~3u)) {
+                    u64 d;
+                    if (!gdt_read(sel, &d)) {
+                        raise_gp(sel & ~3u, rip_here(c->elr - 4));
+                        break;
+                    }
+                    if ((d >> 16 & 0xffffff) || (d >> 56))
+                        stop(STOP_UNSUPPORTED, rip_here(c->elr - 4), 13, sel, d); // non-flat fs or gs
+                    c->x[sr == 4 ? R_FS : R_GS] = 0;
+                }
+                c->seg_sel[sr] = (u16)sel;
+                break;
+            }
+            case SVC_IN:
+            case SVC_OUT: {
+                u32 iopl = (u32)(c->rflags_sys >> 12) & 3;
+                if (c->cpl > iopl) {
+                    x86_gp0();
+                    break;
+                }
+                c->req_a[0] = c->x[R_S0];
+                c->req_a[1] = c->x[R_S1];
+                c->req_a[2] = n == SVC_OUT;
+                c->req_a[3] = c->x[R_S2];
+                hostcall(HC_PORT);
+                if (n == SVC_IN)
+                    c->x[R_S0] = c->req_r[0];
+                break;
+            }
+            case SVC_LDMXCSR: {
+                u32 v = (u32)c->x[R_S0];
+                if (v & 0xFFFF0000u) {
+                    x86_gp0();
+                    break;
+                }
+                if ((v & 0x1F80) != 0x1F80)
+                    stop(STOP_UNSUPPORTED, rip_here(c->elr - 4), 14, v, 0); // unmasked FP exceptions cannot trap here
+                mxcsr_apply(v);
+                break;
+            }
+            case SVC_STMXCSR:
+                c->x[R_S0] = mxcsr_read();
+                break;
+            case SVC_FXSAVE:
+                do_fx(true);
+                break;
+            case SVC_FXRSTOR:
+                do_fx(false);
+                break;
+            case SVC_H_SHIFT:
+                h_shift();
+                break;
+            case SVC_H_SHD:
+                h_shd();
+                break;
+            case SVC_H_DIV:
+                h_div();
+                break;
+            default:
+                stop(STOP_UNSUPPORTED, 0, 15, n, c->elr);
+        }
+    } else if (ec == 0x32) { // software step
+        if (pt_step_slot)
+            shadow_write_finish();
+    } else if (ec == 0x20 || ec == 0x22 || ec == 0x26) {
+        stop(STOP_MONITOR_FAULT, 0, c->esr, c->far, c->elr); // translated code cannot fetch or align wrong: an engine bug
+    } else {
+        stop(STOP_MONITOR_FAULT, 0, c->esr, c->far, c->elr);
+    }
+    exit_check();
+}
+
+void mon_irq(void) {
+    // The host raised the virtual IRQ line. It clears the line and tells us the vector.
+    c->req_a[0] = c->elr;
+    hostcall(HC_IRQ);
+    if (c->req_r[0] != ~0ULL)
+        c->irq_pending = (u32)c->req_r[0] + 1;
+    exit_check();
+}
+
+void mon_fiq(void) { stop(STOP_MONITOR_FAULT, 0, 0, 0, c->elr); }
+
+// Set by the host once: runs first, on the initial entry.
+void mon_init(void) {
+    c->irq_shadow_rip = ~0ULL;
+    u64 *desc_hole = (u64 *)PRIV(OFF_MON_DATA + (1ULL << 20));
+    hole_entry_priv = desc_hole[0];
+    hole_entry_ram = desc_hole[1];
+    View *v = view_find(cr3_key(c->cr3), c->cpl);
+    c->view = (u32)(v - views);
+    c->x[R_RS] = v->rs_saved;
+    c->rs_top = v->rs_top;
+    c->x[R_HASH] = v->hash_va;
+    c->x[R_CTX] = (u64)c;
+    WSR(ttbr0_el1, v->ttbr0);
+    WSR(ttbr1_el1, v->ttbr1);
+    __asm__ volatile("isb");
+    mxcsr_apply(0x1F80);
+    u64 entry = c->req_a[0];
+    c->elr = translate_here(entry, 0, 0, false);
+    exit_check();
+    mon_enter_guest();
+}
+
+// Whole-pool flush: the running x86 instruction restarts after everything is rebuilt. Fault paths are precise, so this is safe.
+static void flush_everything_and_retry(void) {
+    u64 pc = c->elr;
+    bool e, f;
+    u64 rip = rip_of_pc(pc, &e, &f);
+    if (!f)
+        stop(STOP_SHADOW_FULL, 0, 1, pc, 0);
+    tlbi_all();
+    memset(mirror_head, 0, (c->ram_size >> 12) * sizeof(u32));
+    memset(rmap_head, 0, (c->ram_size >> 12) * sizeof(u32));
+    memset(page_info, 0, c->ram_size >> 12);
+    rmap_next = 1;
+    rmap_free = 0;
+    pool_free_head = 0;
+    pool_next = 0;
+    u32 cpl = c->cpl;
+    u64 key = cr3_key(c->cr3);
+    view_count = 0;
+    hostcall(HC_FLUSH_VIEWS);
+    View *v = view_find(key, cpl);
+    c->view = (u32)(v - views);
+    c->x[R_RS] = v->rs_saved;
+    c->rs_top = v->rs_top;
+    c->x[R_HASH] = v->hash_va;
+    WSR(ttbr0_el1, v->ttbr0);
+    WSR(ttbr1_el1, v->ttbr1);
+    __asm__ volatile("isb");
+    c->elr = translate_here(rip, 0, 0, false);
+    exit_check();
+    mon_enter_guest();
+    __builtin_unreachable();
+}
+
+// Unused parameter quiets for a future use.
+void mon_unused(void) { sw_set_x86_flags_no_change(); }
