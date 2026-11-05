@@ -2610,7 +2610,7 @@ void mon_sync(void) {
                 stop(STOP_UNSUPPORTED, 0, 15, n, c->elr);
         }
     } else if (ec == 0x07) { // SIMD with CR0.TS set
-        if (in_rep_stub(c->elr)) { // no x86 FP here, only a bulk copy: on with the plain loop at the call site, as for a device
+        if (in_rep_stub(c->elr)) { // no x86 FP here, only rep stos's stub, which hybrid mode does not use: on with the plain loop at the call site
             c->elr = c->x[R_LR];
         } else {
             c->stat_nm++;

@@ -47,6 +47,7 @@ final class HybridHarness {
         case 7:
             // Every frame of low RAM, far more than the ring holds. Few are marked, so write far more notes than that: all of the kernel image.
             for _ in 0..<600 { engine_note_write(handle, 1 << 20, 16 << 20) }
+        case 12: failed = "rep movsb under CR0.TS took \(mailbox(2)) ticks, against \(mailbox(1)) without"
         case 10: timerOn = true
         case 11: timerOn = false
         case 9:

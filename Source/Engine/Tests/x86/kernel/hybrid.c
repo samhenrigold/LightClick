@@ -839,6 +839,39 @@ static void test_stale_table(u64 root) {
     CHECK(PHYS(table)[511] == 499 + 511);
 }
 
+static u64 tsc(void) {
+    u32 lo, hi;
+    __asm__ volatile("lfence\n rdtsc" : "=a"(lo), "=d"(hi));
+    return (u64)hi << 32 | lo;
+}
+
+static u64 copy_megabyte(void) {
+    u64 count = 1 << 20, t0 = tsc();
+    volatile u8 *s = (volatile u8 *)PHYS(0x20000000), *d = (volatile u8 *)PHYS(0x21000000);
+    __asm__ volatile("cld\n rep movsb" : "+S"(s), "+D"(d), "+c"(count) : : "memory");
+    return tsc() - t0;
+}
+
+// A kernel or a program that copies with TS set, as it is after a context switch, and nothing to clear it: no x86 SIMD
+// ran, so no #NM. Costing a trap per byte made one lc-bench test look hung.
+static void test_rep_speed_under_ts(void) {
+    for (int i = 0; i < 1 << 20; i += 4096)
+        *(volatile u8 *)((u64)PHYS(0x20000000) + (u64)i) = (u8)(i >> 12);
+    copy_megabyte();
+    u64 plain = copy_megabyte(), cr0, nm = nm_count;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 8));
+    u64 under_ts = copy_megabyte();
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 & ~8ULL));
+    CHECK(nm_count == nm);
+    CHECK(*(volatile u8 *)((u64)PHYS(0x21000000) + 4096 * 200) == 200);
+    if (under_ts >= plain * 200) {
+        MAILBOX[1] = plain;
+        MAILBOX[2] = under_ts;
+        command(12);
+    }
+}
+
 // A dead process: the kernel frees its tables and poisons them while its view still holds translated code. Nothing may
 // walk those tables as though they meant something.
 static void test_poisoned_tables(u64 root) {
@@ -925,6 +958,7 @@ void kmain(void) {
     test_mmx();
     test_stale_table(root);
     test_poisoned_tables(root);
+    test_rep_speed_under_ts();
     test_process_log(root);
     test_view_churn(root);
     CHECK(!bad_vector);

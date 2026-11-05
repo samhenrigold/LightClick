@@ -235,8 +235,9 @@ _stub_sahf:
     ret
     .org _stub_base + 0x200
 // rep movs, 32 bytes at a time while the copy runs forward and cannot see its own output inside a chunk. x17: elements per chunk.
-// Registers move only after a chunk is stored, so a fault restarts the x86 instruction with exact state, and redoing a chunk is harmless.
-// Leaves the tail, and anything else, to the plain loop at the call site. Keeps NZCV. Clobbers x16, x20, v24, v25.
+// Registers move only after a chunk is stored, so a fault restarts the x86 instruction with exact state, and redoing a chunk is harmless
+// because source and destination are at least a chunk apart both ways. Leaves the tail, and anything else, to the plain loop at the call
+// site. No NEON: under CR0.TS it would trap for every element, and nothing in a plain copy would clear TS. Keeps NZCV. Clobbers x16, x20, x22, x23.
     .globl _stub_rep_movs
 _stub_rep_movs:
     ldr x16, [x18, #CTX_DF]
@@ -244,12 +245,17 @@ _stub_rep_movs:
     sub x16, x7, x6
     lsr x20, x16, #5
     cbz x20, 2f
+    sub x16, x6, x7
+    lsr x20, x16, #5
+    cbz x20, 2f
     b 1f
     .org _stub_base + 0x240 // the loop head is an x86 boundary: the monitor delivers interrupts here
 1:  sub x20, x1, x17
     tbnz x20, #63, 2f
-    ldp q24, q25, [x6]
-    stp q24, q25, [x7]
+    ldp x22, x23, [x6]
+    stp x22, x23, [x7]
+    ldp x22, x23, [x6, #16]
+    stp x22, x23, [x7, #16]
     add x6, x6, #32
     add x7, x7, #32
     mov x1, x20
