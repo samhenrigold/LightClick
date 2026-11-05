@@ -154,8 +154,18 @@ finally:
     time.sleep(6)
     if process.poll() is None:
         process.kill()
-    subprocess.run(['pkill', '-f', str(real)], check=False)  # the clone's own QEMU, by its unique path
-    time.sleep(1)
+    # Everything left that runs from this clone: its QEMU, and any helper QEMU spawned.
+    deadline = time.time()+20
+    while time.time() < deadline:
+        listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+        leftovers = [int(line.split()[0]) for line in listing.splitlines() if str(work) in line and 'guest-bench' not in line]
+        if not leftovers:
+            break
+        for pid in leftovers:
+            os.kill(pid, signal.SIGKILL if time.time() > deadline-15 else signal.SIGTERM)
+        time.sleep(1)
+    else:
+        print(f'WARNING: processes from {work} are still running')
     shutil.rmtree(work, ignore_errors=True)
     # CFFIXED_USER_HOME doesn't redirect preferences: remove what this clone's paths left in them.
     listing = subprocess.run(['defaults', 'read', 'gold.samhenri.LightClick'], capture_output=True, text=True).stdout
