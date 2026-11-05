@@ -2018,6 +2018,77 @@ static const TCGOutOpQemuLdSt2 outop_qemu_st2 = {
     .out = tgen_qemu_st2,
 };
 
+/*
+ * FP scratch: V31 is the existing vector temp and V30 is reserved for this op.
+ * Inputs and outputs stay in GPRs because the guards around it are integer code.
+ */
+static void tgen_aa64_fp(TCGContext *s, TCGReg a0, TCGReg a1, TCGReg a2,
+                         unsigned kind)
+{
+    /* Move in from a GPR, or out to one: S<->W and D<->X. */
+    enum {
+        FMOV_S_W = 0x1e270000, FMOV_W_S = 0x1e260000,
+        FMOV_D_X = 0x9e670000, FMOV_X_D = 0x9e660000,
+        V31 = TCG_REG_V31 - TCG_REG_V0, V30 = TCG_REG_V30 - TCG_REG_V0,
+    };
+    enum { BINARY, UNARY, FROM_INT, TO_INT };
+    static const struct {
+        uint32_t insn;
+        uint8_t shape, in_double, out_double;
+    } table[] = {
+        [TCG_AA64_FADD_S] = { 0x1e202800, BINARY, 0, 0 },
+        [TCG_AA64_FADD_D] = { 0x1e602800, BINARY, 1, 1 },
+        [TCG_AA64_FSUB_S] = { 0x1e203800, BINARY, 0, 0 },
+        [TCG_AA64_FSUB_D] = { 0x1e603800, BINARY, 1, 1 },
+        [TCG_AA64_FMUL_S] = { 0x1e200800, BINARY, 0, 0 },
+        [TCG_AA64_FMUL_D] = { 0x1e600800, BINARY, 1, 1 },
+        [TCG_AA64_FDIV_S] = { 0x1e201800, BINARY, 0, 0 },
+        [TCG_AA64_FDIV_D] = { 0x1e601800, BINARY, 1, 1 },
+        [TCG_AA64_FSQRT_S] = { 0x1e21c000, UNARY, 0, 0 },
+        [TCG_AA64_FSQRT_D] = { 0x1e61c000, UNARY, 1, 1 },
+        [TCG_AA64_FCVT_S_FROM_D] = { 0x1e624000, UNARY, 1, 0 },
+        [TCG_AA64_FCVT_D_FROM_S] = { 0x1e22c000, UNARY, 0, 1 },
+        [TCG_AA64_SCVTF_S_FROM_W] = { 0x1e220000, FROM_INT, 0, 0 },
+        [TCG_AA64_SCVTF_S_FROM_X] = { 0x9e220000, FROM_INT, 0, 0 },
+        [TCG_AA64_SCVTF_D_FROM_W] = { 0x1e620000, FROM_INT, 0, 1 },
+        [TCG_AA64_SCVTF_D_FROM_X] = { 0x9e620000, FROM_INT, 0, 1 },
+        [TCG_AA64_FCVTZS_W_FROM_S] = { 0x1e380000, TO_INT, 0, 0 },
+        [TCG_AA64_FCVTZS_X_FROM_S] = { 0x9e380000, TO_INT, 0, 0 },
+        [TCG_AA64_FCVTZS_W_FROM_D] = { 0x1e780000, TO_INT, 1, 0 },
+        [TCG_AA64_FCVTZS_X_FROM_D] = { 0x9e780000, TO_INT, 1, 0 },
+    };
+    uint32_t insn = table[kind].insn;
+    uint32_t in = table[kind].in_double ? FMOV_D_X : FMOV_S_W;
+    uint32_t out = table[kind].out_double ? FMOV_X_D : FMOV_W_S;
+
+    switch (table[kind].shape) {
+    case BINARY:
+        tcg_out32(s, in | a1 << 5 | V31);
+        tcg_out32(s, in | a2 << 5 | V30);
+        tcg_out32(s, insn | V30 << 16 | V31 << 5 | V31);
+        tcg_out32(s, out | V31 << 5 | a0);
+        break;
+    case UNARY:
+        tcg_out32(s, in | a1 << 5 | V31);
+        tcg_out32(s, insn | V31 << 5 | V31);
+        tcg_out32(s, out | V31 << 5 | a0);
+        break;
+    case FROM_INT:
+        tcg_out32(s, insn | a1 << 5 | V31);
+        tcg_out32(s, out | V31 << 5 | a0);
+        break;
+    default:
+        tcg_out32(s, in | a1 << 5 | V31);
+        tcg_out32(s, insn | V31 << 5 | a0);
+        break;
+    }
+}
+
+static const TCGOutOpAa64Fp outop_aa64_fp = {
+    .base.static_constraint = C_O1_I2(r, r, r),
+    .out = tgen_aa64_fp,
+};
+
 static const tcg_insn_unit *tb_ret_addr;
 
 static void tcg_out_exit_tb(TCGContext *s, uintptr_t a0)
@@ -3641,6 +3712,7 @@ static void tcg_target_init(TCGContext *s)
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_TMP1);
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_TMP2);
     tcg_regset_set_reg(s->reserved_regs, TCG_VEC_TMP0);
+    tcg_regset_set_reg(s->reserved_regs, TCG_REG_V30); /* tgen_aa64_fp */
 }
 
 /* Saving pairs: (X19, X20) .. (X27, X28), (X29(fp), X30(lr)).  */

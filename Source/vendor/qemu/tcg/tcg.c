@@ -1096,6 +1096,13 @@ typedef struct TCGOutOpUnary {
     void (*out_rr)(TCGContext *s, TCGType type, TCGReg a0, TCGReg a1);
 } TCGOutOpUnary;
 
+#if defined(__aarch64__)
+typedef struct TCGOutOpAa64Fp {
+    TCGOutOp base;
+    void (*out)(TCGContext *s, TCGReg a0, TCGReg a1, TCGReg a2, unsigned kind);
+} TCGOutOpAa64Fp;
+#endif
+
 typedef struct TCGOutOpSetcond {
     TCGOutOp base;
     void (*out_rrr)(TCGContext *s, TCGType type, TCGCond cond,
@@ -1183,6 +1190,9 @@ static const TCGOutOpLoad outop_ld = {
 /* Register allocation descriptions for every TCGOpcode. */
 static const TCGOutOp * const all_outop[NB_OPS] = {
     OUTOP(INDEX_op_add, TCGOutOpBinary, outop_add),
+#if defined(__aarch64__)
+    OUTOP(INDEX_op_aa64_fp, TCGOutOpAa64Fp, outop_aa64_fp),
+#endif
     /* addc1o is implemented with set_carry + addcio */
     OUTOP(INDEX_op_addc1o, TCGOutOpBinary, outop_addcio),
     OUTOP(INDEX_op_addci, TCGOutOpAddSubCarry, outop_addci),
@@ -5858,6 +5868,17 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
     case INDEX_op_pvg_ret:
         tcg_out_pvg_ret(s, new_args[0]);
         break;
+
+#if defined(__aarch64__)
+    case INDEX_op_aa64_fp:
+        {
+            const TCGOutOpAa64Fp *out =
+                container_of(all_outop[op->opc], TCGOutOpAa64Fp, base);
+
+            out->out(s, new_args[0], new_args[1], new_args[2], new_args[3]);
+        }
+        break;
+#endif
 
     default:
         tcg_debug_assert(def->flags & TCG_OPF_VECTOR);

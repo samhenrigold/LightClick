@@ -30,6 +30,7 @@ parser.add_argument('--boot-wait', type=int, default=45)
 parser.add_argument('--repeat', type=int, default=1, help='benchmark runs in the same boot; results are the fastest of each test')
 parser.add_argument('--events', action='store_true', help='record guest event counts in Build/bench/<tag>.events')
 parser.add_argument('--workload', help='run this in the guest with /bin/sh instead of lc-bench')
+parser.add_argument('--program', help='stage this local x86 program and run it once, saving its output as Build/bench/<tag>.txt')
 parser.add_argument('--sample', type=int, help='sample QEMU for this many seconds during the workload, into Build/bench/<tag>.sample')
 args = parser.parse_args()
 bench = source/'Build/bench/lc-bench'
@@ -114,7 +115,7 @@ try:
         print(f'workload exit {result.get("ExitCode")}, event seconds {lines} to {after}')
         print(str(result.get('Stderr'))[:300])
     else:
-        shutil.copyfile(bench, channel/'Transfer.bin')
+        shutil.copyfile(args.program or bench, channel/'Transfer.bin')
         start = time.time()
         staged = request({'Action': 'stage-probe'}, 900)
         if 'Error' in staged:
@@ -122,6 +123,11 @@ try:
         print(f'staged in {time.time()-start:.0f}s', flush=True)
         program = staged['Transfer']['Directory']+'/Transfer.bin'
         request({'Executable': '/bin/chmod', 'Arguments': ['0755', program]}, 120)
+        if args.program:
+            result = request({'Executable': program, 'Arguments': []}, 900)
+            (source/'Build/bench'/f'{args.tag}.txt').write_text(result.get('Stdout', ''))
+            print(f'program exit {result.get("ExitCode")} {str(result.get("Stderr"))[:200]}')
+            raise SystemExit(0)
         best = {}
         order = []
         for _ in range(args.repeat):
