@@ -14,3 +14,4 @@ __pycache__/
 xcuserdata/
 DerivedData/
 Source/Build/
+.claude/worktrees/
