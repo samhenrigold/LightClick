@@ -922,12 +922,12 @@ static int shared_row(const Walk *w, const View *v, u64 rip) {
     for (u32 i = 0; i < 8; i++) {
         if (shared_seen[i].directory != directory)
             continue;
-        for (u32 d = 0; d < c->shared_dir_count; d++)
-            if (c->shared_dirs[d] == directory)
+        for (u32 d = 0; d < c0->shared_dir_count; d++)
+            if (c0->shared_dirs[d] == directory)
                 return (int)i;
-        if (shared_seen[i].first_cr3 == v->cr3 || c->shared_dir_count == SHARED_USER_DIRS)
+        if (shared_seen[i].first_cr3 == v->cr3 || c0->shared_dir_count == SHARED_USER_DIRS)
             return -1;
-        c->shared_dirs[c->shared_dir_count++] = directory;
+        c0->shared_dirs[c0->shared_dir_count++] = directory;
         View *first = &views[shared_seen[i].first_view];
         shared_seen[i].keeper = first->valid && first->cr3 == shared_seen[i].first_cr3 ? shared_seen[i].first_view : (u32)(v - views);
         views[shared_seen[i].keeper].keeper = 1;
@@ -935,8 +935,8 @@ static int shared_row(const Walk *w, const View *v, u64 rip) {
     }
     for (u32 n = 0; n < 8; n++, shared_seen_next = (shared_seen_next + 1) % 8) { // a row in use as shared stays
         bool in_use = false;
-        for (u32 d = 0; d < c->shared_dir_count; d++)
-            in_use = in_use || c->shared_dirs[d] == shared_seen[shared_seen_next].directory;
+        for (u32 d = 0; d < c0->shared_dir_count; d++)
+            in_use = in_use || c0->shared_dirs[d] == shared_seen[shared_seen_next].directory;
         if (!in_use)
             break;
     }
@@ -991,7 +991,9 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
     }
     if (c->hybrid && !is_ram(w.gpa))
         stop(STOP_FALLBACK, rip, FB_FETCH_NOT_RAM, w.gpa, 0);
+    mon_lock();
     int shared = single ? -1 : shared_row(&w, v, rip);
+    mon_unlock();
     c->req_a[0] = c->view;
     c->req_a[1] = rip;
     c->req_a[2] = site;
@@ -1051,9 +1053,7 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
         shared_mark(shared, rip, v);
         if (c->req_r[3])
             shared_mark(shared, (rip & ~0xfffULL) + 4096, v);
-        return c->req_r[0];
-    }
-    if (c->share_user && c->cpl == 0 && (rip >> 47)) {
+    } else if (c->share_user && c->cpl == 0 && (rip >> 47)) {
         // As for a shared user domain: only the keeper's marks kill, as this view may well be a process about to exit, which would take the kernel's translations with it.
         shadow_slot(v, rip, &w, 0, 0);
         v->sees_shared = 1;
@@ -1065,19 +1065,19 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
             if (w2.ok)
                 *shadow_slot(keeper, next, &w2, 0, 0) |= PTE_X_MARK;
         }
-        return c->req_r[0];
-    }
-    *shadow_slot(v, rip, &w, 0, 0) |= PTE_X_MARK;
-    if (c->cpl == 0 && (rip >> 47)) { // shared with other views: the domain's keeper must see writes to this mapping too
-        View *keeper = domain_keeper(*w.chain[3] & X_ADDR, v);
-        if (keeper != v)
-            *shadow_slot(keeper, rip, &w, 0, 0) |= PTE_X_MARK;
-    }
-    if (c->req_r[3]) { // a straddling instruction: a change to the next page's mapping must invalidate this block as well
-        u64 next = (rip & ~0xfffULL) + 4096;
-        Walk w2 = x86_walk(c->cr3, next, 0, false);
-        if (w2.ok)
-            *shadow_slot(v, next, &w2, 0, 0) |= PTE_X_MARK;
+    } else {
+        *shadow_slot(v, rip, &w, 0, 0) |= PTE_X_MARK;
+        if (c->cpl == 0 && (rip >> 47)) { // shared with other views: the domain's keeper must see writes to this mapping too
+            View *keeper = domain_keeper(*w.chain[3] & X_ADDR, v);
+            if (keeper != v)
+                *shadow_slot(keeper, rip, &w, 0, 0) |= PTE_X_MARK;
+        }
+        if (c->req_r[3]) { // a straddling instruction: a change to the next page's mapping must invalidate this block as well
+            u64 next = (rip & ~0xfffULL) + 4096;
+            Walk w2 = x86_walk(c->cr3, next, 0, false);
+            if (w2.ok)
+                *shadow_slot(v, next, &w2, 0, 0) |= PTE_X_MARK;
+        }
     }
     if (smp) {
         // The host read code and tables with nothing protecting them. From here a store or remap finds this block, and anything earlier shows now: look again, and if
@@ -1966,24 +1966,32 @@ static void note_apply(u32 fr) {
     }
 }
 
+// One ring for the VM, in the first context, and any vCPU may drain it. A note is only looked at on the way out of the monitor, and what reaches the monitor first is not
+// a guest that has acted on the write: that takes an interrupt or a serialising instruction, which come through here.
 static void notes_drain(void) {
-    // Overflow: rescan. The write came before the note, so a producer still storing its slot is covered, and its stale slot is only a spare invalidation.
-    if (__atomic_load_n(&c->note_overflow, __ATOMIC_ACQUIRE)) {
-        __atomic_store_n(&c->note_overflow, 0, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&c0->note_head, __ATOMIC_ACQUIRE) == __atomic_load_n(&c0->note_tail, __ATOMIC_ACQUIRE) &&
+        !__atomic_load_n(&c0->note_overflow, __ATOMIC_ACQUIRE))
+        return;
+    mon_lock();
+    // Overflow: rescan. The write came before the note, so a producer still storing its slot is covered, and its note, seen later, costs nothing.
+    if (__atomic_load_n(&c0->note_overflow, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&c0->note_overflow, 0, __ATOMIC_RELEASE);
         for (u32 fr = 0; fr < c->ram_size >> 12; fr++)
             if (page_info[fr] & (PI_CODE | PI_PT))
                 note_apply(fr);
-        c->note_tail = __atomic_load_n(&c->note_head, __ATOMIC_ACQUIRE);
+        __atomic_store_n(&c0->note_tail, __atomic_load_n(&c0->note_head, __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
+        mon_unlock();
         return;
     }
-    u32 head = __atomic_load_n(&c->note_head, __ATOMIC_ACQUIRE);
-    while (c->note_tail != head) {
-        u32 v = __atomic_exchange_n(&c->note_ring[c->note_tail % 256], 0, __ATOMIC_ACQ_REL);
+    u32 head = __atomic_load_n(&c0->note_head, __ATOMIC_ACQUIRE);
+    while (c0->note_tail != head) {
+        u32 v = __atomic_exchange_n(&c0->note_ring[c0->note_tail % 256], 0, __ATOMIC_ACQ_REL);
         if (!v)
             break; // reserved, not stored yet: its kick comes after the store
         note_apply(v - 1);
-        c->note_tail++;
+        __atomic_store_n(&c0->note_tail, c0->note_tail + 1, __ATOMIC_RELEASE);
     }
+    mon_unlock();
 }
 
 static void fp_trap_sync(void);
@@ -1999,6 +2007,11 @@ static void host_resync(void) {
     view_activate(view_find(cr3_key(c->cr3), view_mode()));
     c->irq_shadow_rip = ~0ULL;
     deliver_depth = 0;
+    if (c->tr_flushed) { // the code cache was reset while this vCPU was out: its return stacks hold old addresses
+        c->tr_flushed = 0;
+        code_cache_reset = true;
+        reset_all_return_stacks();
+    }
     c->elr = translate_here(c->req_r[0], 0, 0, false);
 }
 
@@ -2055,7 +2068,7 @@ static void exit_check(void) {
             hostcall(HC_BOUNDARY);
             if (c->hybrid)
                 host_resync();
-            else if (c->req_r[0] != rip) { // the host moved the x86 pc
+            else if (c->req_r[0] != rip || c->tr_flushed) { // the host moved the x86 pc, or reset the code cache this pc is in
                 event_delivered = false;
                 c->elr = translate_here(c->req_r[0], 0, 0, false);
             }

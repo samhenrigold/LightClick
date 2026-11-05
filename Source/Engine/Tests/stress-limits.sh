@@ -14,4 +14,8 @@ if ENGINE_CC_BYTES=$small ENGINE_POOL_PAGES=${1:-512} ENGINE_STATS=1 "$engine" -
 a=$(ENGINE_ALARM=120 ENGINE_TZCNT=1 "$engine" --kernel "$images/compat" 2>&1 | grep -av '^measure' | shasum)
 b=$(ENGINE_ALARM=120 ENGINE_TZCNT=1 ENGINE_CC_BYTES=$small ENGINE_POOL_PAGES=${1:-512} "$engine" --kernel "$images/compat" 2>&1 | grep -av '^measure' | shasum)
 if [[ "$a" == "$b" ]]; then echo "pass compat kernel"; else echo "FAIL compat kernel"; fail=1; fi
+# The code cache resets again and again with several vCPUs running in it.
+for vcpus in 2 4; do
+    if ENGINE_ALARM=120 ENGINE_CC_BYTES=$small "$engine" --smp $vcpus "$images/smp" > /dev/null 2>&1; then echo "pass code cache reset on $vcpus vCPUs"; else echo "FAIL code cache reset on $vcpus vCPUs"; fail=1; fi
+done
 exit $fail

@@ -46,5 +46,6 @@ fi
 ENGINE_TZCNT=1 "$engine" --kernel-capi "$images/compat" >/dev/null 2>&1 && echo "pass compat through the C API" || { echo "FAIL compat through the C API"; fail=1; }
 for vcpus in 2 4; do
     ENGINE_ALARM=60 "$engine" --smp $vcpus "$images/smp" > /dev/null && echo "pass $vcpus vCPUs" || { echo "FAIL $vcpus vCPUs"; fail=1; }
+    ENGINE_SHARE=1 ENGINE_ALARM=60 "$engine" --smp $vcpus "$images/smp" > /dev/null && echo "pass $vcpus vCPUs, keeper rule" || { echo "FAIL $vcpus vCPUs, keeper rule"; fail=1; }
 done
 exit $fail

@@ -355,7 +355,7 @@ public final class Tally: @unchecked Sendable {
         o +=
             "shared user blocks: \(t.shared_blocks) translated, \(t.shared_found) found by another view, under \(c.shared_dir_count) directories\n"
         o +=
-            "view lookup tables emptied: \(t.hash_refills) as full, \(t.hash_forgets) forgetting a shared directory\n\n"
+            "view lookup tables emptied: \(t.hash_refills) as full, \(t.hash_forgets) forgetting a shared directory. Code cache resets: \(t.cache_resets)\n\n"
         o += "== why blocks died: blocks, of those with the page still on the same frame, calls ==\n"
         let killed = withUnsafeBytes(of: t.killed) { Array($0.bindMemory(to: UInt64.self)) }
         let unmoved = withUnsafeBytes(of: t.killed_unmoved) { Array($0.bindMemory(to: UInt64.self)) }

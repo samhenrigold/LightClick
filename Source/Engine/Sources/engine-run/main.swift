@@ -27,10 +27,11 @@ do {
         let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[2]))))
         exit(HybridHarness().run(image: image))
     }
-    if arguments[1] == "--smp" { // engine-run --smp <vCPUs> <image>
+    if arguments[1] == "--smp" {  // engine-run --smp <vCPUs> <image>
         let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[3]))))
         var smpOptions = EngineOptions()
         smpOptions.useTSO = ProcessInfo.processInfo.environment["ENGINE_NO_TSO"] == nil
+        smpOptions.codeCacheBytes = UInt64(ProcessInfo.processInfo.environment["ENGINE_CC_BYTES"] ?? "") ?? 0
         exit(try SMPGuest(options: smpOptions, count: UInt32(arguments[2]) ?? 2).run(image: image))
     }
     if arguments[1] == "--kernel" {
@@ -50,7 +51,7 @@ do {
     let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[1]))))
     var options = EngineOptions()
     options.preciseFlags = ProcessInfo.processInfo.environment["ENGINE_FAST_FLAGS"] == nil
-    options.tzcntLzcnt = true // as Rosetta advertises: flat tests compare against it
+    options.tzcntLzcnt = true  // as Rosetta advertises: flat tests compare against it
     options.codeCacheBytes = UInt64(ProcessInfo.processInfo.environment["ENGINE_CC_BYTES"] ?? "") ?? 0
     options.shadowPoolPages = UInt32(ProcessInfo.processInfo.environment["ENGINE_POOL_PAGES"] ?? "") ?? 0
     let guest = try FlatGuest(options: options)

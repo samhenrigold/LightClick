@@ -49,11 +49,34 @@ public enum RunOutcome: Equatable, Sendable {
     case fallback(rip: UInt64)
 }
 
+/// Who is in the code cache. Resetting it needs them all out, each at an x86 boundary or out of the engine, and none back in until it is done.
+final class CodeCacheGate: @unchecked Sendable {
+    let condition = NSCondition()
+    var inside = 0
+    var flushing = false
+    var engines: [Engine] = []
+
+    func enter() {
+        condition.lock()
+        while flushing { condition.wait() }
+        inside += 1
+        condition.unlock()
+    }
+
+    func leave() {
+        condition.lock()
+        inside -= 1
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
 /// One x86 vCPU, created and run on the calling thread. The first one makes the VM; `init(secondaryOf:index:)` adds another to it, on its own thread.
 public final class Engine {
     public let options: EngineOptions
     public let cpuIndex: UInt32
     private let translatorLock: UnsafeMutablePointer<os_unfair_lock>
+    private let gate: CodeCacheGate
     public let ram: UnsafeMutableRawPointer
     let priv: UnsafeMutableRawPointer
     public let ctx: UnsafeMutablePointer<EngineCtx>
@@ -84,6 +107,7 @@ public final class Engine {
         cpuIndex = 0
         translatorLock = .allocate(capacity: 1)
         translatorLock.initialize(to: os_unfair_lock())
+        gate = CodeCacheGate()
         let below = options.ramBelow4G
         ramTop = below != 0 && options.ramBytes > below ? (1 << 32) + options.ramBytes - below : options.ramBytes
         // The monitor's per-frame tables hold 32 GB of frames; see MIRROR_HEAD_OFF and RMAP_HEAD_OFF.
@@ -132,6 +156,7 @@ public final class Engine {
         config.stub_sahf = stubs + 0x180
         tr_init(&config)
         ctx.pointee.vcpu_count = 1
+        gate.engines = [self]
         try setUpVCPU()
     }
 
@@ -140,6 +165,7 @@ public final class Engine {
         options = first.options
         cpuIndex = index
         translatorLock = first.translatorLock
+        gate = first.gate
         ram = first.ram
         priv = first.priv
         ramTop = first.ramTop
@@ -149,6 +175,40 @@ public final class Engine {
         // One clock: the TSC and the APIC timer read this counter on every vCPU.
         vtimerOffset = first.vtimerOffset
         try hvCheck("set vtimer offset") { hv_vcpu_set_vtimer_offset(vcpu, vtimerOffset) }
+        gate.condition.lock()
+        gate.engines.append(self)
+        gate.condition.unlock()
+    }
+
+    private var firstContext: UnsafeMutablePointer<EngineCtx> { (priv + Int(kOffCtx)).assumingMemoryBound(to: EngineCtx.self) }
+    private var severalVCPUs: Bool { firstContext.pointee.vcpu_count > 1 }
+
+    /// Resets the code cache with every other vCPU out of it. This vCPU is inside, in a host call, with the translator lock not held. Its monitor holds no pointer into the
+    /// cache that it uses again, and nor does a vCPU at a boundary: each resumes through translate_here.
+    private func resetCodeCacheWithOthersOut() {
+        gate.condition.lock()
+        if gate.flushing { // another vCPU got here first: this one counts as out
+            gate.inside -= 1
+            gate.condition.broadcast()
+            while gate.flushing { gate.condition.wait() }
+            gate.inside += 1
+            gate.condition.unlock()
+            return
+        }
+        gate.flushing = true
+        while gate.inside > 1 {
+            for engine in gate.engines where engine !== self { engine.requestBoundary() }
+            gate.condition.wait(until: Date(timeIntervalSinceNow: 0.001))
+        }
+        gate.condition.unlock()
+        os_unfair_lock_lock(translatorLock)
+        if tr_needs_flush() { tr_flush_parked() }
+        for engine in gate.engines { engine.ctx.pointee.tr_flushed = 1 }
+        os_unfair_lock_unlock(translatorLock)
+        gate.condition.lock()
+        gate.flushing = false
+        gate.condition.broadcast()
+        gate.condition.unlock()
     }
 
     /// On the first vCPU, before any vCPU runs: how many this VM will have.
@@ -261,7 +321,9 @@ public final class Engine {
         ctx.pointee.apic_id = cpuIndex << 24
         ctx.pointee.ram_size = ramTop
         ctx.pointee.hybrid = options.hybrid ? 1 : 0
-        ctx.pointee.share_user = options.hybrid && ProcessInfo.processInfo.environment["LC_HVDBT_NO_SHARE"] != "1" ? 1 : 0
+        let environment = ProcessInfo.processInfo.environment
+        // ENGINE_SHARE: the keeper rule in a test with no fallbacks, as --smp is, so that it runs with vCPUs really side by side.
+        ctx.pointee.share_user = (options.hybrid && environment["LC_HVDBT_NO_SHARE"] != "1") || environment["ENGINE_SHARE"] == "1" ? 1 : 0
         ctx.pointee.clts_on_host = options.hybrid && ProcessInfo.processInfo.environment["LC_HVDBT_CLTS_TCG"] == "1" ? 1 : 0
         ctx.pointee.tsc_den = 1
         ctx.pointee.resume_mxcsr = 0x1F80
@@ -306,6 +368,9 @@ public final class Engine {
     var hostCallTicks = [UInt64](repeating: 0, count: 32)
 
     private func runLoop() throws -> RunOutcome {
+        let counted = severalVCPUs
+        if counted { gate.enter() }
+        defer { if counted { gate.leave() } }
         while true {
             // The hypervisor forgets a pending interrupt at each exit, so the line is held here until the monitor takes it.
             if irqLine { hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, true) }
@@ -386,7 +451,7 @@ public final class Engine {
         let t = tr_stats()
         var line =
             "exits \(exitCount) blocks \(t.blocks) x86-insns \(t.insns) arm-words \(t.words) "
-            + "invalidated \(t.invalidated) fills \(ctx.pointee.stat_fills) dirty \(ctx.pointee.stat_dirty) "
+            + "cache-resets \(t.cache_resets) invalidated \(t.invalidated) fills \(ctx.pointee.stat_fills) dirty \(ctx.pointee.stat_dirty) "
             + "smc \(ctx.pointee.stat_smc) pfs \(ctx.pointee.stat_pf_delivered) pt-writes \(ctx.pointee.stat_pt_writes) "
             + "steps \(ctx.pointee.stat_steps) irqs \(ctx.pointee.stat_irq) view-evictions \(ctx.pointee.stat_view_evictions) unshadowed \(ctx.pointee.stat_pt_unshadow) pool-reclaims \(ctx.pointee.stat_pool_reclaim)"
         if t.insns > 0 { line += String(format: " words/insn %.2f", Double(t.words) / Double(t.insns)) }
@@ -396,8 +461,19 @@ public final class Engine {
     private func hostCall(_ code: Int) throws -> RunOutcome? {
         let c = ctx
         // The translator's tables are one set for the VM. Taken here, in the slow path of a host exit that costs far more.
-        let translating = code == Int(HC_TRANSLATE) || code == Int(HC_SMC) || code == Int(HC_VIEW_INVALIDATE_VA) || code == Int(HC_VIEW_DROP)
-        if translating { os_unfair_lock_lock(translatorLock) }
+        let translating = code == Int(HC_TRANSLATE) || code == Int(HC_SMC) || code == Int(HC_VIEW_INVALIDATE_VA) || code == Int(HC_VIEW_FORGET) || code == Int(HC_VIEW_DROP)
+        var cacheWasReset = false
+        if code == Int(HC_TRANSLATE) && severalVCPUs {
+            os_unfair_lock_lock(translatorLock)
+            while tr_needs_flush() {
+                os_unfair_lock_unlock(translatorLock)
+                resetCodeCacheWithOthersOut()
+                cacheWasReset = true
+                os_unfair_lock_lock(translatorLock)
+            }
+        } else if translating {
+            os_unfair_lock_lock(translatorLock)
+        }
         defer { if translating { os_unfair_lock_unlock(translatorLock) } }
         switch code {
         case Int(HC_TRANSLATE):
@@ -421,7 +497,7 @@ public final class Engine {
             } else if kind == SVC_LOOKUP_MISS {
                 tr_hash_insert(view, rip, result.arm)
             } else if site != 0 {
-                tr_link(site, kind, result.arm, result.key)
+                if !cacheWasReset { tr_link(site, kind, result.arm, result.key) } // or the site is in the old cache
                 tr_hash_insert(view, rip, result.arm) // so the next site with this target links in the monitor
             }
         case Int(HC_SMC):
@@ -482,7 +558,11 @@ public final class Engine {
                 let now = mach_absolute_time() &- vtimerOffset
                 deadlineNanos = c.pointee.req_a.1 > now ? (c.pointee.req_a.1 - now) * 125 / 3 : 1
             }
+            // Asleep it holds nothing in the code cache: it resumes through translate_here. A code cache reset need not wait for this vCPU's next interrupt.
+            let asleep = severalVCPUs
+            if asleep { gate.leave() }
             let wake = machine.waitForInterrupt(deadlineNanos: deadlineNanos)
+            if asleep { gate.enter() }
             if let vector = machine.acknowledgeInterrupt() {
                 c.pointee.req_r.0 = UInt64(vector)
             } else {
@@ -494,6 +574,11 @@ public final class Engine {
         case Int(HC_APIC_ICR):
             machine?.apicICR(c.pointee.req_a.0)
         case Int(HC_BOUNDARY):
+            if !options.hybrid && severalVCPUs { // only a code cache reset asks this here, and this vCPU stays in the monitor for it
+                gate.leave()
+                gate.enter()
+                return nil
+            }
             boundaryRIP = c.pointee.req_a.0
             tally?.boundary(rip: boundaryRIP, cpl: c.pointee.cpl, cr3: c.pointee.cr3)
             return .boundary(rip: boundaryRIP)
@@ -625,7 +710,9 @@ public final class Engine {
     public func unmapDirect(gpa: UInt64, bytes: UInt64) {
         let pageInfo = (priv + Int(kOffPageInfo)).assumingMemoryBound(to: UInt8.self)
         for frame in stride(from: gpa >> 12, to: (gpa + bytes) >> 12, by: 1) { pageInfo[Int(frame)] &= ~UInt8(PI_DIRECT) }
-        ctx.pointee.direct_flush = 1
+        gate.condition.lock()
+        for engine in gate.engines { engine.ctx.pointee.direct_flush = 1 }
+        gate.condition.unlock()
         hv_vm_unmap(gpa, Int(bytes))
     }
 
@@ -641,7 +728,15 @@ public final class Engine {
 
     /// Any thread: guest RAM was written other than by this engine. See `engine_note_write`.
     public func noteWrite(gpa: UInt64, bytes: UInt64) {
-        if engine_ctx_note_write(ctx, (priv + Int(kOffPageInfo)).assumingMemoryBound(to: UInt8.self), gpa, bytes) { interruptRequested() }
+        guard engine_ctx_note_write(firstContext, (priv + Int(kOffPageInfo)).assumingMemoryBound(to: UInt8.self), gpa, bytes) else { return }
+        if severalVCPUs {
+            gate.condition.lock()
+            let engines = gate.engines
+            gate.condition.unlock()
+            for engine in engines { engine.interruptRequested() }
+        } else {
+            interruptRequested()
+        }
     }
 
     /// Software walk with no permission checks.

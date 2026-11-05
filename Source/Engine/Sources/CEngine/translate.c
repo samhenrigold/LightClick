@@ -438,6 +438,10 @@ static void fix(u32 *site, int form, u32 *to) {
         *site = (*site & 0xFC000000u) | ((u32)d & 0x3ffffff);
 }
 
+bool tr_needs_flush(void) {
+    return (u8 *)tr_cc - (u8 *)cc_base > (long)(cc_limit - 0x40000) || hblock_count >= BLOCKS_MAX - 2 || pc_map_used + MAX_INSNS >= PCMAP_BYTES / sizeof(PcMap);
+}
+
 static void flush_everything(void) {
     tr_flush_all();
 }
@@ -451,8 +455,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     walk_cpl = cpl;
     tr_cpl = cpl;
     tr_compat = ctx_ptr->compat;
-    if ((u8 *)tr_cc - (u8 *)cc_base > (long)(cc_limit - 0x40000) || hblock_count >= BLOCKS_MAX - 2 ||
-        pc_map_used + MAX_INSNS >= PCMAP_BYTES / sizeof(PcMap)) {
+    if (tr_needs_flush()) {
         flush_everything();
         res.flushed = true;
     }
@@ -1067,10 +1070,17 @@ static inline u32 crc32c64(u64 v) {
 // A lookup ends at an empty slot, in the stub and in the monitor, so a table must always have some. It is only a cache of the block map: when it fills, start again.
 static u32 hash_slots_used[MAX_VIEWS];
 
+// Keys only: another vCPU may be reading a slot, and a key it has seen stays good with the address beside it, if only for a block that may be dead by now, which is safe to enter.
+static void hash_empty(int view) {
+    u64 *t = hash_table(view);
+    for (u32 i = 0; i < HASH_ENTRIES; i++)
+        t[i * 2] = 0;
+}
+
 void tr_hash_insert(int view, uint64_t rip, uint64_t arm) {
     u64 *t = hash_table(view);
     if (hash_slots_used[view] >= HASH_ENTRIES / 4 * 3) {
-        memset(t, 0, HASH_BYTES);
+        hash_empty(view);
         hash_slots_used[view] = 0;
         stats.hash_refills++;
     }
@@ -1150,7 +1160,7 @@ int tr_invalidate_frame(uint64_t gpa, uint32_t why) {
 }
 
 void tr_view_forget(int view) {
-    memset(hash_table(view), 0, HASH_BYTES);
+    hash_empty(view);
     hash_slots_used[view] = 0;
     stats.hash_forgets++;
 }
@@ -1200,10 +1210,15 @@ void tr_view_drop(int view) {
 }
 
 void tr_flush_all(void) {
-    if (ctx_ptr->vcpu_count > 1) { // other vCPUs are running in this cache. shortcut: needs them all stopped at an x86 boundary first; see "Multi-vCPU" in DESIGN.md
-        fprintf(stderr, "engine stop: code cache reset with several vCPUs is not built\n");
+    if (ctx_ptr->vcpu_count > 1) { // other vCPUs are running in this cache: the host gets them out first, and calls tr_flush_parked
+        fprintf(stderr, "engine stop: code cache reset with other vCPUs running\n");
         abort();
     }
+    tr_flush_parked();
+}
+
+void tr_flush_parked(void) {
+    stats.cache_resets++;
     ctx_ptr->tr_flushed = 1;
     tr_cc = cc_base;
     hblock_count = 0;
