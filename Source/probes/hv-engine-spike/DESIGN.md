@@ -1,7 +1,10 @@
 # HV engine spike: x86-64 translated code inside an HVF VM
 
 Run: `build.sh <out>`, then `<out>/spike bench|fill|cr3|litmus <out>/flat.bin`, `<out>/driver-x86`, `<out>/driver-arm64`.
-Env: `SPIKE_IPA16` (16 KB stage 2), `SPIKE_NO_TSO`, `SPIKE_BLOCK` (2 MB stage-1 blocks on the 64 MB buffer).
+Env: `SPIKE_IPA16` (16 KB stage 2), `SPIKE_NO_TSO`, `SPIKE_BLOCK` (2 MB stage-1 blocks on the 64 MB buffer), `SPIKE_EL2`
+(translated code over a guest stage 2 with a stub virtual EL2).
+Trap costs: `<out>/el2 plain|el2|hcr|chase|litmus|irq|irq-gic|irq-gic-wfi|ipi-gic|ipi-gic-wfi|ipi-host`; `chase`, `litmus`
+and the GIC modes take a second argument `el2`. Guest code is `el2guest.s`.
 
 ## Measured (M4 Max, macOS 27.2, release build running, load 10-13; best of 5, several runs)
 
@@ -36,6 +39,79 @@ Flag correctness: a hand-written x86 check (`w_flagasm`) reads CF, OF, SF, ZF af
 inc/dec (CF kept via `rmif`), narrow forms, shifts (CF via `rmif`), memory RMW and across an indirect branch. Its checksum
 matches Rosetta, which stands in for real x86 here; no Intel hardware was used.
 
+## Can it stay inside the VM? Trap costs, plain EL1 vs guest EL2 (measured)
+
+M4 Max, macOS 27.2, other benchmarks running, load 3-8. Each cell is best of 5, shown as the range over two or more
+process runs; expect 15% run-to-run. `el2guest.s` is hand-written: it has the instruction shape the translator would emit
+(register mapping and hash lookup from `spike.c`), but the translator has no syscall, and the kernel body is empty.
+
+| Path, round trip unless noted | Plain EL1 runtime, ns | Through virtual EL2, ns | Exit to host, ns |
+|---|---|---|---|
+| Bare trap and return: EL0 svc/eret; EL0 trapped mrs; EL1 hvc | 31-34 (EL0-EL1) | 2480-2540 (EL0); 2230-2570 (EL1) | 640-730 (EL1 hvc) |
+| Translated `syscall`, stack swap, hash lookup, `sysret` | 35-40 | 2310-2560 | not run |
+| Translated fault: CR2, six-word frame, `iret` | 36-41 | not run; bare trap above is the floor | not run |
+| Write-protect fault, emulate the store only | not run | 3400-3540 (stage-2 fault) | 735-840 |
+| Page-table write: fault, emulate, shadow PTE, TLBI, later refill | 194-256 | 3730-4200 | 920-1110 |
+| `tlbi vale1is`, `dsb`, `isb` (15 baseline) | 150-184 | 700-800 | not applicable |
+| `tlbi aside1is` / `vmalle1is` | 98-148 / 106-148 | not run / 700-800 (`vmalls12e1is`) | not applicable |
+| ASID switch: `msr ttbr0_el1` + `isb`, one way | 8.4-9.7 | 10-11 at vEL2 | not applicable |
+| Device-style load from an unmapped IPA, no device model | not possible in-VM | 760-880 (from EL1 under EL2) | 710-820 |
+
+The same EL0/EL1 rows with a guest stage 2 live and vEL2 idle: svc 30-34, syscall 35-41, fault 36-41, page-table write
+249-388, TLBI at EL1 150-280, ASID switch 8.5-9.8. So guest EL2 costs nothing while unused, and about 2.5 us per entry when
+used.
+
+| Interrupts and IPIs | ns |
+|---|---|
+| Shared-memory poll, one way | 39-41 |
+| IPI via in-kernel GIC SGI, peer busy, one way (no user-space exit) | 1830-2030; 3340 with EL2 enabled |
+| IPI via GIC SGI, peer in WFI, one way | 2400-3250 |
+| IPI carried by the host (hv_vcpus_exit, pending IRQ), one way | 2050-2170 |
+| Inject from another host thread, busy guest: hv_vcpus_exit, re-entry, to IRQ vector | 1260-1400 |
+| Same, `hv_gic_set_spi` to a busy guest (no user-space exit) | 1380-1540; 2540 with EL2 enabled |
+| Wake a WFI guest: without a GIC, WFI exits to the host; semaphore, inject, re-entry | 6100-7100, fastest event 3000 |
+| Wake a WFI guest with `hv_gic_set_spi`; WFI stays in the kernel (0 exits) | 6700-7200, fastest event 3000 |
+
+Memory and ordering with EL2 on:
+- Translated workloads over a guest stage 2 and stub vEL2 (`SPIKE_EL2`, 1 GB blocks), checksums identical: int 1.57,
+  mem 0.255, chase 16 KB 0.765, chase 64 MB 112, call 4.18, random call 6.13, flags 6.00. Same as the table above.
+- Hand-written chase 64 MB at EL0, 4 KB stage 1. Host 4 KB IPA: VM=0 122, guest S2 2 MB 122, guest S2 4 KB 125, no EL2 107-124.
+  Host 16 KB IPA: 97, 92, 104, no EL2 107. No walk penalty is visible through the noise.
+- First touch under a 4 KB guest stage 2 costs about 54 us per page (1M-line warm pass: 1030 vs 145 ns per load, 16 K
+  pages); with 2 MB guest blocks nothing visible. Presumably the host builds a merged stage 2 on faults.
+- EnTSO survives at EL0, EL1 and vEL2 under guest stage 2: litmus 14-15M violations in 30M reads off, 0 on, set through
+  `ACTLR_EL1` from the host. 4 KB stage 1, 4 KB guest stage 2 and `hv_vm_protect` of one 4 KB page all work.
+
+What the numbers mean:
+- The timings show an emulated EL2, inferred, not read from any source. `ERET` at vEL2 alone costs 780 ns; TLBI at vEL2 traps at 700-800 ns. vEL2 system registers
+  do not trap (`elr_el2` round trip 4-6 ns), FEAT_NV2 style. So a vEL2 entry is over 3x an exit to user space.
+- ID registers: `VH=0`, `NV=2`, no FGT. E2H and TGE are not honoured: writes read back from vEL2, but the host read drops
+  them and EL0's SVC still goes to EL1. Nothing routes `syscall` to vEL2 except a trapped instruction or a stage-2 fault.
+- HVC at vEL2 re-enters vEL2; SMC reaches the host.
+- `hv_gic`: the API has no GICR_WAKER, so the guest clears it itself; SPI routing written before a vCPU exists does not take
+  effect, and the SPI then stays pending and undelivered. IROUTER is written after vCPU creation here.
+
+### Revised vCPU overhead, ms of vCPU time per second, whole guest
+
+Rates are the measured 4-vCPU system-heavy ones, assumed to be guest totals. Host MMIO is exit only: no x86 decode or
+device model, neither measured. Interrupt cost is latency, an upper bound on vCPU time. Translated kernel work is not a trap
+cost and is not counted. Shadow fills, IPIs beyond the 10k, and page-table write counts are unmeasured.
+
+| Event | Rate/s | All exit, at prior 1-3 us | Plain EL1 monitor | Monitor at vEL2 |
+|---|---|---|---|---|
+| Syscall + return | 50,000 | 50-150 | 2.0 (40 ns) | 128 (2.55 us) |
+| Exception + iret | 32,000 | 32-96 | 1.3 (41 ns) | 82 (2.55 us) |
+| MMIO | 114,000 | 114-342 | 94 (820 ns, host) | 100 (880 ns, host) |
+| Interrupt | 10,000 | 10-30 | 15 (1.54 us) | 25 (2.54 us) |
+| CR3 write | 9,000 | 9-27 | 0.5 (55 ns, earlier) | 23 (2.55 us) |
+| **Total, no page-table writes** | | **215-645** | **113** | **358** |
+| Each 100,000 page-table writes/s | | 100-300 | 25 (250 ns) | 420 (4.2 us) |
+
+So a plain EL1 monitor costs about 11% of one vCPU, 3% of four, before page-table writes. The budget of 10% across four
+vCPUs (400 ms) would still leave room for about 1.1M page-table writes/s. EL2 makes every row worse. MMIO is 83% of what
+remains and is the next target, whether through in-VM fast paths for the hottest registers (a trapped access costs about
+40 ns plus emulation, if it needs no host) or paravirtual rings.
+
 ## The softmmu load, from `prepare_host_addr` (read, not run)
 
 | x86 access | Instructions | Extra loads | Barrier |
@@ -54,7 +130,7 @@ hardware translation really is native speed here, but no number says what fracti
 
 ## What the spike did not do
 
-No x86 kernel mode, IDT delivery or guest-visible #PF. No MMIO or interrupts. No segments, i386, SSE, x87, `lock`, rep,
+No x86 kernel mode, IDT delivery or guest-visible #PF in translated code (the trap-cost rows above are hand-written). No MMIO or interrupts in `spike.c`. No segments, i386, SSE, x87, `lock`, rep,
 PF/AF consumers, or SMC handling. Only one vCPU ran translated code; the litmus is hand-written ARM. 128/64 div, flags
 after CL shifts and flags after imul stop with an error. Translation runs on the host, so every cold block costs an exit.
 TCG was not run. These are loops, not an OS: nothing about the speed of a booting Mac follows from this table.
@@ -82,7 +158,7 @@ branch per loop. QEMU's APIC timer drives kicks.
 CPL0 translated code at EL1, CPL3 at EL0. U/S maps to AP, SMAP to PAN, and SMEP is natural since guest pages never execute
 as ARM. Syscall and iret become translated sequences. The fallback is both rings at EL0 with an ASID each, adding about
 55 ns per transition (measured for the swap). `hlt`, `invlpg`, CR writes, MSRs, cpuid and port I/O exit or run in a small
-EL1 monitor. Guest-visible #PF needs precise state: an RMW whose store faults has already changed NZCV, so RMW must emit
+EL1 monitor (measured: EL1 is about 60x cheaper than vEL2, so vEL2 is out). Guest-visible #PF needs precise state: an RMW whose store faults has already changed NZCV, so RMW must emit
 the store before the flag-setting op, or snapshot flags.
 
 ### Segments
@@ -123,9 +199,10 @@ keep barriers, so a mixed VM remains correctly ordered. Whether QEMU tolerates t
 
 ## Biggest unknowns
 
-1. Trap rate in a real macOS guest: CR3, invlpg, page-table writes, MMIO, IPIs per second. At 1-3 us each, 100k/s would
-   consume 10-30% of a vCPU. This decides the project.
-2. Whether an EL1 monitor can run enough of it in-guest. The 55 ns vs 984 ns gap says it must, for the hot ones.
+1. Page-table write rate and shadow fill rate in a real macOS guest. Other trap rates are now known, and cost about 11% of one
+   vCPU with an EL1 monitor. Write-protect at 250 ns tolerates a high rate, but a fill still goes to the host unless the walker
+   also moves in-guest.
+2. MMIO: 83% of the remaining trap cost, and device model time on top is unmeasured. Whether hot registers can be served in-VM.
 3. Return prediction. `br` via the cache is 2.3-4x native and up to 1.3x Rosetta. A shadow return stack with real `bl`/`ret`
    should help on call-heavy code; kernels are call-heavy.
 4. Non-canonical isolation. A guest load at the hole address (bit 47 set, canonical bits clear) hits private memory instead
@@ -138,8 +215,7 @@ keep barriers, so a mixed VM remains correctly ordered. Whether QEMU tolerates t
 
 ## Next experiment
 
-Before writing any kernel-mode code: measure unknown 1. Under TCG on an existing clone boot, count CR3 writes, invlpg, page
-table writes (needs a hook), MMIO and interrupts per second during boot and a desktop workload; `probes/tcg-tlb-sources.d`
-already covers part of it. Multiply by the 1-3 us above. If the projected exit overhead on a busy guest stays under about
-10%, build a freestanding x86-64 test kernel with IDT, syscall, timer and fork-like page-table churn in this spike, and
-measure that. If not, stop: the hardware-TLB gain would go back into exits.
+Plain EL1 monitor: go. Guest EL2: no-go on this OS and hardware. Build the freestanding x86-64 test kernel with IDT, syscall, timer
+and fork-like page-table churn in this spike, translated at EL1 and EL0, and replace the hand-written rows with translated ones.
+Separately, count page-table writes and per-register MMIO in a real guest, as neither is known; that decides how much of the
+walker and device paths must also move into the VM.
