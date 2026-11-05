@@ -423,6 +423,78 @@ mmx("mmx after sse", ["movq %mm1,%rcx", "movq %rcx,%xmm3", "paddq %xmm3,%xmm1", 
 mmx("all registers", ["movq %mm1,%mm0", "movq %mm2,%mm3", "movq %mm1,%mm4", "movq %mm2,%mm5", "movq %mm1,%mm6", "movq %mm2,%mm7",
                       "paddb %mm0,%mm3", "pxor %mm3,%mm4", "psubw %mm4,%mm5", "por %mm5,%mm6", "pand %mm6,%mm7", "movq %mm7,%mm1"])
 
+# ---- SSE4.1, AES, PCLMUL ----
+def bin_form(op):
+    form(f"{op} x", f"{op} %xmm2,%xmm1", ALL, FP)
+    form(f"{op} same", f"{op} %xmm1,%xmm1", ALL, FP)
+    form(f"{op} high", f"{op} %xmm12,%xmm9", ALL, FP)
+    form(f"{op} m", f"{op} 32(%r15),%xmm1", ALL, FP)
+
+for op in ["pmuldq", "pcmpeqq", "pcmpgtq", "packusdw", "pminsb", "pminsd", "pminuw", "pminud", "pmaxsb", "pmaxsd", "pmaxuw", "pmaxud", "pmulld",
+           "aesenc", "aesenclast", "aesdec", "aesdeclast", "aesimc"]:
+    bin_form(op)
+for op in ["pblendvb", "blendvps", "blendvpd"]:
+    form(f"{op} x", f"{op} %xmm0,%xmm2,%xmm1", ALL, FP)
+    form(f"{op} m", f"{op} %xmm0,32(%r15),%xmm1", ALL, FP)
+    form(f"{op} into xmm0", f"{op} %xmm0,%xmm2,%xmm0", ALL, FP)
+# Rosetta leaves SF, OF, PF and AF as they were. The SDM and TCG clear them, as the engine does: hybrid.c checks that.
+PT = F_C | F_Z
+form("ptest x", "ptest %xmm2,%xmm1", PT, FP)
+form("ptest same", "ptest %xmm1,%xmm1", PT, FP)
+form("ptest m", "ptest 32(%r15),%xmm1", PT, FP)
+form("ptest zero", ["pxor %xmm2,%xmm2", "ptest %xmm2,%xmm1"], PT, FP)
+form("ptest all", ["pcmpeqd %xmm1,%xmm1", "ptest %xmm2,%xmm1"], PT, FP)
+form("ptest;setcc", ["ptest %xmm2,%xmm1", "sete %al", "setb %bl"], PT, FP)
+for n, m in (("bw", 8), ("bd", 4), ("bq", 2), ("wd", 8), ("wq", 4), ("dq", 8)):
+    for op in ("pmovsx", "pmovzx"):
+        form(f"{op}{n} x", f"{op}{n} %xmm2,%xmm1", ALL, FP)
+        form(f"{op}{n} same", f"{op}{n} %xmm1,%xmm1", ALL, FP)
+        form(f"{op}{n} m", f"{op}{n} 33(%r15),%xmm1", ALL, FP)
+form("movntdqa", "movntdqa 32(%r15),%xmm1", ALL, FP)
+for imm in (0, 1, 0x10, 0x11, 0x55):
+    form(f"pclmulqdq ${imm}", f"pclmulqdq ${imm},%xmm2,%xmm1", ALL, FP)
+    form(f"pclmulqdq ${imm} same", f"pclmulqdq ${imm},%xmm1,%xmm1", ALL, FP)
+    form(f"pclmulqdq ${imm} m", f"pclmulqdq ${imm},32(%r15),%xmm1", ALL, FP)
+for imm in (0, 1, 2, 4, 8, 0x10, 0x1B, 0x36, 0x80, 0xFF):
+    form(f"aeskeygenassist ${imm}", f"aeskeygenassist ${imm},%xmm2,%xmm1", ALL, FP)
+    form(f"aeskeygenassist ${imm} same", f"aeskeygenassist ${imm},%xmm1,%xmm1", ALL, FP)
+form("aeskeygenassist m", "aeskeygenassist $1,32(%r15),%xmm1", ALL, FP)
+for op, mask in (("blendps", 15), ("blendpd", 3), ("pblendw", 255)):
+    for imm in (0, 1, 2, mask // 2, mask):
+        form(f"{op} ${imm}", f"{op} ${imm},%xmm2,%xmm1", ALL, FP)
+        form(f"{op} ${imm} m", f"{op} ${imm},32(%r15),%xmm1", ALL, FP)
+for lane in (0, 1, 7, 15, 16, 0xFF):
+    form(f"pextrb ${lane}", f"pextrb ${lane},%xmm1,%eax", ALL, FP)
+    form(f"pextrb ${lane} m", f"pextrb ${lane},%xmm1,33(%r15)", ALL, FP)
+    form(f"pinsrb ${lane}", f"pinsrb ${lane},%ebx,%xmm1", ALL, FP)
+    form(f"pinsrb ${lane} m", f"pinsrb ${lane},33(%r15),%xmm1", ALL, FP)
+for lane in (0, 1, 3, 4, 0xFF):
+    form(f"pextrd ${lane}", f"pextrd ${lane},%xmm1,%eax", ALL, FP)
+    form(f"pextrd ${lane} high", f"pextrd ${lane},%xmm9,%r9d", ALL, FP)
+    form(f"pextrd ${lane} m", f"pextrd ${lane},%xmm1,33(%r15)", ALL, FP)
+    form(f"pinsrd ${lane}", f"pinsrd ${lane},%ebx,%xmm1", ALL, FP)
+    form(f"pinsrd ${lane} high", f"pinsrd ${lane},%r9d,%xmm9", ALL, FP)
+    form(f"pinsrd ${lane} m", f"pinsrd ${lane},33(%r15),%xmm1", ALL, FP)
+    form(f"extractps ${lane}", f"extractps ${lane},%xmm1,%eax", ALL, FP)
+    form(f"extractps ${lane} m", f"extractps ${lane},%xmm1,33(%r15)", ALL, FP)
+    form(f"pextrq ${lane}", f"pextrq ${lane},%xmm1,%rax", ALL, FP)
+    form(f"pextrq ${lane} m", f"pextrq ${lane},%xmm1,33(%r15)", ALL, FP)
+    form(f"pinsrq ${lane}", f"pinsrq ${lane},%rbx,%xmm1", ALL, FP)
+    form(f"pinsrq ${lane} m", f"pinsrq ${lane},33(%r15),%xmm1", ALL, FP)
+for lane in (0, 3, 7):
+    form(f"pextrw sse4 ${lane} m", f"pextrw ${lane},%xmm1,33(%r15)", ALL, FP)
+    form(f"pextrw sse4 ${lane} r", f".byte 0x66, 0x0F, 0x3A, 0x15, 0xC8, {lane}", ALL, FP)  # pextrw $lane,%xmm1,%eax
+for imm in (0, 1, 0x0F, 0x10, 0x30, 0x40, 0x80, 0xC0, 0xF0, 0xE5, 0x1B):
+    form(f"insertps ${imm}", f"insertps ${imm},%xmm2,%xmm1", ALL, FP)
+    form(f"insertps ${imm} same", f"insertps ${imm},%xmm1,%xmm1", ALL, FP)
+    form(f"insertps ${imm} m", f"insertps ${imm},33(%r15),%xmm1", ALL, FP)
+for imm in (4, 9, 10, 11, 12):  # the modes the translator takes: fixed with precision off, and MXCSR's either way
+    for op, m in (("roundps", "32(%r15)"), ("roundpd", "32(%r15)"), ("roundss", "33(%r15)"), ("roundsd", "33(%r15)")):
+        form(f"{op} ${imm}", f"{op} ${imm},%xmm2,%xmm1", ALL, FP)
+        form(f"{op} ${imm} same", f"{op} ${imm},%xmm1,%xmm1", ALL, FP)
+        form(f"{op} ${imm} m", f"{op} ${imm},{m},%xmm1", ALL, FP)
+        form(f"{op} ${imm} high", f"{op} ${imm},%xmm12,%xmm9", ALL, FP)
+
 out = [".text", ".globl _fuzz_forms", ".p2align 4"]
 for i, (name, body, mask, kind) in enumerate(forms):
     out.append(f"Lf{i}:")

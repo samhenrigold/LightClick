@@ -308,6 +308,218 @@ static void emit_addsub(const Insn *in) {
     vmov(d, 27);
 }
 
+static void fmov_to_d(int v, int x) { RR(0x9E670000u, v, x); }
+static void ins_x(int v, int lane, int x) { E(0x4E081C00u | (u32)lane << 20 | (u32)x << 5 | v); } // ins v.d[lane], x
+
+// SSE4.1, AES and PCLMUL, the forms libraries and kexts reach for, each with an exact NEON or crypto counterpart.
+static void emit_sse41(const Insn *in, int live) {
+    int opc = in->opc, d = in->reg, imm = (int)(in->imm & 0xff);
+    if (in->sub == 4) {
+        switch (opc) {
+            case 0x08:
+            case 0x09:
+            case 0x0A:
+            case 0x0B: {
+                // Bit 2 takes the mode from MXCSR, which FPCR follows. Bit 3 suppresses the precision flag, and NEON's fixed-mode rounds never set
+                // it: a fixed mode that must report precision is TCG's.
+                static const u32 fixed[4] = {0, 2, 1, 3}; // x86 nearest, down, up, zero; ARM rmode N, M is 2, P is 1, Z
+                u32 rmode = (imm & 4) ? ((imm & 8) ? 7 : 6) : fixed[imm & 3];
+                if (!(imm & 4) && !(imm & 8)) {
+                    bad(in, "round: fixed mode with the precision flag");
+                    return;
+                }
+                bool dbl = opc & 1;
+                if (opc >= 0x0A) {
+                    int s = src_op(in, dbl ? 3 : 2, false);
+                    E(0x1E244000u | (dbl ? 1u << 22 : 0) | rmode << 15 | (u32)s << 5 | V_S0);
+                    ins_elem(d, 0, V_S0, 0, dbl ? 8 : 4);
+                } else {
+                    int s = src_op(in, 4, true);
+                    static const u32 packed[8] = {0x4E218800u, 0x4EA18800u, 0x4E219800u, 0x4EA19800u, 0, 0, 0x6E219800u, 0x6EA19800u};
+                    RR(packed[rmode] | (dbl ? 1u << 22 : 0), d, s);
+                }
+                return;
+            }
+            case 0x0C:
+            case 0x0D:
+            case 0x0E: {
+                int s = src_op(in, 4, true), bytes = opc == 0x0C ? 4 : opc == 0x0D ? 8 : 2;
+                for (int i = 0; i < 16 / bytes; i++)
+                    if ((imm >> i) & 1)
+                        ins_elem(d, i, s, i, bytes);
+                return;
+            }
+            case 0x14:
+            case 0x15:
+            case 0x16:
+            case 0x17: {
+                int bytes = opc == 0x14 ? 1 : opc == 0x15 ? 2 : (opc == 0x16 && in->sz == 8) ? 8 : 4, lane = imm & (16 / bytes - 1);
+                u32 umov = (bytes == 8 ? 0x4E003C00u : 0x0E003C00u) | (u32)(lane << (log2sz(bytes) + 1) | bytes) << 16 | (u32)d << 5;
+                if (in->rm_reg) {
+                    E(umov | (u32)in->rm);
+                } else {
+                    Addr a = addr_prepare(in, bytes);
+                    E(umov | S0);
+                    ldst(0, bytes, S0, a);
+                }
+                return;
+            }
+            case 0x20:
+            case 0x22: {
+                int bytes = opc == 0x20 ? 1 : in->sz == 8 ? 8 : 4, lane = imm & (16 / bytes - 1), s = in->rm;
+                if (!in->rm_reg) {
+                    ldst(1, bytes, S0, addr_prepare(in, bytes));
+                    s = S0;
+                }
+                E(0x4E001C00u | (u32)(lane << (log2sz(bytes) + 1) | bytes) << 16 | (u32)s << 5 | d);
+                return;
+            }
+            case 0x21: { // insertps: count_s, count_d, zero mask
+                int s = src_op(in, 2, false);
+                ins_elem(V_S0, 0, s, in->rm_reg ? (imm >> 6) & 3 : 0, 4);
+                ins_elem(d, (imm >> 4) & 3, V_S0, 0, 4);
+                for (int i = 0; i < 4; i++)
+                    if ((imm >> i) & 1)
+                        E(0x4E041C00u | (u32)i << 19 | (u32)XZR << 5 | d);
+                return;
+            }
+            case 0x44: { // pclmulqdq
+                int s = src_op(in, 4, true);
+                ins_elem(V_S0, 0, d, imm & 1, 8);
+                ins_elem(V_S1, 0, s, (imm >> 4) & 1, 8);
+                RRR(0x0EE0E000u, d, V_S0, V_S1);
+                return;
+            }
+            case 0xDF: { // aeskeygenassist: aese does ShiftRows and SubBytes, and the table puts each byte back where the x86 result wants it
+                int s = src_op(in, 4, true);
+                E(0x6E201C00u | V_S0 << 16 | V_S0 << 5 | V_S0);
+                vmov(V_S1, s);
+                RR(0x4E284800u, V_S1, V_S0);
+                movimm(S0, 0x040B0E010B0E0104ULL);
+                fmov_to_d(V_S2, S0);
+                movimm(S0, 0x0C0306090306090CULL);
+                ins_x(V_S2, 1, S0);
+                RRR(0x4E000000u, d, V_S1, V_S2); // tbl
+                movimm(S0, (u64)imm << 32);
+                fmov_to_d(V_S0, S0);
+                ins_x(V_S0, 1, S0);
+                RRR(0x6E201C00u, d, d, V_S0);
+                return;
+            }
+        }
+        svc(SVC_UD);
+        return;
+    }
+    if ((opc >= 0x20 && opc <= 0x25) || (opc >= 0x30 && opc <= 0x35)) { // pmovsx, pmovzx: widen by one step at a time
+        static const u8 kind[6] = {3, 2, 1, 3, 2, 3}, from[6] = {0, 0, 0, 1, 1, 2}, to[6] = {1, 2, 3, 2, 3, 3};
+        int k = opc & 7, s = src_op(in, kind[k], false);
+        u32 base = opc < 0x30 ? 0x0F00A400u : 0x2F00A400u;
+        vmov(V_S0, s);
+        for (int w = from[k]; w < to[k]; w++)
+            RR(base | 1u << (19 + w), V_S0, V_S0);
+        vmov(d, V_S0);
+        return;
+    }
+    if (opc == 0x2A) { // movntdqa
+        if (in->rm_reg)
+            svc(SVC_UD);
+        else
+            vldst(4, true, d, mem16(in, true));
+        return;
+    }
+    int s = src_op(in, 4, true);
+    switch (opc) {
+        case 0x10:
+        case 0x14:
+        case 0x15:
+            RR(opc == 0x10 ? 0x4E20A800u : opc == 0x14 ? 0x4EA0A800u : 0x4EE0A800u, V_S0, 0); // cmlt #0 of xmm0: each lane's top bit picks
+            RRR(0x6EA01C00u, d, s, V_S0); // bit
+            return;
+        case 0x17: { // ptest: ZF from d AND s, CF from NOT d AND s, the rest clear
+            RRR(0x4E201C00u, V_S0, d, s);
+            RRR(0x4E601C00u, V_S1, s, d); // bic
+            umov_d(S0, V_S0, 0);
+            umov_d(S1, V_S0, 1);
+            logic_sh(1, 1, 0, S0, S0, S1, 0, 0);
+            umov_d(S1, V_S1, 0);
+            umov_d(S2, V_S1, 1);
+            logic_sh(1, 1, 0, S1, S1, S2, 0, 0);
+            add_imm(1, 1, 1, XZR, S0, 0);
+            cset(S0, 0);
+            add_imm(1, 1, 1, XZR, S1, 0);
+            cset(S1, 1); // the engine keeps x86 CF inverted in C
+            lsl_imm(1, S0, S0, 30);
+            logic_sh(1, 1, 0, S0, S0, S1, 0, 29);
+            E(0xD51B4200u | S0); // msr nzcv
+            if (live & (F_P | F_A)) {
+                movimm(R_PF, 1); // an odd low byte: PF clear
+                mov_reg(1, R_AF, R_PF);
+            }
+            return;
+        }
+        case 0x28: // pmuldq: the low half of each 64-bit lane, signed
+            RR(0x0EA12800u, V_S0, d);
+            RR(0x0EA12800u, V_S1, s);
+            RRR(0x0EA0C000u, d, V_S0, V_S1);
+            return;
+        case 0x29:
+            RRR(0x6EE08C00u, d, d, s);
+            return;
+        case 0x2B: // packusdw
+            RR(0x2E612800u, V_S0, d);
+            RR(0x6E612800u, V_S0, s);
+            vmov(d, V_S0);
+            return;
+        case 0x37:
+            RRR(0x4EE03400u, d, d, s);
+            return;
+        case 0x38:
+            RRR(0x4E206C00u, d, d, s);
+            return;
+        case 0x39:
+            RRR(0x4EA06C00u, d, d, s);
+            return;
+        case 0x3A:
+            RRR(0x6E606C00u, d, d, s);
+            return;
+        case 0x3B:
+            RRR(0x6EA06C00u, d, d, s);
+            return;
+        case 0x3C:
+            RRR(0x4E206400u, d, d, s);
+            return;
+        case 0x3D:
+            RRR(0x4EA06400u, d, d, s);
+            return;
+        case 0x3E:
+            RRR(0x6E606400u, d, d, s);
+            return;
+        case 0x3F:
+            RRR(0x6EA06400u, d, d, s);
+            return;
+        case 0x40:
+            RRR(0x4EA09C00u, d, d, s);
+            return;
+        case 0xDB:
+            RR(0x4E287800u, d, s); // aesimc
+            return;
+        case 0xDC:
+        case 0xDD:
+        case 0xDE:
+        case 0xDF: { // the x86 forms xor the round key last, the ARM ones first: give ARM a zero key
+            bool dec = opc >= 0xDE, last = opc & 1;
+            E(0x6E201C00u | V_S0 << 16 | V_S0 << 5 | V_S0);
+            vmov(V_S1, d);
+            RR(dec ? 0x4E285800u : 0x4E284800u, V_S1, V_S0);
+            if (!last)
+                RR(dec ? 0x4E287800u : 0x4E286800u, V_S1, V_S1);
+            RRR(0x6E201C00u, d, V_S1, s);
+            return;
+        }
+    }
+    svc(SVC_UD);
+}
+
 // MMX: the operands in vectors whose upper halves are zero, the xmm form of the operation on those, and the low half written back. Every
 // path touches NEON first, so CR0.TS gives #NM as it does for SSE. Like TCG this raises no #MF for a pending x87 exception.
 static void mm_ldst(bool load, int v, int mm) {
@@ -426,6 +638,10 @@ static void emit_mmx(const Insn *in, int live) {
 
 void emit_sse(const Insn *in, int live) {
     int opc = in->opc, pfx = in->pfx, d = in->reg;
+    if (in->op == OP_SSE && in->sub >= 3) {
+        emit_sse41(in, live);
+        return;
+    }
     if (in->op == OP_SSE && in->sub) {
         emit_ssse3(in);
         return;

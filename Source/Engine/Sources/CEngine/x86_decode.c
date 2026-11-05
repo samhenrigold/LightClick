@@ -603,7 +603,7 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
                 MODRM();
                 in->op = OP_MOVBE;
                 in->to_reg = false;
-            } else if (mand == 0x66 && ((opc == 0x38 && p[0] <= 0x1E) || (opc == 0x3A && p[0] == 0x0F))) {
+            } else if (mand == 0x66 && ((opc == 0x38 && (p[0] <= 0x0B || (p[0] >= 0x1C && p[0] <= 0x1E))) || (opc == 0x3A && p[0] == 0x0F))) {
                 // SSSE3. macOS compilers assume it for x86_64, so real binaries contain it.
                 bool imm = opc == 0x3A;
                 opc = *p++;
@@ -613,8 +613,25 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
                     in->has_imm = true;
                     in->imm = *p++;
                 }
+            } else if (mand == 0x66 && opc == 0x38 &&
+                       (p[0] == 0x10 || p[0] == 0x14 || p[0] == 0x15 || p[0] == 0x17 || (p[0] >= 0x20 && p[0] <= 0x25) ||
+                        (p[0] >= 0x28 && p[0] <= 0x2B) || (p[0] >= 0x30 && p[0] <= 0x35) || (p[0] >= 0x37 && p[0] <= 0x40) ||
+                        (p[0] >= 0xDB && p[0] <= 0xDF))) {
+                opc = *p++;
+                SSE_FORM();
+                in->sub = 3;
+                if (opc == 0x17)
+                    in->writes = F_ARITH; // ptest
+            } else if (mand == 0x66 && opc == 0x3A &&
+                       ((p[0] >= 0x08 && p[0] <= 0x0E) || (p[0] >= 0x14 && p[0] <= 0x17) || (p[0] >= 0x20 && p[0] <= 0x22) ||
+                        p[0] == 0x44 || p[0] == 0xDF)) {
+                opc = *p++;
+                SSE_FORM();
+                in->sub = 4;
+                in->has_imm = true;
+                in->imm = *p++;
             } else
-                BADUD("SSE4 opcode map (not advertised)");
+                BADUD("SSE4 opcode map: TCG has it");
         } else if (opc >= 0x40 && opc <= 0x4F) {
             MODRM();
             in->op = OP_CMOV;

@@ -186,8 +186,8 @@ static void test_fallback_state(void) {
     __asm__ volatile("movaps %[xi], %%xmm15\n"
                      "stc\n"
                      "mov $1, %%r13\n mov $5, %%r14\n"
-                     ".byte 0x66, 0x0F, 0x38, 0x40, 0xC1\n" // pmulld xmm0, xmm1: the decoder has no SSE4 and #UD is not
-                                                            // its call to make
+                     ".byte 0x66, 0x0F, 0x38, 0x41, 0xC1\n" // phminposuw xmm0, xmm1: the decoder has no SSE4 and #UD is
+                                                            // not its call to make
                      "pushfq\n popq %[fl]\n"
                      "movaps %%xmm15, %[xo]\n"
                      : "=b"(rbx), [fl] "=r"(flags), [xo] "=m"(back), "+r"(r15)
@@ -839,6 +839,17 @@ static void test_stale_table(u64 root) {
     CHECK(PHYS(table)[511] == 499 + 511);
 }
 
+static void test_ptest_flags(void) {
+    u64 flags, set = 0xFFFFFFFFFFFFFFFFULL;
+    __asm__ volatile("movq %1, %%xmm0\n movq %1, %%xmm1\n"
+                     "mov $0x7f, %%al\n add $1, %%al\n" // sets SF, OF and AF
+                     "ptest %%xmm0, %%xmm1\n pushfq\n popq %0\n"
+                     : "=r"(flags)
+                     : "r"(set)
+                     : "rax", "xmm0", "xmm1", "cc");
+    CHECK((flags & 0x8D5) == 0x01); // both all ones: CF only, of CF PF AF ZF SF OF
+}
+
 static u64 tsc(void) {
     u32 lo, hi;
     __asm__ volatile("lfence\n rdtsc" : "=a"(lo), "=d"(hi));
@@ -893,12 +904,12 @@ static void test_mmx(void) {
     u64 value = 0x1122334455667788ULL, out = 0, after = 0;
     // Action 9 checks and swaps what TCG would see: mm3 holds value, MMX has entered; it hands back ~value.
     __asm__ volatile(
-        "movq %1, %%mm3\n mov $9, %%r13\n mov $5, %%r14\n .byte 0x66, 0x0F, 0x38, 0x40, 0xC1\n movq %%mm3, %0\n"
+        "movq %1, %%mm3\n mov $9, %%r13\n mov $5, %%r14\n .byte 0x66, 0x0F, 0x38, 0x41, 0xC1\n movq %%mm3, %0\n"
         : "=r"(out)
         : "r"(value)
         : "r13", "r14", "xmm0", "memory");
     CHECK(out == ~value);
-    __asm__ volatile("emms\n mov $10, %%r13\n mov $5, %%r14\n .byte 0x66, 0x0F, 0x38, 0x40, 0xC1\n"
+    __asm__ volatile("emms\n mov $10, %%r13\n mov $5, %%r14\n .byte 0x66, 0x0F, 0x38, 0x41, 0xC1\n"
                      :
                      :
                      : "r13", "r14", "xmm0", "memory");
@@ -959,6 +970,7 @@ void kmain(void) {
     test_stale_table(root);
     test_poisoned_tables(root);
     test_rep_speed_under_ts();
+    test_ptest_flags();
     test_process_log(root);
     test_view_churn(root);
     CHECK(!bad_vector);
