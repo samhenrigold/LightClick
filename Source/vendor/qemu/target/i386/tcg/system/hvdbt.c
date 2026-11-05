@@ -389,9 +389,20 @@ static void hvdbt_put_state(CPUState *cs)
         s.xmm[i][0] = env->xmm_regs[i].ZMM_Q(0);
         s.xmm[i][1] = env->xmm_regs[i].ZMM_Q(1);
     }
+    s.fp_tags = 0;
     for (int i = 0; i < 8; i++) {
         s.mm[i] = env->fpregs[i].mmx.MMX_Q(0);
+        s.fp_exp[i] = env->fpregs[i].d.high;
+        s.fp_tags |= !env->fptags[i] << i;
     }
+    s.fp_top = env->fpstt;
+    s.fcw = env->fpuc;
+    s.fsw = env->fpus & ~0x3800;
+    s.fop = env->fpop;
+    s.fcs = env->fpcs;
+    s.fds = env->fpds;
+    s.fip = env->fpip;
+    s.fdp = env->fpdp;
     engine_set_state(hv.engine, &s);
 
     /* The TSC is the same clock on both sides, cpu_get_tsc's steps with cpu_get_tsc's offsets. */
@@ -458,14 +469,17 @@ static void hvdbt_get_state(CPUState *cs)
     }
     for (int i = 0; i < 8; i++) {
         env->fpregs[i].mmx.MMX_Q(0) = s.mm[i];
+        env->fpregs[i].d.high = s.fp_exp[i];
+        env->fptags[i] = !(s.fp_tags >> i & 1);
     }
-    /* As helper_enter_mmx and helper_emms do. */
-    if (s.mmx_event) {
-        if (s.mmx_event == ENGINE_MMX_ENTERED) {
-            env->fpstt = 0;
-        }
-        memset(env->fptags, s.mmx_event == ENGINE_MMX_EMMS, sizeof(env->fptags));
-    }
+    env->fpstt = s.fp_top;
+    cpu_set_fpuc(env, s.fcw);
+    env->fpus = s.fsw;
+    env->fpop = s.fop;
+    env->fpcs = s.fcs;
+    env->fpds = s.fds;
+    env->fpip = s.fip;
+    env->fpdp = s.fdp;
     /* shortcut: a whole TLB flush at every return to TCG, since guest tables changed unseen. Measure before narrowing it. */
     tlb_flush(cs);
 }

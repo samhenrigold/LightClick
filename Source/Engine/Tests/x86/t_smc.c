@@ -77,6 +77,13 @@ int flat_main(unsigned long a0, unsigned long a1) {
     q[7] = 0xC3;
     printf("return into rewritten code %llx\n", (unsigned long long)((fn)ret_site)());
 
+    // An x87 store as the writer: the monitor makes the value, translated code stores it, and that store is what trips the code page.
+    emit_ret_imm(code, 5);
+    printf("before x87 store %llu\n", (unsigned long long)((fn)code)());
+    int32_t patched = 1234;
+    __asm__ volatile("fildl %1\n fistpl %0" : "=m"(*(int32_t *)(code + 1)) : "m"(patched));
+    printf("after x87 store %llu\n", (unsigned long long)((fn)code)());
+
     // Timing, Rosetta's table in research-rosetta.md.
     emit_ret_imm(code + 4096 * 2, 3);
     uint64_t n = 2000;

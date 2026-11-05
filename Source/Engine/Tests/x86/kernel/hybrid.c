@@ -199,7 +199,7 @@ static void test_fallback_state(void) {
     CHECK(back[0] == xmm[0] && back[1] == xmm[1]);
 
     // Other kinds of stop: x87, far return, an MSR the APIC owns, hlt, cr8.
-    __asm__ volatile("mov $0, %%r13\n mov $2, %%r14\n .byte 0xDB, 0xE3\n" : : : "r13", "r14"); // fninit
+    __asm__ volatile("mov $0, %%r13\n mov $2, %%r14\n .byte 0xD9, 0xFF\n" : : : "r13", "r14"); // fninit
     __asm__ volatile("mov $0, %%r13\n mov $1, %%r14\n hlt\n" : : : "r13", "r14");
     u64 rax = 0;
     __asm__ volatile("mov $5, %%r13\n mov $4, %%r14\n mov %%cr8, %%rax\n" : "=a"(rax) : : "r13", "r14");
@@ -414,19 +414,43 @@ static void test_port_forms(void) {
     command(9); // the host checks what it saw
 }
 
-// ---- Two tasks' xmm state under lazy switching, as XNU does it ----
+// ---- Two tasks' FP state under lazy switching, as XNU does it: xmm in both, the x87 stack in one and MMX in the other ----
 // The state lives only in xmm registers, so C here mustn't use them: this file is built without implicit float.
 #define LAZY_STEPS 2000000
 typedef struct {
-    u8 *area; // fxsave image, in the physmap: the host plays fxsave and fxrstor there
+    u8 *area; // fxsave image, in the physmap
     u64 steps;
     bool saved;
-    u64 result[6];
+    u64 result[12];
 } Task;
 static Task tasks[2];
 static volatile int lazy_current;
 static volatile u64 lazy_nm_count;
 static const u8 byte_swap[16] __attribute__((aligned(16))) = {3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12};
+
+// Each task's own rounding and precision, so that a mix-up changes the numbers. Every 16th step: costs a monitor call or several.
+static const u16 task_cw[2] = {0xA7F, 0x77F};
+static inline void task_fp_seed(int n) {
+    __asm__ volatile("fninit\n" : : : "memory");
+    if (n == 0)
+        __asm__ volatile("fldcw (%0)\n fld1\n fldpi\n" : : "r"(&task_cw[n]) : "memory");
+    else
+        __asm__ volatile("movq %0, %%mm3\n movq %0, %%mm6\n" : : "r"(0x0102030405060708ULL) : "memory");
+}
+static inline void task_fp_step(int n, u64 step) {
+    if (step & 15)
+        return;
+    if (n == 0)
+        __asm__ volatile("fadd %%st(1), %%st\n fsqrt\n fxch\n fld1\n faddp\n fxch\n" : : : "memory");
+    else
+        __asm__ volatile("movq %0, %%mm2\n paddq %%mm2, %%mm3\n pxor %%mm3, %%mm6\n psllq $1, %%mm3\n" : : "r"(step) : "memory");
+}
+static void task_fp_read(int n, u64 *out) {
+    if (n == 0)
+        __asm__ volatile("fld %%st(0)\n fstpt (%0)\n fld %%st(1)\n fstpt 16(%0)\n fnstcw 32(%0)\n" : : "r"(out) : "memory");
+    else
+        __asm__ volatile("movq %%mm3, (%0)\n movq %%mm6, 16(%0)\n" : : "r"(out) : "memory");
+}
 
 static void task_seed(u64 seed) {
     __asm__ volatile("pxor %%xmm0, %%xmm0\n pxor %%xmm1, %%xmm1\n pxor %%xmm2, %%xmm2\n pxor %%xmm3, %%xmm3\n"
@@ -453,28 +477,15 @@ static inline void task_step(u64 a, u64 b) {
 static void task_read(u64 *out) {
     __asm__ volatile("movups %%xmm0, (%0)\n movups %%xmm5, 16(%0)\n movups %%xmm15, 32(%0)\n" : : "r"(out) : "memory");
 }
-static void play_fxsave(u8 *area) {
-    __asm__ volatile("mov %0, %%r12\n mov $6, %%r13\n mov $5, %%r14\n .byte 0x41, 0x0F, 0xAE, 0x04, 0x24\n"
-                     :
-                     : "r"(area)
-                     : "r12", "r13", "r14", "memory");
-}
-static void play_fxrstor(u8 *area) {
-    __asm__ volatile("mov %0, %%r12\n mov $7, %%r13\n mov $5, %%r14\n .byte 0x41, 0x0F, 0xAE, 0x0C, 0x24\n"
-                     :
-                     : "r"(area)
-                     : "r12", "r13", "r14", "memory");
-}
-
 // #NM: load this task's state. Runs on the task's stack, with interrupts off through the gate.
 void lazy_nm(void) {
     Task *t = &tasks[lazy_current];
     lazy_nm_count++;
     __asm__ volatile("clts");
     if (t->saved)
-        play_fxrstor(t->area);
+        __asm__ volatile("fxrstor64 (%0)" : : "r"(t->area) : "memory");
     else
-        task_seed(lazy_current + 1);
+        task_seed(lazy_current + 1), task_fp_seed(lazy_current);
     t->saved = false;
     fp_live = 1;
 }
@@ -484,7 +495,7 @@ static void lazy_switch(void) {
     __asm__ volatile("cli");
     if (fp_live) {
         Task *t = &tasks[lazy_current];
-        play_fxsave(t->area);
+        __asm__ volatile("fxsave64 (%0)" : : "r"(t->area) : "memory");
         t->saved = true;
         fp_live = 0;
     }
@@ -552,7 +563,7 @@ static inline void task_touch(u64 step) {
 }
 
 static void test_lazy_fp(u64 root) {
-    u64 golden[2][6];
+    u64 golden[2][12];
     for (int i = 0; i < LAZY_PAGES; i++) {
         lazy_frames[i] = frame();
         for (int w = 0; w < 512; w++)
@@ -562,11 +573,14 @@ static void test_lazy_fp(u64 root) {
     gate(14, lazy_pf_stub);
     for (int n = 0; n < 2; n++) {
         task_seed(n + 1);
+        task_fp_seed(n);
         for (u64 i = 0; i < LAZY_STEPS; i++) {
             task_step(i * (n + 3), ~i);
+            task_fp_step(n, i);
             task_touch(i);
         }
         task_read(golden[n]);
+        task_fp_read(n, &golden[n][6]);
     }
     for (int n = 0; n < 2; n++) {
         tasks[n].area = (u8 *)PHYS(frame());
@@ -589,14 +603,16 @@ static void test_lazy_fp(u64 root) {
         int n = lazy_current;
         for (u64 run = 0; run < quantum && t->steps < LAZY_STEPS; run++, t->steps++) {
             task_step(t->steps * (n + 3), ~t->steps);
+            task_fp_step(n, t->steps);
             task_touch(t->steps);
             if ((t->steps & 0xFFF) ==
                 0) // a fallback in the middle of a task: its xmm state goes through the host and back
-                __asm__ volatile("mov $0, %%r13\n mov $2, %%r14\n .byte 0xDB, 0xE3\n" : : : "r13", "r14");
+                __asm__ volatile("mov $0, %%r13\n mov $2, %%r14\n .byte 0xD9, 0xFF\n" : : : "r13", "r14");
         }
         if (t->steps == LAZY_STEPS) {
             t->steps++;
             task_read(t->result);
+            task_fp_read(n, &t->result[6]);
             finished++;
         }
         quantum = quantum * 7 % 4093 + 1;
@@ -609,8 +625,9 @@ static void test_lazy_fp(u64 root) {
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 & ~8ULL));
     __asm__ volatile("sti");
     for (int n = 0; n < 2; n++)
-        for (int i = 0; i < 6; i++)
+        for (int i = 0; i < 12; i++)
             CHECK(tasks[n].result[i] == golden[n][i]);
+    __asm__ volatile("emms\n fninit");
     CHECK(lazy_nm_count > 100);
     CHECK(lazy_pf_count > 1000);
     gate(14, bad_stub);
@@ -1009,6 +1026,203 @@ static void test_split_store_fault(u64 root) {
     PHYS(table)[511] = 0;
 }
 
+// ---- x87: what Rosetta can't be compared on, by the SDM, and what TCG sees at a fallback ----
+extern volatile u64 gp_count;
+volatile u64 gp_count;
+__asm__(".text\n"
+        "_gp_skip5:\n" // #GP from the five-byte fxrstor64 below: count it and step over
+        "  incq _gp_count(%rip)\n"
+        "  addq $8, %rsp\n"
+        "  addq $5, (%rsp)\n"
+        "  iretq\n");
+extern char gp_skip5[] __asm__("_gp_skip5");
+
+static inline u16 x87_sw(void) {
+    u16 v;
+    __asm__ volatile("fnstsw %0" : "=a"(v));
+    return v;
+}
+
+static void test_x87(void) {
+    u8 *area = (u8 *)PHYS(frame());
+    u16 sw;
+    u64 lo;
+    // Stack underflow, masked: the indefinite, IE and SF, C1 clear.
+    __asm__ volatile("fninit\n fadd %%st(1), %%st\n" : : : "memory");
+    sw = x87_sw();
+    CHECK((sw & 0x7F) == 0x41 && !(sw & 0x200));
+    __asm__ volatile("fnclex\n fxsave64 (%0)" : : "r"(area) : "memory");
+    CHECK(*(u64 *)(area + 32) == 0xC000000000000000ULL && *(u16 *)(area + 40) == 0xFFFF);
+    // A NaN in ST0 doesn't change that, where Rosetta runs the NaN rules against its empty register.
+    __asm__ volatile("fninit\n fldt (%0)\n fadd %%st(3), %%st\n fxsave64 (%1)" : : "r"((const u8[10]){1, 0, 0, 0, 0, 0, 0, 0xC0, 0xFF, 0x7F}), "r"(area) : "memory");
+    CHECK(*(u64 *)(area + 32) == 0xC000000000000000ULL && *(u16 *)(area + 40) == 0xFFFF);
+    // Stack overflow: the same with C1 set, TOP moved, and the register overwritten.
+    __asm__ volatile("fninit\n fld1\n fld1\n fld1\n fld1\n fld1\n fld1\n fld1\n fld1\n fnclex\n fldpi\n" : : : "memory");
+    sw = x87_sw();
+    CHECK((sw & 0x7F) == 0x41 && (sw & 0x200) && (sw >> 11 & 7) == 7);
+    // fbld as well, which Rosetta lets through.
+    __asm__ volatile("fnclex\n fbld (%0)\n" : : "r"((const u8[10]){0x12, 0x34}) : "memory");
+    sw = x87_sw();
+    CHECK((sw & 0x41) == 0x41 && (sw & 0x200));
+    // Popping an empty register stores the indefinite. An integer store gives the integer indefinite.
+    double d = 1;
+    int i32 = 0;
+    __asm__ volatile("fninit\n fstpl %0\n" : "=m"(d));
+    CHECK(*(u64 *)&d == 0xFFF8000000000000ULL);
+    __asm__ volatile("fninit\n fistpl %0\n" : "=m"(i32));
+    CHECK((u32)i32 == 0x80000000);
+
+    // Empty registers keep what they held: a CPU's image shows it, tagged empty.
+    __asm__ volatile("fninit\n fldpi\n fstp %%st(0)\n fxsave64 (%0)" : : "r"(area) : "memory");
+    CHECK(area[4] == 0 && *(u64 *)(area + 32 + 15 * 0) != 0xC000000000000000ULL);
+    CHECK(*(u64 *)(area + 32 + 16 * 7) == 0xC90FDAA22168C235ULL && *(u16 *)(area + 40 + 16 * 7) == 0x4000);
+
+    // Instruction and data pointers, and the opcode. r12 as the base, so the ModRM byte is known; a label gives the rip.
+    u64 at, cell = 0;
+    __asm__ volatile("fninit\n lea 1f(%%rip), %0\n mov %1, %%r12\n 1: .byte 0x41, 0xDD, 0x04, 0x24\n" // fldl (%r12)
+                     "fxsave64 (%2)\n"
+                     : "=&r"(at)
+                     : "r"(&cell), "r"(area)
+                     : "r12", "memory");
+    CHECK(*(u16 *)(area + 6) == 0x504 && *(u64 *)(area + 8) == at && *(u64 *)(area + 16) == (u64)&cell);
+    // The small format and fnstenv's: reserved words all ones, opcode beside the selector.
+    __asm__ volatile("fnstenv (%0)" : : "r"(area) : "memory");
+    CHECK(*(u32 *)(area + 0) == 0xFFFF037F && *(u32 *)(area + 12) == (u32)at && *(u32 *)(area + 16) == (0x504u << 16 | 8) && *(u32 *)(area + 20) == (u32)(u64)&cell);
+    CHECK(*(u16 *)(area + 8) == 0x7FFF); // the one register in use, physical 7, holds zero: tag 01
+    __asm__ volatile("fldcw (%0)\n" : : "r"((const u16[1]){0x37F}) : "memory");
+    __asm__ volatile("fxsave (%0)" : : "r"(area) : "memory");
+    CHECK(*(u32 *)(area + 8) == (u32)at && *(u16 *)(area + 12) == 8 && *(u32 *)(area + 16) == (u32)(u64)&cell);
+    // A control instruction moves neither pointer.
+    __asm__ volatile("fnstcw (%0)\n fnclex\n fxsave64 (%1)" : : "r"(&cell), "r"(area) : "memory");
+    CHECK(*(u64 *)(area + 8) == at);
+    // Data16 images are the short ones.
+    __asm__ volatile(".byte 0x66, 0xD9, 0x30\n" : : "a"(area) : "memory"); // data16 fnstenv (%rax)
+    CHECK(*(u16 *)(area + 0) == 0x37F && *(u16 *)(area + 2) >> 11 == 7);
+
+    // fxsave leaves the end of the image alone, and fxrstor brings back everything it holds. ST order, not physical.
+    for (int w = 52; w < 64; w++)
+        ((u64 *)area)[w] = 0x5A5A5A5A5A5A5A5AULL;
+    u64 xmm3[2] __attribute__((aligned(16))) = {0x1111222233334444ULL, 0x5555666677778888ULL}, back[2] __attribute__((aligned(16)));
+    __asm__ volatile("movaps (%1), %%xmm3\n fninit\n fld1\n fldpi\n fxsave64 (%0)\n fninit\n pxor %%xmm3, %%xmm3\n fxrstor64 (%0)\n movaps %%xmm3, (%2)\n" : : "r"(area), "r"(xmm3), "r"(back) : "memory", "xmm3");
+    CHECK(back[0] == xmm3[0] && back[1] == xmm3[1]);
+    CHECK(((u64 *)area)[52] == 0x5A5A5A5A5A5A5A5AULL && ((u64 *)area)[63] == 0x5A5A5A5A5A5A5A5AULL);
+    CHECK(area[4] == 0xC0 && *(u64 *)(area + 32) == 0xC90FDAA22168C235ULL && *(u64 *)(area + 48) == 0x8000000000000000ULL);
+    __asm__ volatile("fstpl %0\n" : "=m"(d));
+    __asm__ volatile("fstp %st(0)");
+    CHECK(*(u64 *)&d == 0x400921FB54442D18ULL);
+    // Reserved MXCSR bits: #GP, nothing restored.
+    gate(13, gp_skip5);
+    *(u32 *)(area + 24) = 0x10000 | 0x1F80;
+    __asm__ volatile("fninit\n fldz\n mov %0, %%r12\n .byte 0x49, 0x0F, 0xAE, 0x0C, 0x24\n" : : "r"(area) : "r12", "memory");
+    gate(13, bad_stub);
+    CHECK(gp_count == 1);
+    sw = x87_sw();
+    CHECK((sw >> 11 & 7) == 7);
+    __asm__ volatile("fninit");
+
+    // MMX and the stack: TOP 0, all valid, exponents all ones where written; emms empties the tags and leaves TOP.
+    __asm__ volatile("fninit\n fld1\n fld1\n movq %0, %%mm2\n fxsave64 (%1)\n" : : "r"(lo = 0x0123456789ABCDEFULL), "r"(area) : "memory");
+    CHECK((*(u16 *)(area + 2) >> 11 & 7) == 0 && area[4] == 0xFF && *(u64 *)(area + 32 + 2 * 16) == lo && *(u16 *)(area + 40 + 2 * 16) == 0xFFFF);
+    __asm__ volatile("emms\n fxsave64 (%0)" : : "r"(area) : "memory");
+    CHECK(area[4] == 0 && (*(u16 *)(area + 2) >> 11 & 7) == 0);
+    // ...and x87 can read what MMX left: a NaN whose significand is the MMX value, by physical number.
+    __asm__ volatile("fninit\n movq %0, %%mm7\n emms\n fld %%st(7)\n fxsave64 (%1)\n" : : "r"(lo), "r"(area) : "memory");
+    CHECK(*(u16 *)(area + 2) >> 11 == 7);
+
+    // A fault on a store changes nothing: the page faults in and the instruction runs once. TOP moved once, the value is whole.
+    u64 before = lazy_pf_count;
+    *lazy_ptes[2] = 0;
+    __asm__ volatile("invlpg (%0)" : : "r"(LAZY_VA + (2ULL << 12)));
+    gate(14, lazy_pf_stub);
+    u8 *split = (u8 *)LAZY_VA + (2ULL << 12) - 4; // an 80-bit store whose tail is on the missing page
+    *(volatile u64 *)(split - 8) = 0;
+    __asm__ volatile("fninit\n fld1\n fldpi\n fstpt (%0)\n" : : "r"(split) : "memory");
+    CHECK(lazy_pf_count == before + 1);
+    sw = x87_sw();
+    CHECK((sw >> 11 & 7) == 7);
+    CHECK(*(u64 *)split == 0xC90FDAA22168C235ULL && *(u16 *)(split + 8) == 0x4000);
+    // And a load: nothing pushed until it arrives.
+    *lazy_ptes[3] = 0;
+    __asm__ volatile("invlpg (%0)" : : "r"(LAZY_VA + (3ULL << 12)));
+    before = lazy_pf_count;
+    __asm__ volatile("fninit\n fldt (%0)\n" : : "r"((u8 *)LAZY_VA + (3ULL << 12)) : "memory");
+    sw = x87_sw();
+    CHECK(lazy_pf_count == before + 1 && (sw >> 11 & 7) == 7);
+    // A store to the page that's missing, under TS: #NM comes first and clears TS, then the fault.
+    __asm__ volatile("fninit\n fld1");
+    *lazy_ptes[4] = 0;
+    __asm__ volatile("invlpg (%0)" : : "r"(LAZY_VA + (4ULL << 12)));
+    u64 nm = nm_count, cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 8));
+    before = lazy_pf_count;
+    __asm__ volatile("fstpl (%0)\n" : : "r"((u8 *)LAZY_VA + (4ULL << 12)) : "memory");
+    CHECK(nm_count >= nm + 1 && lazy_pf_count == before + 1);
+    // Register forms, control forms and fwait under TS.
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 8));
+    nm = nm_count;
+    __asm__ volatile("fninit");
+    CHECK(nm_count == nm + 1);
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 8));
+    __asm__ volatile("fnstsw %%ax" : : : "ax");
+    CHECK(nm_count == nm + 2);
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 8));
+    __asm__ volatile("fxsave64 (%0)" : : "r"(area) : "memory");
+    CHECK(nm_count == nm + 3);
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 0x8 | 0x2)); // MP and TS: fwait traps too
+    __asm__ volatile("fwait");
+    CHECK(nm_count == nm + 4);
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
+    gate(14, bad_stub);
+
+    // At a fallback TCG gets all of it. Action 13 checks the stack as this leaves it, and writes ST0 and the status word for the way back.
+    __asm__ volatile("fninit\n fldcw (%0)\n fld1\n fldpi\n" : : "r"((const u16[1]){0xB7F}) : "memory");
+    __asm__ volatile("mov $13, %%r13\n mov $2, %%r14\n .byte 0xD9, 0xFF\n fxsave64 (%0)" : : "r"(area) : "r13", "r14", "memory");
+    CHECK(*(u64 *)(area + 32) == 0xFEDCBA9876543210ULL && *(u16 *)(area + 40) == 0x4005 && (*(u16 *)(area + 2) & 0x7F) == 0x20);
+    // An unmasked exception takes the operation to TCG (action 14 checks that nothing moved). Flags now unmasked are pending, and fwait goes too.
+    __asm__ volatile("fninit\n fld1\n fld1\n fldcw (%0)\n" : : "r"((const u16[1]){0x37E}) : "memory");
+    __asm__ volatile("mov $14, %%r13\n mov $2, %%r14\n faddp\n" : : : "r13", "r14");
+    __asm__ volatile("fninit\n fld1\n fldz\n fdivrp\n fldcw (%0)\n" : : "r"((const u16[1]){0x37B}) : "memory");
+    sw = x87_sw();
+    CHECK((sw & 0x80) && (sw & 4));
+    __asm__ volatile("mov $15, %%r13\n mov $1, %%r14\n fwait\n" : : : "r13", "r14");
+    __asm__ volatile("fninit");
+}
+
+// x87 operands go through translated loads and stores, so devices and tracked frames work as for any move. fxsave, written from the monitor, goes to TCG for a tracked frame.
+static void test_x87_memory(u64 root) {
+    u64 got = 0;
+    __asm__ volatile("fninit\n fldl (%0)\n fstpl (%1)" : : "r"(PHYS(MARKED)), "r"(&got) : "memory");
+    CHECK(got == MARKED * 3);
+    u64 writes = 0x1234;
+    __asm__ volatile("fildq (%1)\n fistpq (%0)" : : "r"(PHYS(MARKED)), "r"(&writes) : "memory");
+    CHECK(MAILBOX[0] == 0x1234);
+    __asm__ volatile("fldpi\n fstpt (%0)" : : "r"(PHYS(MARKED)) : "memory");
+    CHECK(MAILBOX[0] == 0xC90FDAA22168C235ULL);
+
+    u64 va = TEST_VA + 0x800000;
+    u64 *slots = pte_of(root, va);
+    u64 table = ((u64)slots - PHYSMAP) & ~0xFFFULL;
+    slots[0] = frame() | PRESENT_RW;
+    slots[1] = table | PRESENT_RW;
+    volatile u8 *high = (volatile u8 *)va + 4096;
+    CHECK(high[9] == (u8)(table >> 8));
+    u64 target = frame();
+    PHYS(target)[0] = 0x77;
+    u64 entry = target | PRESENT_RW;
+    __asm__ volatile("fildq (%1)\n fistpq (%0)" : : "r"(high + 64), "r"(&entry) : "memory");
+    CHECK(*(volatile u64 *)(va + (8ULL << 12)) == 0x77);
+    u64 rax = 0;
+    __asm__ volatile("mov %2, %%r12\n mov $5, %%r13\n mov $5, %%r14\n .byte 0x49, 0x0F, 0xAE, 0x04, 0x24\n"
+                     : "=a"(rax)
+                     : "a"(rax), "r"(high + 1024)
+                     : "r12", "r13", "r14", "memory");
+    CHECK(rax == 7);
+    slots[1] = 0;
+    slots[8] = 0;
+    __asm__ volatile("mov %%cr3, %%rax\n mov %%rax, %%cr3" : : : "rax");
+}
+
 void kmain(void) {
     __asm__ volatile("mov $0x10, %%ax\n mov %%ax, %%ds\n mov %%ax, %%es\n mov %%ax, %%ss\n" : : : "ax");
     tables();
@@ -1029,6 +1243,8 @@ void kmain(void) {
     test_lazy_fp(root);
     test_split_store_fault(root);
     test_mmx();
+    test_x87();
+    test_x87_memory(root);
     test_stale_table(root);
     test_poisoned_tables(root);
     test_rep_speed_under_ts();

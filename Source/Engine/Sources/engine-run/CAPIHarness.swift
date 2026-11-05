@@ -105,6 +105,7 @@ final class CAPIHarness {
         state.sel.2 = 0x10
         state.gpr.7 = config.ram_bytes
         state.mxcsr = 0x1F80
+        state.fcw = 0x37F
         engine_set_state(handle, &state)
 
         let target = handle!

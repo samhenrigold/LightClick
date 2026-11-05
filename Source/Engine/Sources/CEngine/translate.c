@@ -486,6 +486,9 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
             case OP_STMXCSR:
                 emit_sse(in, live_after[i]);
                 break;
+            case OP_X87:
+                emit_x87(in);
+                break;
             case OP_SYSCALL:
             case OP_SYSRET:
             case OP_IRET:
@@ -858,10 +861,12 @@ static void emit_monitor_op(const Insn *in) {
             break;
         case OP_FXSAVE:
         case OP_FXRSTOR: {
-            // Probe both ends, so the monitor's access cannot fault for the guest's reasons.
+            // Probe both ends, so the monitor's access cannot fault for the guest's reasons. TS comes before any fault, hence the NEON word first.
+            E(0x4F00E400u | V_MEM);
             int r = addr_reg(in);
             if (r != S0)
                 mov_reg(1, S0, r);
+            movimm(S2, in->sz == 8);
             ubfx(1, S1, S0, 0, 4);
             cbz(0, 1, S1, 2);
             svc(SVC_GP0);

@@ -15,6 +15,36 @@ static void set_bad(Insn *in, const char *why) {
     in->writes = 0;
 }
 
+// x87 forms that stay on TCG, by name for the tally; NULL for the ones the monitor does. Trigonometry and logarithms, which TCG itself only approximates and
+// nothing has shown to be hot, and the 287 leftovers and undocumented aliases, where only TCG knows what the CPU model does.
+static const char *x87_rare(int esc, u8 m) {
+    if (m < 0xC0)
+        return NULL;
+    u8 r = m & 0xF8;
+    switch (esc) {
+        case 1:
+            switch (m) {
+                case 0xF0: return "x87: f2xm1";
+                case 0xF1: return "x87: fyl2x";
+                case 0xF2: return "x87: fptan";
+                case 0xF3: return "x87: fpatan";
+                case 0xF9: return "x87: fyl2xp1";
+                case 0xFB: return "x87: fsincos";
+                case 0xFE: return "x87: fsin";
+                case 0xFF: return "x87: fcos";
+                default: break;
+            }
+            return r == 0xC0 || r == 0xC8 || m == 0xD0 || (m >= 0xE0 && m != 0xE2 && m != 0xE3 && m != 0xE6 && m != 0xE7 && m != 0xEF) ? NULL : "x87: reserved D9 form";
+        case 2: return m < 0xE0 || m == 0xE9 ? NULL : "x87: reserved DA form";
+        case 3: return m < 0xE0 || m == 0xE2 || m == 0xE3 || (m >= 0xE8 && m < 0xF8) ? NULL : "x87: reserved or 287 DB form";
+        case 4: return r == 0xD0 || r == 0xD8 ? "x87: DC alias of fcom" : NULL;
+        case 5: return r == 0xC0 || r == 0xD0 || r == 0xD8 || r == 0xE0 || r == 0xE8 ? NULL : "x87: reserved DD form";
+        case 6: return r == 0xC0 || r == 0xC8 || m == 0xD9 || r >= 0xE0 ? NULL : "x87: reserved DE form";
+        case 7: return m == 0xE0 || (m >= 0xE8 && m < 0xF8) ? NULL : "x87: reserved or alias DF form";
+        default: return NULL;
+    }
+}
+
 static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
     const u8 *p = b;
     int rex = 0, sz = 4;
@@ -241,7 +271,10 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
         } else if (opc == 0x99) {
             in->op = OP_CWD;
         } else if (opc == 0x9B) {
-            in->op = OP_NOP; // fwait: no x87 exceptions can be pending, since x87 itself stops
+            in->op = OP_X87; // fwait, with no modrm byte
+            in->sub = 8;
+            in->rm_reg = true;
+            in->reads = F_ARITH;
         } else if (opc == 0x9C) {
             in->op = OP_PUSHF;
             in->memop = true;
@@ -353,7 +386,20 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
             in->op = OP_XLAT;
             in->memop = true;
         } else if (opc >= 0xD8 && opc <= 0xDF) {
-            set_bad(in, "x87 instruction");
+            u8 m = *p;
+            const char *rare = x87_rare(opc & 7, m);
+            MODRM();
+            if (rare) {
+                set_bad(in, rare);
+            } else {
+                in->op = OP_X87;
+                in->sub = opc & 7;
+                in->opc = m;
+                in->pfx = p66 ? 0x66 : 0; // the small fnstenv and fnsave images
+                in->reads = F_ARITH; // #NM and a fallback show the flags, and fcmov reads them
+                if ((in->sub == 3 || in->sub == 7) && m >= 0xE8 && m < 0xF8)
+                    in->writes = F_ARITH; // fucomi, fcomi and their popping forms
+            }
         } else if (opc >= 0xE0 && opc <= 0xE3) {
             in->op = OP_JRCXZ;
             in->sub = opc == 0xE3 ? (in->addr32 ? 1 : 0) : opc == 0xE2 ? 2 : opc == 0xE1 ? 3 : 4;
