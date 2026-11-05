@@ -1,0 +1,11 @@
+# Xcode's C editor settings: 4-space indents, no tabs, 120 columns, case labels indented under switch.
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+IndentCaseLabels: true
+NamespaceIndentation: None
+AlignTrailingComments:
+  Kind: Never
+SortIncludes: Never

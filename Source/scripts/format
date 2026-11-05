@@ -1,0 +1,63 @@
+#!/bin/bash
+# Formats our Swift with swift-format (.swift-format) and our C, Objective-C and C++ with clang-format
+# (.clang-format), both from the selected Xcode.
+#
+#     scripts/format <path>...    these files, in place
+#     scripts/format --all        every tracked file, in place
+#     scripts/format --check      lists each tracked file that isn't formatted; exit 1 if any
+#
+# Upstream code and prebuilt guest files are left alone.
+set -uo pipefail
+ROOT="$(git rev-parse --show-toplevel)" || exit 2
+cd "$ROOT" || exit 2
+swift_format="$(xcrun --find swift-format)" || exit 2
+clang_format="$(xcrun --find clang-format)" || exit 2
+
+kind() {
+    case "$1" in
+        Source/vendor/* | Source/prebuilt/*) ;;
+        *.swift) echo swift ;;
+        *.c | *.h | *.m | *.mm | *.cc | *.cpp | *.hpp) echo c ;;
+    esac
+}
+
+tracked() { git -c core.quotePath=false ls-files | while IFS= read -r f; do [[ -n "$(kind "$f")" && ! -L "$f" ]] && echo "$f"; done; }
+
+format_files() {
+    local swift=() c=() f status=0
+    for f in "$@"; do
+        case "$(kind "$f")" in
+            swift) swift+=("$f") ;;
+            c) c+=("$f") ;;
+        esac
+    done
+    ((${#swift[@]})) && { "$swift_format" format --configuration .swift-format -i --parallel -- "${swift[@]}" || status=1; }
+    ((${#c[@]})) && { "$clang_format" -i --style=file -- "${c[@]}" || status=1; }
+    return $status
+}
+
+case "${1:-}" in
+    --all)
+        files=()
+        while IFS= read -r f; do files+=("$f"); done < <(tracked)
+        format_files "${files[@]}"
+        ;;
+    --check)
+        status=0
+        while IFS= read -r f; do
+            if [[ "$(kind "$f")" == swift ]]; then
+                "$swift_format" format --configuration .swift-format "$f" | cmp -s - "$f" || { echo "$f"; status=1; }
+            else
+                "$clang_format" --style=file "$f" | cmp -s - "$f" || { echo "$f"; status=1; }
+            fi
+        done < <(tracked)
+        exit $status
+        ;;
+    "" | -*)
+        sed -n '2,8s/^# \{0,1\}//p' "$0" >&2
+        exit 2
+        ;;
+    *)
+        format_files "$@"
+        ;;
+esac

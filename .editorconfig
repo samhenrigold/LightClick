@@ -1,0 +1,30 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+tab_width = 4
+max_line_length = 120
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[{*.json,*.yml,*.xctestplan,.swift-format}]
+indent_size = 2
+
+[{*.pbxproj,*.plist,*.entitlements,Makefile,*.mk}]
+indent_style = tab
+
+[*.md]
+max_line_length = off
+
+# Upstream diffs: a context line can be blank but for its leading space.
+[*.patch]
+charset = unset
+end_of_line = unset
+indent_style = unset
+indent_size = unset
+max_line_length = unset
+trim_trailing_whitespace = false
+insert_final_newline = unset
