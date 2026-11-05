@@ -2962,7 +2962,8 @@ static void gen_IRET(DisasContext *s, X86DecodedInsn *decode)
                                   eip_next_i32(s));
     }
     assume_cc_op(s, CC_OP_EFLAGS);
-    s->base.is_jmp = DISAS_EOB_ONLY;
+    /* helper_iret_protected requests an exit if IF rising could unmask anything. */
+    s->base.is_jmp = x86_tcg_chain_sys_return && PE(s) && !VM86(s) ? DISAS_JUMP : DISAS_EOB_ONLY;
 }
 
 static void gen_Jcc(DisasContext *s, X86DecodedInsn *decode)

@@ -45,6 +45,7 @@ static bool emit_inline_jmp_cache_cpl0;
 static bool emit_bulk_rep;
 static bool emit_inline_fp;
 static bool emit_inline_sse_packed;
+bool x86_tcg_chain_sys_return;
 static bool dispatch_acquire_barrier;
 static bool dispatch_relaxed;
 static bool shared_dispatch;
@@ -65,6 +66,7 @@ static void __attribute__((constructor)) init_inline_jmp_cache(void)
         pvg_tcg_fast_path("PVG_TCG_INLINE_JMP_CACHE_CPL0");
     emit_bulk_rep = pvg_tcg_fast_path("PVG_TCG_BULK_REP");
     emit_inline_sse_packed = pvg_tcg_fast_path("PVG_TCG_INLINE_SSE_PACKED");
+    x86_tcg_chain_sys_return = pvg_tcg_fast_path("PVG_TCG_CHAIN_SYS_RETURN");
 
     /* The guard loads this bitfield directly, so prove where it lives. */
     float_status layout = { 0 };
@@ -2419,7 +2421,19 @@ gen_eob(DisasContext *s, int mode)
     }
     if (mode == DISAS_EOB_RECHECK_TF) {
         gen_helper_rechecking_single_step(tcg_env);
-        tcg_gen_exit_tb(NULL, 0);
+        /*
+         * Local experiment: SYSCALL and SYSRET need no trip through the main
+         * loop. The lookup uses the new hflags, CS base and CPL, and every TB
+         * entry still checks for exit requests. SYSCALL never raises IF. SYSRET
+         * can, so helper_sysret requests an exit if anything is pending, which
+         * the next TB entry then honors. A deferred interrupt after STI keeps
+         * the old exit.
+         */
+        if (x86_tcg_chain_sys_return && !inhibit_reset) {
+            gen_cached_indirect_jump(s);
+        } else {
+            tcg_gen_exit_tb(NULL, 0);
+        }
     } else if (s->flags & HF_TF_MASK) {
         gen_helper_single_step(tcg_env);
     } else if (mode == DISAS_JUMP &&
