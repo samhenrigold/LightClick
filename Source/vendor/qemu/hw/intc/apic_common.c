@@ -203,6 +203,7 @@ void apic_init_reset(APICCommonState *s)
     s->initial_count = 0;
     s->initial_count_load_time = 0;
     s->next_time = 0;
+    s->cpu->env.tsc_deadline = 0;
     s->wait_for_sipi = !cpu_is_bsp(s->cpu);
 
     if (s->timer) {

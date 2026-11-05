@@ -755,9 +755,55 @@ int apic_accept_pic_intr(APICCommonState *s)
     return 0;
 }
 
+static bool apic_tsc_deadline_mode(APICCommonState *s)
+{
+    return (s->cpu->env.features[FEAT_1_ECX] & CPUID_EXT_TSC_DEADLINE_TIMER) &&
+           (s->lvt[APIC_LVT_TIMER] & (3 << APIC_LVT_TIMER_SHIFT)) == APIC_LVT_TIMER_TSCDEADLINE;
+}
+
+/*
+ * Runs on the vCPU thread without the BQL and in the timer callback with it, so retry if the guest
+ * moved the deadline meanwhile: otherwise the callback's timer_mod could overwrite a sooner one.
+ */
+static void apic_tsc_deadline_arm(APICCommonState *s)
+{
+    CPUX86State *env = &s->cpu->env;
+    uint64_t deadline;
+
+    do {
+        deadline = qatomic_read(&env->tsc_deadline);
+        if (deadline) {
+            uint64_t tsc = cpu_get_tsc(env) + env->tsc_offset;
+            uint32_t khz = env->user_tsc_khz ?: 1000000;
+            /* Round up, so the callback doesn't find the TSC just short of the deadline. */
+            uint64_t ns = deadline > tsc ? muldiv64(deadline - tsc, 1000000, khz) + 1 : 0;
+
+            timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + MIN(ns, INT64_MAX / 2));
+        } else {
+            timer_del(s->timer);
+        }
+    } while (deadline != qatomic_read(&env->tsc_deadline));
+}
+
+void apic_set_tsc_deadline(APICCommonState *s, uint64_t deadline)
+{
+    /* The SDM ignores writes outside deadline mode, and xnu's setup loop relies on reading it back. */
+    if (s && apic_tsc_deadline_mode(s)) {
+        qatomic_set(&s->cpu->env.tsc_deadline, deadline);
+        apic_tsc_deadline_arm(s);
+    }
+}
+
+uint64_t apic_get_tsc_deadline(APICCommonState *s)
+{
+    return s && apic_tsc_deadline_mode(s) ? qatomic_read(&s->cpu->env.tsc_deadline) : 0;
+}
+
 static void apic_timer_update(APICCommonState *s, int64_t current_time)
 {
-    if (apic_next_timer(s, current_time)) {
+    if (apic_tsc_deadline_mode(s)) {
+        apic_tsc_deadline_arm(s);
+    } else if (apic_next_timer(s, current_time)) {
         timer_mod(s->timer, s->next_time);
     } else {
         timer_del(s->timer);
@@ -767,6 +813,19 @@ static void apic_timer_update(APICCommonState *s, int64_t current_time)
 static void apic_timer(void *opaque)
 {
     APICCommonState *s = opaque;
+
+    if (apic_tsc_deadline_mode(s)) {
+        CPUX86State *env = &s->cpu->env;
+        uint64_t deadline = qatomic_read(&env->tsc_deadline);
+
+        if (!deadline || cpu_get_tsc(env) + env->tsc_offset < deadline) {
+            apic_tsc_deadline_arm(s);
+        } else if (qatomic_cmpxchg(&env->tsc_deadline, deadline, 0) == deadline) {
+            /* The cmpxchg fails only if the guest replaced this deadline, which then wins. */
+            apic_local_deliver(s, APIC_LVT_TIMER);
+        }
+        return;
+    }
 
     apic_local_deliver(s, APIC_LVT_TIMER);
     apic_timer_update(s, s->next_time);
@@ -1069,6 +1128,9 @@ static int apic_register_write(APICCommonState *s, int index, uint64_t val)
             int n = index - 0x32;
             s->lvt[n] = val;
             if (n == APIC_LVT_TIMER) {
+                if (!apic_tsc_deadline_mode(s)) {
+                    qatomic_set(&s->cpu->env.tsc_deadline, 0);
+                }
                 apic_timer_update(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
             } else if (n == APIC_LVT_LINT0 && apic_check_pic(s)) {
                 apic_update_irq(s);
@@ -1179,7 +1241,10 @@ static void apic_pre_save(APICCommonState *s)
 
 static void apic_post_load(APICCommonState *s)
 {
-    if (s->timer_expiry != -1) {
+    if (apic_tsc_deadline_mode(s)) {
+        /* shortcut: assumes the CPU's state loaded first; snapshots aren't used, revisit if they are. */
+        apic_tsc_deadline_arm(s);
+    } else if (s->timer_expiry != -1) {
         timer_mod(s->timer, s->timer_expiry);
     } else {
         timer_del(s->timer);

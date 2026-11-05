@@ -317,6 +317,12 @@ void helper_wrmsr(CPUX86State *env)
 
         break;
     }
+    case MSR_IA32_TSCDEADLINE:
+        if (!(env->features[FEAT_1_ECX] & CPUID_EXT_TSC_DEADLINE_TIMER)) {
+            goto error;
+        }
+        apic_set_tsc_deadline(env_archcpu(env)->apic_state, val);
+        break;
     default:
         if ((uint32_t)env->regs[R_ECX] >= MSR_MC0_CTL
             && (uint32_t)env->regs[R_ECX] < MSR_MC0_CTL +
@@ -494,6 +500,12 @@ void helper_rdmsr(CPUX86State *env)
 
         break;
     }
+    case MSR_IA32_TSCDEADLINE:
+        if (!(env->features[FEAT_1_ECX] & CPUID_EXT_TSC_DEADLINE_TIMER)) {
+            raise_exception_err_ra(env, EXCP0D_GPF, 0, GETPC());
+        }
+        val = apic_get_tsc_deadline(x86_cpu->apic_state);
+        break;
     default:
         if ((uint32_t)env->regs[R_ECX] >= MSR_MC0_CTL
             && (uint32_t)env->regs[R_ECX] < MSR_MC0_CTL +
