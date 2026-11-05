@@ -81,3 +81,6 @@ saved_esp: .long 0
 form_entry: .long 0
 .p2align 6
 fuzz_st: .space 512
+.globl fuzz_x87_in, fuzz_x87_out // fuzz_driver.c names them; no form here uses them
+fuzz_x87_in: .space 1024
+fuzz_x87_out: .space 512

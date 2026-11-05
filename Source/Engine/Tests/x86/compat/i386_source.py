@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""test-i386.c for the compat payload: without what needs Linux (segment syscalls, signals, vm86) or x87 (bcd aside, which is TCG's on a real run and so has nothing to compare).
+"""test-i386.c for the compat payload: without what needs Linux (segment syscalls, signals, vm86). test_bcd is left out by user32.c: BCD is TCG's on a real run, so it has nothing to compare.
 Usage: i386_source.py <test-i386.c> <output>"""
 import sys
 

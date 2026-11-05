@@ -7,7 +7,7 @@
 .set ST_RSP, 400
 
 .text
-.globl _fuzz_load, _fuzz_load_fp, _fuzz_save, _fuzz_call, _fuzz_st, buffer_ptr_cell
+.globl _fuzz_load, _fuzz_load_fp, _fuzz_load_x87, _fuzz_save, _fuzz_save_x87, _fuzz_call, _fuzz_st, _fuzz_x87_in, _fuzz_x87_out, buffer_ptr_cell
 
 _fuzz_call: // rdi: form entry
     pushq %rbx
@@ -21,6 +21,21 @@ _fuzz_call: // rdi: form entry
     subq $64, %rsp
     jmp *form_entry(%rip)
 
+// A control word and `depth` registers. The last one loaded is ST0.
+_fuzz_load_x87:
+    leaq _fuzz_x87_in(%rip), %rax
+    fninit
+    fldcw (%rax)
+    movzbl 2(%rax), %ecx
+    addq $16, %rax
+1:
+    testl %ecx, %ecx
+    jz 2f
+    fldt (%rax)
+    addq $16, %rax
+    decl %ecx
+    jmp 1b
+2:
 _fuzz_load_fp:
     leaq _fuzz_st(%rip), %rax
     movaps ST_X+0(%rax), %xmm0
@@ -53,6 +68,9 @@ _fuzz_load:
     movq (%rax), %rax
     ret
 
+_fuzz_save_x87:
+    fxsave64 _fuzz_x87_out(%rip)
+    fninit
 _fuzz_save:
     pushfq
     movq %rax, _fuzz_st+0(%rip)
@@ -101,3 +119,7 @@ form_entry: .quad 0
 buffer_ptr_cell: .quad 0x123456789abcdef0
 .p2align 6
 _fuzz_st: .space 512
+.p2align 4
+_fuzz_x87_in: .space 16 + 8 * 16
+.p2align 4
+_fuzz_x87_out: .space 512

@@ -16,7 +16,7 @@ BAD = re.compile(r"%r(?!15\b|13\b|11\b)|%[er]?(si|di|bp|sp)\b|%(sil|dil|bpl|spl)
 kept = []
 for name, body, mask, kind in scope["forms"]:
     text = " ".join(body)
-    if BAD.search(text):
+    if BAD.search(text) or kind not in ("int", "fp"):  # x87's are held to Rosetta in 64-bit mode; here test_floats covers the 32-bit formats
         continue
     kept.append((name, [b.replace("%r15", "%ebp").replace("%r13", "%esi").replace("%r11", "%edi") for b in body], mask, kind))
 forms = kept

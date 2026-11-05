@@ -664,6 +664,38 @@ static void emit_shift(const Insn *in, int live) {
         ldst(1, sz, S0, a);
     }
     int d = mem ? S0 : gpr_read(in->rm, sz, in->high_rm, S3);
+    if (sz < 4 && !thru && !live && !(in->by_cl && rot)) {
+        // Narrow with no flags wanted: the value extended to 32 bits, a 32-bit shift, whose count is masked to 5 bits as x86's is, then the low part.
+        if (kind == SH_SAR)
+            sbfx(0, S0, d, 0, bits);
+        else
+            ubfx(0, S0, d, 0, bits);
+        if (in->by_cl) {
+            var_shift(0, kind == SH_SHL ? 0 : kind == SH_SHR ? 1 : 2, S0, S0, 1);
+        } else {
+            int count = (int)in->imm & 31;
+            if (rot) {
+                int k = count % bits;
+                k = kind == SH_ROL ? k : (bits - k) % bits;
+                if (k) { // as a left rotate
+                    lsl_imm(0, S1, S0, k);
+                    logic_sh(0, 1, 0, S0, S1, S0, 1, bits - k);
+                }
+            } else if (count) {
+                if (kind == SH_SHL)
+                    lsl_imm(0, S0, S0, count);
+                else if (kind == SH_SHR)
+                    lsr_imm(0, S0, S0, count);
+                else
+                    asr_imm(0, S0, S0, count);
+            }
+        }
+        if (mem)
+            ldst(0, sz, S0, a);
+        else
+            gpr_write(in->rm, sz, in->high_rm, S0);
+        return;
+    }
     if (sz < 4 || thru || (in->by_cl && rot && live)) {
         // Helper: exact semantics for the rare forms. Flags come back as data so a store can still fault first.
         if (d != S0)

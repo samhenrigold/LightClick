@@ -138,6 +138,7 @@ static inline u64 *pool_page(u32 idx) { return (u64 *)(POOL_VA + (u64)idx * 4096
 static inline u32 pool_index(const void *p) { return (u32)(((u64)p - POOL_VA) >> 12); }
 // ram_size is the top of RAM: below it there can be holes, which belong to devices.
 static inline bool is_ram(u64 gpa) { return gpa < c->ram_size && (page_info[gpa >> 12] & PI_RAM); }
+static inline bool is_direct(u64 gpa) { return gpa < c->ram_size && (page_info[gpa >> 12] & PI_DIRECT); }
 
 
 static u32 pool_alloc(u32 view, u32 level, u64 guest_table, u64 va_base) {
@@ -537,6 +538,23 @@ static void zap_entry(u64 *e, const ShadowDesc *d);
 // Every path that allocates shadow tables comes through here first, while it holds no pointer into them. Old views go first; if the running
 // view and the keepers fill the pool alone, their shadows are dropped and refill on demand, and their translations go with their marks.
 #define POOL_MARGIN 16
+static void shadow_drop_all(void) {
+    for (u32 i = 0; i < view_count; i++) {
+        if (!views[i].valid)
+            continue;
+        ShadowDesc *d0 = &desc[pool_index((void *)views[i].root0)], *d1 = &desc[pool_index((void *)views[i].root1)];
+        for (int n = 0; n < 256; n++) {
+            u64 *r0 = (u64 *)views[i].root0 + n, *r1 = (u64 *)views[i].root1 + 256 + n;
+            if (*r0)
+                zap_entry(r0, d0);
+            if (*r1)
+                zap_entry(r1, d1);
+        }
+    }
+    tlbi_all();
+    reset_all_return_stacks();
+}
+
 static void pool_reclaim(void) {
     u32 limit = c->pool_limit ? c->pool_limit : POOL_PAGES;
     while (pool_free_count + (limit > pool_next ? limit - pool_next : 0) < POOL_MARGIN) {
@@ -544,20 +562,7 @@ static void pool_reclaim(void) {
         zap_why = KILL_RECLAIM;
         if (view_evict() != MAX_VIEWS)
             continue;
-        for (u32 i = 0; i < view_count; i++) {
-            if (!views[i].valid)
-                continue;
-            ShadowDesc *d0 = &desc[pool_index((void *)views[i].root0)], *d1 = &desc[pool_index((void *)views[i].root1)];
-            for (int n = 0; n < 256; n++) {
-                u64 *r0 = (u64 *)views[i].root0 + n, *r1 = (u64 *)views[i].root1 + 256 + n;
-                if (*r0)
-                    zap_entry(r0, d0);
-                if (*r1)
-                    zap_entry(r1, d1);
-            }
-        }
-        tlbi_all();
-        reset_all_return_stacks();
+        shadow_drop_all();
         if (pool_free_count + (limit > pool_next ? limit - pool_next : 0) < POOL_MARGIN)
             stop(STOP_SHADOW_FULL, 0, 2, pool_free_count, 0);
     }
@@ -679,7 +684,7 @@ static u64 *shadow_install(View *v, u64 va, const Walk *w, bool want_write) {
         rmap_remove(old & PTE_ADDR, slot);
     bool was_rw = (old & 1) && (old & AP_RO) == AP_RW && (old & PTE_ADDR) == gpa;
     *slot = pte;
-    if (writable && !was_rw && gpa < c->ram_size)
+    if (writable && !was_rw && gpa < c->ram_size && !(pi & PI_DIRECT)) // nothing write-protects these, and there can be far more than rmap holds
         rmap_add(gpa, slot);
     return slot;
 }
@@ -771,13 +776,41 @@ static u64 view_lookup(u64 rip) {
     }
 }
 
+static inline void code_changed(u32 *word) {
+    __asm__ volatile("dc cvau, %0\n dsb ish\n ic ivau, %0\n dsb ish\n isb" : : "r"(word));
+}
+
+// tr_link, for a target this view already knows, with no way out of the VM. Half of all host calls in a fork loop did only this.
+static void link_here(u64 site, u32 kind, u64 arm) {
+    BlockEntry *from = find_block(site), *to = find_block(arm);
+    if (!from || !to || from->key != to->key)
+        return; // a link is forever, so it may only join blocks of one domain
+    u32 *s = (u32 *)site;
+    i64 d = ((i64)arm - (i64)site) >> 2;
+    *s = (kind == SVC_CALL ? 0x94000000u : 0x14000000u) | ((u32)d & 0x3ffffff);
+    code_changed(s);
+    if (kind == SVC_JCC) { // as in tr_link: straight from the conditional branch if it reaches
+        u32 *cond = s - s[3];
+        i64 off = ((i64)arm - (i64)cond) >> 2;
+        if (off >= -(1 << 18) && off < (1 << 18)) {
+            *cond = (*cond & ~(0x7ffffu << 5)) | ((u32)off & 0x7ffff) << 5;
+            code_changed(cond);
+        }
+    }
+    c->stat_links_here++;
+}
+
 static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
     View *v = view_current();
-    if (!site && !kind && !single) {
+    if (!single) {
         u64 hit = view_lookup(rip);
-        if (hit)
+        if (hit) {
+            if (site && kind)
+                link_here(site, kind, hit);
             return hit;
-        kind = SVC_LOOKUP_MISS;
+        }
+        if (!site && !kind)
+            kind = SVC_LOOKUP_MISS;
     }
     pool_reclaim();
     Walk w = x86_walk(c->cr3, rip, 16 | (c->cpl == 3 ? 4 : 0), true);
@@ -1311,7 +1344,7 @@ static void handle_data_abort(bool lower) {
         raise_pf(far, w.fault_err, rip_here(c->elr));
         return;
     }
-    if (!is_ram(w.gpa)) { // device hole: emulate the ARM access itself, so all x86 forms of a move or RMW work
+    if (!is_ram(w.gpa) && !is_direct(w.gpa)) { // device hole: emulate the ARM access itself, so all x86 forms of a move or RMW work
         if (in_rep_stub(c->elr)) { // string instruction on a device: back to the plain per-element loop
             c->elr = c->x[R_LR];
             return;
@@ -1726,6 +1759,11 @@ static void exit_check(void) {
     if (pt_step_slot) {
         step_on();
         return;
+    }
+    if (c->direct_flush) {
+        c->direct_flush = 0;
+        zap_why = KILL_RECLAIM;
+        shadow_drop_all();
     }
     if (c->hybrid) {
         notes_drain();
@@ -2558,33 +2596,7 @@ static void h_div(void) {
     c->x[R_S1] = r;
 }
 
-static void do_fx(bool save) {
-    static u8 area[512] __attribute__((aligned(16)));
-    u64 va = c->x[R_S0];
-    u64 here = rip_here(c->elr - 4);
-    if (c->hybrid)
-        stop(STOP_FALLBACK, here, FB_FX, 0, 0);
-    if (c->cr0 & 8) {
-        c->stat_nm++;
-        deliver(7, 0, false, here, false);
-        return;
-    }
-    if (save) {
-        memset(area, 0, 512);
-        *(u16 *)(area + 0) = 0x37F; // default x87 control: no x87 state exists here
-        u32 mx = mxcsr_read();
-        *(u32 *)(area + 24) = mx;
-        *(u32 *)(area + 28) = 0xFFFF;
-        mon_fp_save(area + 160);
-        if (!guest_write(va, area, 512, c->cpl == 3 ? 4 : 0))
-            stop(STOP_UNSUPPORTED, here, 12, va, 0);
-    } else {
-        if (!guest_read(va, area, 512, c->cpl == 3 ? 4 : 0))
-            stop(STOP_UNSUPPORTED, here, 12, va, 0);
-        mon_fp_restore(area + 160);
-        mxcsr_apply(*(u32 *)(area + 24));
-    }
-}
+#include "x87.c"
 
 static void do_cli_sti(bool sti) {
     u32 iopl = (u32)(c->rflags_sys >> 12) & 3;
@@ -2896,6 +2908,9 @@ void mon_sync(void) {
             case SVC_FXRSTOR:
                 do_fx(false);
                 break;
+            case SVC_X87:
+                x87_op();
+                break;
             case SVC_H_SHIFT:
                 h_shift();
                 break;
@@ -2943,6 +2958,7 @@ void mon_fiq(void) { stop(STOP_MONITOR_FAULT, 0, 0, 0, c->elr); }
 // Set by the host once: runs first, on the initial entry.
 void mon_init(void) {
     c->irq_shadow_rip = ~0ULL;
+    WSR(cntkctl_el1, 2); // EL0VCTEN: rdtsc in translated code reads the virtual counter
     u64 *desc_hole = (u64 *)PRIV(OFF_MON_DATA + (1ULL << 20));
     hole_entry_priv = desc_hole[0];
     hole_entry_ram = desc_hole[1];
@@ -2956,6 +2972,8 @@ void mon_init(void) {
     WSR(ttbr1_el1, v->ttbr1);
     __asm__ volatile("isb");
     mxcsr_apply(c->hybrid ? c->resume_mxcsr : 0x1F80);
+    if (!c->hybrid && !c->fcw)
+        c->fcw = 0x37F;
     fp_trap_sync();
     u64 entry = c->req_a[0];
     c->elr = translate_here(entry, 0, 0, false);

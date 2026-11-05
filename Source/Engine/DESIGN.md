@@ -21,7 +21,7 @@ numbers are best of N and move 10-20% between runs. No Intel hardware was used: 
 
 | Rung | State |
 |---|---|
-| 1. Translator coverage | Done: integer ISA, flags, LSE, bl/ret, per-site indirect, SSE, SSE2, SSE3, SSSE3, MXCSR, rep, SMC. x87, MMX, SSE4 stop with a clear error. 32-bit user code runs in compatibility mode: see "Compatibility mode" |
+| 1. Translator coverage | Done: integer ISA, flags, LSE, bl/ret, per-site indirect, SSE, SSE2, SSE3, SSSE3, MXCSR, rep, SMC, MMX, x87 but for the forms listed below. 32-bit user code runs in compatibility mode: see "Compatibility mode" |
 | 2. Differential testing | Done: fuzz, QEMU test-i386, a compiled corpus, lc-bench arithmetic, all matching Rosetta |
 | 3. Kernel model | Done: shadow paging, CR3 and PCID, IDT, syscall, iret, exceptions, in the monitor, passing a test kernel |
 | 4. APIC and device interface | Done: in-VM APIC hot paths; `engine_api.h`, exercised by a harness |
@@ -31,11 +31,14 @@ numbers are best of N and move 10-20% between runs. No Intel hardware was used: 
 
 Each is a transcript or self-check, run by `Tests/run-all.sh`.
 
-- **Fuzz.** 2511 instruction forms (`gen_fuzz.py`), 64 rounds each with random registers, flags, memory, rounding modes, FTZ and DAZ, and FP patterns
+- **Fuzz.** 3836 instruction forms (`gen_fuzz.py`), 64 rounds each with random registers, flags, memory, rounding modes, FTZ and DAZ, and FP patterns
   (NaNs, SNaNs, denormals, infinities). Hash of all registers, masked flags, XMM, MXCSR and 8 KB of memory. Identical to Rosetta, in both flag modes.
-- **QEMU `tests/tcg/i386/test-i386.c`** in 64-bit mode, unmodified but for a Mach-O section name, assembler spellings and Linux-only register names: 9200 transcript lines
-  identical. Out of it: `test_floats` (x87), `test_enter` (Rosetta raises SIGILL on `enter`, so ours is unchecked against any reference), and 16-bit shld/shrd with
+  494 forms are x87, 256 rounds each: every register encoding with four ST(i) choices and every memory encoding, from a random stack depth, control word and operand, taking in the FXSAVE image (the first run at 5000 rounds found two more corner cases, fixed).
+  Half of them also get pseudo-denormals, unnormals, pseudo-NaNs and pseudo-infinities.
+- **QEMU `tests/tcg/i386/test-i386.c`** in 64-bit mode, unmodified but for a Mach-O section name, assembler spellings and Linux-only register names: 9505 transcript lines
+  identical, `test_floats` among them. Its libm calls are short long double series here, since `fsin` and friends stay on TCG; `fmod`, `sqrt` and `rint` are the instructions. Out of it: test_fenv's two status lines from data16 images (below), `test_enter` (Rosetta raises SIGILL on `enter`, so ours is unchecked against any reference), and 16-bit shld/shrd with
   counts above 16 (undefined; results match, Rosetta's CF does not).
+- **`t_x87`.** Compiled long double code: Mandelbrot, conversions in every width, arithmetic under each rounding and precision mode. Same hash as Rosetta.
 - **Compiled corpus.** SHA-256, an LZ codec, sorting, a jump-table interpreter, bignum, FP matrices, MXCSR modes, varargs, struct returns, at -O0, -O1, -O2, -O3, -Os and -mssse3 -O3.
 - **SMC.** Patch and call, patching the next instruction in the same block, rewriting a return target. Never stale, same output as Rosetta.
 - **Test kernel** (`Tests/x86/kernel/`), ring 0 and ring 3, high-half kernel. Checks: syscall and sysret, #PF with CR2 and error codes, #GP, #UD, #DE, int3, int n, fetch faults, NX,
@@ -49,6 +52,14 @@ Findings about the reference:
 - Rosetta raises SIGILL on `enter`.
 - One form, `stmxcsr`/`ldmxcsr` round trip through the stack, gives a varying result from run to run under Rosetta. It is out of the fuzz set; the engine gives one answer.
 - `rcpps` and `rsqrtps` stop: Intel's approximation tables are not reproduced, so they could not be exact.
+- Rosetta's x87 values and flags match this monitor on every comparable form, down to denormal and NaN corners, so where it differs from the SDM these checks follow the SDM and `hybrid.c` tests that, the fuzz masking it:
+  - FXSAVE and FNSAVE images show empty registers as the indefinite. A CPU keeps what they held.
+  - FIP, FDP and FOP are zero or stale bytes, in every image. The reserved words of an FNSTENV image are zero where, from memory of real dumps, a CPU writes ones. Nothing here was checked on Intel hardware.
+  - After a stack fault, an empty operand acts as a NaN under the NaN rules; the SDM's masked response is the indefinite.
+  - data16 FNSTENV and FNSAVE write the 32-bit layout, not the 14-byte one.
+  - `fbld` onto a full stack loads the value with no fault.
+  - MMX instructions don't change TOP or the tags in its FXSAVE image, and don't set exponents to ones. The SDM has TOP 0, all valid, exponent all ones.
+  - A denormal divided by zero reports #Z and not #D. The SDM's priority list suggests both; followed here, unverified.
 
 Hardware facts measured on the way:
 - HVF accepts only `ACTLR_EL1` bit 1 (EnTSO); every other bit is refused. So PF and AF cannot come from hardware here and stay lazy: `R_PF` holds the last result, `R_AF ^ R_PF` bit 4 is AF.
@@ -142,6 +153,9 @@ Overhead estimate from these, at the real-guest rates in the brief (4 vCPU total
 - **Shadow paging.** Shadow tables mirror guest tables one to one, per view, and every guest table frame is write-protected. A guest write drops the mirroring entries; the next access refills. Since the shadow never holds a stale entry, CR3 reload, `invlpg` and PCID flushes need no work. A table written 64 times with no walk through it is
   unshadowed, so a freed table reused as data stops trapping. A and D are set by the walker; a clean page stays read-only until written.
 - **APIC.** Register page in the monitor, by ARM word decode. Timer on the virtual counter: the compare's exit raises the IRQ line, the monitor rearms, then the host unmasks. Anything for other CPUs or level-triggered EOIs goes to the host.
+- **x87.** `Monitor/x87.c`, integer arithmetic on 80-bit values, exact at 24, 53 and 64 bits under each RC. State is in `EngineCtx` beside the MMX registers: significands in `mm`, physical order, and exponents, TOP, tags, status, control and pointers next to them. Every operation is one `svc` with its opcode and rip as a literal. A memory operand moves in translated code, so a fault, a device, a tracked frame or a split takes the path any move does. For a store the monitor returns the value and the new TOP, tags and status as one word; translated code writes memory, then that word, so state is precise at a fault. An 80-bit store first writes its low eight bytes back, so that neither page changes if either faults.
+  Every masked response follows the SDM. An operation with an exception unmasked or pending goes to TCG before it changes anything, as only TCG raises #MF. `fnstenv`, `fnsave` and `fxsave` write through the monitor's walker after translated code probes both ends; a device or tracked frame there goes to TCG, whose writes are noted.
+  What stays on TCG, by name in the tally: `f2xm1 fyl2x fptan fpatan fyl2xp1 fsincos fsin fcos` (TCG's own are only approximations, through host doubles for some, and nothing has shown them hot), reserved encodings and undocumented aliases, the 287 no-ops, unmasked or pending exceptions, and fxsave or fxrstor with an unmasked MXCSR, no OSFXSR or FFXSE.
 - **Devices.** MMIO completes the faulting ARM load or store, so every x86 form of a move or read-modify-write works. Pairs, SIMD and atomics on a device stop, except `rep movs` and `stos`, which fall back to the per-element loop.
 
 ## Hybrid with TCG
@@ -150,7 +164,7 @@ The first contact with a real guest, built to find out what is missing rather th
 
 - **Hand-off.** TCG runs firmware and boot loaders. The first TB miss in 64-bit mode at a high-half address is XNU's `vstart`: the engine takes the state from `CPUX86State` and runs on TCG's vCPU thread.
 - **Fallback.** Anything the engine can't do returns `ENGINE_RUN_FALLBACK` with the state precise at that instruction, as for an x86 fault. TCG runs that one instruction (`CF_NOIRQ`, count 1) and the next TB miss returns control. No normal TB is ever generated for a state the engine accepts, so a miss always comes. An instruction leaving 64-bit mode, or setting TF, means TCG keeps going until the state is acceptable: 32-bit processes run this way, slowly and correctly, as far as reading goes.
-- **What goes back by design**, as its state stays QEMU's: `hlt`, `fxsave` and `fxrstor` (x87 is in `CPUX86State`), `mov cr8`, every MSR but the syscall family, all #UD (SSE4 and AES are advertised, and only TCG knows them), popcnt (below). The monitor's `stop` is the mechanism, so each old "stops with a clear error" with a known rip now falls back. Stops with no rip are about the engine's limits and stay final, with a register dump and the VM paused.
+- **What goes back by design**, as its state stays QEMU's: `hlt`, `mov cr8`, every MSR but the syscall family, all #UD (SSE4 and AES are advertised, and only TCG knows them), popcnt (below). The monitor's `stop` is the mechanism, so each old "stops with a clear error" with a known rip now falls back. Stops with no rip are about the engine's limits and stay final, with a register dump and the VM paused.
 - **The APIC is QEMU's**, in both halves. The in-VM APIC is off, each access is a host exit, and the rates above don't apply. Interrupts are level-triggered as QEMU sees them: `irq_line` says one may wait, and the monitor acknowledges only when IF allows, since an acknowledged vector has left the APIC.
 - **RAM.** One host block, GPA 0 up to `ram_below_4g` and 4 GB upward, with `PI_RAM` per frame for holes inside that: anything else reaches the device callbacks. The map is read once at hand-off.
 - **Writes behind the monitor.** DMA (`invalidate_and_set_dirty`) and TCG (`notdirty_write`, with every RAM page kept clean so each first write hits it) put frames holding code or page tables on a ring. The monitor drains it on every exit and treats them as trapped stores. TCG sees engine writes differently: the stepped page's TBs are dropped each fallback, and all TBs after any run of normal TBs.
@@ -175,7 +189,7 @@ More runs: the halt is intermittent, and comes with or without a bad hash. Readi
 
 Split stores, measured in the hybrid test: when only the second page of a split store refuses it, FAR is that page's start, and the page-table path then wrote every byte at the start of the frame. An 8-byte store one byte before the boundary left the whole value in the frame's first slot. A pair or SIMD store across two tracked frames left the first one writable, so later writes through it were unseen. Both now go to TCG, as does a split device access. Not known: whether this caused the corrupt files seen in boots. Diffs of the RAM kept from one batch found no wrong bytes, though the run with the damaged prologue kept none; the tally's rows `split store on a page table` and `split access across a device page` show whether it fires in a boot.
 
-The split-store fix took 40 boots' 20 halts to 0 of 32, with no FIPS failures, fsck signals or user faults in 30 s runs. On a longer run, userland reached the guest agent and its first commands ran at about 176 s, then staging timed out because, from about 180 s, one kernel-extension pixel loop of nine MMX instructions held the vCPU for at least 50 s at about 119 us per pass. Measured from the tally: 9 fallbacks and about 6.4 device accesses per pass, and no CR3 writes for long stretches. That is the reason MMX is now translated. Everything but maskmovq is, and 358 forms match Rosetta. x87, fxsave and the MMX forms of cvtpi, movq2dq and SSSE3 remain with TCG. Not measured: the loop's cost now, or whether staging succeeds.
+The split-store fix took 40 boots' 20 halts to 0 of 32, with no FIPS failures, fsck signals or user faults in 30 s runs. On a longer run, userland reached the guest agent and its first commands ran at about 176 s, then staging timed out because, from about 180 s, one kernel-extension pixel loop of nine MMX instructions held the vCPU for at least 50 s at about 119 us per pass. Measured from the tally: 9 fallbacks and about 6.4 device accesses per pass, and no CR3 writes for long stretches. That is the reason MMX is now translated. Everything but maskmovq is, and 358 forms match Rosetta. The MMX forms of cvtpi, movq2dq and SSSE3 remain with TCG. Not measured: the loop's cost now, or whether staging succeeds.
 
 Frames that stopped being tables no longer trap (measured in a test, 271,673 stores down to about 15,700). How much of a boot's 256,000 stores a second that explains is not measured. The tally's `why blocks died` section answers the invalidation question. Direct cost so far: translation was 8.3 s of a 232 s run.
 
@@ -193,6 +207,29 @@ Proposal, in order, each to be justified by the tally before the next:
 Larger costs show in that run. Device accesses at 25,315/s: 15.4M of 28.1M are two 4-byte writes by one kext to 0xa0000000, at rips 0x...4c2c and 0x...4c3b, about 7.7M each, and rep movs reads frame memory at 0x90000000 one element per exit. Device-specific fast paths would come before any of the above. Not measured: their cost per access.
 
 An instruction leaving what the engine takes (16-bit code, or segments with a base) means TCG keeps going until the state is acceptable again.
+Device memory: `vga.vram` (512 MB at 0x80000000) and `vmsvga.fifo` (64 KB at 0xa0060000) are plain RAM to QEMU, and they took most of a boot's device exits. They now go straight into the VM, by name, with a `log_sync` listener marking them dirty for legacy VGA. vmsvga in SVGA mode reads both through pointers, from reading its code, so it needs no log. Measured in a test: each side sees the other's bytes with no exit, and the device answers again once the mapping is gone. Not measured: the exits saved in a boot, or that the display updates. `LC_HVDBT_NO_DIRECT=1` turns it off. Machines whose RAM stops below these addresses are refused, and keep the device path.
+
+Fork, from a 60 s loop of 6,575 forks at 9.1 ms each: 2,430 cold blocks, 53,204 cold instructions and 2.84 ms translating per fork, 697 page-table stores, 38.8 CR3 writes. In that run HC_TRANSLATE was 57.8M calls and 46.4 s of host time, against 27.9M cold blocks, so about half the calls only link an existing block. Each also costs a round trip out of the VM, not separated here. At least 56% of those cold blocks repeated a rip and frame some block already covered. That changes the proposal above: sharing translations of the shared region is now where the largest measured cost goes.
+
+Inlined in translated code, measured in the test kernel, per operation: cr3, segment and sidt reads from 45 ns to about 0; rdtsc to about 0.5 ns; narrow shifts with dead flags to under 1 ns; `cli; sti` from 90 to 50 ns (the non-hybrid sti still traps). The monitor links to a block its view already knows without leaving the VM. Not measured: XNU's syscall, ctxsw and fork after this.
+
+### Sharing user translations: a design, waiting on one check
+
+Why: per fork in the 6,575-fork run, 2,430 cold blocks and 53,204 cold instructions, 2.84 ms translating of 9.1 ms, before exits; at least 56% of all cold blocks repeated a rip and frame already covered. A child runs the same library code as its parent and retranslates it.
+
+The check, from the tally's `cold user blocks by the page directory frame` rows on the next boot: from memory of XNU's pmap_nest, the shared region is nested by PDPT entry, so processes share page-directory frames there. Those rows should show large block counts under a few directory frames used by many address spaces, with rips in 0x7fff80000000 and up. If instead sharing shows only at page-table level, the key below moves down a level, and more unnesting splits it. If neither shows, this design is wrong.
+
+Design, an extension of the kernel domains (`block_key`):
+
+1. Key. For CPL 3, a rip under a directory frame other spaces share keeps its blocks under KEY_DOMAIN plus that frame and the CPL, so the existing map finds them from any view. A private frame is a domain of one, which behaves as a view does now.
+2. Links stay within a domain, as tr_link and link_here already insist, so chains survive into the next child. Going between domains takes the view's table, which is a monitor lookup with no host exit once the block is known.
+3. Validity. A block is valid wherever the directory frame is mapped at that slot, because its mappings are in that shared frame. A store to it must invalidate, and any mirror sees it, but a mirror can vanish with its process. So code marks go only on a keeper view for each domain, as the kernel's do, never on the translating child's view, whose exit must not kill shared blocks. Keepers are not evicted: at most one extra view per shared directory, a handful.
+4. A process that leaves the domain, by unnesting 2 MB for its own copy or by exit, changes its own upper-level slot. That zaps only its own shadow and kills nothing. A later entry finds a different frame, so it has a different key.
+5. Return prediction and the per-view tables are unchanged. A shared block enters a view's table on its first lookup there.
+
+Risks: a stale link means running wrong code with no fault, so this needs a test of two spaces sharing a directory, with one rewriting a slot and one unnesting, and the keeper's own process exiting. The keeper's exit is the hard case: its slot store zaps marked entries, which kills the domain's blocks. That is safe and costs a retranslation, and pinning it to a long-lived process such as launchd avoids most of it.
+
+Expected, if the check holds: forks without most of the 2,430 cold blocks, so perhaps half the 9.1 ms. An estimate only.
 
 Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bitmap interplay beyond those few fallbacks. Cost per fallback is unknown; the tally's `tcg_ms` column gives it. Writes by a separate process into guest RAM (the OOP graphics helper) are not noted. Reset after hand-off is unexamined: firmware in 64-bit mode would run on the engine.
 
@@ -205,9 +242,9 @@ Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bit
 - **Registers.** The low eight GPRs have clear top halves throughout: every 32-bit write does it, and the monitor clears them on entry and after TCG. So `[reg]` is one word, as in 64-bit mode. A sum wraps by a W add: `[reg+disp]` is two words where 64-bit code has one. Bulk `rep` checks that the run won't pass 4 GB, or takes the plain loop.
 - **Monitor.** sysenter, sysexit and the SYSENTER MSRs; iret, sysret and far transfers into and out of 32-bit code; 32-bit iret at ring 3; segment loads with their checks; `lldt` reading its descriptor. Frames from 32-bit code are the 64-bit frames a CPU pushes, through the same `deliver`.
 - **Segments.** `seg_bad` records, at each load, whether es, ds, fs or gs keeps compatibility mode off the engine. Fs and gs need no flat base, since translated code adds it, and their limits aren't checked: XNU's cthread segment is, from memory, 8 KB.
-- **Falls back, one instruction:** BCD adjusts, salc, bound, into, arpl, les and lds, 16-bit near branches, strings and xlat with a segment override or 67h, far transfers through gates, 16-bit operands in far transfers, ins and outs, x87 (until hv-x87 lands). Interrupts through call gates, TF and VME stay as they were.
+- **Falls back, one instruction:** BCD adjusts, salc, bound, into, arpl, les and lds, 16-bit near branches, strings and xlat with a segment override or 67h, far transfers through gates, 16-bit operands in far transfers, ins and outs. x87 in 32-bit code runs in the monitor, as in 64-bit, and the forms it sends to TCG go there here too.
 
-Measured: `Tests/diff-compat.sh` runs one image, `Tests/x86/compat/`, under the engine and under QEMU's TCG, since Rosetta on this macOS doesn't run i386. Reset vector and long mode under QEMU, then the same kernel: self checks through both, 2471 fuzz forms at 64 rounds, QEMU's `test-i386.c` built -m32 without x87, BCD, signals or `modify_ldt`. 6820 lines, identical. `run-all.sh` compares the engine with TCG's hash, runs the kernel through `engine_api.h` with boundary stops every 2 ms, and `hybrid.c` takes a BCD fallback in 32-bit code with the host moving the vCPU to 64-bit mode. No QEMU is needed but for `--update`.
+Measured: `Tests/diff-compat.sh` runs one image, `Tests/x86/compat/`, under the engine and under QEMU's TCG, since Rosetta on this macOS doesn't run i386. Reset vector and long mode under QEMU, then the same kernel: self checks through both, 2489 fuzz forms at 64 rounds, no x87 among them, and QEMU's `test-i386.c` built -m32, `test_floats` with its 32-bit fsave and fxsave formats included, without BCD, signals or `modify_ldt`. 7145 lines, identical. `run-all.sh` compares the engine with TCG's hash, runs the kernel through `engine_api.h` with boundary stops every 2 ms, and `hybrid.c` takes a BCD fallback in 32-bit code with the host moving the vCPU to 64-bit mode. No QEMU is needed but for `--update`.
 
 What TCG can't say. It stores pushad from the lowest address and leaves registers changed when popad faults, and a CPU doesn't, so CR2 there isn't compared and the registers are checked on the engine alone. It takes the x87 rule for two NaNs in SSE arithmetic where the SDM gives the first source, returns a denormal from min and max under DAZ where the engine gives zero, as Rosetta does, and raises MXCSR.DE by other rules; those inputs and that bit are left out of the 32-bit run, and the 64-bit fuzz holds the same emitters to Rosetta. Its `#GP` for a software int through an empty gate has the vector times 16, not 8, so only the low bits are compared. Agreement with TCG says nothing where TCG and the engine both have a thing wrong, about real CPUs where TCG differs from them, or about XNU, which has never run this.
 
@@ -228,7 +265,7 @@ Honest order of risk, none of it started except as noted.
 
 1. **Multi-vCPU.** Everything here ran on one vCPU. Monitor statics must split per vCPU, shadow tables and block maps need locks, invalidation needs IPIs (a killed block's return-stack entries on another vCPU), and the host's translator needs a lock. EnTSO was only proved on two vCPUs in the spike's litmus.
 2. **32-bit kernels,** up to 10.7 or so, stay on TCG, as do real mode and firmware. 32-bit user code: see "Compatibility mode", not yet run under XNU.
-3. **x87 and MMX.** Stop today. Needs 80-bit helpers in the monitor, since a host exit per operation would be 1 us. Real apps use them; test-i386's `test_floats` is ready as the check.
+3. **x87 and MMX.** In the monitor, at about 50 ns an operation against Rosetta's 9 (`t_x87`), and test-i386's `test_floats` passes. Not booted. If the tally shows x87 still hot, inline `fld` and `fstp` come first; if it shows `fsin` and friends, they would need porting.
 4. **Far control flow and system odds:** ring 0's `lretq` and far calls, mov to CS (the test kernel avoids them, starting with CS already set), `ins`/`outs`, debug registers, TF, NMI, machine checks, `xsave` family, `invpcid`, and proper MSR routing. SSE4 is unadvertised.
 5. **QEMU integration.** Written, unproven: see "Hybrid with TCG", whose tally ranks the rest of this list.
    Device model time and BQL contention are unmeasured. MMIO in a real kext may also use forms that stop (SIMD to a device outside `rep`); those now fall back, and the tally counts them.

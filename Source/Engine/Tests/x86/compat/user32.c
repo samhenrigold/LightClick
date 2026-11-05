@@ -1,5 +1,5 @@
 // The 32-bit payload's C side: QEMU's test-i386 and the fuzz driver, chosen by the kernel, printing through int 0x80. test-i386 is unmodified except as
-// i386_source.py says. x87 is hv-x87's, and test_floats stays out here for now.
+// i386_source.py says.
 #include "test-i386-32.c"
 
 extern void *__start_initcall;
@@ -38,10 +38,18 @@ long long __moddi3(long long n, long long d) {
     divmod(n < 0 ? -(u64_)n : n, d < 0 ? -(u64_)d : d, &r);
     return n < 0 ? -(long long)r : (long long)r;
 }
-u64_ __fixunsdfdi(double v) {
-    (void)v;
-    abort();
-    return 0;
+u64_ __fixunsdfdi(double v) { // the printing of a double, from x87 through a truncating control word as compilers do it
+    u64_ r;
+    unsigned short cw, trunc;
+    __asm__ volatile("fnstcw %0" : "=m"(cw));
+    trunc = cw | 0xC00;
+    if (v >= 9223372036854775808.0) {
+        v -= 9223372036854775808.0;
+        __asm__ volatile("fldcw %2\n fldl %1\n fistpq %0\n fldcw %3" : "=m"(r) : "m"(v), "m"(trunc), "m"(cw));
+        return r + (1ULL << 63);
+    }
+    __asm__ volatile("fldcw %2\n fldl %1\n fistpq %0\n fldcw %3" : "=m"(r) : "m"(v), "m"(trunc), "m"(cw));
+    return r;
 }
 
 void abort(void) { exit(4); }
@@ -63,6 +71,7 @@ void c_main(int mode) {
         test_misc();
         test_lea();
         test_self_modifying_code();
+        test_floats();
         test_enter();
         test_conv();
     }

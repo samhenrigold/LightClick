@@ -525,11 +525,22 @@ static void emit_sse41(const Insn *in, int live) {
 static void mm_ldst(bool load, int v, int mm) {
     Addr a = {.base = CTX, .imm = (i64)__builtin_offsetof(EngineCtx, mm) + mm * 8};
     vldst(3, load, v, a);
+    if (load)
+        return;
+    // An MMX write leaves the register reading as a NaN to x87 code, whatever it held.
+    Addr e = {.base = CTX, .imm = (i64)__builtin_offsetof(EngineCtx, fp_exp) + mm * 2};
+    movimm(S1, 0xFFFF);
+    ldst(0, 2, S1, e);
 }
-static void mmx_event(int event) {
-    Addr a = {.base = CTX, .imm = __builtin_offsetof(EngineCtx, mmx_event)};
-    movimm(S1, (u64)event);
-    ldst(0, 4, S1, a);
+// TOP cleared and every tag valid; emms empties every tag and leaves TOP.
+static void mmx_enter(void) {
+    Addr a = {.base = CTX, .imm = __builtin_offsetof(EngineCtx, fp_top)};
+    movimm(S1, 0xFF00);
+    ldst(0, 2, S1, a);
+}
+static void mmx_emms(void) {
+    Addr a = {.base = CTX, .imm = __builtin_offsetof(EngineCtx, fp_tags)};
+    ldst(0, 1, XZR, a);
 }
 void emit_sse(const Insn *in, int live);
 static void emit_mmx(const Insn *in, int live) {
@@ -540,7 +551,7 @@ static void emit_mmx(const Insn *in, int live) {
     switch (opc) {
         case 0x77:
             mm_ldst(true, A, 0);
-            mmx_event(ENGINE_MMX_EMMS);
+            mmx_emms();
             return;
         case 0xF7:
             bad(in, "maskmovq (MMX)");
@@ -559,7 +570,7 @@ static void emit_mmx(const Insn *in, int live) {
             mm_ldst(true, A, dm);
             t.reg = A;
             emit_sse(&t, live);
-            mmx_event(ENGINE_MMX_ENTERED);
+            mmx_enter();
             return;
         case 0x6F:
             if (in->rm_reg)
@@ -579,7 +590,7 @@ static void emit_mmx(const Insn *in, int live) {
             } else {
                 vldst(3, false, A, addr_prepare(in, 8));
             }
-            mmx_event(ENGINE_MMX_ENTERED);
+            mmx_enter();
             return;
         case 0x71:
         case 0x72:
@@ -609,7 +620,7 @@ static void emit_mmx(const Insn *in, int live) {
             t.rm = B;
             t.imm &= 3;
             emit_sse(&t, live); // the destination is a general register
-            mmx_event(ENGINE_MMX_ENTERED);
+            mmx_enter();
             return;
         default: { // two operands, the second register or memory
             mm_ldst(true, A, dm);
@@ -633,7 +644,7 @@ static void emit_mmx(const Insn *in, int live) {
         }
     }
     mm_ldst(false, A, write);
-    mmx_event(ENGINE_MMX_ENTERED);
+    mmx_enter();
 }
 
 void emit_sse(const Insn *in, int live) {
