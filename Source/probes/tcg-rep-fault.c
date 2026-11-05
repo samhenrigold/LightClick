@@ -27,7 +27,7 @@ static void on_fault(int signal, siginfo_t *info, void *context) {
 
 // Element size selects the mnemonic; DF is set only around the instruction.
 #define REP(insn)                                                                                                      \
-    __asm__ volatile("test %[down],%[down]\n\tjz 1f\n\tstd\n1:\n\trep; " insn "\n\tcld"                               \
+    __asm__ volatile("test %[down],%[down]\n\tjz 1f\n\tstd\n1:\n\trep; " insn "\n\tcld"                                \
                      : "+c"(count), "+S"(src), "+D"(dst)                                                               \
                      : [down] "r"(down), "a"(value)                                                                    \
                      : "memory", "cc")
@@ -36,17 +36,33 @@ static void run(int movs, unsigned size, int down, uint8_t *dst, const uint8_t *
                 uint64_t *left, uint64_t *rsi, uint64_t *rdi) {
     if (movs) {
         switch (size) {
-            case 1: REP("movsb"); break;
-            case 2: REP("movsw"); break;
-            case 4: REP("movsl"); break;
-            default: REP("movsq"); break;
+            case 1:
+                REP("movsb");
+                break;
+            case 2:
+                REP("movsw");
+                break;
+            case 4:
+                REP("movsl");
+                break;
+            default:
+                REP("movsq");
+                break;
         }
     } else {
         switch (size) {
-            case 1: REP("stosb"); break;
-            case 2: REP("stosw"); break;
-            case 4: REP("stosl"); break;
-            default: REP("stosq"); break;
+            case 1:
+                REP("stosb");
+                break;
+            case 2:
+                REP("stosw");
+                break;
+            case 4:
+                REP("stosl");
+                break;
+            default:
+                REP("stosq");
+                break;
         }
     }
     *left = count;

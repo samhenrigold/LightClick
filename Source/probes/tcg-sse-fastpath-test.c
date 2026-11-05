@@ -1,5 +1,5 @@
-// Host-only differential: gen_sse_*_fast's guards and host instructions (emit.c.inc) against QEMU's softfloat, over edge
-// cases and random bits. Whenever the guards accept, the result and x86-visible flags must equal softfloat's. The
+// Host-only differential: gen_sse_*_fast's guards and host instructions (emit.c.inc) against QEMU's softfloat, over
+// edge cases and random bits. Whenever the guards accept, the result and x86-visible flags must equal softfloat's. The
 // guards are transcribed here, so this proves the logic; probes/tcg-sse-differential.c covers the generated code.
 //
 // Arm64 only. Run scripts/test-sse-fastpath.
@@ -16,7 +16,7 @@ static bool is_small(uint64_t m, int bits) { return !((m - 1) & EXPONENT(bits));
 static bool is_special(uint64_t m, int bits) { return !(~m & EXPONENT(bits)); }
 
 enum { ADD, SUB, MUL, DIV, SQRT, NARROW, WIDEN, COMIS, UCOMIS, CVTT32, CVTT64, SI32, SI64, OPS };
-static const char *const names[OPS] = {"add", "sub", "mul", "div",   "sqrt", "cvtsd2ss", "cvtss2sd",
+static const char *const names[OPS] = {"add",   "sub",    "mul",    "div",    "sqrt",    "cvtsd2ss", "cvtss2sd",
                                        "comis", "ucomis", "cvtt32", "cvtt64", "cvtsi32", "cvtsi64"};
 static unsigned long accepted[OPS][2], rejected[OPS][2], failures;
 
@@ -29,11 +29,21 @@ static uint32_t host32(int op, uint32_t a, uint32_t b) {
     memcpy(&x, &a, 4);
     memcpy(&y, &b, 4);
     switch (op) {
-        case ADD: S_OP("fadd"); break;
-        case SUB: S_OP("fsub"); break;
-        case MUL: S_OP("fmul"); break;
-        case DIV: S_OP("fdiv"); break;
-        default: __asm__ volatile("fsqrt %s0,%s1" : "=w"(r) : "w"(x)); break;
+        case ADD:
+            S_OP("fadd");
+            break;
+        case SUB:
+            S_OP("fsub");
+            break;
+        case MUL:
+            S_OP("fmul");
+            break;
+        case DIV:
+            S_OP("fdiv");
+            break;
+        default:
+            __asm__ volatile("fsqrt %s0,%s1" : "=w"(r) : "w"(x));
+            break;
     }
     memcpy(&out, &r, 4);
     return out;
@@ -45,11 +55,21 @@ static uint64_t host64(int op, uint64_t a, uint64_t b) {
     memcpy(&x, &a, 8);
     memcpy(&y, &b, 8);
     switch (op) {
-        case ADD: D_OP("fadd"); break;
-        case SUB: D_OP("fsub"); break;
-        case MUL: D_OP("fmul"); break;
-        case DIV: D_OP("fdiv"); break;
-        default: __asm__ volatile("fsqrt %d0,%d1" : "=w"(r) : "w"(x)); break;
+        case ADD:
+            D_OP("fadd");
+            break;
+        case SUB:
+            D_OP("fsub");
+            break;
+        case MUL:
+            D_OP("fmul");
+            break;
+        case DIV:
+            D_OP("fdiv");
+            break;
+        default:
+            __asm__ volatile("fsqrt %d0,%d1" : "=w"(r) : "w"(x));
+            break;
     }
     memcpy(&out, &r, 8);
     return out;
@@ -95,11 +115,17 @@ static void arithmetic(int op, int bits, uint64_t a, uint64_t b) {
     }
     accepted[op][bits == 64]++;
     if (bits == 64) {
-        soft = op == ADD ? float64_add(a, b, &s) : op == SUB ? float64_sub(a, b, &s) : op == MUL ? float64_mul(a, b, &s) :
-               op == DIV ? float64_div(a, b, &s) : float64_sqrt(a, &s);
+        soft = op == ADD   ? float64_add(a, b, &s)
+               : op == SUB ? float64_sub(a, b, &s)
+               : op == MUL ? float64_mul(a, b, &s)
+               : op == DIV ? float64_div(a, b, &s)
+                           : float64_sqrt(a, &s);
     } else {
-        soft = op == ADD ? float32_add(a, b, &s) : op == SUB ? float32_sub(a, b, &s) : op == MUL ? float32_mul(a, b, &s) :
-               op == DIV ? float32_div(a, b, &s) : float32_sqrt(a, &s);
+        soft = op == ADD   ? float32_add(a, b, &s)
+               : op == SUB ? float32_sub(a, b, &s)
+               : op == MUL ? float32_mul(a, b, &s)
+               : op == DIV ? float32_div(a, b, &s)
+                           : float32_sqrt(a, &s);
     }
     check(op, bits, r, soft, &s, a, b);
 }
@@ -285,23 +311,50 @@ static void pair(uint64_t a, uint64_t b, uint32_t c, uint32_t d) {
 
 int main(int argc, char **argv) {
     static const uint64_t doubles[] = {
-        0, 1, 2, UINT64_C(0x000fffffffffffff), UINT64_C(0x0010000000000000), UINT64_C(0x0010000000000001),
-        UINT64_C(0x001fffffffffffff), UINT64_C(0x0020000000000000), UINT64_C(0x1ff0000000000000),
-        UINT64_C(0x2000000000000000), UINT64_C(0x3fe0000000000000), UINT64_C(0x3fefffffffffffff),
-        UINT64_C(0x3ff0000000000000), UINT64_C(0x3ff0000000000001), UINT64_C(0x3ff8000000000000),
-        UINT64_C(0x4000000000000000), UINT64_C(0x4330000000000000), UINT64_C(0x4340000000000001),
-        UINT64_C(0x41dfffffffc00000), UINT64_C(0x41dfffffffffffff), UINT64_C(0x41e0000000000000),
-        UINT64_C(0x41e0000000200000), UINT64_C(0x43dfffffffffffff), UINT64_C(0x43e0000000000000),
-        UINT64_C(0x36a0000000000000), UINT64_C(0x3690000000000000), UINT64_C(0x47efffffe0000000),
-        UINT64_C(0x47effffff0000000), UINT64_C(0x47f0000000000000), UINT64_C(0x3810000000000000),
-        UINT64_C(0x380fffffffffffff), UINT64_C(0x380ffffff0000000), UINT64_C(0x7fdfffffffffffff),
-        UINT64_C(0x7fefffffffffffff), UINT64_C(0x7ff0000000000000), UINT64_C(0x7ff0000000000001),
-        UINT64_C(0x7ff8000000000000), UINT64_C(0x7fffffffffffffff),
+        0,
+        1,
+        2,
+        UINT64_C(0x000fffffffffffff),
+        UINT64_C(0x0010000000000000),
+        UINT64_C(0x0010000000000001),
+        UINT64_C(0x001fffffffffffff),
+        UINT64_C(0x0020000000000000),
+        UINT64_C(0x1ff0000000000000),
+        UINT64_C(0x2000000000000000),
+        UINT64_C(0x3fe0000000000000),
+        UINT64_C(0x3fefffffffffffff),
+        UINT64_C(0x3ff0000000000000),
+        UINT64_C(0x3ff0000000000001),
+        UINT64_C(0x3ff8000000000000),
+        UINT64_C(0x4000000000000000),
+        UINT64_C(0x4330000000000000),
+        UINT64_C(0x4340000000000001),
+        UINT64_C(0x41dfffffffc00000),
+        UINT64_C(0x41dfffffffffffff),
+        UINT64_C(0x41e0000000000000),
+        UINT64_C(0x41e0000000200000),
+        UINT64_C(0x43dfffffffffffff),
+        UINT64_C(0x43e0000000000000),
+        UINT64_C(0x36a0000000000000),
+        UINT64_C(0x3690000000000000),
+        UINT64_C(0x47efffffe0000000),
+        UINT64_C(0x47effffff0000000),
+        UINT64_C(0x47f0000000000000),
+        UINT64_C(0x3810000000000000),
+        UINT64_C(0x380fffffffffffff),
+        UINT64_C(0x380ffffff0000000),
+        UINT64_C(0x7fdfffffffffffff),
+        UINT64_C(0x7fefffffffffffff),
+        UINT64_C(0x7ff0000000000000),
+        UINT64_C(0x7ff0000000000001),
+        UINT64_C(0x7ff8000000000000),
+        UINT64_C(0x7fffffffffffffff),
     };
     static const uint32_t floats[] = {
-        0, 1, 2, 0x007fffff, 0x00800000, 0x00800001, 0x00ffffff, 0x01000000, 0x1f800000, 0x20000000, 0x3f000000,
-        0x3f7fffff, 0x3f800000, 0x3f800001, 0x3fc00000, 0x40000000, 0x4b000000, 0x4b800001, 0x4effffff, 0x4f000000,
-        0x4f000001, 0x5effffff, 0x5f000000, 0x7f7fffff, 0x7f800000, 0x7f800001, 0x7fc00000, 0x7fffffff,
+        0,          1,          2,          0x007fffff, 0x00800000, 0x00800001, 0x00ffffff,
+        0x01000000, 0x1f800000, 0x20000000, 0x3f000000, 0x3f7fffff, 0x3f800000, 0x3f800001,
+        0x3fc00000, 0x40000000, 0x4b000000, 0x4b800001, 0x4effffff, 0x4f000000, 0x4f000001,
+        0x5effffff, 0x5f000000, 0x7f7fffff, 0x7f800000, 0x7f800001, 0x7fc00000, 0x7fffffff,
     };
     const size_t nd = sizeof(doubles) / sizeof(*doubles), nf = sizeof(floats) / sizeof(*floats);
     unsigned long rounds = argc > 1 ? strtoul(argv[1], NULL, 0) : 3000000;
@@ -316,7 +369,8 @@ int main(int argc, char **argv) {
         // The arrays differ in length, so also cross every float pair.
         for (size_t i = 0; i < nf; i++)
             for (size_t j = 0; j < nf; j++)
-                pair(doubles[i] | sa, doubles[j] | sb, floats[i] | (uint32_t)(sa >> 32), floats[j] | (uint32_t)(sb >> 32));
+                pair(doubles[i] | sa, doubles[j] | sb, floats[i] | (uint32_t)(sa >> 32),
+                     floats[j] | (uint32_t)(sb >> 32));
     }
     for (unsigned long i = 0; i < rounds; i++) {
         uint64_t a = next(), b = next(), r = next();
