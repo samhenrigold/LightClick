@@ -10,4 +10,5 @@ static const uint64_t kPrivIPA = PRIV_IPA, kPrivVA = PRIV_VA, kPrivSize = PRIV_S
 static const uint64_t kOffMonText = OFF_MON_TEXT, kOffMonData = OFF_MON_DATA, kOffStubs = OFF_STUBS, kOffCC = OFF_CC, kCCSize = CC_SIZE;
 static const uint64_t kOffCtx = OFF_CTX, kOffRStacks = OFF_RSTACKS, kOffHash = OFF_HASH, kOffBlocks = OFF_BLOCKS, kOffPT = OFF_PT;
 static const uint64_t kOffPcMap = OFF_PCMAP, kOffPageInfo = OFF_PAGEINFO, kOffShadowMeta = OFF_SHADOW_META;
+static const uint64_t kOffMonCPU = OFF_MON_CPU, kCtxSlot = CTX_SLOT;
 static const uint64_t kRStackBytes = RSTACK_BYTES, kRStackSlot = RSTACK_SLOT, kMaxViews = MAX_VIEWS, kPtStaticBytes = PT_STATIC_BYTES;

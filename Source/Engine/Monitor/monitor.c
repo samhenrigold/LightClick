@@ -38,6 +38,37 @@ void *memcpy(void *d, const void *s, unsigned long n) {
     return d;
 }
 
+// ---- One vCPU's own state ----
+// x18 picks the vCPU. EngineCtx is reachable from EL0, so what the monitor keeps for itself sits at a fixed distance from it, in EL1 memory, with the stack at the
+// slot's top. The defines keep the old names: this state was statics, and a static in this file is now shared by every vCPU, so it must either move here or be locked.
+typedef struct {
+    bool mon_resync, walk_any_tables, evicting, event_delivered, code_cache_reset;
+    u32 zap_why, deliver_depth;
+    u64 pt_step_slot, *pt_step_pte, pt_step_va;
+    u64 note_wait_cr3, note_wait_status;
+    u64 rs_saved[MAX_VIEWS]; // where this vCPU's return stack stood when it left each view
+    u8 fx_area[512] __attribute__((aligned(16)));
+} MonCpu;
+_Static_assert(sizeof(MonCpu) <= CTX_SLOT / 2, "the rest of the slot is the stack");
+_Static_assert(sizeof(EngineCtx) <= CTX_SLOT, "EngineCtx outgrew its slot");
+_Static_assert(OFF_MON_CPU + MAX_VCPUS * CTX_SLOT <= OFF_STUBS, "per-vCPU slots run past monitor data");
+_Static_assert(OFF_CTX + MAX_VCPUS * CTX_SLOT <= OFF_RSTACKS, "contexts run past their region");
+#define me ((MonCpu *)((u64)c + (OFF_MON_CPU - OFF_CTX)))
+#define c0 ((EngineCtx *)(PRIV_VA + OFF_CTX)) // what the host publishes once for the VM lives in the first context
+#define cpu_index() ((u32)(((u64)c - (PRIV_VA + OFF_CTX)) / CTX_SLOT))
+#define mon_resync (me->mon_resync)
+#define walk_any_tables (me->walk_any_tables)
+#define evicting (me->evicting)
+#define event_delivered (me->event_delivered)
+#define code_cache_reset (me->code_cache_reset)
+#define zap_why (me->zap_why)
+#define deliver_depth (me->deliver_depth)
+#define pt_step_slot (me->pt_step_slot)
+#define pt_step_pte (me->pt_step_pte)
+#define pt_step_va (me->pt_step_va)
+#define note_wait_cr3 (me->note_wait_cr3)
+#define note_wait_status (me->note_wait_status)
+
 // ---- Host calls ----
 _Noreturn static void stop(u64 reason, u64 rip, u64 a, u64 b, u64 d);
 
@@ -97,13 +128,14 @@ typedef struct {
     u32 cpl, valid;
     u64 root0, root1; // VA of shadow roots
     u64 ttbr0, ttbr1;
-    u64 rs_saved, rs_top;
     u64 hash_va;
     u64 last_used;
     u32 keeper, pad;
 } View;
 static View views[MAX_VIEWS];
 static u32 view_count;
+// Each view has a return stack per vCPU: two vCPUs can run one address space at once.
+static inline u64 view_rs_top(u32 idx) { return PRIV_VA + engine_off_rstacks(cpu_index()) + (u64)(idx + 1) * RSTACK_SLOT - 16; }
 
 // ---- Shadow page pool ----
 typedef struct {
@@ -192,7 +224,7 @@ static inline bool canonical(u64 va) { return (u64)((i64)(va << 16) >> 16) == va
 
 // Permission logic mirrors the SDM for CR0.WP=1 (enforced at CR0 writes) without SMAP (not advertised, stopped at CR4 writes).
 // access: bit 1 write, bit 2 user, bit 4 fetch.
-static bool walk_any_tables; // the tables may be a dead process's, freed and poisoned: a slot pointing outside RAM just ends the walk
+// walk_any_tables: the tables may be a dead process's, freed and poisoned: a slot pointing outside RAM just ends the walk
 
 static Walk x86_walk(u64 cr3, u64 va, u32 access, bool set_ad) {
     Walk w = {0};
@@ -354,7 +386,7 @@ static BlockEntry *find_block(u64 pc) {
         return 0;
     u32 word = (u32)((pc - cc) >> 2);
     BlockEntry *t = (BlockEntry *)PRIV(OFF_BLOCKS);
-    u64 lo = 0, hi = c->block_count;
+    u64 lo = 0, hi = c0->block_count;
     while (lo < hi) {
         u64 mid = (lo + hi) / 2;
         if (t[mid].arm_off <= word)
@@ -410,7 +442,6 @@ static u64 rip_here(u64 pc) {
 // ---- Stops ----
 // A stop this instruction can come back from, in hybrid mode. The state is precise at every rip passed to stop: nothing guest-visible changes
 // before an instruction's last access. Stops with no rip are about the engine's own limits, and stay final.
-static bool mon_resync;
 static void irq_deliver_now(u64 rip, u32 apic_vector);
 _Noreturn static void stop(u64 reason, u64 rip, u64 a, u64 b, u64 d) {
     bool resumable = c->hybrid && rip && (reason == STOP_UNTRANSLATED || reason == STOP_UNSUPPORTED || reason == STOP_FALLBACK);
@@ -492,10 +523,9 @@ static void view_build(u32 idx, u64 key, u32 cpl) {
     ((u64 *)v->root0)[(RAM_ALIAS_VA >> 39) & 0x1ff] = hole_entry_ram;
     v->ttbr0 = VA_TO_IPA(v->root0) | (u64)view_asid(idx) << 48;
     v->ttbr1 = VA_TO_IPA(v->root1);
-    v->rs_top = PRIV_VA + OFF_RSTACKS + (u64)(idx + 1) * RSTACK_SLOT - 16;
-    v->rs_saved = v->rs_top;
+    me->rs_saved[idx] = view_rs_top(idx);
     v->hash_va = PRIV_VA + OFF_HASH + (u64)idx * HASH_BYTES;
-    u64 *sent = (u64 *)v->rs_top;
+    u64 *sent = (u64 *)view_rs_top(idx);
     sent[0] = ~0ULL; // never equals a canonical return address, so popping the sentinel misses
     sent[1] = 0;
     // The monitor is about to fetch through this root. Unlike a guest access, a walk that sees the private slot before these stores reach memory can't refault
@@ -505,7 +535,6 @@ static void view_build(u32 idx, u64 key, u32 cpl) {
 
 
 static void zap_table(u32 idx);
-static bool evicting;
 static void reset_all_return_stacks(void);
 static inline u32 view_asid(u32 v);
 
@@ -531,7 +560,7 @@ static u32 view_evict(void) {
     return best;
 }
 
-static u32 zap_why = KILL_RECLAIM; // for the tally: what the next zaps are for
+// zap_why, for the tally: what the next zaps are for
 static void zap_entry(u64 *e, const ShadowDesc *d);
 
 // Every path that allocates shadow tables comes through here first, while it holds no pointer into them. Old views go first; if the running
@@ -614,9 +643,9 @@ static void view_activate(View *v) {
         stop(STOP_UNSUPPORTED, 0, 17, v - views, ((u64 *)v->root0)[(PRIV_VA >> 39) & 0x1ff]);
     static u64 stamp;
     v->last_used = ++stamp;
-    old->rs_saved = c->x[R_RS];
-    c->x[R_RS] = v->rs_saved;
-    c->rs_top = v->rs_top;
+    me->rs_saved[old - views] = c->x[R_RS];
+    c->x[R_RS] = me->rs_saved[v - views];
+    c->rs_top = view_rs_top((u32)(v - views));
     c->x[R_HASH] = v->hash_va;
     c->view = (u32)(v - views);
     WSR(ttbr0_el1, v->ttbr0);
@@ -626,7 +655,7 @@ static void view_activate(View *v) {
 
 static void reset_all_return_stacks(void) {
     for (u32 i = 0; i < view_count; i++)
-        views[i].rs_saved = views[i].rs_top;
+        me->rs_saved[i] = view_rs_top(i);
     c->x[R_RS] = c->rs_top;
 }
 
@@ -696,7 +725,6 @@ static void track_root(View *v, u64 va, const Walk *w) {
 // ---- Delivering x86 events ----
 // For the tally: what processes start, how they end, and their faults. Rare, so a host call each. shortcut: one wait4 tracked per address space, and the next
 // return in that space counts as its return, which another thread of the same process could get wrong.
-static u64 note_wait_cr3, note_wait_status;
 static void note_process_syscall(u64 next) {
     u64 n = c->x[0];
     bool console_write = (n == 0x2000004 || n == 0x200018d) && c->x[7] <= 2;
@@ -732,8 +760,6 @@ static inline void note_event(u32 kind, u64 rip, u64 a, u32 vector) {
 }
 
 static u64 translate_here(u64 rip, u64 site, u32 kind, bool single);
-static bool event_delivered, code_cache_reset;
-static u32 deliver_depth;
 static void reset_all_return_stacks(void);
 static void deliver(u32 vector, u32 err, bool has_err, u64 ret_rip, bool sw_int);
 
@@ -1277,9 +1303,7 @@ static void step_off(void) {
     }
 }
 
-static u64 pt_step_slot; // nonzero while one store runs on a temporarily writable page-table page
-static u64 *pt_step_pte;
-static u64 pt_step_va;
+// pt_step_slot: nonzero while one store runs on a temporarily writable page-table page
 
 static void shadow_write_finish(void);
 
@@ -1293,7 +1317,7 @@ static void handle_data_abort(bool lower) {
     if ((dfsc & 0x3c) == 0x20 || dfsc == 0x21)
         stop(STOP_UNSUPPORTED, rip_here(c->elr), 3, far, esr); // an alignment fault: split locked access
     // The return-stack guard: drop all the entries and retry the one ARM store.
-    u64 rs_base = PRIV_VA + OFF_RSTACKS;
+    u64 rs_base = PRIV_VA + engine_off_rstacks(cpu_index());
     if (far >= rs_base && far < rs_base + MAX_VIEWS * RSTACK_SLOT) {
         c->x[R_RS] = c->rs_top;
         return;
@@ -2259,7 +2283,7 @@ static void h_div(void) {
 }
 
 static void do_fx(bool save) {
-    static u8 area[512] __attribute__((aligned(16)));
+    u8 *area = me->fx_area;
     u64 va = c->x[R_S0];
     u64 here = rip_here(c->elr - 4);
     if (c->hybrid)
@@ -2643,14 +2667,15 @@ void mon_fiq(void) { stop(STOP_MONITOR_FAULT, 0, 0, 0, c->elr); }
 
 // Set by the host once: runs first, on the initial entry.
 void mon_init(void) {
+    zap_why = KILL_RECLAIM;
     c->irq_shadow_rip = ~0ULL;
     u64 *desc_hole = (u64 *)PRIV(OFF_MON_DATA + (1ULL << 20));
     hole_entry_priv = desc_hole[0];
     hole_entry_ram = desc_hole[1];
     View *v = view_find(cr3_key(c->cr3), c->cpl);
     c->view = (u32)(v - views);
-    c->x[R_RS] = v->rs_saved;
-    c->rs_top = v->rs_top;
+    c->x[R_RS] = me->rs_saved[c->view];
+    c->rs_top = view_rs_top(c->view);
     c->x[R_HASH] = v->hash_va;
     c->x[R_CTX] = (u64)c;
     WSR(ttbr0_el1, v->ttbr0);

@@ -162,8 +162,6 @@ public final class Engine {
         let bootRoot = table()
         let privL1 = table()
         let privL2 = table()
-        let rstackL2Index = Int((kOffRStacks >> 21) & 0x1FF)
-        let rstackL3 = table()
         slot(bootRoot, Int((kPrivVA >> 39) & 0x1FF)).pointee = ipa(privL1) | valid
         slot(privL1, Int((kPrivVA >> 30) & 0x1FF)).pointee = ipa(privL2) | valid
         var off: UInt64 = 0
@@ -181,15 +179,19 @@ public final class Engine {
             off += 2 << 20
         }
         // Return stacks grow down: each slot is an unmapped guard, then the writable part.
-        slot(privL2, rstackL2Index).pointee = ipa(rstackL3) | valid
-        var page: UInt64 = 0
-        while page < 2 << 20 {
-            let inSlot = page % kRStackSlot
-            if inSlot >= kRStackSlot - kRStackBytes {
-                slot(rstackL3, Int(page >> 12)).pointee =
-                    ipa(kOffRStacks + page) | valid | af | sh | apRW | uxn | pxn
+        for cpu in 0..<UInt32(MAX_VCPUS) {
+            let stacks = engine_off_rstacks(cpu)
+            let rstackL3 = table()
+            slot(privL2, Int((stacks >> 21) & 0x1FF)).pointee = ipa(rstackL3) | valid
+            var page: UInt64 = 0
+            while page < 2 << 20 {
+                let inSlot = page % kRStackSlot
+                if inSlot >= kRStackSlot - kRStackBytes {
+                    slot(rstackL3, Int(page >> 12)).pointee =
+                        ipa(stacks + page) | valid | af | sh | apRW | uxn | pxn
+                }
+                page += 4096
             }
-            page += 4096
         }
         // RAM alias for the monitor: 1 GB blocks where possible.
         let ramL1 = table()
@@ -226,7 +228,9 @@ public final class Engine {
         // MMU, caches, nAA for LSE2, RES1 bits.
         try sys(HV_SYS_REG_SCTLR_EL1, 0x30D0_0800 | 1 | 1 << 2 | 1 << 12 | 1 << 6)
         try sys(HV_SYS_REG_CPACR_EL1, 3 << 20)
-        try sys(HV_SYS_REG_SP_EL1, kPrivVA + kOffMonData + (2 << 20) - 16)
+        let stackTop = kPrivVA + kOffMonCPU + kCtxSlot - 16
+        try sys(HV_SYS_REG_SP_EL1, stackTop)
+        try sys(HV_SYS_REG_TPIDR_EL1, stackTop)
         try hvCheck("set x18") { hv_vcpu_set_reg(vcpu, HV_REG_X18, kPrivVA + kOffCtx) }
         hv_vcpu_get_vtimer_offset(vcpu, &vtimerOffset)
         try hvCheck("unmask vtimer") { hv_vcpu_set_vtimer_mask(vcpu, false) }
