@@ -39,6 +39,8 @@
 
 bool x86_tcg_inline_jmp_cache;
 static bool emit_inline_jmp_cache;
+static bool emit_inline_jmp_cache_32;
+static bool emit_inline_jmp_cache_cpl0;
 static bool dispatch_acquire_barrier;
 static bool shared_dispatch;
 #if defined(__APPLE__) && defined(__aarch64__) && !defined(CONFIG_USER_ONLY)
@@ -50,6 +52,9 @@ static void __attribute__((constructor)) init_inline_jmp_cache(void)
 {
     emit_inline_jmp_cache = pvg_tcg_fast_path("PVG_TCG_INLINE_JMP_CACHE");
     x86_tcg_inline_jmp_cache = emit_inline_jmp_cache;
+    emit_inline_jmp_cache_32 = pvg_tcg_fast_path("PVG_TCG_INLINE_JMP_CACHE_32");
+    emit_inline_jmp_cache_cpl0 =
+        pvg_tcg_fast_path("PVG_TCG_INLINE_JMP_CACHE_CPL0");
     const char *value = getenv("PVG_TCG_DISPATCH_ACQUIRE");
     dispatch_acquire_barrier = value && !strcmp(value, "1");
     value = getenv("PVG_TCG_SHARED_DISPATCH");
@@ -2011,11 +2016,14 @@ static void gen_cached_indirect_jump(DisasContext *s)
         tcg_gen_lookup_and_goto_ptr();
         return;
     }
-    /* Kernel CR3 transitions have cold jump caches: duplicating the lookup
-     * before a miss adds cost there. Target hot userspace indirect calls. */
-    if (emit_inline_jmp_cache && (s->flags & HF_CS64_MASK) &&
-        (s->flags & HF_CPL_MASK) == 3 &&
+    /* Local experiment. Every check mirrors tb_lookup's fast hit, which has no
+     * CPL or mode condition, so the mode gates are only about code size. Kernel
+     * CR3 transitions can have cold jump caches, hence the separate CPL0 flag. */
+    if (emit_inline_jmp_cache &&
+        ((s->flags & HF_CS64_MASK) || emit_inline_jmp_cache_32) &&
+        ((s->flags & HF_CPL_MASK) == 3 || emit_inline_jmp_cache_cpl0) &&
         !(s->base.tb->cflags & CF_NO_GOTO_PTR)) {
+        const bool code64 = s->flags & HF_CS64_MASK;
         const ptrdiff_t cpu_off = -offsetof(X86CPU, env);
         TCGLabel *slow = gen_new_label();
         TCGv_i64 pc = tcg_temp_new_i64();
@@ -2024,6 +2032,8 @@ static void gen_cached_indirect_jump(DisasContext *s)
         TCGv_i64 generation = tcg_temp_new_i64();
         TCGv_i32 flags = tcg_temp_new_i32();
         TCGv_i32 other = tcg_temp_new_i32();
+        TCGv_i32 hflags = tcg_temp_new_i32();
+        TCGv_i64 cs_base = tcg_temp_new_i64();
         TCGv_ptr cache = tcg_temp_new_ptr();
         TCGv_ptr entry = tcg_temp_new_ptr();
         TCGv_ptr tb = tcg_temp_new_ptr();
@@ -2040,7 +2050,21 @@ static void gen_cached_indirect_jump(DisasContext *s)
         tcg_gen_andi_i32(flags, flags, CPU_LOG_TB_CPU | CPU_LOG_EXEC);
         tcg_gen_brcondi_i32(TCG_COND_NE, flags, 0, slow);
 
-        tcg_gen_mov_i64(pc, cpu_eip);
+        /* Far transfers also end in DISAS_JUMP, so the target's mode and CS base
+         * can differ from this TB's. Compute the pc the way the runtime mode
+         * requires, as x86_get_tb_cpu_state does, or leave for the helper. */
+        tcg_gen_ld_i32(hflags, tcg_env, offsetof(CPUX86State, hflags));
+        tcg_gen_andi_i32(flags, hflags, HF_CS64_MASK);
+        tcg_gen_brcondi_i32(code64 ? TCG_COND_EQ : TCG_COND_NE, flags, 0, slow);
+        if (code64) {
+            tcg_gen_mov_i64(pc, cpu_eip);
+        } else {
+            /* Use the TCG global: a real-mode far jump may not have synced it.
+             * x86_get_tb_cpu_state keeps only the low 32 bits of the base. */
+            tcg_gen_ext32u_i64(cs_base, cpu_seg_base[R_CS]);
+            tcg_gen_add_i64(pc, cs_base, cpu_eip);
+            tcg_gen_ext32u_i64(pc, pc);
+        }
         tcg_gen_ld_ptr(cache, tcg_env,
                        cpu_off + offsetof(CPUState, tb_jmp_cache));
         tcg_gen_ld_i64(generation, cache, offsetof(CPUJumpCache, generation));
@@ -2080,13 +2104,16 @@ static void gen_cached_indirect_jump(DisasContext *s)
                                   offsetof(CPUJumpCache, array));
         tcg_gen_brcond_i64(TCG_COND_NE, tmp, pc, slow);
         tcg_gen_ld_i64(tmp, tb, offsetof(TranslationBlock, cs_base));
-        tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, slow);
+        if (code64) {
+            tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, slow);
+        } else {
+            tcg_gen_brcond_i64(TCG_COND_NE, tmp, cs_base, slow);
+        }
 
         tcg_gen_ld_i32(flags, tcg_env, offsetof(CPUX86State, eflags));
         tcg_gen_andi_i32(flags, flags,
                          IOPL_MASK | TF_MASK | RF_MASK | VM_MASK | AC_MASK);
-        tcg_gen_ld_i32(other, tcg_env, offsetof(CPUX86State, hflags));
-        tcg_gen_or_i32(flags, flags, other);
+        tcg_gen_or_i32(flags, flags, hflags);
         tcg_gen_ld_i32(other, tb, offsetof(TranslationBlock, flags));
         tcg_gen_brcond_i32(TCG_COND_NE, flags, other, slow);
         tcg_gen_ld_i32(flags, tcg_env,

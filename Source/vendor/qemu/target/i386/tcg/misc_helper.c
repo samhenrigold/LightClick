@@ -53,6 +53,10 @@ __attribute__((naked, noinline)) void pvg_tcg_dispatch_tail(void)
         "mov w17, #%c[log_mask]\n"
         "tst w10, w17\n"
         "b.ne 9f\n"
+        /* A far transfer can reach here in a non-64-bit mode, where the pc is
+         * not simply EIP. Leave those for the helper. */
+        "ldr w10, [x19, #%c[hflags]]\n"
+        "tbz w10, #%c[cs64_shift], 9f\n"
         "ldr x10, [x9, #%c[cache]]\n"
         "add x11, x10, #%c[generation]\n"
         "ldar x11, [x11]\n"
@@ -120,6 +124,7 @@ __attribute__((naked, noinline)) void pvg_tcg_dispatch_tail(void)
           [eip] "i" (offsetof(CPUX86State, eip)),
           [eflags] "i" (offsetof(CPUX86State, eflags)),
           [hflags] "i" (offsetof(CPUX86State, hflags)),
+          [cs64_shift] "i" (HF_CS64_SHIFT),
           [eflags_mask_lo] "i" ((IOPL_MASK | TF_MASK | RF_MASK | VM_MASK | AC_MASK) & 0xffff),
           [eflags_mask_hi] "i" ((IOPL_MASK | TF_MASK | RF_MASK | VM_MASK | AC_MASK) >> 16),
           [cs_base] "i" (offsetof(TranslationBlock, cs_base)),
