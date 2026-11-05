@@ -1,6 +1,7 @@
 /*
  * Counts of the guest events that would each cost a VM exit in a hardware-MMU engine, to tell
- * whether that engine is worth building. Set PVG_TCG_EVENTS to a file to record totals every second.
+ * whether that engine is worth building. Set PVG_TCG_EVENTS to a file to record totals every second,
+ * and MMIO accesses by region to <file>.mmio every five.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #ifndef QEMU_PVG_EVENTS_H

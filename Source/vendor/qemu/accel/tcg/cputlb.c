@@ -2166,6 +2166,79 @@ static void *atomic_mmu_lookup(CPUState *cpu, vaddr addr, MemOpIdx oi,
  * We don't bother with this widened value for SOFTMMU_CODE_ACCESS.
  */
 
+/*
+ * MMIO accesses by region, rewritten beside PVG_TCG_EVENTS as <path>.mmio. A slot is never freed.
+ * shortcut: accesses past 256 distinct regions go uncounted, far more than any layout here maps.
+ */
+#define PVG_MMIO_SLOTS 256
+static struct {
+    MemoryRegion *mr;
+    char *name;
+    unsigned long reads, writes;
+} pvg_mmio[PVG_MMIO_SLOTS];
+
+static void pvg_mmio_tally(MemoryRegion *mr, bool write)
+{
+    unsigned i = ((uintptr_t)mr >> 4) % PVG_MMIO_SLOTS;
+
+    for (unsigned n = 0; n < PVG_MMIO_SLOTS; n++, i = (i + 1) % PVG_MMIO_SLOTS) {
+        MemoryRegion *seen = qatomic_read(&pvg_mmio[i].mr);
+
+        if (!seen && !(seen = qatomic_cmpxchg(&pvg_mmio[i].mr, NULL, mr))) {
+            /* Region names come from QOM, which wants the BQL. Only a region's first access gets here. */
+            BQL_LOCK_GUARD();
+            Object *owner = memory_region_owner(mr);
+
+            qatomic_store_release(&pvg_mmio[i].name,
+                                  g_strdup_printf("%s:%s", owner ? object_get_typename(owner) : "",
+                                                  memory_region_name(mr)));
+            seen = mr;
+        }
+        if (seen == mr) {
+            __atomic_fetch_add(write ? &pvg_mmio[i].writes : &pvg_mmio[i].reads, 1, __ATOMIC_RELAXED);
+            return;
+        }
+    }
+}
+
+static void *pvg_mmio_record(void *path)
+{
+    g_autofree char *temporary = g_strdup_printf("%s.tmp", (char *)path);
+
+    for (unsigned seconds = 5;; seconds += 5) {
+        FILE *file;
+
+        sleep(5);
+        file = fopen(temporary, "w");
+        if (!file) {
+            continue;
+        }
+        fprintf(file, "# seconds %u\n# owner:region\treads\twrites\n", seconds);
+        for (unsigned i = 0; i < PVG_MMIO_SLOTS; i++) {
+            const char *name = qatomic_load_acquire(&pvg_mmio[i].name);
+
+            if (name) {
+                fprintf(file, "%s\t%lu\t%lu\n", name,
+                        __atomic_load_n(&pvg_mmio[i].reads, __ATOMIC_RELAXED),
+                        __atomic_load_n(&pvg_mmio[i].writes, __ATOMIC_RELAXED));
+            }
+        }
+        fclose(file);
+        rename(temporary, path);
+    }
+    return NULL;
+}
+
+static void __attribute__((constructor)) pvg_mmio_init(void)
+{
+    const char *path = getenv("PVG_TCG_EVENTS");
+    pthread_t thread;
+
+    if (path) {
+        pthread_create(&thread, NULL, pvg_mmio_record, g_strdup_printf("%s.mmio", path));
+    }
+}
+
 /**
  * do_ld_mmio_beN:
  * @cpu: generic cpu state
@@ -2227,6 +2300,9 @@ static uint64_t do_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
 
     section = io_prepare(&mr_offset, cpu, full, addr, ra);
     mr = section->mr;
+    if (unlikely(pvg_events_enabled)) {
+        pvg_mmio_tally(mr, false);
+    }
 
     BQL_LOCK_GUARD();
     return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
@@ -2742,6 +2818,9 @@ static uint64_t do_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
 
     section = io_prepare(&mr_offset, cpu, full, addr, ra);
     mr = section->mr;
+    if (unlikely(pvg_events_enabled)) {
+        pvg_mmio_tally(mr, true);
+    }
 
     BQL_LOCK_GUARD();
     return int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
