@@ -252,6 +252,40 @@ What TCG can't say. It stores pushad from the lowest address and leaves register
 
 Not exact: esp wraps in `pop`, `ret` and `call` near 4 GB (the commpage holds that end), an element straddling 4 GB in strings, the limit of fs and gs, a null fs or gs used for an access (a CPU gives #GP, this reads at base 0), CR2 for a faulting popad within the page, `push sreg` writing four bytes as TCG does.
 
+### Cold code: a persistent translation cache?
+
+The idea: keep translations on disk, keyed by the content hash of the x86 they came from, and load them instead of translating. Cold code in `lc-bench` is 3.2 us per function against about 0.2 for Rosetta's AOT. Not built, because the numbers below don't justify it yet.
+
+Measured, from tallies of a boot and then `lc-bench`, with sharing on. The desktop arrives by about 40 s, and translation is the host's time inside the translator:
+
+| vCPUs | cold blocks by 40 s | translating by 40 s | share of those 40 s | busiest 10 s, of one core | whole run | HC_TRANSLATE, us per call on vCPU 0 |
+|---|---|---|---|---|---|---|
+| 1 | 1.57M | 2.45 s | 6.1% | 11.9% | 2.83 s of 191 s | 1.11 |
+| 2 | 2.05M | 3.76 s | 9.4% | 19.4% | 4.21 s of 179 s | 1.90 |
+| 4 | 2.41M | 4.64 s | 11.6% | 21.9% | 5.16 s of 185 s | 3.76 |
+
+The share is an upper bound on what translation costs a boot: it assumes each second of translating delays the desktop by a second. With several vCPUs some of it runs alongside other work, and much of a boot waits on the disk. Each block also costs an exit, which those seconds leave out: an exit's cost isn't separated in the tally, so at a guessed 1 us each, about 1.6 to 2.4 s by 40 s.
+
+Of the cold blocks in the whole run, at least 319,571 of 1.78M at one vCPU (18%) and 767,216 of about 2.7M at four (29%) were already in the cache, live in another view or dead with their frame unchanged. Reusing those takes no disk. The cost per call also grows with vCPUs, about 3.4 times from one to four, which is probably the translator lock, though nothing here separates waiting from work.
+
+Estimated, not measured:
+- **What a cache could save on a boot.** At a 70% hit rate and about 0.3 us for a lookup against 1.6 to 1.9 us for a translation, it saves about 60% of the translating: 1.5 s at one vCPU and 2.8 s at four, of 40 s, so 4 to 7% at best. Saving the exits as well needs a whole page loaded per exit, for up to 1 to 2 s more.
+- **App launch.** No tally isolates one. As a bound, 500,000 cold blocks, a guess at a large app, is about 1 s translating and 0.5 s of exits, and the busiest 10 s of a boot suggests translation stays under a quarter of a core during launch-like work. To measure it: run `guest-bench --workload` launching one large app twice, and take the two launches' differences in blocks and translate ms from the tally timeline. The second launch shows the cost without the cold blocks, as sharing keeps them for the rest of the boot; the disk cache also differs between the two, so the first is an upper bound.
+- **Size.** 67 ARM words per block is 268 bytes, so 480 MB for that run's 1.78M blocks, and maybe two thirds of that once repeats are gone (a guess).
+
+What it would take:
+1. **Relocatable output.** Kernel and shared-region slides differ per boot, as the tallies' `slide` lines show, and blocks hold absolute x86 addresses, in their stub literals and in rip-relative operands, which load an immediate. Each needs a fixup record and patching at load, through every path in the emitters.
+2. **Keys.** Hash the page, then look up by offset in the page, mode (CPL, compatibility), and the translator's flags and version. A block crossing a page hashes both, and its bytes are read under protection as today.
+3. **Liveness.** A block's code also depends on what follows it, as `flags_needed_at` reads ahead, but only within the same page, so the page hash covers that.
+4. **Writing it.** A background thread, off the translator lock, with a file per guest OS build. Loading maps it and copies a block into the code cache, as links and kills work on the live copy.
+
+Cheaper first, in this order, each on its own measurement:
+1. Reuse a dead block whose frame hasn't changed, by comparing bytes: 16% or more of cold blocks, no disk, no relocation.
+2. Translate more per exit: when a block's direct successors are on the same protected page, translate them in the same call. This addresses the 1 us per block that a disk cache doesn't touch without page loading, and most of what `largecode_cold` shows beyond translation.
+3. Hold the translator lock for less at several vCPUs, if the per-call growth is lock waiting.
+
+Build the disk cache if the app launch measurement shows translation is more than about 20% of a first launch after these. Below that, it is a large change to every emitter for a few percent.
+
 ## Multi-vCPU
 
 One vCPU is the largest gap to a usable guest. This is the design, what it costs, and how far it is built. **Measured** means on this machine by `Tests/smp-probe/run.sh` (EL1 code in a VM set up as the engine sets one up, EnTSO on) or `engine-run --smp 2|4 .build/images/smp` (the engine itself, `Tests/x86/kernel/smp.c`), under other work at load 5 to 8, so 10-20% between runs. Everything else is labelled.

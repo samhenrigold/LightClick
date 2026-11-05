@@ -90,6 +90,7 @@ xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -DHAD_THREAD "$here/../..
 xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -mcx16 "$here/../../../probes/smp-stress.c" -o "$out/smp-stress"
 xcrun clang -arch arm64 -O2 "$here/../../../probes/lc-bench.c" -o "$out/lc-bench-arm64"
 xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -w "$here/../../../probes/lc-bench.c" -o "$out/lc-bench-x86"
+xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -Wall -Wextra -pthread "$here/../../../probes/lc-scale.c" -o "$out/lc-scale"
 
 # The differential fuzz image.
 python3 "$here/gen_fuzz.py" "$out/fuzz_forms.s"

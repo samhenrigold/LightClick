@@ -522,7 +522,7 @@ static void litmus_iriw(u32 me) {
     barrier();
     for (u64 i = 1; i <= rounds; i++) {
         if (me == 0) {
-            while (arrived != 3 * (i - 1))
+            while (arrived != (ncpus - 1) * (i - 1))
                 ;
             lit.x = lit.y = 0;
             lit.round = i;
@@ -537,14 +537,14 @@ static void litmus_iriw(u32 me) {
             } else if (me == 2) {
                 lit.r[0] = lit.x;
                 lit.r[1] = lit.y;
-            } else {
+            } else if (me == 3) {
                 lit.r[2] = lit.y;
                 lit.r[3] = lit.x;
             }
             __atomic_fetch_add(&arrived, 1, __ATOMIC_ACQ_REL);
         }
         if (me == 0) {
-            while (arrived != 3 * i)
+            while (arrived != (ncpus - 1) * i)
                 ;
             hits += lit.r[0] == 1 && lit.r[1] == 0 && lit.r[2] == 1 && lit.r[3] == 0;
         }
