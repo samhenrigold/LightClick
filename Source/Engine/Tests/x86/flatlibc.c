@@ -2,6 +2,13 @@
 // through flatrun), so transcripts can be compared byte for byte. Nothing here may depend on addresses or the environment.
 #include "flatlibc.h"
 
+#ifdef __i386__ // the compat kernel's: number in eax, three arguments, no second result
+long raw_syscall(long n, long a, long b, long c, long d, long e, long f, long *second) {
+    long ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "b"(a), "c"(b), "d"(c) : "memory", "cc");
+    return ret;
+}
+#else
 long raw_syscall(long n, long a, long b, long c, long d, long e, long f, long *second) {
     register long r10 __asm__("r10") = d;
     register long r8 __asm__("r8") = e;
@@ -16,6 +23,7 @@ long raw_syscall(long n, long a, long b, long c, long d, long e, long f, long *s
         *second = rdx_out;
     return carry ? -ret : ret;
 }
+#endif
 
 static char outbuf[65536];
 static unsigned long outlen;
@@ -217,13 +225,13 @@ int vprintf(const char *f, va_list ap) {
                 if (*f == 'p') {
                     v = (unsigned long long)va_arg(ap, void *);
                     lng = 1;
-                } else if (lng)
+                } else if (lng > (sizeof(long) == 4))
                     v = va_arg(ap, unsigned long long);
                 else
                     v = va_arg(ap, unsigned);
                 bool neg = false;
                 if (*f == 'd' || *f == 'i') {
-                    long long s = lng ? (long long)v : (long long)(int)v;
+                    long long s = lng > (sizeof(long) == 4) ? (long long)v : (long long)(int)v;
                     neg = s < 0;
                     v = neg ? (unsigned long long)-s : (unsigned long long)s;
                 }

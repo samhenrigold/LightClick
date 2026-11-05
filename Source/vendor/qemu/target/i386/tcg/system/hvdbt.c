@@ -1,11 +1,11 @@
 /*
- * hvdbt: run a guest's 64-bit code in Source/Engine, the x86 translator inside a Hypervisor.framework VM, with TCG as its other half.
+ * hvdbt: run a guest's 64-bit code, and its flat 32-bit user code, in Source/Engine, the x86 translator inside a Hypervisor.framework VM, with TCG as its other half.
  *
  * Off unless LC_HVDBT=1, on a build configured with -Dhvdbt_engine. TCG runs the firmware and the boot loaders. On the first TB miss in the high half in
  * 64-bit mode, which is XNU's vstart, this file loads the engine's state from CPUX86State and runs it on the vCPU thread. Whatever the engine can't do
- * comes back as ENGINE_RUN_FALLBACK: TCG runs that one instruction and, through the same TB miss, control returns. An instruction that leaves 64-bit
- * mode (iret to a 32-bit process, say) just means TCG goes on running until a TB miss finds the state acceptable again. Since a normal TB is never
- * generated for an acceptable state, there is always a miss to catch.
+ * comes back as ENGINE_RUN_FALLBACK: TCG runs that one instruction and, through the same TB miss, control returns. An instruction that leaves what the
+ * engine takes (to 16-bit code, say, or a segment with a base) just means TCG goes on running until a TB miss finds the state acceptable again. Since a
+ * normal TB is never generated for an acceptable state, there is always a miss to catch.
  *
  * The APIC stays QEMU's, for both halves: the engine's in-VM one is off. So APIC accesses go through the host here, which DESIGN.md's rates don't assume.
  * Device models, timers and vCPU stop and start are all TCG's loop, unchanged. Single vCPU only.
@@ -350,6 +350,28 @@ static void hvdbt_load_segment(CPUState *cs, X86Seg seg, uint16_t sel, uint32_t 
     cpu_x86_load_seg_cache(env, seg, sel, hvdbt_desc_base(e), hvdbt_desc_limit(e), e[1]);
 }
 
+/* As seg_note in the monitor: what in es, ds, fs and gs keeps compatibility mode off the engine. fs and gs need no flat base, and their limits aren't checked. */
+static uint32_t hvdbt_seg_bad(CPUX86State *env)
+{
+    static const int regs[] = { R_ES, R_DS, R_FS, R_GS };
+    uint32_t bad = 0;
+
+    for (int i = 0; i < ARRAY_SIZE(regs); i++) {
+        const SegmentCache *s = &env->segs[regs[i]];
+        bool null = !(s->selector & ~3);
+        bool ok = null ? regs[i] >= R_FS : (s->flags & DESC_P_MASK) && (s->flags & DESC_S_MASK) && !(s->flags & DESC_CS_MASK) &&
+                                               ((s->flags >> DESC_DPL_SHIFT) & 3) == 3;
+
+        if (ok && !null && regs[i] < R_FS) {
+            ok = !s->base && s->limit == 0xffffffff && !(s->flags & DESC_E_MASK);
+        }
+        if (!ok) {
+            bad |= 1u << regs[i];
+        }
+    }
+    return bad;
+}
+
 static void hvdbt_put_state(CPUState *cs)
 {
     CPUX86State *env = cpu_env(cs);
@@ -382,6 +404,13 @@ static void hvdbt_put_state(CPUState *cs)
     }
     s.tr = env->tr.selector;
     s.ldtr = env->ldt.selector;
+    s.ldt_base = env->ldt.base;
+    s.ldt_limit = env->ldt.limit;
+    s.compat = !(env->hflags & HF_CS64_MASK);
+    s.seg_bad = hvdbt_seg_bad(env);
+    s.sysenter_cs = env->sysenter_cs;
+    s.sysenter_esp = env->sysenter_esp;
+    s.sysenter_eip = env->sysenter_eip;
     s.cpl = env->hflags & HF_CPL_MASK;
     update_mxcsr_from_sse_status(env);
     s.mxcsr = env->mxcsr;
@@ -434,6 +463,9 @@ static void hvdbt_get_state(CPUState *cs)
     env->lstar = s.lstar;
     env->cstar = s.cstar;
     env->fmask = s.sfmask;
+    env->sysenter_cs = s.sysenter_cs;
+    env->sysenter_esp = s.sysenter_esp;
+    env->sysenter_eip = s.sysenter_eip;
     env->kernelgsbase = s.kernel_gs_base;
     env->gdt.base = s.gdt_base;
     env->gdt.limit = s.gdt_limit;
@@ -454,8 +486,15 @@ static void hvdbt_get_state(CPUState *cs)
         }
         cpu_x86_load_seg_cache(env, R_LDTR, s.ldtr, hvdbt_desc_base(e) | ((uint64_t)e[2] << 32), hvdbt_desc_limit(e), e[1]);
     }
+    env->ldt.base = s.ldt_base;
+    env->ldt.limit = s.ldt_limit;
     for (int i = 0; i < 6; i++) {
         hvdbt_load_segment(cs, i, s.sel[i], s.cpl);
+    }
+    /* sysenter and sysexit take these from the instruction, whatever the table says of the selector. */
+    env->segs[R_CS].flags = (env->segs[R_CS].flags & ~(DESC_L_MASK | DESC_B_MASK)) | (s.compat ? DESC_B_MASK : DESC_L_MASK);
+    if (s.compat) {
+        env->segs[R_SS].flags |= DESC_B_MASK;
     }
     env->segs[R_FS].base = s.fs_base;
     env->segs[R_GS].base = s.gs_base;
@@ -637,7 +676,19 @@ static bool hvdbt_want_engine(CPUState *cs, vaddr pc, uint32_t flags)
     char why[sizeof hv.refused];
     why[0] = 0;
     if (!(flags & HF_CS64_MASK)) {
-        snprintf(why, sizeof why, "refused: not in 64-bit mode");
+        const SegmentCache *cseg = &env->segs[R_CS], *sseg = &env->segs[R_SS];
+        if (!(flags & HF_LMA_MASK)) {
+            snprintf(why, sizeof why, "refused: not in long mode");
+        } else if (!(flags & HF_CS32_MASK) || !(flags & HF_SS32_MASK)) {
+            snprintf(why, sizeof why, "refused: 16-bit code or stack");
+        } else if ((flags & HF_CPL_MASK) != 3) {
+            snprintf(why, sizeof why, "refused: compatibility mode below ring 3");
+        } else if (cseg->base || cseg->limit != 0xffffffff || sseg->base || sseg->limit != 0xffffffff || (sseg->flags & DESC_E_MASK) || hvdbt_seg_bad(env)) {
+            snprintf(why, sizeof why, "refused: compatibility mode, non-flat segments");
+        }
+    }
+    if (why[0]) {
+        /* said above */
     } else if (flags & HF_SMM_MASK) {
         snprintf(why, sizeof why, "refused: SMM");
     } else if (flags & TF_MASK) {

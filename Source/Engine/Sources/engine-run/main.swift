@@ -33,6 +33,7 @@ do {
         kernelOptions.useTSO = ProcessInfo.processInfo.environment["ENGINE_NO_TSO"] == nil
         kernelOptions.codeCacheBytes = UInt64(ProcessInfo.processInfo.environment["ENGINE_CC_BYTES"] ?? "") ?? 0
         kernelOptions.shadowPoolPages = UInt32(ProcessInfo.processInfo.environment["ENGINE_POOL_PAGES"] ?? "") ?? 0
+        kernelOptions.tzcntLzcnt = ProcessInfo.processInfo.environment["ENGINE_TZCNT"] != nil  // as -cpu max under TCG, for the compat kernel's comparison
         let guest = try KernelGuest(options: kernelOptions)
         let code = try guest.run(image: image)
         if ProcessInfo.processInfo.environment["ENGINE_STATS"] != nil {

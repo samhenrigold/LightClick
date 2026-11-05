@@ -65,6 +65,7 @@ static void and_imm_w(int rd, int rn, u32 imm) { // imm must encode
 int addr_reg(const Insn *in) {
     int cur = XZR;
     int segr = in->seg == 1 ? R_FS : in->seg == 2 ? R_GS : -1;
+    int sf = !tr_compat; // 32-bit code's sums wrap at 4 GB, and its registers already have clear top halves
     if (in->riprel) {
         movimm(AD, in->next + in->disp);
         cur = AD;
@@ -72,29 +73,36 @@ int addr_reg(const Insn *in) {
         if (!in->no_base)
             cur = in->base;
         if (!in->no_index) {
-            add_reg(1, 0, 0, AD, cur, in->index, in->scale);
+            add_reg(sf, 0, 0, AD, cur, in->index, in->scale);
             cur = AD;
         }
         if (in->disp) {
             if (in->disp > 0 && in->disp < 4096 && cur != XZR)
-                add_imm(1, 0, 0, AD, cur, (u32)in->disp);
+                add_imm(sf, 0, 0, AD, cur, (u32)in->disp);
             else if (in->disp < 0 && in->disp > -4096 && cur != XZR)
-                add_imm(1, 1, 0, AD, cur, (u32)-in->disp);
+                add_imm(sf, 1, 0, AD, cur, (u32)-in->disp);
             else if (cur == XZR)
-                movimm(AD, (u64)in->disp);
+                movimm(AD, tr_compat ? (u32)in->disp : (u64)in->disp);
             else {
                 movimm(S4, (u64)in->disp);
-                add_reg(1, 0, 0, AD, cur, S4, 0);
+                add_reg(sf, 0, 0, AD, cur, S4, 0);
             }
             cur = AD;
         }
     }
-    if (in->addr32) {
+    if (in->addr16) {
+        ubfx(0, AD, cur, 0, 16);
+        cur = AD;
+    } else if (in->addr32 && !tr_compat) {
         mov_reg(0, AD, cur);
         cur = AD;
     }
     if (segr >= 0) {
-        add_reg(1, 0, 0, AD, cur, segr, 0);
+        add_reg(sf, 0, 0, AD, cur, segr, 0);
+        cur = AD;
+    }
+    if (cur == XZR) { // address 0: x31 as a base would be SP
+        mov_reg(1, AD, XZR);
         cur = AD;
     }
     return cur;
@@ -842,6 +850,17 @@ static void emit_shd(const Insn *in, int live) {
         }
         return;
     }
+    if (sz == 4 && in->by_cl && !mem && !live) {
+        // 32-bit code's 64-bit shifts, in every libgcc division: with flags dead, a wide shift of the pair. The helper is a trap each.
+        and_imm_w(S1, 1, 31);
+        mov_reg(0, S0, right ? d : in->reg);
+        logic_sh(1, 1, 0, S0, S0, right ? in->reg : d, 0, 32);
+        var_shift(1, right ? 1 : 0, S0, S0, S1);
+        if (!right)
+            lsr_imm(1, S0, S0, 32);
+        mov_reg(0, in->rm, S0);
+        return;
+    }
     if (d != S0)
         mov_reg(1, S0, d);
     mov_reg(1, S1, in->reg);
@@ -1067,7 +1086,7 @@ static void emit_bt(const Insn *in, int live) {
         addr = addr_reg(in);
         sext64(S3, in->reg, sz);
         asr_imm(1, S3, S3, bits == 64 ? 6 : bits == 32 ? 5 : 4);
-        add_reg(1, 0, 0, AD, addr, S3, log2sz(sz));
+        add_reg(!tr_compat, 0, 0, AD, addr, S3, log2sz(sz));
         addr = AD;
         and_imm_w(S1, in->reg, bits - 1);
     }
@@ -1170,18 +1189,35 @@ static void emit_bitscan(const Insn *in, int live) {
 // ---- strings ----
 static void emit_string(const Insn *in) {
     int sz = in->sz, sub = in->sub, ls = log2sz(sz);
-    if (in->addr32 || in->seg) {
+    if ((in->addr32 && !tr_compat) || in->addr16 || in->seg) {
         emit_stop(in->rip, "string instruction with an address-size or segment override");
         return;
     }
+    int sf = !tr_compat;
     u32 *start = tr_cc;
     u32 *skip = 0;
     if (in->rep && !tr_no_bulk_rep && (sub == 0 || (sub == 2 && !tr_hybrid))) { // stos's dup is outside the stub, where CR0.TS could not be backed out of
         // Bulk first: a stub moves whole 32-byte chunks with exact registers between them. The plain loop below does what is left.
+        u32 *wraps[2] = {0, 0};
+        if (tr_compat) { // the stub's sums are 64 bits wide: a run that would pass 4 GB takes the plain loop, which wraps
+            add_reg(1, 0, 0, S0, 7, 1, ls);
+            lsr_imm(1, S0, S0, 32);
+            wraps[0] = tr_cc;
+            cbz(1, 1, S0, 0);
+            if (sub == 0) {
+                add_reg(1, 0, 0, S0, 6, 1, ls);
+                lsr_imm(1, S0, S0, 32);
+                wraps[1] = tr_cc;
+                cbz(1, 1, S0, 0);
+            }
+        }
         movimm(S1, (u64)(32 / sz));
         if (sub == 2)
             E(0x4E000C00u | (u32)sz << 16 | V_S0); // dup v24.<T>, the accumulator
         bl_abs(PRIV_VA + OFF_STUBS + (sub == 0 ? STUB_OFF_REP_MOVS : STUB_OFF_REP_STOS));
+        for (int i = 0; i < 2; i++)
+            if (wraps[i])
+                *wraps[i] |= ((u32)(tr_cc - wraps[i]) & 0x7ffff) << 5;
     }
     if (in->rep) {
         skip = tr_cc;
@@ -1195,29 +1231,29 @@ static void emit_string(const Insn *in) {
         case 0: // movs
             ldst(1, sz, S2, rsi);
             ldst(0, sz, S2, rdi);
-            add_reg(1, 0, 0, 6, 6, S4, 0);
-            add_reg(1, 0, 0, 7, 7, S4, 0);
+            add_reg(sf, 0, 0, 6, 6, S4, 0);
+            add_reg(sf, 0, 0, 7, 7, S4, 0);
             break;
         case 2: // stos
             ldst(0, sz, 0, rdi);
-            add_reg(1, 0, 0, 7, 7, S4, 0);
+            add_reg(sf, 0, 0, 7, 7, S4, 0);
             break;
         case 3: // lods
             ldst(1, sz, S2, rsi);
             gpr_write(0, sz, false, S2);
-            add_reg(1, 0, 0, 6, 6, S4, 0);
+            add_reg(sf, 0, 0, 6, 6, S4, 0);
             break;
         case 4: // scas: rax minus [rdi]
             ldst(1, sz, S0, rdi);
-            add_reg(1, 0, 0, 7, 7, S4, 0);
+            add_reg(sf, 0, 0, 7, 7, S4, 0);
             alu_value(ALU_SUB, sz, S2, 0, S0);
             alu_flags(ALU_SUB, sz, F_ARITH, 0, S0, S2);
             break;
         case 1: // cmps: [rsi] minus [rdi]
             ldst(1, sz, S0, rsi);
             ldst(1, sz, S1, rdi);
-            add_reg(1, 0, 0, 6, 6, S4, 0);
-            add_reg(1, 0, 0, 7, 7, S4, 0);
+            add_reg(sf, 0, 0, 6, 6, S4, 0);
+            add_reg(sf, 0, 0, 7, 7, S4, 0);
             alu_value(ALU_SUB, sz, S2, S0, S1);
             alu_flags(ALU_SUB, sz, F_ARITH, S0, S1, S2);
             break;
@@ -1439,7 +1475,10 @@ static void emit_cmpxchg8b(const Insn *in, int live) {
 static void emit_push(const Insn *in) {
     int sz = in->sz;
     int v;
-    if (in->has_imm) {
+    if (in->sub) { // a segment register, zero-extended as TCG writes it. Real parts may write only 16 bits.
+        E(0x79400000u | (u32)((offsetof(EngineCtx, seg_sel) + (in->sub - 1) * 2) / 2) << 10 | CTX << 5 | S0);
+        v = S0;
+    } else if (in->has_imm) {
         movimm(S0, (u64)in->imm);
         v = S0;
     } else if (in->rm_reg) {
@@ -1454,8 +1493,40 @@ static void emit_push(const Insn *in) {
     }
     if (sz == 8)
         E(0xF8000C00u | ((u32)-8 & 0x1ff) << 12 | 4 << 5 | v);
+    else if (sz == 4)
+        E(0xB8000C00u | ((u32)-4 & 0x1ff) << 12 | 4 << 5 | v);
     else
         E(0x78000C00u | ((u32)-2 & 0x1ff) << 12 | 4 << 5 | v);
+}
+
+static void emit_pusha(const Insn *in) {
+    static const u8 order[8] = {7, 6, 5, 4, 3, 2, 1, 0}; // edi at the lowest address
+    int sz = in->sz;
+    if (!in->sub) { // through a scratch pointer: esp moves only after the last store
+        add_imm(0, 1, 0, S0, 4, sz * 8);
+        for (int i = 7; i >= 0; i--) {
+            Addr a = {.base = S0, .imm = i * sz};
+            ldst(0, sz, order[i], a);
+        }
+        mov_reg(0, 4, S0);
+        return;
+    }
+    // Both ends first, which covers any page boundary in 32 bytes: no register changes until no load can fault.
+    Addr top = {.base = 4, .imm = 7 * sz}, bottom = {.base = 4};
+    ldst(1, sz, XZR, top);
+    ldst(1, sz, XZR, bottom);
+    for (int i = 0; i < 8; i++) {
+        if (order[i] == 4)
+            continue; // the saved esp is dropped
+        Addr a = {.base = 4, .imm = i * sz};
+        if (sz == 4)
+            ldst(1, 4, order[i], a);
+        else {
+            ldst(1, 2, S0, a);
+            bfi(1, order[i], S0, 0, 16);
+        }
+    }
+    add_imm(0, 0, 0, 4, 4, sz * 8);
 }
 
 static void emit_pop(const Insn *in) {
@@ -1463,8 +1534,8 @@ static void emit_pop(const Insn *in) {
     if (in->rm_reg) {
         if (in->rm == 4) {
             Addr a = {.base = 4};
-            if (sz == 8)
-                ldst(1, 8, 4, a);
+            if (sz >= 4)
+                ldst(1, sz, 4, a);
             else {
                 ldst(1, 2, S0, a);
                 add_imm(1, 0, 0, 4, 4, 2);
@@ -1474,6 +1545,8 @@ static void emit_pop(const Insn *in) {
         }
         if (sz == 8)
             E(0xF8400400u | 8 << 12 | 4 << 5 | in->rm);
+        else if (sz == 4)
+            E(0xB8400400u | 4 << 12 | 4 << 5 | in->rm);
         else {
             Addr a = {.base = 4};
             ldst(1, 2, S0, a);
@@ -1548,10 +1621,15 @@ void emit_int(const Insn *in, int live) {
         case OP_POP:
             emit_pop(in);
             break;
+        case OP_PUSHA:
+            emit_pusha(in);
+            break;
         case OP_PUSHF:
             bl_abs(tr_stub_pushf);
             if (sz == 8)
                 E(0xF8000C00u | ((u32)-8 & 0x1ff) << 12 | 4 << 5 | S0);
+            else if (sz == 4)
+                E(0xB8000C00u | ((u32)-4 & 0x1ff) << 12 | 4 << 5 | S0);
             else
                 E(0x78000C00u | ((u32)-2 & 0x1ff) << 12 | 4 << 5 | S0);
             break;
@@ -1581,7 +1659,7 @@ void emit_int(const Insn *in, int live) {
                 ldst(0, sz, S3, a);
             }
             movimm(S2, (u64)size);
-            add_reg(1, 1, 0, 4, S0, S2, 0);
+            add_reg(!tr_compat, 1, 0, 4, S0, S2, 0);
             gpr_write(5, sz, false, S3);
             break;
         }
@@ -1591,6 +1669,12 @@ void emit_int(const Insn *in, int live) {
                 break;
             }
             Addr a = {.base = 5};
+            if (tr_compat) {
+                ldst(1, 4, S0, a);
+                add_imm(0, 0, 0, 4, 5, 4);
+                mov_reg(0, 5, S0);
+                break;
+            }
             ldst(1, 8, S0, a);
             add_imm(1, 0, 0, 4, 5, 8);
             mov_reg(1, 5, S0);
@@ -1744,12 +1828,16 @@ void emit_int(const Insn *in, int live) {
             emit_string(in);
             break;
         case OP_XLAT:
-            if (in->addr32 || in->seg) {
+            if ((in->addr32 && !tr_compat) || in->addr16 || in->seg) {
                 emit_stop(in->rip, "xlat with an override");
                 break;
             }
             ubfx(0, S0, 0, 0, 8);
-            E(0x38606800u | S0 << 16 | 3 << 5 | S0); // ldrb w16, [x3, x16]
+            if (tr_compat) {
+                add_reg(0, 0, 0, S0, 3, S0, 0);
+                E(0x39400000u | S0 << 5 | S0); // ldrb w16, [x16]
+            } else
+                E(0x38606800u | S0 << 16 | 3 << 5 | S0); // ldrb w16, [x3, x16]
             bfi(1, 0, S0, 0, 8);
             break;
         case OP_MOVBE: {

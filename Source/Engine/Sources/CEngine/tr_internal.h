@@ -126,6 +126,10 @@ enum {
     OP_FXRSTOR,
     OP_X87, // sub: low three bits of the escape byte, 8 for fwait. opc: the modrm byte
     OP_RDFSGS_UNUSED,
+    OP_PUSHA, // sub 0 pushad, 1 popad
+    OP_SYSENTER,
+    OP_SYSEXIT,
+    OP_FAR, // sub 0 retf, 1 call, 2 jmp. has_imm: direct, imm the offset, disp the selector
 };
 
 typedef struct {
@@ -136,7 +140,7 @@ typedef struct {
     u8 pfx; // SSE mandatory prefix: 0 none, 0x66, 0xF2, 0xF3
     u8 opc; // SSE: second opcode byte; 0F38/0F3A are not advertised and stop
     u8 imm_len;
-    bool rm_reg, to_reg, has_imm, by_cl, lock, addr32, riprel, no_base, no_index, high_reg, high_rm, memop;
+    bool rm_reg, to_reg, has_imm, by_cl, lock, addr32, addr16, pop_seg, riprel, no_base, no_index, high_reg, high_rm, memop;
     i64 disp, imm;
     u64 rip, next, target;
     const char *why;
@@ -154,6 +158,7 @@ bool insn_is_terminator(const Insn *in);
 extern u32 *tr_cc; // write cursor
 extern bool tr_precise_flags, tr_has_tzcnt, tr_hybrid, tr_no_bulk_rep;
 extern int tr_cpl;
+extern bool tr_compat; // the block being built is 32-bit user code
 static inline void E(u32 v) { *tr_cc++ = v; }
 
 // Global to the block being built.

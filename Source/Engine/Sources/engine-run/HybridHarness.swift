@@ -139,6 +139,19 @@ final class HybridHarness {
             if s.fsw & 0x80 == 0 { failed = "fwait at a fallback with nothing pending" }
         case 10:
             if s.fp_tags != 0 { failed = "emms at a fallback: tags \(s.fp_tags)" }
+        case 11:  // daa in 32-bit code: everything the host needs is in the state
+            if s.compat != 1 || s.sel.1 != 0x43 || s.sel.2 != 0x23 || s.cpl != 3 || s.gpr.0 != 0x4433_2211 || s.rip != 0x4000_0005 || s.gpr.4 != 0x4000_1000 {
+                failed = "32-bit state at a fallback: compat \(s.compat) cs \(s.sel.1) ss \(s.sel.2) cpl \(s.cpl) eax \(s.gpr.0) rip \(s.rip)"
+            }
+            s.gpr.2 = 0xABCD_0000_0000_0005
+            s.gpr.13 = 12
+        case 12:  // das, and the host leaves 32-bit code
+            if s.compat != 1 || s.rip != 0x4000_0008 || s.gpr.2 != 5 || s.gpr.7 != 5 {
+                failed = "the top half the host left: compat \(s.compat) rip \(s.rip) rdx \(s.gpr.2) rdi \(s.gpr.7)"
+            }
+            s.gpr.0 = 0x1_0000_0055
+            s.compat = 0
+            s.sel.1 = 0x2B
         default: break
         }
         s.rip += s.gpr.14
@@ -253,7 +266,7 @@ final class HybridHarness {
                 let tally = (try? String(contentsOfFile: tallyPath, encoding: .utf8)) ?? ""
                 for reason in [
                     "unknown opcode", "x87: fcos", "hlt", "far return", "mov cr8", "rdmsr 0x1b", "wrmsr 0x6e0",
-                    "popcnt", "mmio form", "verr"
+                    "popcnt", "mmio form", "verr", "BCD adjust"
                 ]
                 where !tally.contains(reason) {
                     FileHandle.standardError.write(Data("tally lacks \(reason)\n".utf8))

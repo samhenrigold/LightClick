@@ -52,6 +52,27 @@ clang "${kflags[@]}" -mno-implicit-float -fno-vectorize -fno-slp-vectorize -c "$
 ld -arch x86_64 -preload -e _kstart -no_uuid -pagezero_size 0 -segaddr __TEXT 0xFFFF800000100000 -segaddr __DATA 0xFFFF800000800000 \
     -o "$out/hybrid" "$out/kentry.o" "$out/hybrid.o"
 
+# 32-bit code: the compat kernel's payload, with the fuzz forms and test-i386, linked flat since no linker here takes i386, into a kernel that runs it in compatibility mode.
+c=$here/compat
+f32=(-target i386-unknown-none-elf -march=pentium4 -mfpmath=sse -fno-pic -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -nostdlibinc -w
+    -I"$c/sysroot" -I"$out/sysroot" -I"$here" -I"$qemu_tests" -I"$out" -Dflat_main=fuzz_main)
+mkdir -p "$out/sysroot/sys"
+for h in stdio string inttypes math signal setjmp errno unistd sys/ucontext sys/mman; do echo '#include <stdlib.h>' > "$out/sysroot/$h.h"; done
+python3 "$c/i386_source.py" "$qemu_tests/test-i386.c" "$out/test-i386-32.c"
+python3 "$c/gen_fuzz32.py" "$here/gen_fuzz.py" "$out/fuzz_forms32.s"
+clang -target i386-unknown-none-elf -c "$c/user32.s" -o "$out/user32_s.o"
+clang "${f32[@]}" -c "$c/user32.c" -o "$out/user32_c.o"
+clang "${f32[@]}" -c "$here/fuzz_driver.c" -o "$out/fuzz_driver32.o"
+clang "${f32[@]}" -c "$here/flatlibc.c" -o "$out/flatlibc32.o"
+clang "${f32[@]}" -c "$here/t_i386_stubs.c" -o "$out/t_i386_stubs32.o"
+clang -target i386-unknown-none-elf -c "$out/fuzz_forms32.s" -o "$out/fuzz_forms32.o"
+clang -target i386-unknown-none-elf -c "$c/fuzz_support32.s" -o "$out/fuzz_support32.o"
+python3 "$c/link32.py" 0x100000 "$out/compat_user.bin" "$out/user32_s.o" "$out/user32_c.o" "$out/fuzz_driver32.o" "$out/fuzz_forms32.o" "$out/fuzz_support32.o" "$out/flatlibc32.o" "$out/t_i386_stubs32.o"
+clang "${kflags[@]}" -mno-implicit-float -fno-vectorize -fno-slp-vectorize -c "$c/ckernel.c" -o "$out/ckernel.o"
+clang -target x86_64-apple-macos10.9 -I"$out" -c "$c/kstubs.s" -o "$out/ckstubs.o"
+ld -arch x86_64 -preload -e _kstart -no_uuid -pagezero_size 0 -segaddr __TEXT 0xFFFF800000100000 -segaddr __DATA 0xFFFF800000800000 \
+    -o "$out/compat" "$out/kentry.o" "$out/ckernel.o" "$out/ckstubs.o"
+
 # lc-bench's arithmetic.
 clang "${flags[@]}" -w -I"$here/../../../probes" -c "$here/t_lcbench.c" -o "$out/t_lcbench.o"
 clang "${flags[@]}" -w -c "$here/t_lcbench_stubs.c" -o "$out/t_lcbench_stubs.o"

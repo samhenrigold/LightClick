@@ -17,6 +17,14 @@ typedef struct {
 extern const Form fuzz_table[];
 
 #define BUF_BYTES 8192
+// r15, r13 and r11 of the forms: 32-bit code has ebp, esi and edi for them.
+#ifdef __i386__
+enum { R_BUF = 5, R_BUF2 = 6, R_INDEX = 7 };
+#define FMT_HASH "%016llx"
+#else
+enum { R_BUF = 15, R_BUF2 = 13, R_INDEX = 11 };
+#define FMT_HASH "%016lx"
+#endif
 static uint64_t buffer[BUF_BYTES / 8] __attribute__((aligned(4096)));
 
 static uint64_t rng_state;
@@ -143,7 +151,19 @@ static void mix(uint64_t v) {
     hash ^= hash >> 29;
 }
 
+#ifdef __i386__
+// Compared with TCG, which takes the x87 rule for two NaNs where the SDM gives SSE the first source, and keeps a denormal in min and max under DAZ where the engine
+// gives zero, as Rosetta does. So no second source holds a NaN, and DAZ stays off: the 64-bit run holds those to Rosetta, and the emitters don't look at the mode.
+static const uint64_t mxcsr_choices[] = {0x1F80, 0x1F80, 0x1F80, 0x1F80, 0x3F80, 0x5F80, 0x7F80, 0x9F80};
+static void no_nan(uint64_t *v) {
+    uint32_t *lanes = (uint32_t *)v;
+    for (int i = 0; i < 4; i++)
+        if ((lanes[i] & 0x7f800000) == 0x7f800000)
+            lanes[i] &= ~0x00800000u;
+}
+#else
 static const uint64_t mxcsr_choices[] = {0x1F80, 0x1F80, 0x1F80, 0x1F80, 0x3F80, 0x5F80, 0x7F80, 0x9F80, 0x1FC0, 0x9FC0};
+#endif
 
 static void run_round(const Form *f, bool verbose) {
     for (int i = 0; i < BUF_BYTES / 8; i++)
@@ -176,11 +196,17 @@ static void run_round(const Form *f, bool verbose) {
     }
     for (int i = 0; i < 16; i++)
         fuzz_st.r[i] = special_int();
-    fuzz_st.r[15] = (uint64_t)buffer;
-    fuzz_st.r[13] = (uint64_t)buffer + 256;
-    fuzz_st.r[11] &= 7;
+    fuzz_st.r[R_BUF] = (uint64_t)buffer;
+    fuzz_st.r[R_BUF2] = (uint64_t)buffer + 256;
+    fuzz_st.r[R_INDEX] &= 7;
     for (int i = 0; i < 16; i++)
         fp_pair(fuzz_st.x[i]);
+#ifdef __i386__
+    no_nan(&buffer[4]);
+    no_nan(mem);
+    for (int i = 2; i < 5; i++)
+        no_nan(fuzz_st.x[i]);
+#endif
     fuzz_st.rflags = (rnd() & 0x8D5) | 2 | 0x200;
     fuzz_st.mxcsr = f->fp ? mxcsr_choices[rnd() % (sizeof mxcsr_choices / sizeof mxcsr_choices[0])] : 0x1F80;
     uint64_t in_rax = fuzz_st.r[0], in_rbx = fuzz_st.r[3], in_rcx = fuzz_st.r[1], in_flags = fuzz_st.rflags, in_mx = fuzz_st.mxcsr;
@@ -200,7 +226,11 @@ static void run_round(const Form *f, bool verbose) {
             mix(fuzz_st.x[kept[i]][0]);
             mix(fuzz_st.x[kept[i]][1]);
         }
+#ifdef __i386__
+        mix(fuzz_st.mxcsr & ~2u); // the comparison here is with TCG, which raises DE by rules of its own. Rosetta's 64-bit run holds DE to account.
+#else
         mix(fuzz_st.mxcsr);
+#endif
     }
     if (f->fp >= 2) {
         for (int i = 0; i < 6; i++)
@@ -268,7 +298,7 @@ int flat_main(unsigned long a0, unsigned long a1) {
             if (a1)
                 printf("round %d hash %016lx from %016lx\n", r, hash, h0);
         }
-        printf("%4d %016lx %s\n", i, hash, f->name);
+        printf("%4d " FMT_HASH " %s\n", i, hash, f->name);
     }
     return 0;
 }

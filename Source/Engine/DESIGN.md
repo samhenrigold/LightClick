@@ -21,7 +21,7 @@ numbers are best of N and move 10-20% between runs. No Intel hardware was used: 
 
 | Rung | State |
 |---|---|
-| 1. Translator coverage | Done: integer ISA, flags, LSE, bl/ret, per-site indirect, SSE, SSE2, SSE3, SSSE3, MXCSR, rep, SMC, MMX, x87 but for the forms listed below. 32-bit code stops with a clear error |
+| 1. Translator coverage | Done: integer ISA, flags, LSE, bl/ret, per-site indirect, SSE, SSE2, SSE3, SSSE3, MXCSR, rep, SMC, MMX, x87 but for the forms listed below. 32-bit user code runs in compatibility mode: see "Compatibility mode" |
 | 2. Differential testing | Done: fuzz, QEMU test-i386, a compiled corpus, lc-bench arithmetic, all matching Rosetta |
 | 3. Kernel model | Done: shadow paging, CR3 and PCID, IDT, syscall, iret, exceptions, in the monitor, passing a test kernel |
 | 4. APIC and device interface | Done: in-VM APIC hot paths; `engine_api.h`, exercised by a harness |
@@ -206,6 +206,7 @@ Proposal, in order, each to be justified by the tally before the next:
 
 Larger costs show in that run. Device accesses at 25,315/s: 15.4M of 28.1M are two 4-byte writes by one kext to 0xa0000000, at rips 0x...4c2c and 0x...4c3b, about 7.7M each, and rep movs reads frame memory at 0x90000000 one element per exit. Device-specific fast paths would come before any of the above. Not measured: their cost per access.
 
+An instruction leaving what the engine takes (16-bit code, or segments with a base) means TCG keeps going until the state is acceptable again.
 Device memory: `vga.vram` (512 MB at 0x80000000) and `vmsvga.fifo` (64 KB at 0xa0060000) are plain RAM to QEMU, and they took most of a boot's device exits. They now go straight into the VM, by name, with a `log_sync` listener marking them dirty for legacy VGA. vmsvga in SVGA mode reads both through pointers, from reading its code, so it needs no log. Measured in a test: each side sees the other's bytes with no exit, and the device answers again once the mapping is gone. Not measured: the exits saved in a boot, or that the display updates. `LC_HVDBT_NO_DIRECT=1` turns it off. Machines whose RAM stops below these addresses are refused, and keep the device path.
 
 Fork, from a 60 s loop of 6,575 forks at 9.1 ms each: 2,430 cold blocks, 53,204 cold instructions and 2.84 ms translating per fork, 697 page-table stores, 38.8 CR3 writes. In that run HC_TRANSLATE was 57.8M calls and 46.4 s of host time, against 27.9M cold blocks, so about half the calls only link an existing block. Each also costs a round trip out of the VM, not separated here. At least 56% of those cold blocks repeated a rip and frame some block already covered. That changes the proposal above: sharing translations of the shared region is now where the largest measured cost goes.
@@ -232,12 +233,29 @@ Expected: forks without most of the 2,430 cold blocks, so perhaps half the 9.1 m
 
 Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bitmap interplay beyond those few fallbacks. Cost per fallback is unknown; the tally's `tcg_ms` column gives it. Writes by a separate process into guest RAM (the OOP graphics helper) are not noted. Reset after hand-off is unexamined: firmware in 64-bit mode would run on the engine.
 
+## Compatibility mode
+
+32-bit user code on a 64-bit kernel runs on the engine, for the processes of Tiger through Snow Leopard and Final Cut-era apps. Ring 3, flat CS, DS, ES and SS, 32-bit CS and stack. Real mode, 16-bit code, 32-bit kernels and any segment with a base stay on TCG, and `hvdbt_want_engine` says which with a `refused:` row in the tally. XNU's layout is from memory, as it was never run: user CS, DS and the cthread GS in an LDT at 0x17, 0x1f and 0x37, reached from IA32_SYSENTER_CS 7, sysenter on the way in, sysexit or iretq on the way out, segments reloaded from the LDT in 64-bit mode just before.
+
+- **A view of its own.** A view is an address space seen from one CPL and mode, so the same rip can hold 32-bit and 64-bit code, each with its blocks, lookup table and return stack. A 32-bit process uses two views, as a 64-bit one does. A mode change costs what a CPL change does.
+- **Decoder and emitters.** One global, `tr_compat`, read from the context per block: operand and stack sizes, no REX, 40-4F are inc and dec, moffs, pushad and popad, `ret` and `call` at four bytes, 16-bit addressing, `sidt` storing six bytes. Nothing in the 64-bit paths looks at it at run time.
+- **Registers.** The low eight GPRs have clear top halves throughout: every 32-bit write does it, and the monitor clears them on entry and after TCG. So `[reg]` is one word, as in 64-bit mode. A sum wraps by a W add: `[reg+disp]` is two words where 64-bit code has one. Bulk `rep` checks that the run won't pass 4 GB, or takes the plain loop.
+- **Monitor.** sysenter, sysexit and the SYSENTER MSRs; iret, sysret and far transfers into and out of 32-bit code; 32-bit iret at ring 3; segment loads with their checks; `lldt` reading its descriptor. Frames from 32-bit code are the 64-bit frames a CPU pushes, through the same `deliver`.
+- **Segments.** `seg_bad` records, at each load, whether es, ds, fs or gs keeps compatibility mode off the engine. Fs and gs need no flat base, since translated code adds it, and their limits aren't checked: XNU's cthread segment is, from memory, 8 KB.
+- **Falls back, one instruction:** BCD adjusts, salc, bound, into, arpl, les and lds, 16-bit near branches, strings and xlat with a segment override or 67h, far transfers through gates, 16-bit operands in far transfers, ins and outs. x87 in 32-bit code runs in the monitor, as in 64-bit, and the forms it sends to TCG go there here too.
+
+Measured: `Tests/diff-compat.sh` runs one image, `Tests/x86/compat/`, under the engine and under QEMU's TCG, since Rosetta on this macOS doesn't run i386. Reset vector and long mode under QEMU, then the same kernel: self checks through both, 2489 fuzz forms at 64 rounds, no x87 among them, and QEMU's `test-i386.c` built -m32, `test_floats` with its 32-bit fsave and fxsave formats included, without BCD, signals or `modify_ldt`. 7145 lines, identical. `run-all.sh` compares the engine with TCG's hash, runs the kernel through `engine_api.h` with boundary stops every 2 ms, and `hybrid.c` takes a BCD fallback in 32-bit code with the host moving the vCPU to 64-bit mode. No QEMU is needed but for `--update`.
+
+What TCG can't say. It stores pushad from the lowest address and leaves registers changed when popad faults, and a CPU doesn't, so CR2 there isn't compared and the registers are checked on the engine alone. It takes the x87 rule for two NaNs in SSE arithmetic where the SDM gives the first source, returns a denormal from min and max under DAZ where the engine gives zero, as Rosetta does, and raises MXCSR.DE by other rules; those inputs and that bit are left out of the 32-bit run, and the 64-bit fuzz holds the same emitters to Rosetta. Its `#GP` for a software int through an empty gate has the vector times 16, not 8, so only the low bits are compared. Agreement with TCG says nothing where TCG and the engine both have a thing wrong, about real CPUs where TCG differs from them, or about XNU, which has never run this.
+
+Not exact: esp wraps in `pop`, `ret` and `call` near 4 GB (the commpage holds that end), an element straddling 4 GB in strings, the limit of fs and gs, a null fs or gs used for an access (a CPU gives #GP, this reads at base 0), CR2 for a faulting popad within the page, `push sreg` writing four bytes as TCG does.
+
 ## Not exact, known
 
 - **The private window.** Private memory lives at a non-canonical VA (bit 47 set, top bits clear), 2 TB slots at `0xF000_0000_0000` and `0xF100_0000_0000`. Other non-canonical addresses fault and become #GP, tested. A guest access inside the window instead reads the lookup table or context, or writes context or return stacks. A compatibility risk; stage 2
   still bounds the guest. The monitor and shadow tables are out of reach (EL1 only), and code is execute-only.
 - Saved RFLAGS after a straddling RMW with lock: not tested. x86 reserved-bit #PF is not modelled: a PTE with reserved bits set is treated as valid.
-- Unmasked SSE exceptions stop, since FP traps cannot be taken here. So do TF single-step, CR0.WP off, CR4.SMAP, and non-flat fs or gs loads by selector.
+- Unmasked SSE exceptions stop, since FP traps cannot be taken here. So do TF single-step, CR0.WP off and CR4.SMAP.
 - A split locked access, across 16 bytes, stops rather than taking a bus lock.
 - APIC: x2APIC is absent, LVT error and thermal never fire, ESR reads 0.
 
@@ -246,9 +264,9 @@ Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bit
 Honest order of risk, none of it started except as noted.
 
 1. **Multi-vCPU.** Everything here ran on one vCPU. Monitor statics must split per vCPU, shadow tables and block maps need locks, invalidation needs IPIs (a killed block's return-stack entries on another vCPU), and the host's translator needs a lock. EnTSO was only proved on two vCPUs in the spike's litmus.
-2. **Compatibility mode and 32-bit code.** 32-bit apps, kernels up to 10.7 or so, and `sysenter`. The decoder and emitters assume 64-bit mode. Real mode and firmware stay on TCG, using `EngineX86State` as the hand-off; whether QEMU tolerates two engines on one vCPU is still untested on a real boot.
+2. **32-bit kernels,** up to 10.7 or so, stay on TCG, as do real mode and firmware. 32-bit user code: see "Compatibility mode", not yet run under XNU.
 3. **x87 and MMX.** In the monitor, at about 50 ns an operation against Rosetta's 9 (`t_x87`), and test-i386's `test_floats` passes. Not booted. If the tally shows x87 still hot, inline `fld` and `fstp` come first; if it shows `fsin` and friends, they would need porting.
-4. **Far control flow and system odds:** `lretq`, far calls, mov to CS (the test kernel avoids them, starting with CS already set), `ins`/`outs`, debug registers, TF, NMI, machine checks, `xsave` family, `invpcid`, and proper MSR routing. SSE4 is unadvertised.
+4. **Far control flow and system odds:** ring 0's `lretq` and far calls, mov to CS (the test kernel avoids them, starting with CS already set), `ins`/`outs`, debug registers, TF, NMI, machine checks, `xsave` family, `invpcid`, and proper MSR routing. SSE4 is unadvertised.
 5. **QEMU integration.** Written, unproven: see "Hybrid with TCG", whose tally ranks the rest of this list.
    Device model time and BQL contention are unmeasured. MMIO in a real kext may also use forms that stop (SIMD to a device outside `rep`); those now fall back, and the tally counts them.
 6. **Limits to lift.** Kernel domains are capped at 16, and the code cache is 118 MB with a whole-cache reset. `Tests/stress-limits.sh` runs everything with a tiny cache and shadow pool, so the reset and reclaim paths are exercised, though never on a real guest's working set.

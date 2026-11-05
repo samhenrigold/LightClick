@@ -120,6 +120,9 @@ enum {
     SVC_FXRSTOR,
     SVC_MFENCE_UNUSED,
     SVC_CLTS,
+    SVC_SYSENTER,
+    SVC_SYSEXIT, // x16 1 with REX.W
+    SVC_FAR, // x16 offset, x17 selector, x22 kind (0 retf, 1 call, 2 jmp) | operand size << 8 | retf's immediate << 16
     SVC_X87, // literal: u32 op, u64 rip. x20 the effective address, x16 and x17 a value loaded. Stores: x16 and x17 the value, x23 the state word to commit after it
     // Helpers: operands in x16, x17, x22, x23. Results as documented in monitor.c. Flags come back in x22 (nzcv), x23 (pf), x24 (aux).
     SVC_H_SHIFT = 64, // narrow and rotate-through-carry shifts: x16 value, x17 count, x22 kind|size<<8. x16 result
@@ -242,6 +245,11 @@ typedef struct {
     uint16_t fsw; // the TOP bits stay zero, TOP is fp_top
     uint16_t fcw, fop, fcs, fds;
     uint64_t fip, fdp;
+    uint32_t compat; // CS.L clear: 32-bit user code. In this state the low eight GPRs always have their top halves clear, and the view is a separate one
+    uint32_t seg_bad; // bit by seg_sel index: this register's contents keep compatibility mode off the engine. See seg_note in monitor.c
+    uint64_t ldt_base;
+    uint32_t ldt_limit, pad_ldt;
+    uint64_t sysenter_cs, sysenter_esp, sysenter_eip;
     uint64_t ram_size;
     uint64_t kernel_view_tag;
 

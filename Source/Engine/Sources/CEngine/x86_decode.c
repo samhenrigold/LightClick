@@ -15,6 +15,30 @@ static void set_bad(Insn *in, const char *why) {
     in->writes = 0;
 }
 
+// 16-bit addressing, which is 67h in compatibility mode: bx, si, di, bp only. The emitter wraps the sum at 16 bits.
+static const u8 *modrm16(Insn *in, int mod, int rm, const u8 *p) {
+    static const u8 base[8] = {3, 3, 5, 5, 6, 7, 5, 3}, index[8] = {6, 7, 6, 7};
+    if (rm < 4) {
+        in->no_index = false;
+        in->index = index[rm];
+    }
+    if (mod == 0 && rm == 6) {
+        in->no_base = true;
+        in->disp = *(u16 *)p;
+        return p + 2;
+    }
+    in->base = base[rm];
+    if (mod == 1) {
+        in->disp = *(int8_t *)p;
+        return p + 1;
+    }
+    if (mod == 2) {
+        in->disp = *(u16 *)p;
+        return p + 2;
+    }
+    return p;
+}
+
 // x87 forms that stay on TCG, by name for the tally; NULL for the ones the monitor does. Trigonometry and logarithms, which TCG itself only approximates and
 // nothing has shown to be hot, and the 287 leftovers and undocumented aliases, where only TCG knows what the CPU model does.
 static const char *x87_rare(int esc, u8 m) {
@@ -50,6 +74,7 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
     int rex = 0, sz = 4;
     bool has_rex = false, p66 = false;
     u8 last_mand = 0;
+    in->addr32 = tr_compat;
     for (;; p++) {
         if (p - b > 14) {
             set_bad(in, "too many prefixes");
@@ -65,8 +90,10 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
             in->seg = 1;
         else if (c == 0x65)
             in->seg = 2;
-        else if (c == 0x67)
+        else if (c == 0x67) {
             in->addr32 = true;
+            in->addr16 = tr_compat;
+        }
         else if (c == 0xF0)
             in->lock = true;
         else if (c == 0xF2 || c == 0xF3) {
@@ -75,13 +102,14 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
         } else
             break;
     }
-    if ((*p & 0xF0) == 0x40) {
+    if (!tr_compat && (*p & 0xF0) == 0x40) { // in 32-bit code these are inc and dec
         rex = *p++ & 15;
         has_rex = true;
     }
     if (rex & 8)
         sz = 8;
     int w = sz;
+    const int stack_w = sz == 2 ? 2 : tr_compat ? 4 : 8;
     u8 opc = *p++;
     bool two = false;
     if (opc == 0x0F) {
@@ -101,6 +129,16 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
         }                                                                                                              \
         in->memop = true;                                                                                              \
         in->no_index = true;                                                                                           \
+        if (in->addr16) {                                                                                              \
+            p = modrm16(in, mod_, rm_, p);                                                                             \
+            break;                                                                                                     \
+        }                                                                                                              \
+        if (tr_compat && rm_ == 5 && mod_ == 0) { /* no rip-relative form: an absolute address */                      \
+            in->no_base = true;                                                                                        \
+            in->disp = *(i32 *)p;                                                                                      \
+            p += 4;                                                                                                    \
+            break;                                                                                                     \
+        }                                                                                                              \
         if (rm_ == 4) {                                                                                                \
             u8 s_ = *p++;                                                                                              \
             int idx_ = ((s_ >> 3) & 7) | ((rex & 2) << 2), bs_ = s_ & 7;                                               \
@@ -161,7 +199,57 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
     } while (0)
 
     if (!two) {
-        if (opc < 0x40 && (opc & 7) < 6) {
+        if (tr_compat && opc >= 0x40 && opc <= 0x4F) {
+            in->op = OP_INCDEC;
+            in->sub = opc >= 0x48;
+            in->writes = F_V | F_Z | F_N | F_P | F_A;
+            in->rm_reg = true;
+            in->rm = opc & 7;
+        } else if (tr_compat && (opc == 0x06 || opc == 0x0E || opc == 0x16 || opc == 0x1E)) {
+            in->op = OP_PUSH;
+            in->sub = (opc >> 3) + 1;
+            w = stack_w;
+        } else if (tr_compat && (opc == 0x07 || opc == 0x17 || opc == 0x1F)) {
+            in->op = OP_MOV_SEG;
+            in->pop_seg = true;
+            in->sub = opc >> 3;
+            w = stack_w;
+        } else if (tr_compat && (opc == 0x60 || opc == 0x61)) {
+            in->op = OP_PUSHA;
+            in->sub = opc & 1;
+            in->memop = true;
+        } else if (tr_compat && opc >= 0xA0 && opc <= 0xA3) { // moffs
+            w = (opc & 1) ? sz : 1;
+            in->op = OP_MOV;
+            in->memop = true;
+            in->no_base = true;
+            in->to_reg = opc < 0xA2;
+            if (in->addr16) {
+                in->disp = *(u16 *)p;
+                p += 2;
+            } else {
+                in->disp = *(i32 *)p;
+                p += 4;
+            }
+        } else if (tr_compat && (opc == 0x9A || opc == 0xEA)) {
+            in->op = OP_FAR;
+            in->sub = opc == 0x9A ? 1 : 2;
+            in->memop = true;
+            in->reads = F_ARITH;
+            in->has_imm = true;
+            in->imm = sz == 2 ? *(u16 *)p : *(u32 *)p;
+            p += sz;
+            in->disp = *(u16 *)p;
+            p += 2;
+        } else if (tr_compat && opc == 0x63) {
+            set_bad(in, "arpl");
+        } else if (tr_compat && (opc == 0x27 || opc == 0x2F || opc == 0x37 || opc == 0x3F || opc == 0xD4 || opc == 0xD5 || opc == 0xD6)) {
+            set_bad(in, "BCD adjust or salc");
+        } else if (tr_compat && (opc == 0x62 || opc == 0xCE)) {
+            set_bad(in, "bound or into");
+        } else if (tr_compat && (opc == 0xC4 || opc == 0xC5) && (*p >> 6) != 3) {
+            set_bad(in, "les or lds");
+        } else if (opc < 0x40 && (opc & 7) < 6) {
             int form = opc & 7;
             in->op = OP_ALU;
             in->sub = opc >> 3;
@@ -182,14 +270,14 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
             in->op = opc < 0x58 ? OP_PUSH : OP_POP;
             in->rm_reg = true;
             in->rm = (opc & 7) | ((rex & 1) << 3);
-            w = sz == 2 ? 2 : 8;
+            w = stack_w;
         } else if (opc == 0x63) {
             MODRM();
             in->op = OP_MOVSX;
             in->srcsz = 4;
         } else if (opc == 0x68 || opc == 0x6A) {
             in->op = OP_PUSH;
-            w = sz == 2 ? 2 : 8;
+            w = stack_w;
             IMM(opc == 0x6A ? 1 : (sz == 2 ? 2 : 4));
         } else if (opc == 0x69 || opc == 0x6B) {
             MODRM();
@@ -201,8 +289,8 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
             in->cc = opc & 15;
             in->reads = cc_reads[in->cc];
             IMM(1);
-        } else if (opc == 0x80 || opc == 0x81 || opc == 0x83) {
-            w = opc == 0x80 ? 1 : sz;
+        } else if (opc == 0x80 || opc == 0x81 || opc == 0x83 || (tr_compat && opc == 0x82)) {
+            w = opc == 0x80 || opc == 0x82 ? 1 : sz;
             MODRM();
             in->op = OP_ALU;
             in->sub = in->reg & 7;
@@ -254,7 +342,7 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
                 set_bad(in, "XOP or unknown 8F encoding");
             else {
                 in->op = OP_POP;
-                w = sz == 2 ? 2 : 8;
+                w = stack_w;
             }
         } else if (opc >= 0x90 && opc <= 0x97) {
             if (opc == 0x90 && !(rex & 1)) {
@@ -279,12 +367,12 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
             in->op = OP_PUSHF;
             in->memop = true;
             in->reads = F_ARITH;
-            w = sz == 2 ? 2 : 8;
+            w = stack_w;
         } else if (opc == 0x9D) {
             in->op = OP_POPF;
             in->memop = true;
             in->writes = F_ARITH;
-            w = sz == 2 ? 2 : 8;
+            w = stack_w;
         } else if (opc == 0x9E) {
             in->op = OP_SAHF;
             in->writes = F_C | F_Z | F_N | F_P | F_A;
@@ -490,30 +578,45 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
                 MARK_HIGH();
                 in->high_reg = false;
             } else if (opc == 0xFF && s == 2) {
-                w = 8;
+                w = tr_compat ? 4 : 8;
                 in->op = OP_CALLI;
                 in->memop = true;
             } else if (opc == 0xFF && s == 4) {
-                w = 8;
+                w = tr_compat ? 4 : 8;
                 in->op = OP_JMPI;
             } else if (opc == 0xFF && s == 6) {
-                w = sz == 2 ? 2 : 8;
+                w = stack_w;
                 in->op = OP_PUSH;
             } else if (opc == 0xFF && (s == 3 || s == 5)) {
-                set_bad(in, "far call or jump through memory");
+                if (tr_cpl == 0 || in->rm_reg)
+                    set_bad(in, "far call or jump through memory");
+                else {
+                    in->op = OP_FAR;
+                    in->sub = s == 3 ? 1 : 2;
+                    in->memop = true;
+                    in->reads = F_ARITH;
+                }
             } else
                 BADUD("FE/FF group entry");
         } else if (opc == 0x6C || opc == 0x6D || opc == 0x6E || opc == 0x6F) {
             set_bad(in, "ins/outs");
-        } else if (opc == 0xCA || opc == 0xCB) {
+        } else if ((opc == 0xCA || opc == 0xCB) && tr_cpl == 0) {
             set_bad(in, "far return");
+        } else if (opc == 0xCA || opc == 0xCB) {
+            in->op = OP_FAR;
+            in->memop = true;
+            in->reads = F_ARITH;
+            if (opc == 0xCA) {
+                in->imm = *(u16 *)p;
+                p += 2;
+            }
         } else if (opc == 0xC8) {
             in->op = OP_ENTER;
             in->memop = true;
             in->imm = *(u16 *)p;
             p += 2;
             in->sub = *p++ & 31;
-            w = sz == 2 ? 2 : 8;
+            w = stack_w;
         } else if (opc == 0x06 || opc == 0x07 || opc == 0x0E || opc == 0x16 || opc == 0x17 || opc == 0x1E ||
                    opc == 0x1F || opc == 0x27 || opc == 0x2F || opc == 0x37 || opc == 0x3F || opc == 0x60 ||
                    opc == 0x61 || opc == 0x62 || opc == 0x82 || opc == 0x9A || opc == 0xC4 || opc == 0xC5 ||
@@ -568,6 +671,19 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
             in->imm = *p++;
         } else if (opc >= 0xD0 && opc <= 0xFE) {
             SSE_FORM();
+        } else if (opc == 0x34 || opc == 0x35) {
+            in->op = opc == 0x34 ? OP_SYSENTER : OP_SYSEXIT;
+            in->writes = F_ARITH;
+            in->reads = F_ARITH;
+        } else if (opc == 0xA0 || opc == 0xA8) {
+            in->op = OP_PUSH;
+            in->sub = (opc == 0xA0 ? 4 : 5) + 1;
+            w = stack_w;
+        } else if (opc == 0xA1 || opc == 0xA9) {
+            in->op = OP_MOV_SEG;
+            in->pop_seg = true;
+            in->sub = opc == 0xA1 ? 4 : 5;
+            w = stack_w;
         } else if (opc == 0x05) {
             in->op = OP_SYSCALL;
             in->writes = F_ARITH;
@@ -820,10 +936,12 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
     (void)avail;
     if (in->op == OP_JCC && in->cc >= 16)
         set_bad(in, "bad condition");
+    if (tr_compat && p66 && (in->op == OP_JCC || in->op == OP_JMP || in->op == OP_CALL || in->op == OP_JRCXZ || in->op == OP_JMPI || in->op == OP_CALLI || in->op == OP_RET))
+        set_bad(in, "16-bit near branch"); // the target wraps at 64 KB, and call and ret move two bytes
     in->sz = w;
     in->next = rip + (p - b);
     if (in->op == OP_JCC || in->op == OP_JMP || in->op == OP_CALL || in->op == OP_JRCXZ)
-        in->target = in->next + in->imm;
+        in->target = tr_compat ? (u32)(in->next + in->imm) : in->next + in->imm;
 }
 
 void x86_decode(u64 rip, Insn *in) {
@@ -889,6 +1007,9 @@ bool insn_is_terminator(const Insn *in) {
         case OP_OUT:
         case OP_SWAPGS:
         case OP_LDMXCSR:
+        case OP_SYSENTER:
+        case OP_SYSEXIT:
+        case OP_FAR:
         case OP_FXSAVE:
         case OP_FXRSTOR:
             return true;

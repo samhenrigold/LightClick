@@ -43,7 +43,7 @@ static void done(u32 code) {
         }                                                                                                              \
     } while (0)
 
-static u64 gdt[8] __attribute__((aligned(16))) = {0, 0x00AF9A000000FFFFULL, 0x00CF92000000FFFFULL};
+static u64 gdt[9] __attribute__((aligned(16))) = {0, 0x00AF9A000000FFFFULL, 0x00CF92000000FFFFULL, [8] = 0x00CFFA000000FFFFULL};
 typedef struct {
     u16 off0, sel;
     u8 ist, attr;
@@ -1385,6 +1385,53 @@ static void test_split_store_fault(u64 root) {
     PHYS(table)[511] = 0;
 }
 
+// 32-bit ring 3 with the host taking instructions: state as the host sees it, top halves the host left, and the host moving the vCPU to 64-bit mode at a stop.
+// In by iretq, out by sysenter, to here.
+__asm__(".text\n"
+        "_compat_ride:\n" // rdi: rip, r13 and r14 are the harness's
+        "  movq %rsp, _compat_rsp(%rip)\n"
+        "  movw $0x23, %ax\n movw %ax, %ds\n movw %ax, %es\n"
+        "  pushq $0x23\n pushq $0x40001000\n pushq $2\n pushq $0x43\n pushq %rdi\n"
+        "  iretq\n"
+        "_compat_back:\n"
+        "  movq _compat_rsp(%rip), %rsp\n"
+        "  movw $0x10, %dx\n movw %dx, %ds\n movw %dx, %es\n"
+        "  movq %rax, _compat_out+0(%rip)\n movq %rcx, _compat_out+8(%rip)\n movq %rdi, _compat_out+16(%rip)\n"
+        "  ret\n");
+u64 compat_rsp, compat_out[3];
+extern void compat_ride(u64 rip);
+extern char compat_back[];
+
+static void test_compat(u64 root) {
+    static const u8 code[] = {
+        0xB8, 0x11, 0x22, 0x33, 0x44, // mov eax, 0x44332211
+        0x27, // daa: the host checks 32-bit state, and sets eax and a top half in edx
+        0x8D, 0x3A, // lea edi, [edx]
+        0x2F, // das: the host sends the vCPU to 64-bit mode with a wide rax
+        0x48, 0x89, 0xC1, // mov rcx, rax. In 32-bit mode this would be dec eax; mov ecx, eax
+        0x0F, 0x34, // sysenter
+    };
+    u64 va = 0x40000000, f = frame();
+    for (int level = 3; level > 0; level--) { // user at each level, as pte_of doesn't give
+        u64 t = root;
+        for (int l = 3; l > level; l--)
+            t = PHYS(t)[(va >> (12 + 9 * l)) & 0x1ff] & 0x000FFFFFFFFFF000ULL;
+        volatile u64 *e = &PHYS(t)[(va >> (12 + 9 * level)) & 0x1ff];
+        if (!(*e & 1))
+            *e = frame() | PRESENT_RW;
+        *e |= 4;
+    }
+    *pte_of(root, va) = f | PRESENT_RW | 4;
+    for (unsigned i = 0; i < sizeof code; i++)
+        ((volatile u8 *)&PHYS(f)[0])[i] = code[i];
+    __asm__ volatile("wrmsr" : : "c"(0x174), "a"(0x08), "d"(0));
+    __asm__ volatile("wrmsr" : : "c"(0x176), "a"((u32)(u64)compat_back), "d"((u32)((u64)compat_back >> 32)));
+    __asm__ volatile("mov $11, %%r13\n mov $1, %%r14\n call _compat_ride" : : "D"(va) : "rax", "rbx", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "r13", "r14", "memory", "cc");
+    CHECK(compat_out[0] == 0x100000055ULL); // the host's, in 64-bit mode
+    CHECK(compat_out[1] == 0x100000055ULL);
+    CHECK(compat_out[2] == 5); // lea through a register whose top half the host left
+}
+
 // ---- x87: what Rosetta can't be compared on, by the SDM, and what TCG sees at a fallback ----
 extern volatile u64 gp_count;
 volatile u64 gp_count;
@@ -1650,6 +1697,7 @@ void kmain(void) {
     test_shared_region(root);
     test_shared_return(root);
     test_view_churn(root);
+    test_compat(root);
     CHECK(!bad_vector);
     puts_("hybrid checks passed\n");
     done(0);

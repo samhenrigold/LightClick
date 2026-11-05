@@ -73,6 +73,11 @@ typedef struct {
     uint64_t apic_base;
     uint32_t apic_tpr, apic_svr, apic_id, apic_ldr, apic_dfr, apic_lvt_timer, apic_lvt[5], apic_tmict, apic_tdcr;
     uint32_t apic_irr[8], apic_isr[8], apic_tmr[8];
+    // Compatibility mode, ring 3 and flat only. seg_bad: es, ds, fs or gs, by selector order, as compatibility mode can't take them; see seg_note in monitor.c.
+    uint32_t compat, seg_bad;
+    uint64_t ldt_base;
+    uint32_t ldt_limit;
+    uint64_t sysenter_cs, sysenter_esp, sysenter_eip;
 } EngineX86State;
 
 EngineHandle *engine_create(const EngineConfig *config, const EngineMachineOps *ops);
