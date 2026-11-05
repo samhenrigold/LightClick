@@ -13,6 +13,8 @@ A research fork of Virtual Intel Mac.
 - Signing: set `VIM_CODESIGN_IDENTITY` to an Apple Development identity for daily builds and a Developer ID
   Application identity for releases.
 - QEMU's build needs its source committed first.
+- Run in Xcode embeds the runtime from the newest app in `Build/Products`, so run `scripts/build-app` once first. USB
+  capture and the networking that needs a privileged helper only work in a packaged app.
 - Don't change `compat/PassthroughOpenGLBootPolicy.h`, `scripts/build_signing.py` or the other files listed in
   `inputs()` in `scripts/build-opengl-opencore.py` unless you rebuild the prebuilt OpenCore payload; it pins their bytes.
 

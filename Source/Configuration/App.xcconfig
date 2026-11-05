@@ -6,6 +6,8 @@ CODE_SIGN_STYLE = Automatic
 COMBINE_HIDPI_IMAGES = YES
 CURRENT_PROJECT_VERSION = 4
 ENABLE_APP_SANDBOX = NO
+// embed-dev-runtime reads a packaged app whose files can't be listed as phase inputs.
+ENABLE_USER_SCRIPT_SANDBOXING = NO
 GENERATE_INFOPLIST_FILE = YES
 INFOPLIST_FILE = support/App-Info.plist
 INFOPLIST_KEY_NSMainNibFile = MainMenu

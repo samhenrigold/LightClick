@@ -1,0 +1,20 @@
+#!/bin/zsh
+# Xcode build phase: gives a Debug build from Xcode the runtime of the newest app packaged by scripts/build-app.
+# The copies keep their own signatures, since Xcode signs only the outer app. The helpers stay inactive because this
+# Info.plist has no SMPrivilegedExecutables or helper source hashes, which only packaging can write.
+set -eu
+# build-app passes CODE_SIGNING_ALLOWED=NO, and package-app-runtime.py refuses an input app that has a runtime.
+[[ $CONFIGURATION == Debug && ${CODE_SIGNING_ALLOWED:-} != NO ]] || exit 0
+contents=$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH
+rm -rf $contents/Resources/Runtime $contents/Library/LaunchServices
+# Packaging writes Packaging.plist last, so an interrupted package is never picked.
+receipts=($SRCROOT/Build/Products/*/$FULL_PRODUCT_NAME/Contents/Resources/Runtime/Packaging.plist(.Nom[1]))
+if (( ! $#receipts )); then
+    print "warning: No packaged runtime in Build/Products, so virtual Macs won't start. Run scripts/build-app, then build again."
+    exit 0
+fi
+packaged=${receipts[1]:h:h:h}
+print "Embedding the runtime from $packaged"
+mkdir -p $contents/Resources $contents/Library
+cp -cRp $packaged/Resources/Runtime $contents/Resources/
+cp -cRp $packaged/Library/LaunchServices $contents/Library/

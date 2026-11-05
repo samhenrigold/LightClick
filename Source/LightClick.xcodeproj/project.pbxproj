@@ -71,6 +71,7 @@
 				048FCB9D307E95CF00AECB5D /* Sources */,
 				048FCB9E307E95CF00AECB5D /* Frameworks */,
 				048FCB9F307E95CF00AECB5D /* Resources */,
+				EA155B15309C391300B82F7C /* Embed Dev Runtime */,
 			);
 			buildRules = (
 			);
@@ -122,6 +123,18 @@
 			);
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		EA155B15309C391300B82F7C /* Embed Dev Runtime */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			files = (
+			);
+			name = "Embed Dev Runtime";
+			shellPath = /bin/sh;
+			shellScript = "exec \"$SRCROOT/scripts/embed-dev-runtime\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		048FCB9D307E95CF00AECB5D /* Sources */ = {
