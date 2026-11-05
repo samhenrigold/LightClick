@@ -52,7 +52,7 @@ QEMU = 'qemu-system-x86_64'
 OUTCOME = re.compile(r'^outcome: (hard stop|guest powered off|running)\b', re.M)
 HARD_STOP = re.compile(r'^state: HARD STOP: (.*)$', re.M)
 USER_FAULT = re.compile(r'^proc +\S+ cr3 \S+ FAULT vector .*$', re.M)
-NO_PROGRESS = re.compile(r'^hvdbt: no progress\b.*$', re.M)
+NO_PROGRESS = re.compile(r'^hvdbt: (?:vCPU \d+: )?no progress\b.*$', re.M)
 LIFECYCLE = re.compile(r'^\[Light Click\] Lifecycle: .*"SHUTDOWN".*$', re.M)
 # The older scripts' grep. A guest process can die of a signal on a healthy boot, so this is a note, not a failure.
 SUSPECT = re.compile(r'FIPS USER|EXITED WITH SIGNAL|Symbol not found| SIGNAL ')
