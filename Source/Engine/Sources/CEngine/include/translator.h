@@ -14,7 +14,7 @@ typedef struct {
     bool has_tzcnt_lzcnt; // CPUID advertises BMI1 and ABM; without them these encodings are bsf and bsr
     bool hybrid; // CR0.TS is live, so integer instructions must not need NEON outside a stub that can back out
     // Comparison switches, each giving up one optimisation to see whether a fault goes with it.
-    bool no_bulk_rep, no_return_prediction, all_flags_live;
+    bool no_bulk_rep, no_return_prediction, all_flags_live, no_reuse, no_ahead;
     uint64_t ram_below_4g; // 0: RAM is one piece. Otherwise GPA 4 GB and up is host RAM at this offset
 } TrConfig;
 
@@ -64,7 +64,7 @@ typedef struct {
     uint64_t killed[KILL_KINDS], killed_unmoved[KILL_KINDS], kill_calls[KILL_KINDS];
     // Cold blocks at a rip and frame some earlier block already covers, live in another view or dead with the frame unchanged:
     // what translations keyed by frame would have saved. Looks at only the first few blocks on the frame, so these are lower bounds.
-    uint64_t again_live, again_dead;
+    uint64_t again_live, again_dead, reused, ahead;
     uint64_t hash_refills, hash_forgets, cache_resets;
     uint64_t shared_blocks, shared_found; // translated into a shared user domain; found there by a view that had not looked before
 } TrStats;

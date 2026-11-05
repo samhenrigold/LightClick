@@ -364,7 +364,9 @@ public final class Tally: @unchecked Sendable {
             "shared user blocks: \(t.shared_blocks) translated, \(t.shared_found) found by another view, under \(c.shared_dir_count) directories\n"
         o +=
             "view lookup tables emptied: \(t.hash_refills) as full, \(t.hash_forgets) forgetting a shared directory. Code cache resets: \(t.cache_resets)\n"
-        o += "stopped for another vCPU's exclusive section: \(exclusiveStops.pointee)\n\n"
+        o += "stopped for another vCPU's exclusive section: \(exclusiveStops.pointee)\n"
+        o += String(format: "dead blocks reused: %llu. Blocks translated ahead of being asked for: %llu\n", t.reused, t.ahead)
+        o += String(format: "this vCPU waited for the translator lock %llu times, %.2f s\n\n", engine.translatorWaits, seconds(engine.translatorWaitTicks))
         o += "== why blocks died: blocks, of those with the page still on the same frame, calls ==\n"
         let killed = withUnsafeBytes(of: t.killed) { Array($0.bindMemory(to: UInt64.self)) }
         let unmoved = withUnsafeBytes(of: t.killed_unmoved) { Array($0.bindMemory(to: UInt64.self)) }

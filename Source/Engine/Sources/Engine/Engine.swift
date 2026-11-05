@@ -144,6 +144,8 @@ public final class Engine {
         config.hybrid = options.hybrid
         let environment = ProcessInfo.processInfo.environment
         config.no_bulk_rep = options.hybrid && environment["LC_HVDBT_NO_BULK"] == "1"
+        config.no_reuse = environment["LC_HVDBT_NO_REUSE"] == "1"
+        config.no_ahead = environment["LC_HVDBT_NO_AHEAD"] == "1"
         config.no_return_prediction = options.hybrid && environment["LC_HVDBT_NO_RETURN_PREDICTION"] == "1"
         config.all_flags_live = options.hybrid && environment["LC_HVDBT_ALL_FLAGS"] == "1"
         config.precise_flags = options.preciseFlags
@@ -369,6 +371,17 @@ public final class Engine {
     var hostCallCount = [UInt64](repeating: 0, count: 32)
     var hostCallTicks = [UInt64](repeating: 0, count: 32)
 
+    // For the tally: how much of a translation is waiting for another vCPU's.
+    var translatorWaits: UInt64 = 0
+    var translatorWaitTicks: UInt64 = 0
+    private func lockTranslator() {
+        if os_unfair_lock_trylock(translatorLock) { return }
+        let start = mach_absolute_time()
+        os_unfair_lock_lock(translatorLock)
+        translatorWaits &+= 1
+        translatorWaitTicks &+= mach_absolute_time() &- start
+    }
+
     private func runLoop() throws -> RunOutcome {
         let counted = severalVCPUs
         if counted { gate.enter() }
@@ -473,15 +486,15 @@ public final class Engine {
         let translating = code == Int(HC_TRANSLATE) || code == Int(HC_SMC) || code == Int(HC_VIEW_INVALIDATE_VA) || code == Int(HC_VIEW_FORGET) || code == Int(HC_VIEW_DROP)
         var cacheWasReset = false
         if code == Int(HC_TRANSLATE) && severalVCPUs {
-            os_unfair_lock_lock(translatorLock)
+            lockTranslator()
             while tr_needs_flush() {
                 os_unfair_lock_unlock(translatorLock)
                 resetCodeCacheWithOthersOut()
                 cacheWasReset = true
-                os_unfair_lock_lock(translatorLock)
+                lockTranslator()
             }
         } else if translating {
-            os_unfair_lock_lock(translatorLock)
+            lockTranslator()
         }
         defer { if translating { os_unfair_lock_unlock(translatorLock) } }
         switch code {

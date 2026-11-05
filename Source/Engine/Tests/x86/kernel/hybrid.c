@@ -1220,6 +1220,80 @@ static void test_linked_loop(void) {
     (void)cr0;
 }
 
+// A block that dies with nothing wrong with it comes back, and one whose bytes changed doesn't: nor one whose code would have
+// been different because of bytes after its end, which decide whether it must compute the flags.
+static void test_reuse(u64 root) {
+    u64 code = frame(), va = TEST_VA + 0x40200000;
+    volatile u8 *p = (volatile u8 *)PHYS(code);
+    // xor %eax,%eax; cmp $5,%edi; jmp past what decoding the jmp reads, so only the look ahead for live flags reads the target
+    static const u8 start[] = {0x31, 0xC0, 0x83, 0xFF, 0x05, 0xEB, 0x40};
+    static const u8 flags_dead[] = {0x31, 0xC0, 0x90, 0xC3}, flags_read[] = {0x0F, 0x92, 0xC0, 0xC3}; // xor %eax,%eax, or setc %al; then ret
+    for (u64 i = 0; i < sizeof start; i++)
+        p[i] = start[i];
+    for (u64 i = 0; i < 4; i++)
+        p[0x47 + i] = flags_dead[i];
+    u32 (*f)(u32) = (u32 (*)(u32))va;
+    *pte_of(root, va) = code | PRESENT_RW;
+    __asm__ volatile("invlpg (%0)" : : "r"(va));
+    CHECK(f(1) == 0);
+    // The same frame mapped again: the block dies, and its bytes are the same.
+    *pte_of(root, va) = code | PRESENT_RW | (1ULL << 6);
+    __asm__ volatile("invlpg (%0)" : : "r"(va));
+    CHECK(f(1) == 0);
+    // Only what follows the first block changes.
+    for (u64 i = 0; i < 4; i++)
+        p[0x47 + i] = flags_read[i];
+    CHECK(f(1) == 1);
+    CHECK(f(9) == 0);
+    // And what the first block is itself.
+    p[4] = 0x00; // cmp $0,%edi
+    CHECK(f(1) == 0);
+    // The same bytes on another frame: a store there must reach what runs.
+    u64 other = frame();
+    volatile u8 *q = (volatile u8 *)PHYS(other);
+    for (u64 i = 0; i < 0x4B; i++)
+        q[i] = p[i];
+    *pte_of(root, va) = other | PRESENT_RW;
+    __asm__ volatile("invlpg (%0)" : : "r"(va));
+    CHECK(f(1) == 0);
+    q[4] = 0x05;
+    CHECK(f(1) == 1);
+}
+
+// What is translated ahead of being asked for must die like anything else, on its page, and may not run onto a next page nobody
+// watches yet.
+static void put_bytes(volatile u8 *at, const u8 *from, u64 n) {
+    for (u64 i = 0; i < n; i++)
+        at[i] = from[i];
+}
+
+static void test_translate_ahead(u64 root) {
+    u64 first = frame(), second = frame(), va = TEST_VA + 0x40400000;
+    volatile u8 *p = (volatile u8 *)PHYS(first), *q = (volatile u8 *)PHYS(second);
+    // test %edi,%edi; je L; mov $1,%eax; ret; L: mov $2,%eax; ret
+    static const u8 fn[] = {0x85, 0xFF, 0x74, 0x06, 0xB8, 1, 0, 0, 0, 0xC3, 0xB8, 2, 0, 0, 0, 0xC3};
+    put_bytes(p, fn, sizeof fn);
+    // test %edi,%edi; je far; mov $4,%eax; ret, with far: 13 nops, then mov $3,%eax across the page, then ret
+    static const u8 fn2[] = {0x85, 0xFF, 0x0F, 0x84, 0xC8, 0x0E, 0, 0, 0xB8, 4, 0, 0, 0, 0xC3};
+    put_bytes(p + 0x120, fn2, sizeof fn2);
+    for (int i = 0; i < 13; i++)
+        p[0xFF0 + i] = 0x90;
+    static const u8 end[] = {0xB8, 3, 0};
+    put_bytes(p + 0xFFD, end, 3);
+    static const u8 rest[] = {0, 0, 0xC3};
+    put_bytes(q, rest, 3);
+    *pte_of(root, va) = first | PRESENT_RW;
+    *pte_of(root, va + 4096) = second | PRESENT_RW;
+    __asm__ volatile("invlpg (%0)\n invlpg (%1)" : : "r"(va), "r"(va + 4096));
+    u32 (*f)(u32) = (u32 (*)(u32))va, (*g)(u32) = (u32 (*)(u32))(va + 0x120);
+    CHECK(f(1) == 1); // L is translated by now, and has never run
+    p[11] = 7;
+    CHECK(f(0) == 7);
+    CHECK(g(1) == 4); // and far would be, if it were allowed
+    q[0] = 1;
+    CHECK(g(0) == 0x10003);
+}
+
 // An interrupt raised just after a hlt ends it, polled in the monitor or through TCG if the host is slow, and the handler
 // returns past the hlt.
 static void test_hlt_poll(void) {
@@ -1844,6 +1918,8 @@ void kmain(void) {
     test_many_blocks(root);
     test_linked_loop();
     test_hlt_poll();
+    test_reuse(root);
+    test_translate_ahead(root);
     test_second_vcpu(root);
     test_process_log(root);
     test_shared_region(root);

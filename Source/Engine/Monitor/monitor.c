@@ -902,9 +902,12 @@ static void link_here(u64 site, u32 kind, u64 arm) {
     BlockEntry *from = find_block(site), *to = find_block(arm);
     if (!from || !to || from->key != to->key)
         return; // a link is forever, so it may only join blocks of one domain
-    u32 *s = (u32 *)site;
+    u32 *s = (u32 *)site, was = *s;
+    if (site == arm || (was & 0xFFE0001Fu) != 0xD4000001u) // as in tr_link: a dead block's entry may have come back
+        return;
     i64 d = ((i64)arm - (i64)site) >> 2;
-    *s = (kind == SVC_CALL ? 0x94000000u : 0x14000000u) | ((u32)d & 0x3ffffff);
+    if (!__atomic_compare_exchange_n(s, &was, (kind == SVC_CALL ? 0x94000000u : 0x14000000u) | ((u32)d & 0x3ffffff), false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return;
     code_changed(s);
     if (kind == SVC_JCC) { // as in tr_link: straight from the conditional branch if it reaches
         u32 *cond = s - s[3];
