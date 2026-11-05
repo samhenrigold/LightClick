@@ -1,7 +1,7 @@
 # MachineKit's safety and consistency checks
 
-Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpenGLRestartEvidence.h`, `VIMSession.m` and
-`VIMNetworkDefaults.m`, or left in Objective-C. Tests are in `Tests/MachineKitTests`.
+Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpenGLRestartEvidence.h`, `VIMSession.m`,
+`VIMNetworkDefaults.m` and `VIMLibraryLocation.m`, or left in Objective-C. Tests are in `Tests/MachineKitTests`.
 
 ## Evidence comparison
 
@@ -31,6 +31,21 @@ Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpen
 - A rename has no slash, colon, newline or leading dot. Package names replace those characters, avoid a leading dot, and
   never collide.
 - Prepared media can be deleted only under `<UUID>/Media`, in `Downloads/Preparation` or in this library's `Installers`.
+
+## Library location and layout (`LibrarySelection`, `LibraryLocation`, `LibraryMigration`)
+
+- The standard library's path can't be saved: `.standard` has no path, and `.chosen` only comes from comparing a root
+  with this instance's standard root. Preferences stay shared under `CFFIXED_USER_HOME`, so a saved default would pin
+  every other instance to this home.
+- `VIMLibraryPath` is written only by `LibrarySelection`. The migration's sweep of `VIM…` preferences skips it.
+- A migration runs only with the library lock, every machine's `Session.lock` and `Configuration.lock`, and no active
+  creation job for this library. All of these refusals use `EBUSY`, which the app retries next launch.
+- A package without a `State` folder can't be locked, so it defers the migration as if it were running.
+- The plan is saved before anything moves. A saved plan with the wrong format or legacy root, or any location outside
+  the two roots, refuses. A journal that doesn't parse at all is planned again.
+- A move with both ends present, or neither, refuses. Nothing is overwritten.
+- Moves run deepest first. Rewriting a path uses its longest moved ancestor, at a whole path component.
+- Only `Machine.plist` and non-hidden property lists under `Installation` and `State` are rewritten.
 
 ## Pending edits
 
