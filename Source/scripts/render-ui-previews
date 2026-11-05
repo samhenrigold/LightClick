@@ -5,8 +5,8 @@
 set -euo pipefail
 source_dir="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$source_dir/Build/UIReview"
-xcrun clang -fobjc-arc -fmodules -Wno-incomplete-implementation \
-  -mmacosx-version-min=11.0 -arch arm64 -arch x86_64 \
+"$source_dir/scripts/clang-with-swift-packages" GuestControl InstallerKit -- \
+  -fobjc-arc -fmodules -Wno-incomplete-implementation -mmacosx-version-min=15.0 \
   -I "$source_dir/VirtualIntelMac" \
   "$source_dir/tools/ui-previews.m" \
   "$source_dir/VirtualIntelMac/AppDelegate.m" \
@@ -20,9 +20,7 @@ xcrun clang -fobjc-arc -fmodules -Wno-incomplete-implementation \
   "$source_dir/VirtualIntelMac/VIMLibraryLocation.m" \
   "$source_dir/VirtualIntelMac/VIMNetworkDefaults.m" \
   "$source_dir/VirtualIntelMac/VIMNewMachineWindow.m" \
-  "$source_dir/VirtualIntelMac/VIMInstallerCatalog.m" \
   "$source_dir/VirtualIntelMac/VIMInstallerAssembly.m" \
-  "$source_dir/VirtualIntelMac/VIMDownload.m" \
   "$source_dir/VirtualIntelMac/VIMHostSupport.m" \
   "$source_dir/VirtualIntelMac/VIMAlerts.m" \
   "$source_dir/VirtualIntelMac/VIMMenuController.m" \
@@ -30,8 +28,6 @@ xcrun clang -fobjc-arc -fmodules -Wno-incomplete-implementation \
   "$source_dir/VirtualIntelMac/VIMPlayButton.m" \
   "$source_dir/VirtualIntelMac/VIMMetalView.m" \
   "$source_dir/VirtualIntelMac/VIMDisplayConnection.m" \
-  "$source_dir/VirtualIntelMac/VIMQMPConnection.m" \
-  "$source_dir/VirtualIntelMac/VIMGuestAgent.m" \
   "$source_dir/VirtualIntelMac/VIMGuestPreparation.m" \
   "$source_dir/VirtualIntelMac/VIMGuestInstallation.m" \
   "$source_dir/VirtualIntelMac/VIMGuestProgress.m" \
