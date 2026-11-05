@@ -1002,6 +1002,40 @@ static void test_shared_return(u64 root) {
     CHECK(shared_run_with_stack(b, root) == 21);
 }
 
+// More blocks than a view's lookup table holds, each reached by a link. A full table left the monitor's lookup
+// searching forever for an empty slot.
+static void test_many_blocks(u64 root) {
+    enum { PAGES = 40 };
+    u64 va = TEST_VA + 0x20000000;
+    for (int p = 0; p < PAGES; p++) {
+        u64 page = frame();
+        *pte_of(root, va + (u64)p * 4096) = page | PRESENT_RW;
+        volatile u8 *to = (volatile u8 *)PHYS(page);
+        for (int i = 0; i < 4096; i += 2) { // jmp +0: each one ends a block
+            to[i] = 0xEB;
+            to[i + 1] = 0;
+        }
+        if (p == PAGES - 1)
+            to[4094] = 0xC3;
+    }
+    for (int round = 0; round < 2; round++)
+        ((void (*)(void))va)();
+}
+
+// A linked loop has no way out but an interrupt or a stop request, and it must take them. The host raises the line from
+// another thread once it is running.
+static void test_linked_loop(void) {
+    u64 irqs = irq_count, cr0;
+    __asm__ volatile("sti");
+    for (int i = 0; i < 3; i++) {
+        command(15);
+        __asm__ volatile("1: cmpq %0, %1\n je 1b\n" : : "r"(irqs), "m"(irq_count));
+        CHECK(irq_count > irqs);
+        irqs = irq_count;
+    }
+    (void)cr0;
+}
+
 static void test_process_log(u64 root) {
     u64 t = (u64)tss;
     gdt[3] = 0x00CFF2000000FFFFULL;
@@ -1489,6 +1523,8 @@ void kmain(void) {
     test_ptest_flags();
     test_inline_ops(root);
     test_direct_map();
+    test_many_blocks(root);
+    test_linked_loop();
     test_process_log(root);
     test_shared_region(root);
     test_shared_return(root);

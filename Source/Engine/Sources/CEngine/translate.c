@@ -1003,8 +1003,16 @@ static inline u32 crc32c64(u64 v) {
     return c;
 }
 
+// A lookup ends at an empty slot, in the stub and in the monitor, so a table must always have some. It is only a cache of the block map: when it fills, start again.
+static u32 hash_slots_used[MAX_VIEWS];
+
 void tr_hash_insert(int view, uint64_t rip, uint64_t arm) {
     u64 *t = hash_table(view);
+    if (hash_slots_used[view] >= HASH_ENTRIES / 4 * 3) {
+        memset(t, 0, HASH_BYTES);
+        hash_slots_used[view] = 0;
+        stats.hash_refills++;
+    }
     u32 h = crc32c64(rip) & (HASH_ENTRIES - 1);
     for (u32 n = 0; n < HASH_ENTRIES; n++, h = (h + 1) & (HASH_ENTRIES - 1)) {
         u64 key = t[h * 2];
@@ -1013,13 +1021,14 @@ void tr_hash_insert(int view, uint64_t rip, uint64_t arm) {
             return;
         }
         if (key == 0 || key == 1) {
+            if (key == 0)
+                hash_slots_used[view]++;
             t[h * 2 + 1] = arm;
             __sync_synchronize();
             t[h * 2] = rip;
             return;
         }
     }
-    // shortcut: a full table leaves this target on the slow path, fine at 64K entries per view
 }
 
 static void hash_remove(int view, u64 rip) {
@@ -1079,7 +1088,11 @@ int tr_invalidate_frame(uint64_t gpa, uint32_t why) {
     return n;
 }
 
-void tr_view_forget(int view) { memset(hash_table(view), 0, HASH_BYTES); }
+void tr_view_forget(int view) {
+    memset(hash_table(view), 0, HASH_BYTES);
+    hash_slots_used[view] = 0;
+    stats.hash_forgets++;
+}
 
 int tr_invalidate_view_va(int view, uint64_t va, uint32_t why, bool unmoved, bool keeper) {
     int n = 0;
@@ -1122,6 +1135,7 @@ void tr_view_drop(int view) {
         }
     view_head[view] = 0;
     memset(hash_table(view), 0, HASH_BYTES);
+    hash_slots_used[view] = 0;
     ctx_ptr->tr_flushed = 1;
 }
 
@@ -1137,6 +1151,7 @@ void tr_flush_all(void) {
     memset(view_head, 0, sizeof view_head);
     for (int v = 0; v <= view_high; v++)
         memset(hash_table(v), 0, HASH_BYTES);
+    memset(hash_slots_used, 0, sizeof hash_slots_used);
 }
 
 TrStats tr_stats(void) { return stats; }

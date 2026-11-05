@@ -700,6 +700,12 @@ public final class Engine {
         o += "monitor: elr \(hex(c.elr)) esr \(hex(c.esr)) far \(hex(c.far)) spsr \(hex(c.spsr)) cpl \(c.cpl) view \(c.view) cr0 \(hex(c.cr0)) cr3 \(hex(c.cr3)) cr4 \(hex(c.cr4))\n"
         o += "interrupts: rflags_sys \(hex(c.rflags_sys)) irq_line \(c.irq_line) irq_pending \(c.irq_pending) stop_requested \(c.stop_requested) stepping \(c.stepping) steps \(c.stat_steps) irqs \(c.stat_irq)\n"
         o += "engine TSC by its formula: \(hex(tsc))\n"
+        // When the vCPU will not stop, this says what it last entered the monitor from. The monitor's own loops do not move elr.
+        let codeBase = kPrivVA + UInt64(kOffCC)
+        if c.elr >= codeBase + 32, c.elr < codeBase + UInt64(kCCSize) {
+            let words = (priv + Int(kOffCC) + Int(c.elr - codeBase) - 32).assumingMemoryBound(to: UInt32.self)
+            o += "code around elr, from elr-32: " + (0..<16).map { String(format: "%08x", words[$0]) }.joined(separator: " ") + "\n"
+        }
         let x = withUnsafeBytes(of: c.x) { Array($0.bindMemory(to: UInt64.self)) }
         o += "registers at the last monitor entry, x0-x15 are rax rcx rdx rbx rsp rbp rsi rdi r8-r15:\n"
         for i in 0..<16 { o += hex(x[i]) + (i % 4 == 3 ? "\n" : " ") }

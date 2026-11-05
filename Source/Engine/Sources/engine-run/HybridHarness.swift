@@ -67,6 +67,14 @@ final class HybridHarness {
                 failed = "the guest's writes are not in the directly mapped memory"
             }
             engine_unmap_direct(handle, 0xC000_0000, 1 << 16)
+        case 15:
+            let target = handle!
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(20)) { [self] in
+                pendingVector = true
+                engine_request_boundary(target)
+                engine_set_irq_line(target, true)
+                engine_kick(target)
+            }
         case 10: timerOn = true
         case 11: timerOn = false
         case 9:

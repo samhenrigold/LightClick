@@ -61,6 +61,7 @@ typedef struct {
     // Cold blocks at a rip and frame some earlier block already covers, live in another view or dead with the frame unchanged:
     // what translations keyed by frame would have saved. Looks at only the first few blocks on the frame, so these are lower bounds.
     uint64_t again_live, again_dead;
+    uint64_t hash_refills, hash_forgets;
     uint64_t shared_blocks, shared_found; // translated into a shared user domain; found there by a view that had not looked before
 } TrStats;
 TrStats tr_stats(void);
