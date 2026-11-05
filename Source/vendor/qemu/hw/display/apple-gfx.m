@@ -40,6 +40,8 @@
 #import <objc/message.h>
 #include "apple-gfx-app.h"
 
+#define APPLE_GFX_OOP_MMIO_WORDS (16384 / 4)
+#define APPLE_GFX_OOP_POSTED_MAX 256
 typedef struct AppleGFXOOPClient {
     int fd;
     pid_t pid;
@@ -55,8 +57,11 @@ typedef struct AppleGFXOOPClient {
     void (^irq)(uint32_t);
     Notifier exit_notifier;
     AppleGFXState *state;
-    AppleGFXOOPTiming lock_time, read_time, write_time, other_time;
+    AppleGFXOOPTiming lock_time, read_time, write_time, other_time, post_time, hold_time;
     bool timing_enabled;
+    bool posted[APPLE_GFX_OOP_MMIO_WORDS]; /* VIM_PVG_POSTED_MMIO, fixed at realize. */
+    uint32_t posted_inflight;
+    uint64_t write_counts[APPLE_GFX_OOP_MMIO_WORDS], write_counts_reported;
 } AppleGFXOOPClient;
 static void apple_gfx_oop_frame_bh(void *opaque);
 typedef struct {
@@ -180,6 +185,82 @@ static uint64_t apple_gfx_oop_rpc(AppleGFXOOPClient *c, uint32_t op,
             op == APPLE_GFX_OOP_WRITE ? "rpc-write" : "rpc-other", started);
     }
     return c->reply.value;
+}
+
+/*
+ * Posted MMIO writes, opt-in per offset, so a doorbell doesn't hold the BQL for the
+ * whole helper round trip.
+ *
+ * Order is unchanged. Every read and write enters under the BQL (the region uses
+ * global locking) and goes through the one serial control queue, then one socket,
+ * then one helper loop, so the device applies them in the order the guest made them.
+ * A later read therefore sees every earlier post, like a PCI read flushing posted
+ * writes. Guest memory written before the doorbell is visible for the same reason as
+ * before: the socket write happens after the store, on a later queue hop.
+ *
+ * What this can't argue is the guest's own expectations. A driver may assume a write
+ * has taken effect when it retires, with no read-back, as it did when the VMM handled
+ * MMIO synchronously. So nothing is posted until an offset is named, and the offsets
+ * to name come from the "PVG mmio writes" counts below.
+ */
+static void apple_gfx_oop_post(AppleGFXOOPClient *c, uint64_t offset, uint64_t value)
+{
+    uint64_t started = c->timing_enabled ? apple_gfx_oop_now() : 0;
+    QEMU_LOCK_GUARD(&c->rpc_lock);
+    if (qatomic_read(&c->failed)) { return; }
+    AppleGFXOOPCommand request = {.magic=APPLE_GFX_OOP_MAGIC,
+        .operation=APPLE_GFX_OOP_WRITE_POSTED, .sequence=++c->sequence, .offset=offset, .value=value};
+    if (!apple_gfx_oop_io(c->fd, &request, sizeof(request), true)) {
+        qatomic_set(&c->failed, true);
+        shutdown(c->fd, SHUT_RDWR);
+        error_report("PVG helper request failed; device transport stopped");
+        return;
+    }
+    if (started) { apple_gfx_oop_timing(&c->post_time, "rpc-post", started); }
+}
+
+static void apple_gfx_oop_parse_posted(AppleGFXOOPClient *c)
+{
+    const char *setting = getenv("VIM_PVG_POSTED_MMIO");
+    if (!setting || !*setting || !strcmp(setting, "0")) { return; }
+    if (!strcmp(setting, "all")) {
+        memset(c->posted, true, sizeof(c->posted));
+        return;
+    }
+    for (const char *p = setting; *p;) {
+        char *end;
+        unsigned long offset = strtoul(p, &end, 16);
+        if (end == p || (*end && *end != ',') || (offset & 3) || offset / 4 >= APPLE_GFX_OOP_MMIO_WORDS) {
+            warn_report("VIM_PVG_POSTED_MMIO: ignoring from '%s'", p);
+            return;
+        }
+        c->posted[offset / 4] = true;
+        p = *end ? end + 1 : end;
+    }
+}
+
+/* Called under the BQL. Which offsets are worth posting, busiest first. */
+static void apple_gfx_oop_count_write(AppleGFXOOPClient *c, uint64_t offset)
+{
+    if (offset / 4 >= APPLE_GFX_OOP_MMIO_WORDS) { return; }
+    c->write_counts[offset / 4]++;
+    uint64_t now = apple_gfx_oop_now();
+    if (now - c->write_counts_reported < 5000000000ULL) { return; }
+    c->write_counts_reported = now;
+    bool shown[APPLE_GFX_OOP_MMIO_WORDS] = {false};
+    fprintf(stderr, "PVG mmio writes");
+    for (unsigned n = 0; n < 8; n++) {
+        unsigned best = APPLE_GFX_OOP_MMIO_WORDS;
+        for (unsigned i = 0; i < APPLE_GFX_OOP_MMIO_WORDS; i++) {
+            if (c->write_counts[i] && !shown[i] &&
+                (best == APPLE_GFX_OOP_MMIO_WORDS || c->write_counts[i] > c->write_counts[best])) { best = i; }
+        }
+        if (best == APPLE_GFX_OOP_MMIO_WORDS) { break; }
+        shown[best] = true;
+        fprintf(stderr, " 0x%x=%llu%s", best * 4, (unsigned long long)c->write_counts[best],
+                c->posted[best] ? "(posted)" : "");
+    }
+    fputc('\n', stderr);
 }
 
 static void apple_gfx_oop_frame_ack(void *opaque)
@@ -913,10 +994,25 @@ static void apple_gfx_write(void *opaque, hwaddr offset, uint64_t val,
         .completed = false,
     };
     AppleGFXState *s = opaque;
-    dispatch_queue_t queue = s->oop ? s->oop->control_queue : get_background_queue();
+    AppleGFXOOPClient *c = s->oop;
+    uint64_t started = c && c->timing_enabled ? apple_gfx_oop_now() : 0;
+    if (started) { apple_gfx_oop_count_write(c, offset); }
+    /* A write that can't be posted waits below, behind everything queued, so the
+     * limit bounds both the backlog and how late a guest's writes can land. */
+    if (c && offset / 4 < APPLE_GFX_OOP_MMIO_WORDS && c->posted[offset / 4] &&
+        qatomic_read(&c->posted_inflight) < APPLE_GFX_OOP_POSTED_MAX) {
+        qatomic_inc(&c->posted_inflight);
+        dispatch_async(c->control_queue, ^{
+            apple_gfx_oop_post(c, offset, val);
+            qatomic_dec(&c->posted_inflight);
+        });
+    } else {
+        dispatch_queue_t queue = c ? c->control_queue : get_background_queue();
 
-    dispatch_async_f(queue, &job, apple_gfx_do_write);
-    AIO_WAIT_WHILE(NULL, !qatomic_read(&job.completed));
+        dispatch_async_f(queue, &job, apple_gfx_do_write);
+        AIO_WAIT_WHILE(NULL, !qatomic_read(&job.completed));
+    }
+    if (started) { apple_gfx_oop_timing(&c->hold_time, "mmio-write-bql", started); }
 
     trace_apple_gfx_write(offset, val);
 }
@@ -938,6 +1034,8 @@ static const MemoryRegionOps apple_gfx_ops = {
 void apple_gfx_reset(AppleGFXState *s)
 {
     if (s->oop) {
+        /* This RPC skips the control queue, so let posted writes land before it. */
+        dispatch_sync(s->oop->control_queue, ^{});
         /* Current reset RPC has no callbacks requiring BQL in the helper. */
         apple_gfx_oop_rpc(s->oop, APPLE_GFX_OOP_RESET, 0, 0);
     } else if ([s->pgdev respondsToSelector:@selector(reset)]) {
@@ -1195,6 +1293,7 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
         qemu_mutex_init(&c->rpc_lock);
         c->reply_ready = dispatch_semaphore_create(0);
         c->control_queue = dispatch_queue_create("pvg.oop.control", DISPATCH_QUEUE_SERIAL);
+        apple_gfx_oop_parse_posted(c);
         c->exit_notifier.notify = apple_gfx_oop_exit;
         qemu_add_exit_notifier(&c->exit_notifier);
         s->oop = c;

@@ -583,6 +583,14 @@ static int helper_main(int argc, char **argv)
             if (request.magic != APPLE_GFX_OOP_MAGIC || request.reserved ||
                 request.status || request.sequence <= last_sequence) { return 33; }
             last_sequence = request.sequence;
+            if (request.operation == APPLE_GFX_OOP_WRITE_POSTED) {
+                /* There is no reply to carry an error, so fail closed. QEMU only
+                 * posts 4-byte aligned writes inside the MMIO region. */
+                if ((request.offset & 3) || request.offset >= desc.mmioLength ||
+                    request.value > UINT32_MAX) { _exit(51); }
+                [device mmioWriteAtOffset:request.offset value:(uint32_t)request.value];
+                continue;
+            }
             if (request.operation == APPLE_GFX_OOP_FRAME_ACK) {
                 if (app_channel >= 0) { continue; }
                 dispatch_async(frames, ^{
