@@ -42,11 +42,12 @@ if [[ $slug == mojave ]]; then
     # Context-tagged dispatch retention: qualified same-boot window/IPC gain.
     export PVG_TCG_CONTEXT_JMP_CACHE=${PVG_TCG_CONTEXT_JMP_CACHE:-1}
     export PVG_TCG_FAST_PTW=${PVG_TCG_FAST_PTW:-1}
-    # Keep 4096 translations only in USER64 (logical MMU slot 2), not all
-    # 22 slots. Avoids measured adaptive-shrink/repopulation cliffs.
+    # Keep 4096 translations only in USER64 (logical MMU slot 2) and PHYS
+    # (slot 6), not all slots. USER64 avoids measured adaptive-shrink/repopulation
+    # cliffs; PHYS is kept across flushes, so it never gets to resize.
     # FLOOR_BITS=6 restores the original minimum; MASK=0 disables selection.
     export PVG_TCG_TLB_FLOOR_BITS=${PVG_TCG_TLB_FLOOR_BITS:-12}
-    export PVG_TCG_TLB_FLOOR_MASK=${PVG_TCG_TLB_FLOOR_MASK:-4}
+    export PVG_TCG_TLB_FLOOR_MASK=${PVG_TCG_TLB_FLOOR_MASK:-0x44}
 fi
 # Tracked native FPSR experiment remains opt-in: no clear measured gain.
 export PVG_TCG_NATIVE_FP_FLAGS=${PVG_TCG_NATIVE_FP_FLAGS:-0}
