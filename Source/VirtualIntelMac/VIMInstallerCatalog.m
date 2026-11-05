@@ -12,7 +12,7 @@ static NSError *CatalogError(NSString *text) {
 @implementation VIMInstallerCatalog
 + (NSURL *)cacheURL {
     NSURL *support=[NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
-    return [[support URLByAppendingPathComponent:@"Virtual Intel Mac"] URLByAppendingPathComponent:@"InstallerCatalog.plist"];
+    return [[support URLByAppendingPathComponent:@"Light Click"] URLByAppendingPathComponent:@"InstallerCatalog.plist"];
 }
 + (NSData *)bundledData {
     NSURL *resource=[NSBundle.mainBundle URLForResource:@"InstallerCatalog" withExtension:@"plist"];

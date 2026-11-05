@@ -70,7 +70,7 @@ if args.package_release:
                                 ('Release-'+datetime.now().strftime('%Y%m%d-%H%M%S')))
     if directory.exists() or directory.suffix == '.app':
         parser.error('--package-release --output must be a new folder, not an .app path')
-    args.output = directory/'Virtual Intel Mac.app'
+    args.output = directory/'Light Click.app'
 sys.path.insert(0, str(source/'scripts'))
 from build_signing import resolve_identity
 import build_freshness as freshness
@@ -228,25 +228,25 @@ if not args.ui_only:
         parser.error('Fast runtime inputs missing (use --ui-only for UI development):\n'+'\n'.join(missing))
     if not args.output:
         scratch = Path(os.environ.get('VIM_BUILD_SCRATCH') or source/'Build/Products')
-        args.output = scratch/('AppBuild-'+datetime.now().strftime('%Y%m%d-%H%M%S'))/'Virtual Intel Mac.app'
+        args.output = scratch/('AppBuild-'+datetime.now().strftime('%Y%m%d-%H%M%S'))/'Light Click.app'
     if args.output.exists() or args.output.suffix != '.app':
         parser.error('--output must be a new .app path')
 derived = source/'Build/App'
 log = source/'Build/build-app.log'
 log.parent.mkdir(parents=True, exist_ok=True)
 command = ['xcodebuild', '-project', str(source/'VirtualIntelMac.xcodeproj'),
-           '-scheme', 'Virtual Intel Mac', '-configuration', args.configuration,
+           '-scheme', 'Light Click', '-configuration', args.configuration,
            '-derivedDataPath', str(derived), 'CODE_SIGNING_ALLOWED=NO',
            'ARCHS=arm64 x86_64', 'ONLY_ACTIVE_ARCH=NO',
            'MACOSX_DEPLOYMENT_TARGET=15.0', '__DIAGNOSE_INVALID_DEPLOYMENT_TARGET_AS_ERROR=NO',
            'OTHER_CFLAGS=$(inherited) -Werror=unguarded-availability-new', 'clean', 'build']
-print('Building Virtual Intel Mac…', flush=True)
+print('Building Light Click…', flush=True)
 with log.open('w') as stream:
     result = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT)
 if result.returncode:
     print(f'Build failed. Details: {log}', file=sys.stderr)
     sys.exit(result.returncode)
-app = derived/'Build/Products'/args.configuration/'Virtual Intel Mac.app'
+app = derived/'Build/Products'/args.configuration/'Light Click.app'
 app_info = plistlib.loads((app/'Contents/Info.plist').read_bytes())
 if app_info.get('LSMinimumSystemVersion') != '15.0':
     sys.exit('Build refused: the main app must target macOS 15.0; runtime dependencies remain macOS 11.0.')

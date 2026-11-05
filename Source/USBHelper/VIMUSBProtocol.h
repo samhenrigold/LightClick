@@ -1,6 +1,6 @@
 #import <Foundation/Foundation.h>
 
-#define VIM_USB_SERVICE @"com.mac.virtualintelmac.usb-helper"
+#define VIM_USB_SERVICE @"gold.samhenri.LightClick.usb-helper"
 #define VIM_USB_PROTOCOL 1
 
 /// No paths, commands, disk operations or executable uploads cross this API.

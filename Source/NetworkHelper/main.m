@@ -27,7 +27,7 @@ static NSUInteger activeNetworks;
 - (void)run;
 @end
 @implementation VIMNetworkWorker
-- (instancetype)init {if((self=[super init])){_socket=_wakeRead=_wakeWrite=-1;_events=dispatch_queue_create("com.mac.virtualintelmac.vmnet",DISPATCH_QUEUE_SERIAL);}return self;}
+- (instancetype)init {if((self=[super init])){_socket=_wakeRead=_wakeWrite=-1;_events=dispatch_queue_create("gold.samhenri.LightClick.vmnet",DISPATCH_QUEUE_SERIAL);}return self;}
 - (void)signal { @synchronized(self){if(_wakeWrite>=0){uint8_t byte=1;(void)write(_wakeWrite,&byte,1);}} }
 - (void)cancel {@synchronized(self){_cancelled=YES;}[self signal];}
 - (void)dealloc {if(_ownsBudget)@synchronized(budgetLock){activeNetworks--;}}

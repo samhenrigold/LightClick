@@ -1,7 +1,7 @@
 #import "VIMUpdateChecker.h"
 #import "VIMAlerts.h"
 
-static NSString * const VIMReleasePage = @"https://github.com/nfzerox/VirtualIntelMacOnAppleSilicon/releases";
+static NSString * const VIMReleasePage = @"https://github.com/samhenrigold/LightClick/releases";
 @interface VIMUpdateChecker ()
 @property(nonatomic, readwrite, getter=isChecking) BOOL checking;
 @property(nonatomic) BOOL manualRequested;
@@ -47,7 +47,7 @@ static NSString * const VIMReleasePage = @"https://github.com/nfzerox/VirtualInt
     [self publishResult:@"Checking for updates…"];
     [defaults setObject:NSDate.date forKey:@"VIMLastUpdateAttempt"];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:
-        @"https://api.github.com/repos/nfzerox/VirtualIntelMacOnAppleSilicon/releases/latest"]
+        @"https://api.github.com/repos/samhenrigold/LightClick/releases/latest"]
         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:20];
     [request setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
     [request setValue:@"2026-03-10" forHTTPHeaderField:@"X-GitHub-Api-Version"];
@@ -85,11 +85,11 @@ static NSString * const VIMReleasePage = @"https://github.com/nfzerox/VirtualInt
                 if (!interactive && [[defaults stringForKey:@"VIMAnnouncedRelease"] isEqual:version]) return;
                 [defaults setObject:version forKey:@"VIMAnnouncedRelease"];
                 [self showTitle:@"A New Version Is Available" detail:[NSString stringWithFormat:
-                    @"Virtual Intel Mac %@ is available. You’re using %@.", version, current] release:YES];
+                    @"Light Click %@ is available. You’re using %@.", version, current] release:YES];
             } else {
                 [self publishResult:[NSString stringWithFormat:@"You’re up to date (%@).",current]];
                 if(interactive)[self showTitle:@"You’re Up to Date" detail:[NSString stringWithFormat:
-                    @"You’re using Virtual Intel Mac %@. No newer stable release is available.", current] release:NO];
+                    @"You’re using Light Click %@. No newer stable release is available.", current] release:NO];
             }
         });
     }] resume];

@@ -35,7 +35,7 @@
 }
 @end
 
-static NSPasteboardType const VIMLibraryDragType=@"com.mac.virtualintelmac.library-row";
+static NSPasteboardType const VIMLibraryDragType=@"gold.samhenri.LightClick.library-row";
 @interface VIMLibraryLabel : NSTextField
 @end
 @implementation VIMLibraryLabel
@@ -235,7 +235,7 @@ static NSString *VIMLibraryResources(VIMMachine *machine) {
     if(self.view.window.toolbar)return;
     NSToolbar *toolbar=[[NSToolbar alloc] initWithIdentifier:@"VIMLibraryToolbar"];
     toolbar.delegate=self;toolbar.displayMode=NSToolbarDisplayModeIconOnly;
-    self.view.window.title=@"Virtual Intel Mac Library";self.view.window.titleVisibility=NSWindowTitleVisible;
+    self.view.window.title=@"Light Click Library";self.view.window.titleVisibility=NSWindowTitleVisible;
     self.view.window.toolbar=toolbar;self.view.window.toolbarStyle=NSWindowToolbarStyleUnifiedCompact;
     self.view.window.tabbingMode=NSWindowTabbingModeDisallowed;
     [self sizeLibraryWindow];
@@ -651,7 +651,7 @@ static NSString *VIMLibraryResources(VIMMachine *machine) {
         if(lock<0||fstat(lock,&info)||!S_ISREG(info.st_mode)||info.st_nlink!=1||flock(lock,LOCK_EX|LOCK_NB)) {
             if(lock>=0)close(lock);
             NSAlert *busy=[NSAlert new];busy.messageText=@"This Mac can’t be deleted right now";
-            busy.informativeText=@"Shut down the virtual Mac and close any other Virtual Intel Mac session using it, then try again.";
+            busy.informativeText=@"Shut down the virtual Mac and close any other Light Click session using it, then try again.";
             [busy addButtonWithTitle:@"OK"];VIMPresentAlert(busy,self.view.window,nil);return;
         }
         VIMMachine *current=[VIMMachine loadURL:machine.URL error:nil];

@@ -12,12 +12,12 @@ static BOOL SetupFailure(NSError **error,NSString *message) {
 static NSDictionary *Credential(NSString *identifier) {
     if(![identifier isKindOfClass:NSString.class]||![[NSUUID alloc] initWithUUIDString:identifier])return nil;
     return @{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService:@"com.mac.virtualintelmac.automatic-setup",
+        (__bridge id)kSecAttrService:@"gold.samhenri.LightClick.automatic-setup",
         (__bridge id)kSecAttrAccount:identifier};
 }
 static int CredentialDirectory(BOOL create,NSError **error) {
     NSURL *support=[NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
-    NSURL *directory=[support URLByAppendingPathComponent:@"Virtual Intel Mac/Setup Credentials" isDirectory:YES];
+    NSURL *directory=[support URLByAppendingPathComponent:@"Light Click/Setup Credentials" isDirectory:YES];
     if(!directory){SetupFailure(error,@"The private setup-password folder is unavailable.");return -1;}
     if(create&&![NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:error])return -1;
     int fd=open(directory.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);

@@ -75,7 +75,7 @@ static void InstallUSBHelper(BOOL terminal,void (^completion)(NSError *)) {
     if(self.stopped){completion(VIMUSBError(@"This virtual Mac has stopped."));return;}
     if(self.prepared){completion(nil);return;}
     if(self.preparing){completion(VIMUSBError(@"USB helper setup is already in progress."));return;}
-    if(!NSBundle.mainBundle.infoDictionary[@"VIMUSBHelperSourceHash"]){completion(VIMUSBError(@"This development build does not include USB capture. Open the complete Virtual Intel Mac app."));return;}
+    if(!NSBundle.mainBundle.infoDictionary[@"VIMUSBHelperSourceHash"]){completion(VIMUSBError(@"This development build does not include USB capture. Open the complete Light Click app."));return;}
     self.preparing=YES;[self openConnection];
     [self checkWithCompletion:^(BOOL valid){
         if(valid){self.preparing=NO;self.prepared=YES;completion(nil);return;}

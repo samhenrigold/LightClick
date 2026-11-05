@@ -348,7 +348,7 @@ static void VIMAlignFormBaselines(NSView *view) {
         NSPopUpButton *output=[self audioPopup:NO],*input=[self audioPopup:YES];
         NSGridView *grid=[NSGridView gridViewWithViews:@[@[[NSTextField labelWithString:@"Sound Output:"],output],@[[NSTextField labelWithString:@"Microphone:"],input]]];grid.rowSpacing=20;grid.columnSpacing=12;[grid columnAtIndex:0].xPlacement=NSGridCellPlacementTrailing;
         NSButton *hostAccess=[self button:@"This Mac’s Access…" action:@selector(microphone:)];
-        hostAccess.toolTip=@"Allow Virtual Intel Mac to use this Mac’s microphone.";
+        hostAccess.toolTip=@"Allow Light Click to use this Mac’s microphone.";
         NSStackView *access=[NSStackView stackViewWithViews:@[hostAccess,
             [self guestSettingsButton:@"Virtual Mac’s Access…" pane:@"microphone"]]];access.spacing=8;
         return VIMColumn(@[grid,access,
@@ -886,7 +886,7 @@ static void VIMAlignFormBaselines(NSView *view) {
 + (void)requestMicrophoneAccessFromWindow:(NSWindow *)window {
     if([AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio]==AVAuthorizationStatusNotDetermined) {
         [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted){
-            if(!granted)dispatch_async(dispatch_get_main_queue(),^{NSAlert *alert=[NSAlert new];alert.messageText=@"Microphone access is turned off";alert.informativeText=@"You can allow Virtual Intel Mac to use this Mac’s microphone in Privacy settings.";[alert addButtonWithTitle:@"OK"];VIMPresentAlert(alert,window,nil);});
+            if(!granted)dispatch_async(dispatch_get_main_queue(),^{NSAlert *alert=[NSAlert new];alert.messageText=@"Microphone access is turned off";alert.informativeText=@"You can allow Light Click to use this Mac’s microphone in Privacy settings.";[alert addButtonWithTitle:@"OK"];VIMPresentAlert(alert,window,nil);});
         }];
     } else [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"]];
 }

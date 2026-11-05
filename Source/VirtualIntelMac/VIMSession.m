@@ -43,7 +43,7 @@
 #import "VIMInstallerCatalog.h"
 #import "VIMImageSlots.h"
 #import "VIMLegacyTabletPolicy.h"
-#import "Virtual_Intel_Mac-Swift.h"
+#import "Light_Click-Swift.h"
 
 static NSMutableDictionary<NSString *,VIMSession *> *sessions;
 static NSMutableDictionary<NSString *,NSUUID *> *pendingRosettaStarts;
@@ -546,7 +546,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     if(existing){existing.window=nil;session.window.windowController=session;session.window.delegate=session;}
     if(cleanupError) {
         session.guestStatus.stringValue=[NSString stringWithFormat:@"Installer cleanup pending: %@",cleanupError.localizedDescription];
-        [session.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Cleanup retry: %@\n",cleanupError.localizedDescription] dataUsingEncoding:NSUTF8StringEncoding]];
+        [session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Cleanup retry: %@\n",cleanupError.localizedDescription] dataUsingEncoding:NSUTF8StringEncoding]];
     }
     sessions[key]=session;
     NSMutableDictionary *opened=[[NSUserDefaults.standardUserDefaults dictionaryForKey:@"VIMLastOpened"] mutableCopy]?:[NSMutableDictionary dictionary];opened[SessionKey(machine)]=NSDate.date;[NSUserDefaults.standardUserDefaults setObject:opened forKey:@"VIMLastOpened"];
@@ -695,7 +695,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     BOOL appleSilicon=NO;
     int translated=0;size_t translatedSize=sizeof(translated);
     if(sysctlbyname("sysctl.proc_translated",&translated,&translatedSize,NULL,0)==0&&translated) {
-        if(error)*error=VIMSessionError(@"Open the Apple silicon version of Virtual Intel Mac. The Intel app cannot use hardware virtualization through Rosetta.");
+        if(error)*error=VIMSessionError(@"Open the Apple silicon version of Light Click. The Intel app cannot use hardware virtualization through Rosetta.");
         return NO;
     }
 #endif
@@ -874,7 +874,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
         }
         NSData *json=[NSJSONSerialization dataWithJSONObject:event options:0 error:NULL];
         NSString *line=[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
-        [session.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Lifecycle: %@\n",line] dataUsingEncoding:NSUTF8StringEncoding]];
+        [session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Lifecycle: %@\n",line] dataUsingEncoding:NSUTF8StringEncoding]];
     };
     self.guestAgent=[[VIMGuestAgent alloc] initWithSocketPath:[self.runtimeDirectory stringByAppendingPathComponent:@"guest-agent"]];
     if([@[@"mojave",@"catalina"] containsObject:self.machine.guest])
@@ -962,7 +962,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
             [self cleanUp];return NO;
         }
         researchCPUModel=model;
-        [self.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Research CPU comparison: %@\n",model] dataUsingEncoding:NSUTF8StringEncoding]];
+        [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Research CPU comparison: %@\n",model] dataUsingEncoding:NSUTF8StringEncoding]];
     }
     NSUInteger diskOption=[launchArguments indexOfObject:@"--system-disk-interface"];
     NSString *systemDiskInterface=nil;
@@ -973,7 +973,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
             [self cleanUp];return NO;
         }
         systemDiskInterface=interface;
-        [self.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Development system disk interface: %@\n",interface] dataUsingEncoding:NSUTF8StringEncoding]];
+        [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Development system disk interface: %@\n",interface] dataUsingEncoding:NSUTF8StringEncoding]];
     }
     self.task=[NSTask new];self.task.executableURL=[NSURL fileURLWithPath:qemu];
     // Interactive VM execution is user-initiated work, not a maintenance job.
@@ -1078,8 +1078,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     self.log=[NSFileHandle fileHandleForWritingAtPath:logPath];
     if(!self.log) { if(error)*error=VIMSessionError(@"Could not open the VM session log.");[self cleanUp];return NO; }
     [self.log seekToEndOfFile];self.task.standardOutput=self.log;self.task.standardError=self.log;
-    [self.log writeData:[@"\n[Virtual Intel Mac] Memory ordering: normal runtime barriers\n" dataUsingEncoding:NSUTF8StringEncoding]];
-    [self.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] %@ runtime: %@\n",
+    [self.log writeData:[@"\n[Light Click] Memory ordering: normal runtime barriers\n" dataUsingEncoding:NSUTF8StringEncoding]];
+    [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] %@ runtime: %@\n",
         root.length?@"Development override":@"Bundled",qemu] dataUsingEncoding:NSUTF8StringEncoding]];
     self.task.terminationHandler=^(NSTask *task){dispatch_async(dispatch_get_main_queue(), ^{
         VIMSession *session=weakSelf;if(!session||session.task!=task)return;
@@ -1154,14 +1154,14 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
                     if(error)*error=VIMSessionError(@"The graphics memory connection could not be prepared.");
                     [self.task terminate];[self cleanUp];return NO;
                 }
-                [self.log writeData:[@"\n[Virtual Intel Mac] Shared graphics memory endpoint unavailable; using copied graphics fallback.\n" dataUsingEncoding:NSUTF8StringEncoding]];
+                [self.log writeData:[@"\n[Light Click] Shared graphics memory endpoint unavailable; using copied graphics fallback.\n" dataUsingEncoding:NSUTF8StringEncoding]];
             }
         }
     }
     if([config[@"FileSharingEnabled"] boolValue]&&[VIMNetworkMode(config) isEqual:@"shared"]) {
         self.smbService=[[VIMSMBService alloc] initWithMachine:self.machine port:[config[@"FileSharingPort"] unsignedShortValue]];
         NSError *sharingError=nil;
-        if(![self.smbService start:&sharingError])[self.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] %@\n",sharingError.localizedDescription] dataUsingEncoding:NSUTF8StringEncoding]];
+        if(![self.smbService start:&sharingError])[self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] %@\n",sharingError.localizedDescription] dataUsingEncoding:NSUTF8StringEncoding]];
     }
     [self updateInstallationActivity];
     [self showWindow:nil];[self.window makeKeyAndOrderFront:nil];
@@ -1987,7 +1987,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
         if([@[@"unmanaged",@"unsupported",@"setup-unavailable"] containsObject:phase]){
             [session dismissSetupNotice];
             if([phase isEqual:@"setup-unavailable"])
-                [session.log writeData:[@"\n[Virtual Intel Mac] Automatic OpenGL setup left the current system unchanged; continuing desktop monitoring.\n" dataUsingEncoding:NSUTF8StringEncoding]];
+                [session.log writeData:[@"\n[Light Click] Automatic OpenGL setup left the current system unchanged; continuing desktop monitoring.\n" dataUsingEncoding:NSUTF8StringEncoding]];
             session.openGLDesktopMonitoring=YES;[session refreshGuestStatus];return;
         }
         if([phase isEqual:@"recovery"]){
@@ -2107,7 +2107,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
         VIMSession *session=weakSelf;
         if(session.guestAgent!=agent||!session.task.running)return;
         session.guestPending=NO;
-        if(failure)[session.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Mavericks File Sharing compatibility could not be applied: %@\n",failure]
+        if(failure)[session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Mavericks File Sharing compatibility could not be applied: %@\n",failure]
             dataUsingEncoding:NSUTF8StringEncoding]];
         [session refreshGuestStatus];
     };
@@ -2211,13 +2211,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     self.guestStatus.toolTip=message;
     if(![message isEqual:self.lastGuestMessage]) {
         self.lastGuestMessage=message;
-        [self.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Guest status: %@\n",message] dataUsingEncoding:NSUTF8StringEncoding]];
+        [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Guest status: %@\n",message] dataUsingEncoding:NSUTF8StringEncoding]];
     }
     [self.guestTimer invalidate];
     if(!error&&!self.shutdownRequested&&!self.preparing&&!self.preparationRequested&&!self.relaunchForGraphics) {
         NSError *nativeError=nil;
         if([self.machine prepareNativeBigSurDisplayWithGuestReport:report error:&nativeError]) {
-            [self.log writeData:[@"\n[Virtual Intel Mac] Installed Big Sur has native PVG; switching Setup Assistant to accelerated graphics. Guest patches and installer cleanup remain pending.\n" dataUsingEncoding:NSUTF8StringEncoding]];
+            [self.log writeData:[@"\n[Light Click] Installed Big Sur has native PVG; switching Setup Assistant to accelerated graphics. Guest patches and installer cleanup remain pending.\n" dataUsingEncoding:NSUTF8StringEncoding]];
             [self handoffToGraphics];
             self.guestStatus.stringValue=@"Starting native Big Sur graphics for Setup Assistant…";
             return;
@@ -2272,7 +2272,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
                 VIMSession *session=weakSelf;if(!session.task.running||![session.runtimeDirectory isEqual:runtime])return;
                 session.bootPolicyPending=NO;
                 NSString *message=ready?@"Guest privacy compatibility verified.":failure.localizedDescription;
-                [session.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Boot policy: %@\n",message?:@"Verification did not finish; legacy boot retained."] dataUsingEncoding:NSUTF8StringEncoding]];
+                [session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Boot policy: %@\n",message?:@"Verification did not finish; legacy boot retained."] dataUsingEncoding:NSUTF8StringEncoding]];
                 NSDictionary *policy=[NSDictionary dictionaryWithContentsOfURL:[session.machine.URL URLByAppendingPathComponent:@"State/BootPolicy.plist"]];
                 if(ready&&![report[@"DesktopRunning"] isEqual:@YES]&&
                    [policy[@"RecoveryBootSessionUUID"] isEqual:boot]&&
@@ -2303,7 +2303,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
         NSError *claimError=nil;
         if([self.machine claimAutomaticInstallationWithGuestReport:report error:&claimError]) {
             self.preparationRequested=YES;self.installationRequested=YES;self.automaticInstallation=YES;
-            [self.log writeData:[@"\n[Virtual Intel Mac] macOS setup completed; beginning initial graphics installation.\n" dataUsingEncoding:NSUTF8StringEncoding]];
+            [self.log writeData:[@"\n[Light Click] macOS setup completed; beginning initial graphics installation.\n" dataUsingEncoding:NSUTF8StringEncoding]];
         } else if(claimError)self.guestStatus.stringValue=claimError.localizedDescription;
     }
     if(!error&&boot.length&&[report[@"SetupComplete"] isEqual:@YES])
@@ -2336,10 +2336,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
         NSError *claimError=nil;
         if([self.machine claimAutomaticUpdateRepairWithGuestReport:report error:&claimError]) {
             self.repairRequested=YES;self.verifiedUpdateRepair=YES;
-            [self.log writeData:[@"\n[Virtual Intel Mac] Guest macOS build changed; beginning graphics repair from the updated system files.\n" dataUsingEncoding:NSUTF8StringEncoding]];
+            [self.log writeData:[@"\n[Light Click] Guest macOS build changed; beginning graphics repair from the updated system files.\n" dataUsingEncoding:NSUTF8StringEncoding]];
         } else if(claimError) {
             self.guestStatus.stringValue=claimError.localizedDescription;
-            [self.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Automatic update repair: %@\n",claimError.localizedDescription] dataUsingEncoding:NSUTF8StringEncoding]];
+            [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Automatic update repair: %@\n",claimError.localizedDescription] dataUsingEncoding:NSUTF8StringEncoding]];
         }
     }
     if(self.repairRequested&&!error&&([report[@"DesktopRunning"] isEqual:@YES]||self.verifiedUpdateRepair)&&
@@ -2396,7 +2396,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
                     ([result[@"Phase"] isEqual:@"awaiting-reboot"]?@"Installation status recovered — restart required for graphics verification":
                      [NSString stringWithFormat:@"Installation status: %@",result[@"Phase"]?:@"unknown"]));
                 session.guestStatus.stringValue=message;
-                [session.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Reconciliation: %@\n",message] dataUsingEncoding:NSUTF8StringEncoding]];
+                [session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Reconciliation: %@\n",message] dataUsingEncoding:NSUTF8StringEncoding]];
                 // Console discovery may have completed while this read-only
                 // check held preparing=YES. Resume clipboard provisioning now,
                 // not at the next minute-long desktop status refresh. Do not
@@ -2452,10 +2452,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
                             if(installError) {
                                 BOOL restored=[outcome[@"Phase"] isEqual:@"rolled-back"];
                                 [current.guestProgress updateMode:restored?@"failed":@"working" fraction:restored?0:-1
-                                    message:restored?@"Setup couldn’t finish. The original system files were restored.":@"Setup status couldn’t be confirmed. Keep this Mac running and check Session Details in the Virtual Intel Mac app."
+                                    message:restored?@"Setup couldn’t finish. The original system files were restored.":@"Setup status couldn’t be confirmed. Keep this Mac running and check Session Details in the Light Click app."
                                     completion:nil];
                             }
-                            [current.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Installation: %@\n",result] dataUsingEncoding:NSUTF8StringEncoding]];
+                            [current.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Installation: %@\n",result] dataUsingEncoding:NSUTF8StringEncoding]];
                             current.reconciledBoot=nil;
                             if(!installError&&current.task.running&&
                                [outcome[@"Phase"] isEqual:@"awaiting-reboot"]&&[outcome[@"RebootRequired"] isEqual:@YES]&&
@@ -2482,7 +2482,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
                 NSString *message=failure.localizedDescription?:@"Guest files prepared — installation pending";
                 session.guestStatus.stringValue=message;
                 if(!failure)[session.guestProgress updateMode:@"complete" fraction:1 message:@"Support files are prepared. No system files were installed." completion:nil];
-                [session.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Preparation: %@\n",message] dataUsingEncoding:NSUTF8StringEncoding]];
+                [session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Preparation: %@\n",message] dataUsingEncoding:NSUTF8StringEncoding]];
                 // Explicit request runs once. No automatic retry of uncertain writes.
                 session.guestTimer=[NSTimer scheduledTimerWithTimeInterval:60 repeats:NO block:^(NSTimer *timer){[weakSession refreshGuestStatus];}];
             }];
@@ -2516,7 +2516,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
             // Retry only through the ordinary cold readiness pass. A slow TCG
             // hot-plug must not become an immediate status/selection loop.
             self.displaySelectionRetryAfter=[NSDate dateWithTimeIntervalSinceNow:60];
-            [self.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Initial display selection pending: %@\n",failure.localizedDescription] dataUsingEncoding:NSUTF8StringEncoding]];
+            [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Initial display selection pending: %@\n",failure.localizedDescription] dataUsingEncoding:NSUTF8StringEncoding]];
         } else self.displaySelectionRetryAfter=nil;
     }];
 }
@@ -2548,7 +2548,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
             session.displayView.displaySleeping=YES;session.statePanel.hidden=NO;
             session.stateLabel.stringValue=[session.status.stringValue stringByAppendingString:@". Open Controls → Session Details for more information."];
         }
-        NSData *line=[[NSString stringWithFormat:@"\n[Virtual Intel Mac] QEMU state: %@\n",state] dataUsingEncoding:NSUTF8StringEncoding];
+        NSData *line=[[NSString stringWithFormat:@"\n[Light Click] QEMU state: %@\n",state] dataUsingEncoding:NSUTF8StringEncoding];
         [session.log writeData:line];
     }];
 }
@@ -2820,7 +2820,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     NSMutableArray *protected=[NSMutableArray arrayWithObjects:NSBundle.mainBundle.bundleURL,VIMLibraryLocation.rootURL,nil];
     for(VIMSession *session in sessions.allValues)if(session.machine.URL)[protected addObject:session.machine.URL];
     NSError *failure=nil;NSDictionary *storage=VIMHostUSBStorageInfo(device,protected,&failure);
-    if(!storage||[storage[@"Protected"] boolValue]){VIMPresentError(failure?:VIMSessionError(@"This device contains Virtual Intel Mac, a virtual Mac, or its library and cannot be unmounted. Move those files to another drive first."),self.window);return;}
+    if(!storage||[storage[@"Protected"] boolValue]){VIMPresentError(failure?:VIMSessionError(@"This device contains Light Click, a virtual Mac, or its library and cannot be unmounted. Move those files to another drive first."),self.window);return;}
     void (^connect)(void)=^{
         VIMSession *session=weakSelf;if(!session.task.running)return;
         session.usbOperationPending=YES;
@@ -3083,7 +3083,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
         if(ok){if(powerOnly)session.powerConfiguredBoot=boot;else {session.clipboardFailure=nil;session.clipboardConfiguredBoot=boot;}[bridge awaitGuestHandshake];}
         else {
             NSString *message=[NSString stringWithFormat:@"Guest %@ %@ did not finish.",powerOnly?@"display-power observer":@"clipboard",step];
-            if(![session.clipboardFailure isEqual:message])[session.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] %@\n",message] dataUsingEncoding:NSUTF8StringEncoding]];
+            if(![session.clipboardFailure isEqual:message])[session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] %@\n",message] dataUsingEncoding:NSUTF8StringEncoding]];
             [bridge stop];if(powerOnly)session.powerBridge=nil;else {session.clipboardFailure=message;session.clipboard=nil;}
         }
         // Let the independent clipboard provision after display setup releases
@@ -3262,7 +3262,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     NSString *root=VIMDevelopmentSourceRoot();
     NSString *tool=root.length?[NSDictionary dictionaryWithContentsOfFile:[root stringByAppendingPathComponent:@"Build/RuntimeLocation.plist"]][@"Directory"]:
         [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Runtime/bin"];
-    if(!tool.length){completion(VIMSessionError(@"Open the complete Virtual Intel Mac app to connect disk images."));return;}
+    if(!tool.length){completion(VIMSessionError(@"Open the complete Light Click app to connect disk images."));return;}
     VIMCheckOpticalImage(path,format,[tool stringByAppendingPathComponent:@"qemu-img"],apply);
 }
 - (void)ensureImageDevice:(NSUInteger)slot completion:(void (^)(NSError *))completion {
@@ -3413,7 +3413,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     BOOL repair=[NSFileManager.defaultManager fileExistsAtPath:journal.path];
     NSAlert *alert=[NSAlert new];alert.messageText=repair?@"Repair graphics support?":@"Finish graphics setup?";
     VIMSetInstallerAlertIcon(alert,self.machine.guest);
-    alert.informativeText=repair?@"Save your work first. We’ll check the previous installation, retain its recovery records, and prepare fresh graphics support for this macOS build. Keep this Mac running until repair finishes, then restart it. An unfinished or uncertain installation will not be replaced.":@"Save your work in this Mac first. Virtual Intel Mac will prepare and install its graphics support. This can take several minutes. Keep this Mac running until setup finishes, then shut it down and open it again.";
+    alert.informativeText=repair?@"Save your work first. We’ll check the previous installation, retain its recovery records, and prepare fresh graphics support for this macOS build. Keep this Mac running until repair finishes, then restart it. An unfinished or uncertain installation will not be replaced.":@"Save your work in this Mac first. Light Click will prepare and install its graphics support. This can take several minutes. Keep this Mac running until setup finishes, then shut it down and open it again.";
     [alert addButtonWithTitle:repair?@"Repair":@"Finish Setup"];[alert addButtonWithTitle:@"Cancel"];
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response){
         if(response!=NSAlertFirstButtonReturn||!self.task.running)return;
@@ -3443,7 +3443,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
             // modal alert here can outlive an otherwise successful shutdown.
             self.guestStatus.stringValue=@"The shutdown request couldn’t be confirmed. This Mac may already be shutting down. If it stays on, choose Shut Down inside the virtual Mac, or use Force Stop.";
             self.guestStatus.toolTip=connectionError.localizedDescription;
-            [self.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Shutdown connection: %@\n",connectionError.localizedDescription] dataUsingEncoding:NSUTF8StringEncoding]];
+            [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Shutdown connection: %@\n",connectionError.localizedDescription] dataUsingEncoding:NSUTF8StringEncoding]];
             return;
         }
         [self.guestAgent requestShutdownWithCompletion:^(NSError *error){

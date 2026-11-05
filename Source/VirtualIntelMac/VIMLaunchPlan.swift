@@ -397,7 +397,7 @@ public final class LaunchPlan: NSObject {
             if env["VIM_PASSTHROUGH_OPENGL_INLINE"] == nil { env["VIM_PASSTHROUGH_OPENGL_INLINE"] = "1" }
             if env["VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT"] == nil { env["VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT"] = "1" }
             if env["VIM_DISPLAY_EVENT_DRIVEN"] == nil { env["VIM_DISPLAY_EVENT_DRIVEN"] = "1" }
-            setIfEmpty("VIM_OPENGL_VRAM_SERVICE", "com.mac.virtualintelmac.ram." + input.vramServiceIdentifier)
+            setIfEmpty("VIM_OPENGL_VRAM_SERVICE", "gold.samhenri.LightClick.ram." + input.vramServiceIdentifier)
             setIfEmpty("VIM_OPENGL_VRAM_ENDPOINT", input.runtimeDirectory + "/vram-endpoint.plist")
             setIfEmpty("VIM_OPENGL_DISPLAY_ENDPOINT", input.runtimeDirectory + "/graphics-endpoint.plist")
         }

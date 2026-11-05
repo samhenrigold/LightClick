@@ -3,11 +3,12 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 110;
 	objects = {
 
 /* Begin PBXFileReference section */
-		048FCBA1307E95CF00AECB5D /* Virtual Intel Mac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Virtual Intel Mac.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		048FCBA1307E95CF00AECB5D /* Light Click.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Light Click.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		EA155B00309C391300B82F7C /* Light Click.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Light Click.entitlements"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -30,6 +31,7 @@
 		048FCB98307E95CF00AECB5D = {
 			isa = PBXGroup;
 			children = (
+				EA155B00309C391300B82F7C /* Light Click.entitlements */,
 				048FCBA3307E95CF00AECB5D /* VirtualIntelMac */,
 				048FCBA2307E95CF00AECB5D /* Products */,
 			);
@@ -38,7 +40,7 @@
 		048FCBA2307E95CF00AECB5D /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				048FCBA1307E95CF00AECB5D /* Virtual Intel Mac.app */,
+				048FCBA1307E95CF00AECB5D /* Light Click.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -46,9 +48,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		048FCBA0307E95CF00AECB5D /* Virtual Intel Mac */ = {
+		048FCBA0307E95CF00AECB5D /* Light Click */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 048FCBB0307E95D000AECB5D /* Build configuration list for PBXNativeTarget "Virtual Intel Mac" */;
+			buildConfigurationList = 048FCBB0307E95D000AECB5D /* Build configuration list for PBXNativeTarget "Light Click" */;
 			buildPhases = (
 				048FCB9D307E95CF00AECB5D /* Sources */,
 				048FCB9E307E95CF00AECB5D /* Frameworks */,
@@ -59,9 +61,9 @@
 			fileSystemSynchronizedGroups = (
 				048FCBA3307E95CF00AECB5D /* VirtualIntelMac */,
 			);
-			name = "Virtual Intel Mac";
-			productName = "Virtual Intel Mac";
-			productReference = 048FCBA1307E95CF00AECB5D /* Virtual Intel Mac.app */;
+			name = "Light Click";
+			productName = "Light Click";
+			productReference = 048FCBA1307E95CF00AECB5D /* Light Click.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -71,14 +73,14 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastUpgradeCheck = 2700;
+				LastUpgradeCheck = 2720;
 				TargetAttributes = {
 					048FCBA0307E95CF00AECB5D = {
 						CreatedOnToolsVersion = 27.0;
 					};
 				};
 			};
-			buildConfigurationList = 048FCB9C307E95CF00AECB5D /* Build configuration list for PBXProject "Virtual Intel Mac" */;
+			buildConfigurationList = 048FCB9C307E95CF00AECB5D /* Build configuration list for PBXProject "VirtualIntelMac" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -92,7 +94,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				048FCBA0307E95CF00AECB5D /* Virtual Intel Mac */,
+				048FCBA0307E95CF00AECB5D /* Light Click */,
 			);
 		};
 /* End PBXProject section */
@@ -114,7 +116,7 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
-		048FCBAE307E95D000AECB5D /* Debug configuration for PBXProject "Virtual Intel Mac" */ = {
+		048FCBAE307E95D000AECB5D /* Debug configuration for PBXProject "VirtualIntelMac" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -148,7 +150,9 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = SM75355Y6R;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -167,18 +171,21 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				ARCHS = "arm64 x86_64";
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				__DIAGNOSE_INVALID_DEPLOYMENT_TARGET_AS_ERROR = NO;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
-				ONLY_ACTIVE_ARCH = NO;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lbsm",
+				);
 				SDKROOT = macosx;
-				OTHER_LDFLAGS = "$(inherited) -lbsm";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				__DIAGNOSE_INVALID_DEPLOYMENT_TARGET_AS_ERROR = NO;
 			};
 			name = Debug;
 		};
-		048FCBAF307E95D000AECB5D /* Release configuration for PBXProject "Virtual Intel Mac" */ = {
+		048FCBAF307E95D000AECB5D /* Release configuration for PBXProject "VirtualIntelMac" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -212,7 +219,9 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = SM75355Y6R;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -225,32 +234,38 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				ARCHS = "arm64 x86_64";
-				ONLY_ACTIVE_ARCH = NO;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				__DIAGNOSE_INVALID_DEPLOYMENT_TARGET_AS_ERROR = NO;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = NO;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lbsm",
+				);
 				SDKROOT = macosx;
-				OTHER_LDFLAGS = "$(inherited) -lbsm";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				__DIAGNOSE_INVALID_DEPLOYMENT_TARGET_AS_ERROR = NO;
 			};
 			name = Release;
 		};
-		048FCBB1307E95D000AECB5D /* Debug configuration for PBXNativeTarget "Virtual Intel Mac" */ = {
+		048FCBB1307E95D000AECB5D /* Debug configuration for PBXNativeTarget "Light Click" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon$(VIM_ICON_SUFFIX_$(XCODE_VERSION_MAJOR))";
-				EXCLUDED_SOURCE_FILE_NAMES = "$(inherited) $(VIM_EXCLUDED_ICON_$(XCODE_VERSION_MAJOR))";
-				VIM_ICON_SUFFIX_2600 = 26;
-				VIM_EXCLUDED_ICON_2600 = AppIcon.icon;
-				VIM_EXCLUDED_ICON_2700 = AppIcon26.icon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "Light Click.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 4;
+				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = NO;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"$(inherited)",
+					"$(VIM_EXCLUDED_ICON_$(XCODE_VERSION_MAJOR))",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "VirtualIntelMac-Info.plist";
+				INFOPLIST_FILE = "support/App-Info.plist";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMainNibFile = MainMenu;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Allow your virtual Macs to use this Mac’s microphone when a guest app records audio.";
@@ -261,31 +276,35 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				INFOPLIST_FILE = "support/App-Info.plist";
-				PRODUCT_BUNDLE_IDENTIFIER = com.mac.virtualintelmac;
+				PRODUCT_BUNDLE_IDENTIFIER = gold.samhenri.LightClick;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 6.0;
+				VIM_EXCLUDED_ICON_2600 = AppIcon.icon;
+				VIM_EXCLUDED_ICON_2700 = AppIcon26.icon;
+				VIM_ICON_SUFFIX_2600 = 26;
 			};
 			name = Debug;
 		};
-		048FCBB2307E95D000AECB5D /* Release configuration for PBXNativeTarget "Virtual Intel Mac" */ = {
+		048FCBB2307E95D000AECB5D /* Release configuration for PBXNativeTarget "Light Click" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "AppIcon$(VIM_ICON_SUFFIX_$(XCODE_VERSION_MAJOR))";
-				EXCLUDED_SOURCE_FILE_NAMES = "$(inherited) $(VIM_EXCLUDED_ICON_$(XCODE_VERSION_MAJOR))";
-				VIM_ICON_SUFFIX_2600 = 26;
-				VIM_EXCLUDED_ICON_2600 = AppIcon.icon;
-				VIM_EXCLUDED_ICON_2700 = AppIcon26.icon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "Light Click.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 4;
+				DEAD_CODE_STRIPPING = YES;
 				ENABLE_APP_SANDBOX = NO;
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"$(inherited)",
+					"$(VIM_EXCLUDED_ICON_$(XCODE_VERSION_MAJOR))",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "VirtualIntelMac-Info.plist";
+				INFOPLIST_FILE = "support/App-Info.plist";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMainNibFile = MainMenu;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Allow your virtual Macs to use this Mac’s microphone when a guest app records audio.";
@@ -296,32 +315,34 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				INFOPLIST_FILE = "support/App-Info.plist";
-				PRODUCT_BUNDLE_IDENTIFIER = com.mac.virtualintelmac;
+				PRODUCT_BUNDLE_IDENTIFIER = gold.samhenri.LightClick;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 6.0;
+				VIM_EXCLUDED_ICON_2600 = AppIcon.icon;
+				VIM_EXCLUDED_ICON_2700 = AppIcon26.icon;
+				VIM_ICON_SUFFIX_2600 = 26;
 			};
 			name = Release;
 		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		048FCB9C307E95CF00AECB5D /* Build configuration list for PBXProject "Virtual Intel Mac" */ = {
+		048FCB9C307E95CF00AECB5D /* Build configuration list for PBXProject "VirtualIntelMac" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				048FCBAE307E95D000AECB5D /* Debug configuration for PBXProject "Virtual Intel Mac" */,
-				048FCBAF307E95D000AECB5D /* Release configuration for PBXProject "Virtual Intel Mac" */,
+				048FCBAE307E95D000AECB5D /* Debug configuration for PBXProject "VirtualIntelMac" */,
+				048FCBAF307E95D000AECB5D /* Release configuration for PBXProject "VirtualIntelMac" */,
 			);
 			defaultConfigurationName = Release;
 		};
-		048FCBB0307E95D000AECB5D /* Build configuration list for PBXNativeTarget "Virtual Intel Mac" */ = {
+		048FCBB0307E95D000AECB5D /* Build configuration list for PBXNativeTarget "Light Click" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				048FCBB1307E95D000AECB5D /* Debug configuration for PBXNativeTarget "Virtual Intel Mac" */,
-				048FCBB2307E95D000AECB5D /* Release configuration for PBXNativeTarget "Virtual Intel Mac" */,
+				048FCBB1307E95D000AECB5D /* Debug configuration for PBXNativeTarget "Light Click" */,
+				048FCBB2307E95D000AECB5D /* Release configuration for PBXNativeTarget "Light Click" */,
 			);
 			defaultConfigurationName = Release;
 		};

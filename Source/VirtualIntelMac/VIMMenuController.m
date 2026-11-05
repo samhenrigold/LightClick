@@ -74,8 +74,8 @@
     [self buildGuestMenus:session];
     [self.fileMenu removeAllItems];
     if(!guest) {
-        [self add:@"New Virtual Intel Mac…" action:@selector(newMac:) key:@"n" to:self.fileMenu target:NSApp.delegate];
-        [self add:@"Open Virtual Intel Mac…" action:@selector(openExistingMac:) key:@"o" to:self.fileMenu target:self.library];
+        [self add:@"New Virtual Mac…" action:@selector(newMac:) key:@"n" to:self.fileMenu target:NSApp.delegate];
+        [self add:@"Open Virtual Mac…" action:@selector(openExistingMac:) key:@"o" to:self.fileMenu target:self.library];
         VIMMachine *selected=self.library.selectedMachine;
         if(selected&&self.activeWindow==self.library.view.window) {
             [self.fileMenu addItem:NSMenuItem.separatorItem];

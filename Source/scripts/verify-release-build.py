@@ -156,11 +156,11 @@ def main():
     if shared.exists() and plistlib.loads(shared.read_bytes())['Identity'].upper() != identity:
         raise RuntimeError('Release does not use the shared private-repository identity')
     run('codesign', '--verify', '--deep', '--strict', app)
-    hosts = [app/'Contents/MacOS/Virtual Intel Mac', runtime/'bin/qemu-system-x86_64',
+    hosts = [app/'Contents/MacOS/Light Click', runtime/'bin/qemu-system-x86_64',
              runtime/'bin/qemu-img', runtime/'bin/apple-gfx-helper',
              runtime/'bin/libVIMPassthroughOpenGLHost.dylib',
-             app/'Contents/Library/LaunchServices/com.mac.virtualintelmac.usb-helper',
-             app/'Contents/Library/LaunchServices/com.mac.virtualintelmac.network-helper']
+             app/'Contents/Library/LaunchServices/gold.samhenri.LightClick.usb-helper',
+             app/'Contents/Library/LaunchServices/gold.samhenri.LightClick.network-helper']
     for path in hosts:
         architectures = set(run('lipo', '-archs', path).split())
         expected = {'x86_64'} if path.name == 'apple-gfx-helper' else {'arm64', 'x86_64'}

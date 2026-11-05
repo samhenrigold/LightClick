@@ -42,7 +42,7 @@ static NSDictionary *CommandJSON(NSDictionary *r) {
     NSError *writeError=nil;
     if(error)self.state[@"Failure"]=error.localizedDescription;
     if(receipt)self.state[@"Receipt"]=receipt;
-    if(error)[self.progressUI updateMode:@"failed" fraction:0 message:@"Setup couldn’t finish. Check Session Details in the Virtual Intel Mac app before trying again." completion:nil];
+    if(error)[self.progressUI updateMode:@"failed" fraction:0 message:@"Setup couldn’t finish. Check Session Details in the Light Click app before trying again." completion:nil];
     if(self.state)[self savePhase:error?@"failed":@"prepared" error:&writeError];
     [self releaseSupportMedia:^(NSError *ejectError){self.completion(receipt,error?:writeError?:ejectError);}];
 }

@@ -299,7 +299,7 @@ static VIMNewMachineWindow *creationController;
     NSWindow *window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,872,584)
         styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskFullSizeContentView backing:NSBackingStoreBuffered defer:NO];
     if((self=[super initWithWindow:window])) {
-        window.title=@"Create Virtual Intel Mac";window.titleVisibility=NSWindowTitleHidden;window.titlebarAppearsTransparent=YES;
+        window.title=@"Create Virtual Mac";window.titleVisibility=NSWindowTitleHidden;window.titlebarAppearsTransparent=YES;
         window.releasedWhenClosed=NO;window.delegate=self;
         window.autorecalculatesKeyViewLoop=YES;
         window.backgroundColor=NSColor.windowBackgroundColor;
@@ -618,7 +618,7 @@ static VIMNewMachineWindow *creationController;
     [self sizeAssistantForConfiguration:NO];
     NSView *page=[VIMAssistantPage new];self.choices=page;self.window.contentView=page;
     self.status=self.configurationStatus;
-    NSTextField *title=AssistantText(@"Create Virtual Intel Mac",27,NSFontWeightSemibold);
+    NSTextField *title=AssistantText(@"Create Virtual Mac",27,NSFontWeightSemibold);
     NSImageView *appIcon=[NSImageView imageViewWithImage:NSApp.applicationIconImage];[appIcon.widthAnchor constraintEqualToConstant:48].active=YES;[appIcon.heightAnchor constraintEqualToConstant:48].active=YES;
     NSStackView *heading=[NSStackView stackViewWithViews:@[appIcon,title]];heading.spacing=12;AddAssistantView(page,heading);
     NSTextField *intro=AssistantText(@"Choose a version to run the Intel or PowerPC apps you love and revisit classic Mac designs. Every version supports graphics acceleration.",13,NSFontWeightRegular);intro.alignment=NSTextAlignmentCenter;AddAssistantView(page,intro);

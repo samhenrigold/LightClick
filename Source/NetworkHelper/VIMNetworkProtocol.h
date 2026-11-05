@@ -1,5 +1,5 @@
 #import <Foundation/Foundation.h>
-#define VIM_NETWORK_SERVICE @"com.mac.virtualintelmac.network-helper"
+#define VIM_NETWORK_SERVICE @"gold.samhenri.LightClick.network-helper"
 #define VIM_NETWORK_PROTOCOL 1
 @protocol VIMNetworkHelperProtocol
 - (void)statusWithReply:(void (^)(NSDictionary *))reply;

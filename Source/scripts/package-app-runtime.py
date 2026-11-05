@@ -231,10 +231,10 @@ def main():
     firmware_code, firmware_candidate = quiet_firmware(source, args.qemu, args.firmware_build)
     for guest in ('mojave', 'catalina', 'bigsur'):
         inputs[f'Firmware/{guest}/CODE.fd'] = firmware_code
-    for path in [args.app/'Contents/MacOS/Virtual Intel Mac', args.qemu/'pc-bios', *inputs.values()]:
+    for path in [args.app/'Contents/MacOS/Light Click', args.qemu/'pc-bios', *inputs.values()]:
         if not path.exists():
             parser.error(f'missing input: {path}')
-    require_universal(args.app/'Contents/MacOS/Virtual Intel Mac', (15, 0, 0), exact=True)
+    require_universal(args.app/'Contents/MacOS/Light Click', (15, 0, 0), exact=True)
     for path in [inputs['bin/qemu-system-x86_64'], inputs['bin/qemu-img']]:
         require_universal(path)
     require_macos_11(inputs['bin/apple-gfx-helper'])

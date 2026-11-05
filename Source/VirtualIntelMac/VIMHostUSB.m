@@ -101,7 +101,7 @@ void VIMHostRequestUSBStorageAccess(NSDictionary *device,NSArray<NSURL *> *prote
         NSMutableArray *protected=[NSMutableArray arrayWithObjects:NSBundle.mainBundle.bundleURL,VIMLibraryLocation.rootURL,nil];
         [protected addObjectsFromArray:protectedURLs];
         NSError *failure=nil;NSDictionary *info=VIMHostUSBStorageInfo(device,protected,&failure);
-        if(info&&[info[@"Protected"] boolValue])failure=USBReleaseError(@"This device contains Virtual Intel Mac or its library and cannot be connected. Move those files to another drive first.");
+        if(info&&[info[@"Protected"] boolValue])failure=USBReleaseError(@"This device contains Light Click or its library and cannot be connected. Move those files to another drive first.");
         dispatch_async(dispatch_get_main_queue(),^{
             // A blank, unmounted or recently reset USB drive may have an
             // interface but no IOMedia yet. Consent must not depend on disks.
@@ -131,7 +131,7 @@ void VIMHostRequestUSBStorageAccess(NSDictionary *device,NSArray<NSURL *> *prote
                     BOOL denied=status==kIOReturnNotPermitted||status==kIOReturnNotPrivileged;
                     completion([NSError errorWithDomain:@"VirtualIntelMac.USB" code:status userInfo:@{
                         NSLocalizedDescriptionKey:denied?@"Allow access to this USB drive":@"This Mac couldn’t open the USB interface",
-                        NSLocalizedRecoverySuggestionErrorKey:denied?@"Allow Removable Volumes for Virtual Intel Mac USB Helper in System Settings → Privacy & Security → Files and Folders, then try again.":@"Disconnect it from other virtual machines and close apps using it. If that doesn’t help, unplug the device, reconnect it, and try again. macOS did not report a denied privacy permission."}]);return;
+                        NSLocalizedRecoverySuggestionErrorKey:denied?@"Allow Removable Volumes for Light Click USB Helper in System Settings → Privacy & Security → Files and Folders, then try again.":@"Disconnect it from other virtual machines and close apps using it. If that doesn’t help, unplug the device, reconnect it, and try again. macOS did not report a denied privacy permission."}]);return;
                 }
                 completion(nil);
             }];
@@ -144,7 +144,7 @@ void VIMHostReleaseUSBDisks(NSDictionary *device,NSArray<NSURL *> *protectedURLs
     NSMutableArray *protected=[NSMutableArray arrayWithObject:NSBundle.mainBundle.bundleURL];
     [protected addObject:VIMLibraryLocation.rootURL];[protected addObjectsFromArray:protectedURLs];
     NSError *error=nil;NSDictionary *info=VIMHostUSBStorageInfo(device,protected,&error);
-    if(!info||[info[@"Protected"] boolValue]){completion(error?:USBReleaseError(@"This device contains Virtual Intel Mac or its library and cannot be unmounted. Move the app and library to another drive first."));return;}
+    if(!info||[info[@"Protected"] boolValue]){completion(error?:USBReleaseError(@"This device contains Light Click or its library and cannot be unmounted. Move the app and library to another drive first."));return;}
     NSArray *names=info[@"Disks"];
     if(!names.count){completion(nil);return;}
     VIMUSBRelease *operation=[VIMUSBRelease new];operation.disks=names;operation.force=force;operation.completion=completion;operation.session=DASessionCreate(NULL);

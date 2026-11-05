@@ -4,7 +4,7 @@ set -euo pipefail
 root=${0:A:h:h}
 architecture=${1:-$(uname -m)}
 configuration=${2:-Release}
-objects=("$root/Build/App/Build/Intermediates.noindex/VirtualIntelMac.build/$configuration/Virtual Intel Mac.build/Objects-normal/$architecture/"*.o(N))
+objects=("$root/Build/App/Build/Intermediates.noindex/VirtualIntelMac.build/$configuration/Light Click.build/Objects-normal/$architecture/"*.o(N))
 objects=( ${objects:#*/main.o} )
 (( ${#objects} )) || { print -u2 'Build the app first with Source/Build.command.'; exit 1; }
 mkdir -p "$root/Build/Probes"

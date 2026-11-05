@@ -8446,7 +8446,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -8968,7 +8968,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -9496,7 +9496,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -10274,7 +10274,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -10683,7 +10683,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -10824,7 +10824,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -10965,7 +10965,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -11106,7 +11106,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -12107,7 +12107,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -12613,7 +12613,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -13137,7 +13137,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -13651,7 +13651,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -14177,7 +14177,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -16946,7 +16946,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -18081,7 +18081,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -18222,7 +18222,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -18363,7 +18363,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -18504,7 +18504,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -20866,7 +20866,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -21380,7 +21380,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -21906,7 +21906,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -22420,7 +22420,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -22946,7 +22946,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -23460,7 +23460,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -23986,7 +23986,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -26757,7 +26757,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -27892,7 +27892,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -28033,7 +28033,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -28174,7 +28174,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -28315,7 +28315,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -30181,7 +30181,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"
@@ -30695,7 +30695,7 @@
       "VIM_INSTALLER_DISPLAY_SOCKET" : "/Fixture/run/display",
       "VIM_OPENGL_DISPLAY_ENDPOINT" : "/Fixture/run/graphics-endpoint.plist",
       "VIM_OPENGL_VRAM_ENDPOINT" : "/Fixture/run/vram-endpoint.plist",
-      "VIM_OPENGL_VRAM_SERVICE" : "com.mac.virtualintelmac.ram.FIXED-UUID",
+      "VIM_OPENGL_VRAM_SERVICE" : "gold.samhenri.LightClick.ram.FIXED-UUID",
       "VIM_PASSTHROUGH_OPENGL_INLINE" : "1",
       "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY" : "/Fixture/libHost.dylib",
       "VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT" : "1"

@@ -40,7 +40,7 @@ def finalize(app, destination, receipt, work):
     # with real Unix modes, so installing it for other users remains possible.
     stage = work/'Distribution'
     stage.mkdir(exist_ok=False)
-    release_folder = stage/'Virtual Intel Mac'
+    release_folder = stage/'Light Click'
     release_folder.mkdir(mode=0o755)
     staged_app = release_folder/app.name
     run('/usr/bin/ditto', '--noextattr', '--noacl', app, staged_app)
@@ -57,7 +57,7 @@ def finalize(app, destination, receipt, work):
             path.chmod(0o755 if header in magics or header.startswith(b'#!') else 0o644)
     run('codesign', '--verify', '--deep', '--strict', staged_app)
     # Keep the opening instructions alongside the app, not hidden inside it.
-    instructions = SOURCE/'support/How to Open Virtual Intel Mac.webloc'
+    instructions = SOURCE/'support/How to Open Light Click.webloc'
     if not instructions.is_file():
         raise RuntimeError('The release opening-instructions link is missing')
     staged_instructions = release_folder/instructions.name
@@ -74,7 +74,7 @@ def finalize(app, destination, receipt, work):
         prefix = release_folder.name+'/'
         if (prefix+instructions.name not in names or prefix+app.name+'/Contents/Info.plist' not in names
                 or any(not name.startswith((prefix,'__MACOSX/')) for name in names)):
-            raise RuntimeError('The ZIP must contain one Virtual Intel Mac folder with the app and opening instructions side by side')
+            raise RuntimeError('The ZIP must contain one Light Click folder with the app and opening instructions side by side')
     receipt['ArchiveRootDirectory'] = release_folder.name
     receipt['ArchiveSHA256'] = digest(archive)
     (destination/'ReleaseBuild.plist').write_bytes(plistlib.dumps(receipt))
@@ -150,7 +150,7 @@ def main():
         run(python, source/'scripts/build-guest-firmware.py', '--bootstrap-tools',
             '--configuration', 'RELEASE', '--jobs', args.jobs, env=environment)
         firmware = ['--firmware-build', source/'Build/GuestFirmware/Output-RELEASE']
-    app = args.output/'Virtual Intel Mac.app'
+    app = args.output/'Light Click.app'
     # Full builds recompile guest tools and both IOSurface ABI kexts as well as
     # both QEMU slices, static dependencies and the Intel graphics helper.
     run(python, source/'scripts/build-app', '--configuration', args.configuration,

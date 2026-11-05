@@ -40,7 +40,7 @@ def main():
     source = Path(__file__).resolve().parents[1]
     for path, expected in ((a.qemu_x86, {'x86_64'}), (a.qemu_arm, {'arm64'}),
                            (a.executor, {'x86_64', 'arm64'}),
-                           (a.ui_app/'Contents/MacOS/Virtual Intel Mac', {'x86_64', 'arm64'})):
+                           (a.ui_app/'Contents/MacOS/Light Click', {'x86_64', 'arm64'})):
         if set(run('lipo', '-archs', path).split()) != expected:
             p.error('Unexpected architectures: ' + str(path))
         for line in run('otool', '-arch', 'all', '-L', path).splitlines():
@@ -130,7 +130,7 @@ def main():
             ['git', '-C', str(source), 'diff', 'HEAD'])).hexdigest(),
         'Inputs': {str(path.resolve()): digest(path) for path in (
             a.qemu_x86, a.qemu_arm, a.executor,
-            a.ui_app/'Contents/MacOS/Virtual Intel Mac')},
+            a.ui_app/'Contents/MacOS/Light Click')},
         'ReferenceRuntime': str(runtime.resolve()),
         'ReferenceArtwork': str(a.reference_app.resolve()),
         'UsesCompiledUIAssets': a.use_ui_artwork,

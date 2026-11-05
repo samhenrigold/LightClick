@@ -434,7 +434,7 @@ static bool HFSExtractionProgress(uint64_t completed,uint64_t total,void *contex
     BOOL matches=identifier&&URL.isFileURL&&[URL.pathExtension.lowercaseString isEqual:@"app"]&&[info[@"CFBundleIdentifier"] isEqual:identifier]&&versionMatches;
     if(!matches||!complete)return AssemblyError(error,@"Choose the complete installer app for the selected Mac OS version. This file is a different version or is missing installation files.");
     if(!splitInstaller&&!InstallerPackageImage([support URLByAppendingPathComponent:@"SharedSupport.dmg"]))
-        return AssemblyError(error,@"This Big Sur installer is missing Apple’s signed installation package. Choose a complete installer app, or download a new copy using Virtual Intel Mac.");
+        return AssemblyError(error,@"This Big Sur installer is missing Apple’s signed installation package. Choose a complete installer app, or download a new copy using Light Click.");
     return YES;
 }
 - (void)report:(NSString *)stage {

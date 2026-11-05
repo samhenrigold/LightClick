@@ -47,13 +47,13 @@ NSError *VIMFriendlyDiscImageError(NSString *path,NSError *underlying) {
     if([underlying.domain isEqual:NSPOSIXErrorDomain]&&(underlying.code==ENOENT||underlying.code==ENOTDIR))
         advice=@"The image may have been moved or deleted, or its drive may be disconnected. Reconnect its drive or choose the image at its current location.";
     else if([underlying.domain isEqual:NSPOSIXErrorDomain]&&(underlying.code==EACCES||underlying.code==EPERM))
-        advice=@"Virtual Intel Mac can’t read this image. Choose it again using Connect Image, and allow access if macOS asks.";
+        advice=@"Light Click can’t read this image. Choose it again using Connect Image, and allow access if macOS asks.";
     else if([detail containsString:@"encrypt"]||[detail containsString:@"password"])
         advice=@"Password-protected disk images can’t be connected to a virtual Mac. Choose an unencrypted image instead.";
     else if([detail containsString:@"no free ports"]||[detail containsString:@"not found (in use?)"])
         advice=@"This virtual Mac’s USB ports are in use. Disconnect another image or USB device, then try again.";
     else if([detail containsString:@"xz"]||[detail containsString:@"lzma"]||[detail containsString:@"not supported"]||[detail containsString:@"unsupported"])
-        advice=@"This image uses a disk format or compression method that Virtual Intel Mac can’t read. Choose an ISO, CDR, or a DMG saved as read-only or zlib compressed. No conversion was attempted, and your original image hasn’t been changed.";
+        advice=@"This image uses a disk format or compression method that Light Click can’t read. Choose an ISO, CDR, or a DMG saved as read-only or zlib compressed. No conversion was attempted, and your original image hasn’t been changed.";
     return [NSError errorWithDomain:@"VirtualIntelMac.DiscImage" code:2 userInfo:@{
         NSLocalizedDescriptionKey:[NSString stringWithFormat:@"“%@” couldn’t be connected",path.lastPathComponent],
         NSLocalizedRecoverySuggestionErrorKey:advice,NSUnderlyingErrorKey:underlying}];

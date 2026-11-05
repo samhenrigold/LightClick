@@ -63,7 +63,7 @@ static NSError *VIMDisplayError(NSString *message) {
     mach_port_t port=MACH_PORT_NULL;
     kern_return_t kr=mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE,&port);
     if(!kr)kr=mach_port_insert_right(mach_task_self(),port,port,MACH_MSG_TYPE_MAKE_SEND);
-    NSString *name=[@"com.mac.virtualintelmac.surface." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSString *name=[@"gold.samhenri.LightClick.surface." stringByAppendingString:NSUUID.UUID.UUIDString];
     if(!kr)kr=bootstrap_register(bootstrap_port,(char *)name.UTF8String,port);
     if(kr){
         if(port)mach_port_destroy(mach_task_self(),port);
@@ -128,7 +128,7 @@ static NSError *VIMDisplayError(NSString *message) {
     NSAssert(NSThread.isMainThread, @"Main-thread lifecycle");
     if (!(self = [super init])) return nil;
     _peer = -1; _lock = [NSLock new]; _view = view; _failure = [failure copy];
-    _writer = dispatch_queue_create("com.mac.virtualintelmac.display.requests", DISPATCH_QUEUE_SERIAL);
+    _writer = dispatch_queue_create("gold.samhenri.LightClick.display.requests", DISPATCH_QUEUE_SERIAL);
     // Short path avoids sockaddr_un's 104-byte limit even with long home paths.
     char directory[] = "/tmp/vim-display.XXXXXX";
     if (!mkdtemp(directory)) {

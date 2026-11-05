@@ -7,7 +7,7 @@ if (( $# != 2 )); then
 fi
 app=${1:A}
 machine=${2:A}
-[[ -x "$app/Contents/MacOS/Virtual Intel Mac" && -f "$machine/Machine.plist" ]] || {
+[[ -x "$app/Contents/MacOS/Light Click" && -f "$machine/Machine.plist" ]] || {
     print -u2 'The app or virtual Mac package is missing.'; exit 66
 }
 [[ $(/usr/libexec/PlistBuddy -c 'Print :Guest' "$machine/Machine.plist") == mavericks ]] || {

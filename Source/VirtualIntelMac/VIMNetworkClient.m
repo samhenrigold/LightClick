@@ -46,7 +46,7 @@ static void InstallNetworkHelper(BOOL terminal,void (^completion)(NSError *)) {
     [self.connection resume];
 }
 - (void)startMode:(NSString *)mode bridge:(NSString *)bridge completion:(void (^)(NSError *))completion {
-    if(!NSBundle.mainBundle.infoDictionary[@"VIMNetworkHelperSourceHash"]){completion(VIMNetworkError(@"This app is missing its networking helper. Open the complete Virtual Intel Mac app."));return;}
+    if(!NSBundle.mainBundle.infoDictionary[@"VIMNetworkHelperSourceHash"]){completion(VIMNetworkError(@"This app is missing its networking helper. Open the complete Light Click app."));return;}
     [self connect];[self check:^(BOOL ready){
         if(self.stopped){completion(VIMNetworkError(@"Network setup was cancelled."));return;}
         if(ready){[self beginMode:mode bridge:bridge completion:completion];return;}

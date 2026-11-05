@@ -183,7 +183,7 @@ static int USBWrite(void *context,uint8_t *bytes,int count) {
     if(!handle){if(!failure)failure=VIMUSBError(@"The USB device disappeared before it could be connected.");goto finished;}
     // usbredirhost takes ownership, including on failure. Its normal Darwin
     // libusb capture path runs here as root, never inside the emulator.
-    host=usbredirhost_open(usb,handle,USBLog,USBRead,USBWrite,(__bridge void *)self,"Virtual Intel Mac USB",
+    host=usbredirhost_open(usb,handle,USBLog,USBRead,USBWrite,(__bridge void *)self,"Light Click USB",
         self.traceStorageMetadata?usbredirparser_info:usbredirparser_warning,
         self.traceStorageMetadata?usbredirhost_fl_scsi_metadata:0);handle=NULL;
     if(!host){failure=VIMUSBError([NSString stringWithFormat:@"This Mac could not release the USB device. %@%@",self.transportFailure?:@"",self.backendFailure?[@" " stringByAppendingString:self.backendFailure]:@""]);goto finished;}

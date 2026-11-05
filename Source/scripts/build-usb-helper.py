@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from usb_dependency_state import usb_inputs_hash
 import build_freshness as freshness
 
-LABEL = 'com.mac.virtualintelmac.usb-helper'
+LABEL = 'gold.samhenri.LightClick.usb-helper'
 
 
 def static_archive_hash(path):
@@ -57,7 +57,7 @@ def build(source, app, identity, dependencies=None, kind='usb'):
     identity = resolve_identity(source, identity)
     if kind not in ('usb', 'network'):
         raise ValueError('Unknown privileged service')
-    label = LABEL if kind == 'usb' else 'com.mac.virtualintelmac.network-helper'
+    label = LABEL if kind == 'usb' else 'gold.samhenri.LightClick.network-helper'
     folder = source/('USBHelper' if kind == 'usb' else 'NetworkHelper')
     token = kind.upper()
     if identity == '-' or not identity:
@@ -108,7 +108,7 @@ def build(source, app, identity, dependencies=None, kind='usb'):
             f'#define VIM_{token}_CLIENT_REQUIREMENT @'+json.dumps(client_requirement)+'\n'
             f'#define VIM_{token}_SOURCE_HASH @'+json.dumps(source_hash)+'\n')
         helper_info = {
-            'CFBundleIdentifier': label, 'CFBundleName': 'Virtual Intel Mac '+kind.title()+' Helper',
+            'CFBundleIdentifier': label, 'CFBundleName': 'Light Click '+kind.title()+' Helper',
             'CFBundleVersion': version, 'CFBundleShortVersionString': '1.0',
             'SMAuthorizedClients': [client_requirement],
         }

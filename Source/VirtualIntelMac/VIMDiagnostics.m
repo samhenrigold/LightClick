@@ -49,7 +49,7 @@ static BOOL WriteRecord(NSDictionary *record,NSURL *URL,NSError **error) {
 @implementation VIMDiagnostics
 + (void)exportFromWindow:(NSWindow *)window {
     NSSavePanel *panel=[NSSavePanel savePanel];panel.title=@"Export Diagnostics";
-    panel.nameFieldStringValue=@"Virtual Intel Mac Diagnostics.zip";
+    panel.nameFieldStringValue=@"Light Click Diagnostics.zip";
     panel.message=@"Includes app and virtual Mac configuration summaries and recent logs. Review the archive before sharing it.";
     panel.allowedFileTypes=@[@"zip"];panel.canCreateDirectories=YES;
     NSURL *library=VIMLibraryLocation.machinesURL;
@@ -71,7 +71,7 @@ static BOOL WriteRecord(NSDictionary *record,NSURL *URL,NSError **error) {
 + (BOOL)writeArchiveToURL:(NSURL *)destination library:(NSURL *)library error:(NSError **)outError {
             NSFileManager *fm=NSFileManager.defaultManager;NSError *error=nil;
             NSURL *temporary=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] isDirectory:YES];
-            NSURL *folder=[temporary URLByAppendingPathComponent:@"Virtual Intel Mac Diagnostics" isDirectory:YES];
+            NSURL *folder=[temporary URLByAppendingPathComponent:@"Light Click Diagnostics" isDirectory:YES];
             if([fm createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:&error]) {
                 NSDictionary *info=NSBundle.mainBundle.infoDictionary;
 #if defined(__arm64__)

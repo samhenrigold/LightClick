@@ -35,7 +35,7 @@ static BOOL PrepareRoot(NSURL *root,NSURL *previousRoot,NSError **error) {
     int lock=open([root URLByAppendingPathComponent:@".LibraryLayout.lock"].fileSystemRepresentation,O_CREAT|O_RDWR|O_NOFOLLOW|O_CLOEXEC,0600);
     struct stat info;
     if(lock<0||fstat(lock,&info)||!S_ISREG(info.st_mode)||info.st_nlink!=1||flock(lock,LOCK_EX|LOCK_NB)) {
-        if(lock>=0)close(lock);return LocationError(error,EBUSY,@"Another copy of Virtual Intel Mac is organizing this library. Try again after it finishes.");
+        if(lock>=0)close(lock);return LocationError(error,EBUSY,@"Another copy of Light Click is organizing this library. Try again after it finishes.");
     }
     NSMutableArray<NSNumber *> *locks=[NSMutableArray new];
     BOOL (^finish)(BOOL)=^BOOL(BOOL result){for(NSNumber *fd in locks)close(fd.intValue);close(lock);return result;};
@@ -160,7 +160,7 @@ static BOOL PrepareRoot(NSURL *root,NSURL *previousRoot,NSError **error) {
 + (NSURL *)currentURL { return self.rootURL; }
 + (NSURL *)defaultURL {
     NSURL *support=[NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
-    return [support URLByAppendingPathComponent:@"Virtual Intel Mac" isDirectory:YES];
+    return [support URLByAppendingPathComponent:@"Light Click" isDirectory:YES];
 }
 + (BOOL)prepareLayout:(NSError **)error {
     // Create the standard library even when the user currently uses an external

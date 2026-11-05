@@ -104,7 +104,7 @@
     NSString *hostNotice=VIMHostUpdateNotice(NSProcessInfo.processInfo.operatingSystemVersion);
     if(hostNotice) {
         NSAlert *alert=[NSAlert new];alert.messageText=hostNotice;
-        alert.informativeText=@"Check the Virtual Intel Mac releases page for a version compatible with this Mac.";
+        alert.informativeText=@"Check the Light Click releases page for a version compatible with this Mac.";
         [alert addButtonWithTitle:@"Check for Updates"];[alert addButtonWithTitle:@"Quit"];
         VIMPresentAlert(alert,nil,^(NSModalResponse response){
             if(response==NSAlertFirstButtonReturn)[NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://github.com/nfzerox/VirtualIntelMacOnAppleSilicon/releases"]];
@@ -123,7 +123,7 @@
         backing:NSBackingStoreBuffered defer:NO];
     self.window.releasedWhenClosed = NO;
     self.libraryController = [VIMLibraryViewController new];
-    self.window.title = @"Virtual Intel Mac Library";
+    self.window.title = @"Light Click Library";
     self.window.excludedFromWindowsMenu=YES;
     self.window.collectionBehavior=(self.window.collectionBehavior&~(NSWindowCollectionBehaviorFullScreenPrimary|NSWindowCollectionBehaviorFullScreenAuxiliary))|NSWindowCollectionBehaviorFullScreenNone;
     self.window.contentViewController = self.libraryController;
@@ -143,7 +143,7 @@
         action:@selector(checkForUpdates:) keyEquivalent:@""];
     check.target = self; [appMenu insertItem:check atIndex:MIN(2, appMenu.numberOfItems)];
     NSMenu *help = [[NSMenu alloc] initWithTitle:@"Help"];
-    [help addItemWithTitle:@"Virtual Intel Mac Project" action:@selector(visitProject:) keyEquivalent:@""].target = self;
+    [help addItemWithTitle:@"Light Click Project" action:@selector(visitProject:) keyEquivalent:@""].target = self;
     [help addItemWithTitle:@"Get Help from Community" action:@selector(reportIssue:) keyEquivalent:@""].target = self;
     [help addItemWithTitle:@"Report an Issue…" action:@selector(reportIssue:) keyEquivalent:@""].target = self;
     NSMenuItem *helpItem = nil;
@@ -229,8 +229,8 @@
     }
     int translated=0;size_t translatedSize=sizeof(translated);
     if(sysctlbyname("sysctl.proc_translated",&translated,&translatedSize,NULL,0)==0&&translated) {
-        NSAlert *alert=[NSAlert new];alert.messageText=@"Turn off Rosetta for Virtual Intel Mac";
-        alert.informativeText=@"Virtual Intel Mac needs to run natively on this Apple silicon Mac. Quit the app, select it in Finder, and choose File → Get Info. Turn off “Open using Rosetta”, then open the app again.";
+        NSAlert *alert=[NSAlert new];alert.messageText=@"Turn off Rosetta for Light Click";
+        alert.informativeText=@"Light Click needs to run natively on this Apple silicon Mac. Quit the app, select it in Finder, and choose File → Get Info. Turn off “Open using Rosetta”, then open the app again.";
         [alert addButtonWithTitle:@"Show in Finder"];[alert addButtonWithTitle:@"Not Now"];
         VIMPresentAlert(alert,NSApp.mainWindow,^(NSModalResponse response){if(response==NSAlertFirstButtonReturn)[NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[NSBundle.mainBundle.bundleURL]];});
     }
@@ -291,7 +291,7 @@
     for(NSURL *URL in URLs) {
         NSError *error=nil;
         if(!URL.isFileURL||![URL.pathExtension.lowercaseString isEqual:@"vintelmac"]) {
-            error=[NSError errorWithDomain:@"VirtualIntelMac.Documents" code:1 userInfo:@{NSLocalizedDescriptionKey:@"Choose a Virtual Intel Mac package (.vintelmac)."}];
+            error=[NSError errorWithDomain:@"VirtualIntelMac.Documents" code:1 userInfo:@{NSLocalizedDescriptionKey:@"Choose a virtual Mac package (.vintelmac)."}];
         } else {
             [self.libraryController registerPackageURL:URL];
             VIMMachine *machine=[VIMMachine loadURL:URL error:&error];
@@ -407,11 +407,11 @@
 - (void)exportDiagnostics:(id)sender {[VIMDiagnostics exportFromWindow:self.settingsWindow];}
 - (void)showAbout:(id)sender {
     NSMutableParagraphStyle *paragraph=[NSMutableParagraphStyle new];paragraph.alignment=NSTextAlignmentCenter;paragraph.paragraphSpacing=5;
-    NSMutableAttributedString *credits=[[NSMutableAttributedString alloc] initWithString:@"Created by nfzerox\nProject on GitHub"
+    NSMutableAttributedString *credits=[[NSMutableAttributedString alloc] initWithString:@"Based on Virtual Intel Mac by nfzerox\nProject on GitHub"
         attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:12],NSForegroundColorAttributeName:NSColor.labelColor,NSParagraphStyleAttributeName:paragraph}];
     [credits addAttribute:NSLinkAttributeName value:[NSURL URLWithString:@"https://github.com/nfzerox"] range:[credits.string rangeOfString:@"nfzerox"]];
-    [credits addAttribute:NSLinkAttributeName value:[NSURL URLWithString:@"https://github.com/nfzerox/VirtualIntelMacOnAppleSilicon"] range:[credits.string rangeOfString:@"Project on GitHub"]];
-    [NSApp orderFrontStandardAboutPanelWithOptions:@{NSAboutPanelOptionApplicationName:@"Virtual Intel Mac",NSAboutPanelOptionCredits:credits}];
+    [credits addAttribute:NSLinkAttributeName value:[NSURL URLWithString:@"https://github.com/samhenrigold/LightClick"] range:[credits.string rangeOfString:@"Project on GitHub"]];
+    [NSApp orderFrontStandardAboutPanelWithOptions:@{NSAboutPanelOptionApplicationName:@"Light Click",NSAboutPanelOptionCredits:credits}];
 }
 - (void)updateResultChanged:(NSNotification *)notification {
     self.updateResult.stringValue=[NSUserDefaults.standardUserDefaults stringForKey:@"VIMLastUpdateResult"]?:@"";
@@ -434,10 +434,10 @@
     if (enabled) [self.updateChecker checkManually:NO];
 }
 - (void)visitProject:(id)sender {
-    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://github.com/nfzerox/VirtualIntelMacOnAppleSilicon"]];
+    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://github.com/samhenrigold/LightClick"]];
 }
 - (void)reportIssue:(id)sender {
-    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://github.com/nfzerox/VirtualIntelMacOnAppleSilicon/issues?q=is%3Aissue"]];
+    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://github.com/samhenrigold/LightClick/issues?q=is%3Aissue"]];
 }
 
 

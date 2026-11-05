@@ -25,7 +25,7 @@ static NSError *VIMQMPError(NSString *message) {
 - (instancetype)initWithSocketPath:(NSString *)path {
     if ((self=[super init])) {
         _path=[path copy]; _descriptor=-1; _lock=[NSLock new]; _buffer=[NSMutableData data];
-        _queue=dispatch_queue_create("com.mac.virtualintelmac.control",DISPATCH_QUEUE_SERIAL);
+        _queue=dispatch_queue_create("gold.samhenri.LightClick.control",DISPATCH_QUEUE_SERIAL);
     }
     return self;
 }
