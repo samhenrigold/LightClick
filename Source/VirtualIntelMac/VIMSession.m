@@ -235,7 +235,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     }
     return menu;
 }
-// NSMenuToolbarItem/NSToolbarItemGroup copy menus while constructing their
+// NSMenuToolbarItem copies menus while constructing its
 // controls. NSMenu does not retain/copy its delegate contract for us. Preserve
 // the logical kind and delegate so these copies stay live, not boot snapshots.
 @interface VIMLiveDeviceMenu : NSMenu
@@ -491,17 +491,15 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     toolbar.displayMode = NSToolbarDisplayModeIconOnly;
     toolbar.allowsUserCustomization = NO;
     self.window.toolbar = toolbar;
-    self.window.toolbarStyle = NSWindowToolbarStyleUnifiedCompact;
-}
-- (BOOL)deviceToolbarExpanded {
-    NSString *key = [@"VIMExpandedToolbar-" stringByAppendingString:SessionKey(self.machine)];
-    NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:key];
-    return saved ? saved.boolValue : YES;
+    self.window.toolbarStyle = NSWindowToolbarStyleUnified;
 }
 - (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar {
-    if (![self deviceToolbarExpanded])
-        return @[ NSToolbarFlexibleSpaceItemIdentifier, @"GuestExpand", @"GuestSettings" ];
-    return @[ NSToolbarFlexibleSpaceItemIdentifier, @"GuestDevices", @"GuestExpand", @"GuestSettings" ];
+    // SDL device selection is currently next-start only. Keep it in Sound
+    // settings, not among controls that imply a live device change.
+    return @[
+        NSToolbarFlexibleSpaceItemIdentifier, @"GuestApps", @"GuestCPU", @"GuestUSB", @"GuestOptical", @"GuestNetwork",
+        @"GuestSharing", @"GuestControls", @"GuestSettings"
+    ];
 }
 - (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
     return [self toolbarDefaultItemIdentifiers:toolbar];
@@ -509,34 +507,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (NSToolbarItem *)toolbar:(NSToolbar *)toolbar
         itemForItemIdentifier:(NSToolbarItemIdentifier)identifier
     willBeInsertedIntoToolbar:(BOOL)insert {
-    if ([identifier isEqual:@"GuestDevices"]) {
-        NSToolbarItemGroup *group = [[NSToolbarItemGroup alloc] initWithItemIdentifier:identifier];
-        group.label = @"Devices";
-        group.controlRepresentation = NSToolbarItemGroupControlRepresentationExpanded;
-        group.bordered = YES;
-        group.selectionMode = NSToolbarItemGroupSelectionModeMomentary;
-        NSMutableArray *items = [NSMutableArray new];
-        // SDL device selection is currently next-start only. Keep it in Sound
-        // settings, not among controls that imply a live device change.
-        for (NSString *child in @[
-                 @"GuestApps", @"GuestCPU", @"GuestUSB", @"GuestOptical", @"GuestNetwork", @"GuestSharing",
-                 @"GuestControls"
-             ])
-            [items addObject:[self toolbar:toolbar itemForItemIdentifier:child willBeInsertedIntoToolbar:NO]];
-        group.subitems = items;
-        return group;
-    }
-    if ([identifier isEqual:@"GuestExpand"]) {
-        BOOL expanded = [self deviceToolbarExpanded];
-        NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:identifier];
-        item.label = expanded ? @"Hide Devices" : @"Show Devices";
-        item.toolTip = item.label;
-        item.image = [NSImage imageWithSystemSymbolName:expanded ? @"chevron.left" : @"chevron.down"
-                               accessibilityDescription:item.label];
-        item.target = self;
-        item.action = @selector(toggleDeviceToolbar:);
-        return item;
-    }
     NSDictionary *devices = @{
         @"GuestApps" : @[ @"Download Apps…", @"appstore", @"downloadApps:" ],
         @"GuestCPU" : @[ @"CPU & Memory", @"cpu", @"showCPUSettings:" ],
@@ -4487,12 +4457,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 }
 - (void)refreshUSBToolbar:(NSNotification *)notification {
     for (NSToolbarItem *top in self.window.toolbar.items) {
-        NSArray *items = [top isKindOfClass:NSToolbarItemGroup.class] ? [(NSToolbarItemGroup *)top subitems] : @[ top ];
-        for (NSToolbarItem *item in items)
-            if ([item.itemIdentifier isEqual:@"GuestUSB"] && [item isKindOfClass:NSMenuToolbarItem.class])
-                [self populateUSBMenu:((NSMenuToolbarItem *)item).menu];
-        // Replacing the group while AppKit is dismissing its pull-down can
-        // leave the selected segment drawn as pressed. Update its menu in place.
+        if ([top.itemIdentifier isEqual:@"GuestUSB"] && [top isKindOfClass:NSMenuToolbarItem.class])
+            [self populateUSBMenu:((NSMenuToolbarItem *)top).menu];
     }
 }
 /// Lists host devices; a checkmark means the device is connected to the guest.
@@ -5248,11 +5214,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     } else
         [self setNetworkConnected:connected machine:machine completion:completion];
     [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
-}
-- (void)toggleDeviceToolbar:(id)sender {
-    NSString *key = [@"VIMExpandedToolbar-" stringByAppendingString:SessionKey(self.machine)];
-    [NSUserDefaults.standardUserDefaults setBool:![self deviceToolbarExpanded] forKey:key];
-    [self installWindowControls:self.task.running];
 }
 - (void)downloadApps:(id)sender {
     NSString *version = @"";

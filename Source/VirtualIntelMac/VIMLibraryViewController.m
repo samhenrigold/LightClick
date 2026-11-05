@@ -348,7 +348,7 @@ static NSString *VIMLibraryResources(VIMMachine *machine) {
     self.view.window.title = @"Light Click Library";
     self.view.window.titleVisibility = NSWindowTitleVisible;
     self.view.window.toolbar = toolbar;
-    self.view.window.toolbarStyle = NSWindowToolbarStyleUnifiedCompact;
+    self.view.window.toolbarStyle = NSWindowToolbarStyleUnified;
     self.view.window.tabbingMode = NSWindowTabbingModeDisallowed;
     [self sizeLibraryWindow];
     [self updateLibraryVisibility];

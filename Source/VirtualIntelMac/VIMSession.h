@@ -63,7 +63,6 @@ NS_ASSUME_NONNULL_BEGIN
 - (IBAction)showSSHSettings:(id)sender;
 - (IBAction)showKeyboardSettings:(id)sender;
 - (IBAction)sendForceQuitKey:(id)sender;
-- (IBAction)toggleDeviceToolbar:(id)sender;
 - (IBAction)downloadApps:(id)sender;
 - (IBAction)chooseOpticalMedia:(id)sender;
 - (IBAction)ejectOpticalMedia:(id)sender;
