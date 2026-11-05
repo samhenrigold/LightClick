@@ -133,6 +133,8 @@ try:
                 if line.startswith('#') or len(parts) != 3:
                     continue
                 value = float(parts[1])
+                if parts[0] == 'largecode_cold' and parts[0] in best:
+                    continue  # code from the first run is no longer cold
                 if parts[0] not in best:
                     order.append(parts[0])
                     best[parts[0]] = (value, parts[2])
