@@ -8,4 +8,20 @@
 <key>NSExceptionAllowsInsecureHTTPLoads</key><true/>
 <key>NSIncludesSubdomains</key><false/>
 </dict></dict></dict>
+    <key>NSRemovableVolumesUsageDescription</key><string>Allow a USB drive you choose to be connected to your virtual Mac instead of this Mac.</string>
+    <key>CFBundleDocumentTypes</key><array><dict>
+        <key>CFBundleTypeName</key><string>Light Click</string>
+        <key>CFBundleTypeRole</key><string>Editor</string>
+        <key>LSHandlerRank</key><string>Owner</string>
+        <key>LSItemContentTypes</key><array><string>gold.samhenri.LightClick.machine</string></array>
+        <key>LSTypeIsPackage</key><true/>
+    </dict></array>
+    <key>UTExportedTypeDeclarations</key><array><dict>
+        <key>UTTypeIdentifier</key><string>gold.samhenri.LightClick.machine</string>
+        <key>UTTypeDescription</key><string>Light Click</string>
+        <key>UTTypeConformsTo</key><array><string>com.apple.package</string></array>
+        <key>UTTypeTagSpecification</key><dict>
+            <key>public.filename-extension</key><array><string>vintelmac</string></array>
+        </dict>
+    </dict></array>
 </dict></plist>

@@ -40,9 +40,7 @@ def finalize(app, destination, receipt, work):
     # with real Unix modes, so installing it for other users remains possible.
     stage = work/'Distribution'
     stage.mkdir(exist_ok=False)
-    release_folder = stage/'Light Click'
-    release_folder.mkdir(mode=0o755)
-    staged_app = release_folder/app.name
+    staged_app = stage/app.name
     run('/usr/bin/ditto', '--noextattr', '--noacl', app, staged_app)
     magics = (b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf', b'\xcf\xfa\xed\xfe',
               b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xfe\xed\xfa\xce')
@@ -56,14 +54,7 @@ def finalize(app, destination, receipt, work):
                 header = file.read(4)
             path.chmod(0o755 if header in magics or header.startswith(b'#!') else 0o644)
     run('codesign', '--verify', '--deep', '--strict', staged_app)
-    # Keep the opening instructions alongside the app, not hidden inside it.
-    instructions = SOURCE/'support/How to Open Light Click.webloc'
-    if not instructions.is_file():
-        raise RuntimeError('The release opening-instructions link is missing')
-    staged_instructions = release_folder/instructions.name
-    shutil.copyfile(instructions, staged_instructions)
-    staged_instructions.chmod(0o644)
-    archive = destination/'VirtualIntelMac.zip'
+    archive = destination/'LightClick.zip'
     if archive.exists():
         raise RuntimeError('Refusing to overwrite an existing release ZIP')
     run('/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', stage, archive)
@@ -71,11 +62,8 @@ def finalize(app, destination, receipt, work):
     import zipfile
     with zipfile.ZipFile(archive) as packaged:
         names = packaged.namelist()
-        prefix = release_folder.name+'/'
-        if (prefix+instructions.name not in names or prefix+app.name+'/Contents/Info.plist' not in names
-                or any(not name.startswith((prefix,'__MACOSX/')) for name in names)):
-            raise RuntimeError('The ZIP must contain one Light Click folder with the app and opening instructions side by side')
-    receipt['ArchiveRootDirectory'] = release_folder.name
+        if app.name+'/Contents/Info.plist' not in names or any(not name.startswith((app.name+'/','__MACOSX/')) for name in names):
+            raise RuntimeError('The ZIP must contain just the app')
     receipt['ArchiveSHA256'] = digest(archive)
     (destination/'ReleaseBuild.plist').write_bytes(plistlib.dumps(receipt))
     (destination/'SHA256SUMS').write_text(receipt['ArchiveSHA256']+'  '+archive.name+'\n')

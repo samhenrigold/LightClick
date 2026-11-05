@@ -234,7 +234,7 @@ if not args.ui_only:
 derived = source/'Build/App'
 log = source/'Build/build-app.log'
 log.parent.mkdir(parents=True, exist_ok=True)
-command = ['xcodebuild', '-project', str(source/'VirtualIntelMac.xcodeproj'),
+command = ['xcodebuild', '-project', str(source/'LightClick.xcodeproj'),
            '-scheme', 'Light Click', '-configuration', args.configuration,
            '-derivedDataPath', str(derived), 'CODE_SIGNING_ALLOWED=NO',
            'ARCHS=arm64 x86_64', 'ONLY_ACTIVE_ARCH=NO',
@@ -251,7 +251,7 @@ app_info = plistlib.loads((app/'Contents/Info.plist').read_bytes())
 if app_info.get('LSMinimumSystemVersion') != '15.0':
     sys.exit('Build refused: the main app must target macOS 15.0; runtime dependencies remain macOS 11.0.')
 icon_name = app_info.get('CFBundleIconName')
-if (icon_name not in ('AppIcon', 'AppIcon26')
+if (icon_name != 'AppIcon'
         or not (app/'Contents/Resources'/(icon_name+'.icns')).is_file()):
     sys.exit('Build refused: compile the toolchain-selected Icon Composer source as the app icon.')
 # Xcode's incremental resource phase can retain removed resources. Never carry

@@ -159,7 +159,7 @@ def main():
     args.signing_identity = resolve_identity(source, args.signing_identity)
     app_info = plistlib.loads((args.app/'Contents/Info.plist').read_bytes())
     icon_name = app_info.get('CFBundleIconName')
-    if (icon_name not in ('AppIcon', 'AppIcon26')
+    if (icon_name != 'AppIcon'
             or not (args.app/'Contents/Resources'/(icon_name+'.icns')).is_file()
             or any((args.app/'Contents/Resources'/name).exists() for name in ('VirtualIntelMac.icns','FolderIcon.icns'))):
         parser.error('Build the app with its Icon Composer icon and no legacy ICNS overrides before packaging.')
