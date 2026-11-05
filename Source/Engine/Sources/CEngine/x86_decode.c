@@ -598,8 +598,18 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
                 MODRM();
                 in->op = OP_MOVBE;
                 in->to_reg = false;
+            } else if (mand == 0x66 && ((opc == 0x38 && p[0] <= 0x1E) || (opc == 0x3A && p[0] == 0x0F))) {
+                // SSSE3. macOS compilers assume it for x86_64, so real binaries contain it.
+                bool imm = opc == 0x3A;
+                opc = *p++;
+                SSE_FORM();
+                in->sub = imm ? 2 : 1;
+                if (imm) {
+                    in->has_imm = true;
+                    in->imm = *p++;
+                }
             } else
-                BADUD("SSSE3/SSE4 opcode map (not advertised)");
+                BADUD("SSE4 opcode map (not advertised)");
         } else if (opc >= 0x40 && opc <= 0x4F) {
             MODRM();
             in->op = OP_CMOV;

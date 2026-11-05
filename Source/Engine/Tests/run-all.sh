@@ -23,6 +23,7 @@ check_same corpus-O1 t_corpus_O1
 check_same corpus-O2 t_corpus_O2
 check_same corpus-O3 t_corpus_O3
 check_same corpus-Os t_corpus_Os
+check_same corpus-ssse3 t_corpus_ssse3
 check_same fuzz fuzz
 ENGINE_FAST_FLAGS=1 check_same fuzz-fast-flags fuzz
 zsh "$here/diff-i386.sh" 4 | tail -1 | grep -q 'differences: 0$' && echo "pass test-i386" || { echo "FAIL test-i386"; fail=1; }

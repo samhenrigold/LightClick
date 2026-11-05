@@ -182,7 +182,7 @@ public enum CPUIDModel {
             // Family 6, cx8, cmov, fxsr, sse, sse2, tsc, msr, pae, pge, clflush. cx16 and popcnt in ecx.
             let edx: UInt32 =
                 1 << 4 | 1 << 5 | 1 << 6 | 1 << 8 | 1 << 13 | 1 << 15 | 1 << 19 | 1 << 24 | 1 << 25 | 1 << 26
-            let ecx: UInt32 = 1 << 13 | 1 << 23
+            let ecx: UInt32 = 1 | 1 << 9 | 1 << 13 | 1 << 23  // sse3, ssse3, cx16, popcnt
             return (0x0006_06A6, 0x0001_0800, ecx, edx)
         case 0x8000_0000:
             return (0x8000_0001, 0, 0, 0)

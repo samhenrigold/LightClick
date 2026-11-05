@@ -27,8 +27,8 @@ for level in 0 1 2 3 s; do
     clang "${flags[@]}" -O$level -c "$here/t_corpus.c" -o "$out/t_corpus_O$level.o"
     link "t_corpus_O$level" "$out/t_corpus_O$level.o" "$out/flatlibc.o"
 done
-clang "${flags[@]}" -msse3 -mssse3 -msse4.1 -c "$here/t_corpus.c" -o "$out/t_corpus_sse4.o"
-link t_corpus_sse4 "$out/t_corpus_sse4.o" "$out/flatlibc.o"
+clang "${flags[@]}" -mssse3 -O3 -c "$here/t_corpus.c" -o "$out/t_corpus_ssse3.o"
+link t_corpus_ssse3 "$out/t_corpus_ssse3.o" "$out/flatlibc.o"
 
 # QEMU's test-i386 in 64-bit mode.
 qemu_tests=$here/../../../vendor/qemu/tests/tcg/i386

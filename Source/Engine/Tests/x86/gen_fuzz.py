@@ -364,6 +364,20 @@ for i in (0, 3, 7):
     form(f"pinsrw {i} m", f"pinsrw ${i},8(%r15),%xmm1", ALL, FP)
     form(f"pextrw {i}", f"pextrw ${i},%xmm1,%eax", ALL, FP)
 
+# SSE3 and SSSE3: macOS compilers assume them.
+for op in ["pshufb", "phaddw", "phaddd", "phaddsw", "phsubw", "phsubd", "phsubsw", "pmaddubsw", "psignb", "psignw", "psignd", "pmulhrsw", "pabsb",
+           "pabsw", "pabsd", "addsubps", "addsubpd", "haddps", "haddpd", "hsubps", "hsubpd", "movsldup", "movshdup"]:
+    form(f"{op} x", f"{op} %xmm2,%xmm1", ALL, FP)
+    form(f"{op} same", f"{op} %xmm1,%xmm1", ALL, FP)
+    form(f"{op} m", f"{op} 32(%r15),%xmm1", ALL, FP)
+form("movddup x", "movddup %xmm2,%xmm1", ALL, FP)
+form("movddup m", "movddup 32(%r15),%xmm1", ALL, FP)
+form("lddqu m", "lddqu 33(%r15),%xmm1", ALL, FP)
+for imm in (0, 1, 7, 15, 16, 17, 31, 32, 200):
+    form(f"palignr ${imm}", f"palignr ${imm},%xmm2,%xmm1", ALL, FP)
+    form(f"palignr ${imm} same", f"palignr ${imm},%xmm1,%xmm1", ALL, FP)
+    form(f"palignr ${imm} m", f"palignr ${imm},32(%r15),%xmm1", ALL, FP)
+
 out = [".text", ".globl _fuzz_forms", ".p2align 4"]
 for i, (name, body, mask, kind) in enumerate(forms):
     out.append(f"Lf{i}:")

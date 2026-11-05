@@ -209,8 +209,110 @@ static void emit_pmovmskb(int rd, int s) {
     logic_sh(1, 1, 0, rd, S0, S1, 0, 8);
 }
 
+// SSSE3: opcode from the 0F 38 or 0F 3A map, 66 prefix checked by the decoder.
+static void emit_ssse3(const Insn *in) {
+    int opc = in->opc, d = in->reg;
+    int s = src_op(in, 4, true);
+    if (in->sub == 2) { // palignr
+        int n = (int)(in->imm & 0xff);
+        if (n >= 32) {
+            E(0x6E201C00u | d << 16 | d << 5 | d);
+        } else if (n >= 16) {
+            E(0x6E201C00u | V_S0 << 16 | V_S0 << 5 | V_S0);
+            if (n > 16)
+                E(0x6E000000u | V_S0 << 16 | (u32)(n - 16) << 11 | d << 5 | d);
+        } else if (n == 0) {
+            vmov(d, s);
+        } else {
+            E(0x6E000000u | d << 16 | (u32)n << 11 | s << 5 | d);
+        }
+        return;
+    }
+    u32 sz = opc <= 0x0B && opc != 0 ? 0 : 0;
+    switch (opc) {
+        case 0x00: // pshufb: bit 7 clears the byte, otherwise the low nibble picks one. tbl reads 0 for an index out of range.
+            E(0x4F04E400u | 15 << 5 | V_S0); // movi v24.16b, #0x8f
+            E(0x4E201C00u | V_S0 << 16 | s << 5 | V_S0);
+            E(0x4E000000u | V_S0 << 16 | d << 5 | d);
+            return;
+        case 0x01: // phaddw
+        case 0x02: // phaddd
+            sz = opc == 1 ? 1 : 2;
+            RRR(0x4E20BC00u | sz << 22, d, d, s);
+            return;
+        case 0x03: // phaddsw
+        case 0x05: // phsubw
+        case 0x06: // phsubd
+        case 0x07: // phsubsw
+            sz = opc == 6 ? 2 : 1;
+            RRR(0x4E001800u | sz << 22, V_S0, d, s); // uzp1
+            RRR(0x4E005800u | sz << 22, V_S1, d, s); // uzp2
+            if (opc == 3)
+                RRR(0x4E200C00u | sz << 22, d, V_S0, V_S1); // sqadd
+            else if (opc == 7)
+                RRR(0x4E202C00u | sz << 22, d, V_S0, V_S1); // sqsub
+            else
+                RRR(0x6E208400u | sz << 22, d, V_S0, V_S1); // sub
+            return;
+        case 0x04: // pmaddubsw: unsigned bytes of d by signed bytes of s, pairs added with saturation
+            RR(0x2F08A400u, V_S0, d); // ushll
+            RR(0x6F08A400u, V_S1, d); // ushll2
+            RR(0x0F08A400u, V_S2, s); // sshll
+            RR(0x4F08A400u, 27, s); // sshll2
+            RRR(0x4E609C00u, V_S0, V_S0, V_S2); // mul
+            RRR(0x4E609C00u, V_S1, V_S1, 27);
+            RRR(0x4E401800u, V_S2, V_S0, V_S1); // uzp1
+            RRR(0x4E405800u, 27, V_S0, V_S1); // uzp2
+            RRR(0x4E600C00u, d, V_S2, 27); // sqadd
+            return;
+        case 0x08: // psignb
+        case 0x09: // psignw
+        case 0x0A: // psignd
+            sz = (u32)(opc - 8);
+            RR(0x6E20B800u | sz << 22, V_S0, d); // neg
+            RR(0x4E20A800u | sz << 22, V_S1, s); // cmlt #0
+            RRR(0x6EA01C00u, d, V_S0, V_S1); // bit: take the negated lane where s is negative
+            RR(0x4E209800u | sz << 22, V_S1, s); // cmeq #0
+            RRR(0x4E601C00u, d, d, V_S1); // bic: clear where s is zero
+            return;
+        case 0x0B: // pmulhrsw: as hardware, -32768 squared wraps to 0x8000 where sqrdmulh would saturate
+            RRR(0x0E60C000u, V_S0, d, s); // smull
+            RRR(0x4E60C000u, V_S1, d, s); // smull2
+            E(0x4F002400u | 49u << 16 | V_S0 << 5 | V_S0); // srshr .4s, #15
+            E(0x4F002400u | 49u << 16 | V_S1 << 5 | V_S1);
+            RRR(0x4E401800u, d, V_S0, V_S1); // uzp1 .8h: the low half of each
+            return;
+        case 0x1C: // pabsb
+        case 0x1D: // pabsw
+        case 0x1E: // pabsd
+            sz = (u32)(opc - 0x1C);
+            RR(0x4E20B800u | sz << 22, d, s);
+            return;
+        default:
+            svc(SVC_UD);
+    }
+}
+
+// addsubps and addsubpd, lane by lane, so that no lane raises an FP flag for the operation it does not perform.
+static void emit_addsub(const Insn *in) {
+    bool isd = in->pfx == 0x66;
+    int s = src_op(in, 4, true), d = in->reg, bytes = isd ? 8 : 4, lanes = 16 / bytes;
+    u32 ftype = isd ? 1u << 22 : 0;
+    for (int i = 0; i < lanes; i++) {
+        ins_elem(V_S0, 0, d, i, bytes);
+        ins_elem(V_S1, 0, s, i, bytes);
+        RRR((i & 1 ? 0x1E202800u : 0x1E203800u) | ftype, V_S2, V_S0, V_S1);
+        ins_elem(27, i, V_S2, 0, bytes);
+    }
+    vmov(d, 27);
+}
+
 void emit_sse(const Insn *in, int live) {
     int opc = in->opc, pfx = in->pfx, d = in->reg;
+    if (in->op == OP_SSE && in->sub) {
+        emit_ssse3(in);
+        return;
+    }
     if (in->op == OP_LDMXCSR) {
         ldst(1, 4, S0, addr_prepare(in, 4));
         svc(SVC_LDMXCSR);
@@ -229,7 +331,7 @@ void emit_sse(const Insn *in, int live) {
         bad(in, "MMX instruction");
         return;
     }
-    if (intop && pfx != 0x66 && !(opc == 0x6F || opc == 0x70 || opc == 0xD6)) {
+    if (intop && pfx != 0x66 && !(opc == 0x6F || opc == 0x70 || opc == 0xD6 || opc == 0xF0)) {
         bad(in, "unsupported prefix on an integer SSE opcode");
         return;
     }
@@ -252,8 +354,14 @@ void emit_sse(const Insn *in, int live) {
         }
         case 0x12:
         case 0x13:
-            if (pfx == 0xF3 || pfx == 0xF2) {
-                bad(in, "SSE3 movsldup or movddup");
+            if (opc == 0x12 && pfx == 0xF3) { // movsldup
+                int s = src_op(in, 4, true);
+                RRR(0x4E802800u, d, s, s); // trn1 .4s
+            } else if (opc == 0x12 && pfx == 0xF2) { // movddup
+                int s = src_op(in, 3, false);
+                E(0x4E080400u | (u32)s << 5 | d);
+            } else if (pfx == 0xF3 || pfx == 0xF2) {
+                svc(SVC_UD);
             } else if (in->rm_reg) {
                 if (opc == 0x12 && pfx == 0)
                     ins_elem(d, 0, in->rm, 1, 8); // movhlps
@@ -278,8 +386,11 @@ void emit_sse(const Insn *in, int live) {
         }
         case 0x16:
         case 0x17:
-            if (pfx == 0xF3 || pfx == 0xF2) {
-                bad(in, "SSE3 movshdup");
+            if (opc == 0x16 && pfx == 0xF3) { // movshdup
+                int s = src_op(in, 4, true);
+                RRR(0x4E806800u, d, s, s); // trn2 .4s
+            } else if (pfx == 0xF3 || pfx == 0xF2) {
+                svc(SVC_UD);
             } else if (in->rm_reg) {
                 if (opc == 0x16 && pfx == 0)
                     ins_elem(d, 1, in->rm, 0, 8); // movlhps
@@ -458,6 +569,36 @@ void emit_sse(const Insn *in, int live) {
             break;
         case 0x5F:
             fp_arith(in, fp_max);
+            break;
+        case 0x7C: // haddpd, haddps
+        case 0x7D: { // hsubpd, hsubps
+            if (pfx != 0x66 && pfx != 0xF2) {
+                svc(SVC_UD);
+                break;
+            }
+            int s = src_op(in, 4, true);
+            u32 fsz = pfx == 0x66 ? 1u << 22 : 0;
+            if (opc == 0x7C)
+                RRR(0x6E20D400u | fsz, d, d, s); // faddp
+            else {
+                u32 zsz = pfx == 0x66 ? 3u << 22 : 2u << 22;
+                RRR(0x4E001800u | zsz, V_S0, d, s);
+                RRR(0x4E005800u | zsz, V_S1, d, s);
+                RRR(0x4EA0D400u | fsz, d, V_S0, V_S1); // fsub, even minus odd
+            }
+            break;
+        }
+        case 0xD0: // addsubpd, addsubps
+            if (pfx != 0x66 && pfx != 0xF2)
+                svc(SVC_UD);
+            else
+                emit_addsub(in);
+            break;
+        case 0xF0: // lddqu
+            if (pfx != 0xF2 || in->rm_reg)
+                svc(SVC_UD);
+            else
+                vldst(4, true, d, addr_prepare(in, 16));
             break;
         // punpck
         case 0x60:
