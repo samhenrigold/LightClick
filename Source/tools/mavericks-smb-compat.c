@@ -32,7 +32,9 @@ static int run(char *const argv[])
     while (waitpid(child, &status, 0) < 0) {
         if (errno != EINTR) return -1;
     }
-    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    status = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    if (status) fprintf(stderr, "%s %s: %d\n", argv[0], argv[1], status);
+    return status;
 }
 
 static bool transfer(int fd, void *bytes, size_t remaining, bool writing)
@@ -48,8 +50,10 @@ static bool transfer(int fd, void *bytes, size_t remaining, bool writing)
     return true;
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
+    // A guest without developer tools has only an xcode-select shim for this.
+    if (argc != 2 || setenv("CODESIGN_ALLOCATE", argv[1], 1)) return 1;
     // Do not patch the recovery environment or any newer guest, even if its
     // compiler emitted an identical instruction sequence.
     char release[32] = {0};

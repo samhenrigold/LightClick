@@ -2098,25 +2098,29 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu,NSString *title) {
     self.mavericksSMBCheckedBoot=boot;
     NSURL *tool=[NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:
         @"Runtime/OpenGLGuests/mavericks/mavericks-smb-compat"];
-    if(![tool checkResourceIsReachableAndReturnError:nil])return NO;
+    NSURL *allocator=[NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime/GuestTools/codesign_allocate"];
+    if(![tool checkResourceIsReachableAndReturnError:nil]||![allocator checkResourceIsReachableAndReturnError:nil])return NO;
     self.guestPending=YES;
     VIMGuestAgent *agent=self.guestAgent;
     __weak VIMSession *weakSelf=self;
-    void (^finished)(BOOL)=^(BOOL ok){
+    void (^finished)(NSString *)=^(NSString *failure){
         VIMSession *session=weakSelf;
         if(session.guestAgent!=agent||!session.task.running)return;
         session.guestPending=NO;
-        if(!ok)[session.log writeData:[@"\n[Virtual Intel Mac] Mavericks File Sharing compatibility could not be applied.\n"
+        if(failure)[session.log writeData:[[NSString stringWithFormat:@"\n[Virtual Intel Mac] Mavericks File Sharing compatibility could not be applied: %@\n",failure]
             dataUsingEncoding:NSUTF8StringEncoding]];
         [session refreshGuestStatus];
     };
-    [agent stageFiles:@{@"mavericks-smb-compat":tool} progress:nil completion:^(NSDictionary *receipt,NSError *issue){
-        if(issue||!receipt){finished(NO);return;}
+    [agent stageFiles:@{@"mavericks-smb-compat":tool,@"codesign_allocate":allocator} progress:nil completion:^(NSDictionary *receipt,NSError *issue){
+        if(issue||!receipt){finished(issue.localizedDescription?:@"staging returned nothing");return;}
         NSString *program=[receipt[@"Directory"] stringByAppendingPathComponent:@"mavericks-smb-compat"];
-        [agent runExecutable:@"/bin/chmod" arguments:@[@"0700",program] timeout:0 completion:^(NSDictionary *mode,NSError *failure){
-            if(failure||![mode[@"exitcode"] isEqual:@0]){finished(NO);return;}
-            [agent runExecutable:program arguments:@[] timeout:0 completion:^(NSDictionary *reply,NSError *failure){
-                finished(!failure&&[reply[@"exitcode"] isEqual:@0]);
+        NSString *allocatorProgram=[receipt[@"Directory"] stringByAppendingPathComponent:@"codesign_allocate"];
+        [agent runExecutable:@"/bin/chmod" arguments:@[@"0700",program,allocatorProgram] timeout:0 completion:^(NSDictionary *mode,NSError *failure){
+            if(failure||![mode[@"exitcode"] isEqual:@0]){finished(failure.localizedDescription?:@"chmod failed");return;}
+            [agent runExecutable:program arguments:@[allocatorProgram] timeout:0 completion:^(NSDictionary *reply,NSError *failure){
+                if(!failure&&[reply[@"exitcode"] isEqual:@0]){finished(nil);return;}
+                NSString *detail=[[NSString alloc] initWithData:reply[@"stderr"]?:NSData.data encoding:NSUTF8StringEncoding];
+                finished(failure.localizedDescription?:[NSString stringWithFormat:@"exit %@, signal %@: %@",reply[@"exitcode"],reply[@"signal"],detail]);
             }];
         }];
     }];
