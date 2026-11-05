@@ -48,6 +48,13 @@
 // RAM alias, EL1 only: x86 GPA + RAM_ALIAS_VA reaches guest RAM for the monitor's walker.
 #define RAM_ALIAS_VA 0xF10000000000ULL
 
+// Stubs at fixed offsets from OFF_STUBS, as laid out in Monitor/vectors.s.
+#define STUB_OFF_REP_MOVS 0x200ULL
+#define STUB_OFF_REP_MOVS_HEAD 0x240ULL
+#define STUB_OFF_REP_STOS 0x280ULL
+#define STUB_OFF_REP_STOS_HEAD 0x2C0ULL
+#define STUB_OFF_REP_END 0x300ULL
+
 #define RSTACK_BYTES (16ULL << 10)
 #define RSTACK_SLOT (32ULL << 10)
 
@@ -137,6 +144,7 @@ enum {
     HC_APIC_EOI, // a[0] vector: EOI of a level-triggered vector, for the host's IO-APIC
     HC_APIC_ICR, // a[0] icr: an IPI the monitor cannot finish itself
     HC_BOUNDARY, // a[0] x86 rip: the vCPU stopped at an instruction boundary on request. r[0] rip to continue at
+    HC_VIEW_DROP, // a[0] view, being reused for another address space
     HC_DEBUG, // a[0] a[1] printable
 };
 
@@ -205,7 +213,7 @@ typedef struct {
     // Statistics, read by the host.
     uint64_t stat_svc[128];
     uint64_t stat_fills, stat_dirty, stat_pf_delivered, stat_pt_writes, stat_pt_writes_zap, stat_pt_step, stat_smc,
-        stat_irq, stat_steps, stat_cr3, stat_iret, stat_syscall, stat_mmio, stat_mmio_vm;
+        stat_irq, stat_steps, stat_cr3, stat_iret, stat_syscall, stat_mmio, stat_mmio_vm, stat_view_evictions, stat_pt_unshadow;
 } EngineCtx;
 
 // Block table, one entry per translated block, ordered by arm_off because the code cache only grows.

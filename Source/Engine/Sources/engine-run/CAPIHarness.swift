@@ -66,7 +66,7 @@ final class CAPIHarness {
             opaque: nil,
             mmio_read: { _, gpa, _ in CAPIHarness.current!.deviceRegisters[gpa] ?? 0 },
             mmio_write: { _, gpa, _, value in CAPIHarness.current!.deviceRegisters[gpa] = value },
-            port_read: { _, port, _ in port == 0xF2 ? CAPIHarness.current!.eois : 0xFFFF_FFFF },
+            port_read: { _, port, _ in port == 0xF2 ? CAPIHarness.current!.eois : port == 0xF3 ? 0 : 0xFFFF_FFFF },
             port_write: { _, port, _, value in CAPIHarness.current!.portWrite(port, value) },
             read_msr: { _, _, value in
                 value?.pointee = 0

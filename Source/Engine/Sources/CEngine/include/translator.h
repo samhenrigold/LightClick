@@ -18,6 +18,7 @@ typedef struct {
     uint64_t fetch_fault_va; // nonzero: the instruction runs onto this unmapped or non-executable page
     uint64_t frames[2]; // GPA frames the block was read from (second is ~0 when unused)
     bool flushed; // the code cache was reset to make room: every pointer into it is stale
+    int key; // the translation domain of the target: tr_link needs it
 } TrResult;
 
 void tr_init(const TrConfig *config);
@@ -27,7 +28,7 @@ void tr_init(const TrConfig *config);
 TrResult tr_translate(int view, uint64_t cr3, int cpl, uint64_t rip, bool single);
 
 // Patches an exit stub: site is the guest VA reported in the request, kind the svc number, arm the linked target.
-void tr_link(uint64_t site, int kind, uint64_t arm);
+void tr_link(uint64_t site, int kind, uint64_t arm, int key);
 
 // Installs a lookup entry in the view's indirect-branch table.
 void tr_hash_insert(int view, uint64_t rip, uint64_t arm);
@@ -36,6 +37,8 @@ void tr_hash_insert(int view, uint64_t rip, uint64_t arm);
 int tr_invalidate_frame(uint64_t gpa);
 // Invalidates the blocks of one view at one x86 page (its mapping changed).
 int tr_invalidate_view_va(int view, uint64_t va);
+// Forgets a view being reused for another address space: its own blocks and its lookup table.
+void tr_view_drop(int view);
 // Forgets one whole view.
 void tr_flush_all(void);
 

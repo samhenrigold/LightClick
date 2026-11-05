@@ -110,7 +110,9 @@ public final class KernelGuest: EngineMachine {
             break
         }
     }
-    public func portRead(port: UInt16, size: Int) -> UInt32 { port == 0xF2 ? UInt32(eoiCount) : 0xFFFF_FFFF }
+    public func portRead(port: UInt16, size: Int) -> UInt32 {
+        port == 0xF2 ? UInt32(eoiCount) : port == 0xF3 ? UInt32(truncatingIfNeeded: tr_stats().blocks) : 0xFFFF_FFFF
+    }
 
     private func setTick(period: UInt32) {
         lock.lock()

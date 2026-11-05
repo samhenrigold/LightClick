@@ -134,7 +134,7 @@ _return_from_user:
 // ---- Ring 3 code, copied to user pages. Position independent, with a syscall per action. Ends at user_blob_end. ----
     .globl _user_blob, _user_blob_end
     .globl _u_syscalls, _u_touch, _u_touch_write, _u_spin, _u_cli, _u_ud2, _u_div0, _u_int3, _u_noncanon, _u_kernel_read, _u_int80, _u_flags_at_fault
-    .globl _u_rmw_fault, _u_store_loop, _u_return_value
+    .globl _u_rmw_fault, _u_store_loop, _u_return_value, _u_rep_copy, _u_store_cross, _u_load_cross
     .p2align 12
 _user_blob:
 
@@ -251,6 +251,23 @@ _u_store_loop:
     cmpq %rsi, %rcx
     jne 1b
     jmp 8b
+
+_u_store_cross:
+    movq $-1, %rax
+    movq %rax, (%rdi)
+    jmp 8b
+_u_load_cross:
+    movq (%rdi), %rax
+    jmp 8b
+
+// rdi: destination, rsi: source, rdx: bytes. A rep movsb that may fault part way and must resume with exact registers.
+_u_rep_copy:
+    movq %rdx, %rcx
+    rep movsb
+    movq %rcx, %rdi // must be 0
+    movq $1, %rax
+    syscall
+    ud2
 
 // Returns through the exit syscall with status read from rdi.
 _u_return_value:

@@ -163,7 +163,7 @@ static struct {
 
 extern char isr0[], isr3[], isr6[], isr8[], isr13[], isr14[], isr32[], isr33[], isr128[], syscall_entry[];
 extern char user_blob[], user_blob_end[], u_syscalls[], u_touch[], u_touch_write[], u_spin[], u_cli[], u_ud2[], u_div0[], u_int3[], u_noncanon[],
-    u_kernel_read[], u_int80[], u_flags_at_fault[], u_rmw_fault[], u_store_loop[], u_return_value[];
+    u_kernel_read[], u_int80[], u_flags_at_fault[], u_rmw_fault[], u_store_loop[], u_return_value[], u_rep_copy[], u_store_cross[], u_load_cross[];
 extern u64 enter_user(u64 rip, u64 rsp, u64 rflags);
 extern __attribute__((noreturn)) void return_from_user(void);
 
@@ -319,17 +319,19 @@ static void switch_to(u64 root, u64 pcid, bool noflush) {
     write_cr3(root | pcid | (noflush ? 1ULL << 63 : 0));
 }
 
-static u64 run_user(void *fn, u64 a0, u64 a1) {
+static u64 run_user3(void *fn, u64 a0, u64 a1, u64 a2);
+static u64 run_user(void *fn, u64 a0, u64 a1) { return run_user3(fn, a0, a1, 0); }
+static u64 run_user3(void *fn, u64 a0, u64 a1, u64 a2) {
     // Arguments for ring 3 travel in rdi and rsi via two pre-set registers.
-    extern u64 enter_user_args(u64 rip, u64 rsp, u64 rflags, u64 a0, u64 a1);
-    return enter_user_args(user_rip(fn), USTACK_TOP - 64, 0x202, a0, a1), user_exit_status;
+    extern u64 enter_user_args(u64 rip, u64 rsp, u64 rflags, u64 a0, u64 a1, u64 a2);
+    return enter_user_args(user_rip(fn), USTACK_TOP - 64, 0x202, a0, a1, a2), user_exit_status;
 }
 
 __asm__(".text\n.globl _enter_user_args\n_enter_user_args:\n"
         "pushq %rbx\n pushq %rbp\n pushq %r12\n pushq %r13\n pushq %r14\n pushq %r15\n"
         "movq %rsp, %gs:16\n"
         "pushq $0x23\n pushq %rsi\n pushq %rdx\n pushq $0x2B\n pushq %rdi\n"
-        "movq %rcx, %rdi\n movq %r8, %rsi\n"
+        "movq %rcx, %rdi\n movq %r8, %rsi\n movq %r9, %rdx\n"
         "swapgs\n iretq\n");
 
 // ---- Tests ----
@@ -383,6 +385,19 @@ static void test_precise(void) {
     r = run_user(u_rmw_fault, UDATA + 0x100000, 0);
     CHECK(r == 0x10E && (last_flags & 1) && *phys(ro) == 0x77 && (last_err & 7) == 7, "rmw status %x flags %x mem %x err %x", r, last_flags, *phys(ro),
           last_err);
+    // A store straddling into an unmapped page: CR2 names the second page; on x86 no byte may change on the first.
+    u64 lo = frame_alloc();
+    *(u64 *)((u8 *)phys(lo) + 4088) = 0x1111111111111111ULL;
+    map4k(current_root, UDATA + 0x200000, lo, P | W | U | NX);
+    *pte_slot(current_root, UDATA + 0x201000, true) = 0;
+    invlpg(UDATA + 0x201000);
+    r = run_user(u_store_cross, UDATA + 0x200000 + 4092, 0);
+    CHECK(r == 0x10E && last_cr2 == UDATA + 0x201000 && (last_err & 2), "crossing store status %x cr2 %x err %x", r, last_cr2, last_err);
+    u64 after = *(u64 *)((u8 *)phys(lo) + 4088);
+    kprintf("measure straddling store that faults on its second page: first page %s\n", after == 0x1111111111111111ULL ? "unchanged" : "partly written");
+    // The same load: rax must stay, CR2 the second page.
+    r = run_user(u_load_cross, UDATA + 0x200000 + 4092, 0);
+    CHECK(r == 0x10E && last_cr2 == UDATA + 0x201000 && !(last_err & 2), "crossing load status %x cr2 %x err %x", r, last_cr2, last_err);
     kprintf("PASS precise frames\n");
 }
 
@@ -408,6 +423,28 @@ static void test_demand(void) {
     ns = MEASURE_NS(t, pages);
     CHECK(r == 0, "status %x", r);
     kprintf("measure dirty upgrade, no x86 fault: %d ns/page\n", ns);
+    // A long rep movsb across pages that fault one after another, starting off-alignment and resuming mid-copy.
+    u64 src = UDATA + 0x4000000, dst = demand_hi + 0x123, len = 200000;
+    demand_hi += 1ULL << 20;
+    demand_lo = dst & ~0xfffULL;
+    u64 before2 = fault_count;
+    for (u64 o = 0; o < len + 8192; o += 4096) {
+        u64 fr = frame_alloc();
+        u8 *b = (u8 *)phys(fr);
+        for (u64 i = 0; i < 4096; i++)
+            b[i] = (u8)((o + i) * 2654435761u >> 24);
+        map4k(current_root, src + o, fr, P | W | U | NX);
+    }
+    r = run_user3(u_rep_copy, dst, src + 7, len);
+    CHECK(r == 0, "rep copy status %x", r);
+    u64 pages_hit = fault_count - before2;
+    CHECK(pages_hit >= len / 4096, "rep faults %d", pages_hit);
+    u8 *check = (u8 *)dst;
+    u64 bad = 0;
+    for (u64 i = 0; i < len; i++)
+        if (check[i] != (u8)((7 + i) * 2654435761u >> 24))
+            bad++;
+    CHECK(bad == 0, "rep copied %d wrong bytes across %d faults", bad, pages_hit);
     kprintf("PASS demand paging\n");
 }
 
@@ -489,37 +526,58 @@ static void test_pcid(u64 a, u64 b) {
     kprintf("PASS address spaces and PCID\n");
 }
 
+static inline u32 inl_port(u16 port) {
+    u32 v;
+    __asm__ volatile("inl %1, %0" : "=a"(v) : "Nd"(port));
+    return v;
+}
+
 static void test_pt_churn(u64 root) {
-    // Fork-like: fill a table, then rewrite PTEs of a live mapping. Each write traps once.
+    // Fork-like: fill a table, then rewrite PTEs of a live mapping. Each write traps once. Fewer writes per walk than the flood limit,
+    // so the table stays shadowed, as a table in real use does.
     fault_mode = M_EXIT_ON_FAULT;
-    u64 base = UDATA + 0x20000000, pages = 512;
+    u64 base = UDATA + 0x20000000, pages = 512, per_walk = 48;
     u64 f = frame_alloc();
     for (u64 i = 0; i < pages; i++)
         map4k(root, base + i * 4096, f, P | U | NX);
     run_user(u_touch, base, pages); // shadows every entry
     u64 *first = pte_slot(root, base, false);
-    u64 rounds = 200, t = rdtsc();
-    for (u64 r = 0; r < rounds; r++)
-        for (u64 i = 0; i < pages; i++)
-            ((volatile u64 *)first)[i] = f | P | U | NX | (r & 1 ? 0x20 : 0);
-    u64 ns = (rdtsc() - t) / (rounds * pages);
-    kprintf("measure page-table write, live entry dropped each time after the first round: %d ns\n", ns);
-    t = rdtsc();
-    for (u64 r = 0; r < rounds; r++)
-        for (u64 i = 0; i < pages; i++)
-            ((volatile u64 *)first)[i] = 0;
-    ns = (rdtsc() - t) / (rounds * pages);
-    kprintf("measure page-table write, already-empty slot: %d ns\n", ns);
-    for (u64 i = 0; i < pages; i++)
-        first[i] = f | P | U | NX;
-    __asm__ volatile("lock cmpxchgq %2, %0" : "+m"(first[0]) : "a"(first[0]), "r"(f | P | U | NX | 0x20));
-    u64 t0 = rdtsc();
-    for (u64 i = 1; i < pages; i++) {
-        u64 old = first[i];
-        __asm__ volatile("lock cmpxchgq %2, %0" : "+m"(first[i]), "+a"(old) : "r"(f | P | U | NX | 0x20));
+    u64 rounds = 4000;
+    u64 walk_ns = rdtsc();
+    for (u64 k = 0; k < rounds; k++)
+        run_user(u_touch, base, 1);
+    walk_ns = (rdtsc() - walk_ns) / rounds;
+    u64 t = rdtsc();
+    for (u64 k = 0; k < rounds; k++) {
+        for (u64 i = 1; i <= per_walk; i++)
+            ((volatile u64 *)first)[i] = f | P | U | NX;
+        run_user(u_touch, base, 1);
     }
-    ns = (rdtsc() - t0) / pages;
-    kprintf("measure page-table lock cmpxchg: %d ns\n", ns);
+    u64 ns = ((rdtsc() - t) / rounds - walk_ns) / per_walk;
+    kprintf("measure page-table store, slot already empty, table still shadowed: %d ns\n", ns);
+    run_user(u_touch, base, pages);
+    t = rdtsc();
+    for (u64 i = 1; i <= per_walk; i++)
+        ((volatile u64 *)first)[i] = f | P | U | NX | 0x20;
+    ns = (rdtsc() - t) / per_walk;
+    kprintf("measure page-table store, live entry dropped with TLBI: %d ns\n", ns);
+    t = rdtsc();
+    for (u64 k = 0; k < rounds; k++) {
+        for (u64 i = 1; i <= per_walk; i++) {
+            u64 old = first[i];
+            __asm__ volatile("lock cmpxchgq %2, %0" : "+m"(first[i]), "+a"(old) : "r"(f | P | U | NX | 0x20));
+        }
+        run_user(u_touch, base, 1);
+    }
+    ns = ((rdtsc() - t) / rounds - walk_ns) / per_walk;
+    kprintf("measure page-table lock cmpxchg, read then swap, slot empty: %d ns\n", ns);
+    // A freed table reused as data: after the flood limit its stores stop trapping.
+    t = rdtsc();
+    for (u64 k = 0; k < 2000; k++)
+        for (u64 i = 0; i < pages; i++)
+            ((volatile u64 *)first)[i] = f | P | U | NX;
+    ns = (rdtsc() - t) / (2000 * pages);
+    kprintf("measure stores to an abandoned table once unshadowed: %d ns\n", ns);
     u64 r = run_user(u_touch, base, pages);
     CHECK(r == 0, "after churn %x", r);
     // Shadow fill alone: every entry was dropped by a write, the guest touches it, no x86 event happens.
@@ -537,6 +595,37 @@ static void test_pt_churn(u64 root) {
     kprintf("measure shadow fill, EL0 fault to resumed guest: %d ns/page (touch %d ns/page)\n", (fill_ns - touch_ns) / (fill_rounds * pages),
             touch_ns / (fill_rounds * pages));
     kprintf("PASS page-table churn\n");
+}
+
+// More address spaces than the engine keeps views: least recently used ones are rebuilt on return. Kernel code stays translated throughout.
+static void test_many_spaces(u64 home) {
+    fault_mode = M_EXIT_ON_FAULT;
+    enum { SPACES = 80 };
+    static u64 roots[SPACES];
+    u32 blocks0 = inl_port(0xF3);
+    u64 t = rdtsc();
+    for (u64 s = 0; s < SPACES; s++) {
+        roots[s] = new_space();
+        u64 fr = frame_alloc();
+        *phys(fr) = s + 1000;
+        map4k(roots[s], UDATA, fr, P | W | U | NX);
+        switch_to(roots[s], 0x10 + s, false);
+        u64 r = run_user(u_return_value, UDATA, 0);
+        CHECK(r == s + 1000, "space %d first pass %d", s, r);
+    }
+    u64 first_pass = (rdtsc() - t) / SPACES;
+    u32 blocks1 = inl_port(0xF3);
+    t = rdtsc();
+    for (u64 s = 0; s < SPACES; s++) {
+        switch_to(roots[s], 0x10 + s, true);
+        u64 r = run_user(u_return_value, UDATA, 0);
+        CHECK(r == s + 1000, "space %d second pass %d", s, r);
+    }
+    u64 second_pass = (rdtsc() - t) / SPACES;
+    kprintf("measure new address space, first run: %d ns; returning to it after eviction: %d ns\n", first_pass, second_pass);
+    kprintf("measure blocks translated per new address space, user code only: %d\n", (u64)((blocks1 - blocks0) / SPACES));
+    switch_to(home, 1, true);
+    kprintf("PASS more address spaces than views\n");
 }
 
 static void test_timer(void) {
@@ -781,6 +870,7 @@ void kmain(u64 ram) {
     test_cow();
     test_pcid(a, b);
     test_pt_churn(a);
+    test_many_spaces(a);
     test_timer();
     test_apic(a);
     test_devices(a);

@@ -301,7 +301,7 @@ public final class Engine {
             "exits \(exitCount) blocks \(t.blocks) x86-insns \(t.insns) arm-words \(t.words) "
             + "invalidated \(t.invalidated) fills \(ctx.pointee.stat_fills) dirty \(ctx.pointee.stat_dirty) "
             + "smc \(ctx.pointee.stat_smc) pfs \(ctx.pointee.stat_pf_delivered) pt-writes \(ctx.pointee.stat_pt_writes) "
-            + "steps \(ctx.pointee.stat_steps) irqs \(ctx.pointee.stat_irq)"
+            + "steps \(ctx.pointee.stat_steps) irqs \(ctx.pointee.stat_irq) view-evictions \(ctx.pointee.stat_view_evictions) unshadowed \(ctx.pointee.stat_pt_unshadow)"
         if t.insns > 0 { line += String(format: " words/insn %.2f", Double(t.words) / Double(t.insns)) }
         return line
     }
@@ -328,12 +328,14 @@ public final class Engine {
             } else if kind == SVC_LOOKUP_MISS {
                 tr_hash_insert(view, rip, result.arm)
             } else if site != 0 {
-                tr_link(site, kind, result.arm)
+                tr_link(site, kind, result.arm, result.key)
             }
         case Int(HC_SMC):
             _ = tr_invalidate_frame(c.pointee.req_a.0)
         case Int(HC_VIEW_INVALIDATE_VA):
             _ = tr_invalidate_view_va(Int32(c.pointee.req_a.0), c.pointee.req_a.1)
+        case Int(HC_VIEW_DROP):
+            tr_view_drop(Int32(c.pointee.req_a.0))
         case Int(HC_FLUSH_VIEWS):
             tr_flush_all()
         case Int(HC_SYSCALL):

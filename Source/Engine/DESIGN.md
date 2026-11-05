@@ -1,10 +1,180 @@
-# HV engine spike: x86-64 translated code inside an HVF VM
+# HV engine: x86-64 translated code inside an HVF VM
 
-Run: `build.sh <out>`, then `<out>/spike bench|fill|cr3|litmus <out>/flat.bin`, `<out>/driver-x86`, `<out>/driver-arm64`.
-Env: `SPIKE_IPA16` (16 KB stage 2), `SPIKE_NO_TSO`, `SPIKE_BLOCK` (2 MB stage-1 blocks on the 64 MB buffer), `SPIKE_EL2`
-(translated code over a guest stage 2 with a stub virtual EL2).
-Trap costs: `<out>/el2 plain|el2|hcr|chase|litmus|irq|irq-gic|irq-gic-wfi|ipi-gic|ipi-gic-wfi|ipi-host`; `chase`, `litmus`
-and the GIC modes take a second argument `el2`. Guest code is `el2guest.s`.
+A library for running x86-64 guests on Apple silicon: an x86-to-AArch64 translator whose output runs inside a Hypervisor.framework VM, with
+hardware 4 KB stage-1 translation, EnTSO, and a small EL1 monitor. QEMU is meant to keep the devices and machine.
+
+Build: `Source/Engine/build.sh` (monitor blob, x86 test images, Swift package, signing). Test: `Tests/run-all.sh`. Numbers: `Tests/bench.py`,
+`engine-run --kernel .build/images/kernel`, `engine-run .build/images/t_callret`, `t_rep`, `t_smc`.
+
+| Path | What |
+|---|---|
+| `Monitor/` | EL1 monitor in freestanding C, vectors and EL0 stubs in assembly |
+| `Sources/CEngine/` | Decoder, block builder and emitters (C), ABI shared with the monitor, `engine_api.h` for QEMU |
+| `Sources/Engine/` | Control plane (Swift): VM setup, run loop, guests, the C API |
+| `Tests/x86/` | Flat test images, the fuzz generator, the test kernel |
+| `qemu-accel/` | AccelOps skeleton, never compiled |
+
+Everything below separates **measured** from **not measured**. Measured means on this machine: M4 Max, macOS 27.2, other work running (load 8), so
+numbers are best of N and move 10-20% between runs. No Intel hardware was used: Rosetta is the reference, and where it disagrees with the SDM that is noted.
+
+## Status against the ladder
+
+| Rung | State |
+|---|---|
+| 1. Translator coverage | Done: integer ISA, flags, LSE, bl/ret, per-site indirect, SSE, SSE2, SSE3, SSSE3, MXCSR, rep, SMC. x87, MMX, SSE4 and 32-bit code stop with a clear error |
+| 2. Differential testing | Done: fuzz, QEMU test-i386, a compiled corpus, lc-bench arithmetic, all matching Rosetta |
+| 3. Kernel model | Done: shadow paging, CR3 and PCID, IDT, syscall, iret, exceptions, in the monitor, passing a test kernel |
+| 4. APIC and device interface | Done: in-VM APIC hot paths; `engine_api.h`, exercised by a harness |
+| 5. QEMU accel | Skeleton only, uncompiled. XNU has never run. See "What is left" |
+
+## Measured: correctness
+
+Each is a transcript or self-check, run by `Tests/run-all.sh`.
+
+- **Fuzz.** 2511 instruction forms (`gen_fuzz.py`), 64 rounds each with random registers, flags, memory, rounding modes, FTZ and DAZ, and FP patterns
+  (NaNs, SNaNs, denormals, infinities). Hash of all registers, masked flags, XMM, MXCSR and 8 KB of memory. Identical to Rosetta, in both flag modes.
+- **QEMU `tests/tcg/i386/test-i386.c`** in 64-bit mode, unmodified but for a Mach-O section name, assembler spellings and Linux-only register names: 9200 transcript lines
+  identical. Out of it: `test_floats` (x87), `test_enter` (Rosetta raises SIGILL on `enter`, so ours is unchecked against any reference), and 16-bit shld/shrd with
+  counts above 16 (undefined; results match, Rosetta's CF does not).
+- **Compiled corpus.** SHA-256, an LZ codec, sorting, a jump-table interpreter, bignum, FP matrices, MXCSR modes, varargs, struct returns, at -O0, -O1, -O2, -O3, -Os and -mssse3 -O3.
+- **SMC.** Patch and call, patching the next instruction in the same block, rewriting a return target. Never stale, same output as Rosetta.
+- **Test kernel** (`Tests/x86/kernel/`), ring 0 and ring 3, high-half kernel. Checks: syscall and sysret, #PF with CR2 and error codes, #GP, #UD, #DE, int3, int n, fetch faults, NX,
+  demand paging, copy on write, precise frames (flags before a faulting load; `add` to a read-only page changes nothing), `rep movsb` faulting across pages and resuming,
+  straddling loads and stores, PCID address spaces with the same VA holding different data and code, code remapped under running translations, 80 address spaces with
+  LRU eviction of views, #DF on an IST stack, timer interrupts through ring 3 spin loops, sti shadow, TPR masking, level and edge vectors from the host.
+- **The same kernel through `engine_api.h`**, with a thread forcing an x86-boundary stop every 2 ms and a full CPU state read and write-back each time: about 1000 stops, all checks pass.
+
+Findings about the reference:
+- Rosetta computes a failing `cmpxchg` as dest - acc. The SDM, and QEMU, have acc - dest. Only ZF is compared there; the engine follows the SDM.
+- Rosetta raises SIGILL on `enter`.
+- One form, `stmxcsr`/`ldmxcsr` round trip through the stack, gives a varying result from run to run under Rosetta. It is out of the fuzz set; the engine gives one answer.
+- `rcpps` and `rsqrtps` stop: Intel's approximation tables are not reproduced, so they could not be exact.
+
+Hardware facts measured on the way:
+- HVF accepts only `ACTLR_EL1` bit 1 (EnTSO); every other bit is refused. So PF and AF cannot come from hardware here and stay lazy: `R_PF` holds the last result, `R_AF ^ R_PF` bit 4 is AF.
+- FEAT_AFP works in the guest. With FPCR.AH and NEP: `fmax` returns the second operand, default NaN is `ffc00000`, scalar ops keep upper lanes. So SSE is near 1:1, and FP flags matched the fuzz.
+- EL0 software step traps to EL1 with no host exit. MDSCR_EL1.SS with SPSR.SS clear traps at once, so it is toggled only while stepping.
+- `hv_vcpu_set_pending_interrupt` is forgotten at every exit: the run loop reasserts it until the monitor takes it.
+- A stage-1 data abort taken at EL1 has no valid ISV here, so MMIO and page-table stores are emulated by decoding the ARM word.
+- EnTSO has a cost on exceptions: syscall round trip 106 ns off vs 137 ns on, nothing visible on plain code.
+- A store straddling into an unmapped page left the first page unchanged, the one case tested. CR2 was right.
+- Execute-only stage-1 mappings work: EL0 runs the code cache and cannot read it.
+
+## Measured: speed
+
+`Tests/bench.py 3 25`, best of 3, load 8. The flat image holds lc-bench's arithmetic; "rosetta-flat" is the same bytes under Rosetta, so same memcpy, no AOT. "engine-fast" drops
+flag precision at faulting instructions.
+
+| test | unit | engine | engine-fast | rosetta-flat | native | rosetta-full | engine/rosetta-flat | engine/native |
+|---|---|---|---|---|---|---|---|---|
+| alu | ns/iter | 2.235 | 2.233 | 2.182 | 1.758 | 2.191 | 1.02 | 1.27 |
+| branchy | ns/iter | 12.296 | 12.269 | 11.637 | 8.107 | 12.738 | 1.06 | 1.52 |
+| chase_16k | ns/load | 0.752 | 0.752 | 0.753 | 0.753 | 0.758 | 1.00 | 1.00 |
+| chase_1m | ns/load | 7.743 | 7.778 | 7.897 | 6.744 | 8.002 | 0.98 | 1.15 |
+| chase_64m | ns/load | 102.030 | 102.007 | 81.312 | 89.090 | 78.882 | 1.25 | 1.15 |
+| memcpy | MB/s | 49488 | 52746 | 53220 | 82225 | 42091 | 1.08 | 1.66 |
+| sse_float | ns/iter | 2.760 | 2.759 | 2.558 | 2.762 | 2.761 | 1.08 | 1.00 |
+| scalar_double | ns/iter | 3.260 | 3.065 | 3.259 | 3.275 | 3.265 | 1.00 | 1.00 |
+| cas_uncontended | ns/op | 0.816 | 0.815 | 1.152 | 1.052 | 1.152 | 0.71 | 0.78 |
+| largecode_cold | ns/function | 2371 | 2383 | 4696 | 24 | 224 | 0.50 | 98 |
+| largecode_warm | ns/call | 19.5 | 19.6 | 19.9 | 10.2 | 26.7 | 0.98 | 1.91 |
+
+Reading it: steady-state parity with Rosetta. Exact flags at every faulting instruction cost nothing measurable, so they stay on. The 64 MB chase is 1.25x (4 KB stage 1 under 16 KB stage 2; the spike
+saw 13% from 2 MB stage-1 blocks, not built). Cold code is 2.4 us per function, a host exit per block: better than Rosetta's JIT on the same image, 10x its AOT. `lc-bench`'s TCG baseline in earlier notes was alu 2.98, branchy 20.6,
+chase_16k 2.73, sse_float 10.7, cas 4.27, largecode_warm 399 (112 with tail dispatch), in VM clones, so conditions differ.
+
+Call and return, `t_callret`, ns:
+
+| Sites or depth | Engine | Rosetta |
+|---|---|---|
+| ret, 1 / 16 / 256 / 4096 / 16384 sites | 0.71 / 0.50 / 0.80 / 0.80 / 0.90 | 0.74 / 0.51 / 0.80 / 0.83 / 4.30 |
+| pop + jmp*, same sites | 1.26 / 1.29 / 1.64 / 10.6 / 17.4 | 3.67 / 3.22 / 3.88 / 16.3 / 21.8 |
+| recursion, depth 8 / 48 / 64 / 1000 / 100000 | 0.84 / 0.74 / 4.32 / 4.35 / 1.79 | 0.81 / 0.78 / 4.29 / 4.36 / 2.92 |
+
+Strings, `t_rep`, 256 KB: `rep movsb` 48 GB/s vs Rosetta 3.9; `rep movsq` 48 vs 30; `rep stosq` 77 vs 31.
+SMC, `t_smc`: patch and call 5.2 us vs Rosetta 14.1; data write in a code page and call 4.8 vs 14.0; next page 1.1 ns on both.
+
+Kernel model, translated code in `engine-run --kernel`, ranges over runs, ns. The guest clock is a 24 MHz counter shown as 1 GHz, so figures are means over long loops.
+
+| Path | ns |
+|---|---|
+| syscall + sysret round trip, stack swap, kernel stub | 122-147 (106 with EnTSO off) |
+| int from ring 0, 15 pushes, C handler, iret | 203-227 |
+| CR3 write with PCID, kept shadows | 81-97 |
+| Shadow fill, fault to resumed guest (walk included, no x86 event) | 115-141 |
+| Page-table store, slot empty (trap, decode, store, mirror lookup) | 55-78 |
+| Page-table `lock cmpxchg`, slot empty | 47-56 |
+| Page-table store dropping a live entry with TLBI | 280-950, few samples, TLBI under load |
+| Dirty upgrade, no x86 fault | 470-700 |
+| Demand fault: x86 #PF, handler, PTE store, fill, iret; kernel zeroes 4 KB with a byte loop | 1170-1340 |
+| In-VM APIC read / TPR write / EOI | 84-102 / 99-115 / 98-115 |
+| Self IPI: trap, delivery, handler with register save, EOI, iret | 1055-1203 |
+| Device MMIO through the host, no device model, Swift dictionary as device | 790-930 |
+| Port write through the host | 730-840 |
+| New address space, first run in a loop | 67-85 us, 1 block translated (user code); kernel code is shared |
+| Return to an evicted address space | 23-36 us |
+
+Overhead estimate from these, at the real-guest rates in the brief (4 vCPU totals). Translated kernel work and device models are not counted, nor are cold translation and IPIs between vCPUs, as nothing measured them.
+
+| Event | Rate/s | Cost | ms per second |
+|---|---|---|---|
+| Syscall + return | 50,000 | 140 ns | 7 |
+| Exception + iret | 32,000 | 220 ns | 7 |
+| MMIO, APIC half | 57,000 | 110 ns | 6 |
+| MMIO, the rest | 57,000 | 900 ns | 51 |
+| Interrupt delivery | 10,000 | 1200 ns | 12 |
+| CR3 write | 9,000 | 95 ns | 1 |
+| **Total** | | | **84** (2% of 4 vCPUs) |
+| Each 100,000 page-table stores/s | | 60-300 ns | 6-30 |
+
+## How it works
+
+- **Registers.** x86 GPRs in x0-x15, XMM in v0-v15, as in Rosetta. x18 context, x19 lookup table, x21 and x25 lazy PF and AF, x26 return stack, x27 and x28 GS and FS bases. NZCV holds CF inverted, ZF, SF, OF.
+- **Both x86 rings run at EL0.** A view is an address space seen from one CPL: its own shadow roots, ASID, lookup table and return stack. A CPL change is a TTBR swap in the monitor, about 9 ns (spike). This differs from the earlier
+  plan of CPL0 at EL1: guest kernel code then never holds EL1, so a stray store cannot reach monitor state, and there is one fault path. Not measured against the EL1 alternative, which would share kernel TLB entries across processes.
+- **The monitor** is entered by svc and faults. It stays out of translation, which runs on the host through `hvc`, about 1 us plus translation per block.
+- **Precise state.** Nothing guest-visible changes before an instruction's last access that can fault: read-modify-writes compute with non-flag instructions, store, then set flags. A PC map per block gives the x86 rip.
+- **Interrupts** arrive at any ARM word. The monitor single-steps to the next x86 boundary, at one trap per word while one waits (25 steps in a run with 500,000 interrupts, as most arrive at boundaries), and costs nothing otherwise.
+- **Control flow.** Direct branches chain once a stub has fired. `call` pushes the guest return, pushes {x86, arm} on a shadow stack, and uses `bl`; `ret` compares and uses `ret`. A mismatch resets the stack, and the guest's value stays authoritative. Overflow hits a guard page. Indirect branches do
+  a hash lookup in a shared stub and `br` at the site.
+- **Translation scope.** Block maps are per view, except ring-0 code in the high half, which is shared by every address space reaching it through the same PML4 target. Links only join blocks of one domain.
+- **SMC.** A frame with code is mapped read-only. A store kills the frame's blocks (their entries become traps), drops return stacks, runs the store from a one-off block, and leaves the page writable until code runs from it again.
+- **Shadow paging.** Shadow tables mirror guest tables one to one, per view, and every guest table frame is write-protected. A guest write drops the mirroring entries; the next access refills. Since the shadow never holds a stale entry, CR3 reload, `invlpg` and PCID flushes need no work. A table written 64 times with no walk through it is
+  unshadowed, so a freed table reused as data stops trapping. A and D are set by the walker; a clean page stays read-only until written.
+- **APIC.** Register page in the monitor, by ARM word decode. Timer on the virtual counter: the compare's exit raises the IRQ line, the monitor rearms, then the host unmasks. Anything for other CPUs or level-triggered EOIs goes to the host.
+- **Devices.** MMIO completes the faulting ARM load or store, so every x86 form of a move or read-modify-write works. Pairs, SIMD and atomics on a device stop, except `rep movs` and `stos`, which fall back to the per-element loop.
+
+## Not exact, known
+
+- **The private window.** Private memory lives at a non-canonical VA (bit 47 set, top bits clear), 2 TB slots at `0xF000_0000_0000` and `0xF100_0000_0000`. Other non-canonical addresses fault and become #GP, tested. A guest access inside the window instead reads the lookup table or context, or writes context or return stacks. A compatibility risk; stage 2
+  still bounds the guest. The monitor and shadow tables are out of reach (EL1 only), and code is execute-only.
+- Saved RFLAGS after a straddling RMW with lock: not tested. x86 reserved-bit #PF is not modelled: a PTE with reserved bits set is treated as valid.
+- Unmasked SSE exceptions stop, since FP traps cannot be taken here. So do TF single-step, CR0.WP off, CR4.SMAP, and non-flat fs or gs loads by selector.
+- A split locked access, across 16 bytes, stops rather than taking a bus lock.
+- APIC: x2APIC is absent, LVT error and thermal never fire, ESR reads 0.
+
+## What is left to boot XNU
+
+Honest order of risk, none of it started except as noted.
+
+1. **Multi-vCPU.** Everything here ran on one vCPU. Monitor statics must split per vCPU, shadow tables and block maps need locks, invalidation needs IPIs (a killed block's return-stack entries on another vCPU), and the host's translator needs a lock. EnTSO was only proved on two vCPUs in the spike's litmus.
+2. **Compatibility mode and 32-bit code.** 32-bit apps, kernels up to 10.7 or so, and `sysenter`. The decoder and emitters assume 64-bit mode. Real mode and firmware are meant to stay on TCG, using `EngineX86State` as the hand-off; whether QEMU tolerates two engines on one vCPU is untested.
+3. **x87 and MMX.** Stop today. Needs 80-bit helpers in the monitor, since a host exit per operation would be 1 us. Real apps use them; test-i386's `test_floats` is ready as the check.
+4. **Far control flow and system odds:** `lretq`, far calls, mov to CS (the test kernel avoids them, starting with CS already set), `ins`/`outs`, debug registers, TF, NMI, machine checks, `xsave` family, `invpcid`, and proper MSR routing. SSE4 is unadvertised.
+5. **QEMU integration.** Compile the skeleton. RAM is assumed to be GPA 0 to N in one piece, so a PC memory map with a hole below 4 GB and RAM above needs slots in the walker and aliases. Firmware ROM. DMA into code or page-table frames must tell the engine, or stale translations survive: there is no such call yet.
+   Device model time and BQL contention are unmeasured. MMIO in a real kext may also use forms that stop (SIMD to a device outside `rep`).
+6. **Limits to lift.** 64 views with LRU eviction exists but kernel domains are capped at 16; the whole-pool shadow flush and whole-cache flush paths have never run; code cache is 118 MB.
+7. **Unknown rates.** Page-table write rate in a real macOS guest. At these costs even 1M writes/s would be 60-300 ms of 4000. Cold translation during boot: 2.4 us per function, and how much code a boot touches is unmeasured.
+8. **Platform durability.** `ACTLR_EL1.EnTSO` from HVF is undocumented as far as I know, and hardware TSO could go when Rosetta does.
+
+## Go or no-go
+
+Go for the next phase. Translated code matches Rosetta in steady state and passes every differential check available, and in-VM kernel paths cost about 2% of four vCPUs at real-guest rates with the x86 kernel model proven only on a test kernel of our own. That is not evidence about a booting Mac: nothing here has run XNU, one vCPU, 64-bit only.
+Stop and reconsider if multi-vCPU shadow locking costs far more than the numbers here, or if a real guest's page-table write rate is above several million per second.
+
+## Earlier spike measurements
+
+The probe in `Source/probes/hv-engine-spike` came first. These are its figures, kept because they decided the design: trap costs by privilege level, and why guest EL2 was dropped.
 
 ## Measured (M4 Max, macOS 27.2, release build running, load 10-13; best of 5, several runs)
 
@@ -127,95 +297,3 @@ register spills at block ends are not counted.
 Reasoning, not measured: the spike's 16 KB loop does 2 accesses in about 1.2 cycles per word (assuming 4.5 GHz). Adding
 20 instructions and 6 loads puts it at several cycles before barriers. **I did not measure TCG**, so the hypothesis has support, not proof:
 hardware translation really is native speed here, but no number says what fraction of a real guest's time softmmu takes.
-
-## What the spike did not do
-
-No x86 kernel mode, IDT delivery or guest-visible #PF in translated code (the trap-cost rows above are hand-written). No MMIO or interrupts in `spike.c`. No segments, i386, SSE, x87, `lock`, rep,
-PF/AF consumers, or SMC handling. Only one vCPU ran translated code; the litmus is hand-written ARM. 128/64 div, flags
-after CL shifts and flags after imul stop with an error. Translation runs on the host, so every cold block costs an exit.
-TCG was not run. These are loops, not an OS: nothing about the speed of a booting Mac follows from this table.
-
-## Design, as guesses from here down except where marked
-
-### AccelOps
-Add `accel/hvdbt` alongside `accel/hvf` (`accel/hvf/hvf-accel-ops.c` shows the shape): `create_vcpu_thread` owning one
-`hv_vcpu_t`, `kick_vcpu_thread` calling `hv_vcpus_exit`, `generic_handle_interrupt`, and `synchronize_*` copying x0-x15,
-NZCV and pinned state to `CPUX86State`. QEMU's devices, memory API and machine stay unchanged. CONFIG_HVF on arm64 only
-builds `target/arm/hvf`, so this is a new accel for the i386 target, with TCG also built for fallback.
-
-### MMIO (measured basis: stage 1 faults work, 1 us exit)
-The host walker finds a GPA outside RAM and leaves the shadow PTE invalid, so stage 2 can stay 16 KB (measured faster)
-and 4 KB holes need no 4 KB stage 2. On fault: ARM PC to x86 rip through a per-block side table, decode with
-`target/i386/emulate/x86_decode.c`, complete through `address_space_rw`. Frequent framebuffer or PVG traffic needs testing.
-
-### Interrupts
-`hv_vcpus_exit` from the I/O thread can stop at any ARM instruction. x86 needs an instruction boundary. Almost all x86
-instructions commit at their last ARM instruction, so: look up the PC, finish to the boundary by unlinking the current
-block's exits, deliver through the x86 IDT. A polled flag at back edges is the simple alternative, costing a load and
-branch per loop. QEMU's APIC timer drives kicks.
-
-### x86 kernel mode
-CPL0 translated code at EL1, CPL3 at EL0. U/S maps to AP, SMAP to PAN, and SMEP is natural since guest pages never execute
-as ARM. Syscall and iret become translated sequences. The fallback is both rings at EL0 with an ASID each, adding about
-55 ns per transition (measured for the swap). `hlt`, `invlpg`, CR writes, MSRs, cpuid and port I/O exit or run in a small
-EL1 monitor (measured: EL1 is about 60x cheaper than vEL2, so vEL2 is out). Guest-visible #PF needs precise state: an RMW whose store faults has already changed NZCV, so RMW must emit
-the store before the flag-setting op, or snapshot flags.
-
-### Segments
-Flat except GS/FS bases: pin a base register, add on prefixed accesses. Other non-zero bases or limits fall back to TCG.
-
-### i386 guests
-Registers hold 32-bit values; addresses use a 32-bit add and `uxtw` to wrap, at most one extra instruction. PAE and 2-level
-tables are a different host walker. The shadow stays 4-level, and the 32-bit space sits at low VA. The 4G/4G kernels
-that reload CR3 on each trap would be the worst case; ASID retention is mandatory there.
-
-### SSE and x87
-Pin xmm0-15 to v0-v15. Most SSE2 maps to NEON 1:1; FEAT_AFP (present) covers FP corner cases; `hv_vcpu_get_simd_fp_reg`
-syncs state. x87 and MMX go to QEMU's softfloat helpers, which means a host exit each until a monitor can run them in the
-guest; x87-heavy apps are a fallback risk.
-
-### Self-modifying code
-Translations are keyed by GPA with a page-to-block reverse map. Shadow PTEs for code pages are read-only. A write fault
-invalidates that page's blocks and unlinks chains, reusing the rules QEMU's `tb_invalidate_phys_page` encodes. Code and
-data sharing a page would ping-pong at 1-3 us, so such pages need checksum validation or TCG. Hole-private pages are
-read-only to guest code but readable: see unknowns.
-
-### 4 KB shadow invalidation
-Roots per CR3 or PCID, tagged with ASIDs; the guest's G bit maps to nG=0. Evict with `tlbi aside1is`. `invlpg` becomes
-`tlbi vale1is` in the monitor. Guest writes to its page tables: write-protect (1-3 us each, measured path) with KVM-style
-unsync for leaf tables, resyncing on `invlpg` or CR3 reload. A and D are set host-side as in the spike. Full invalidate at
-33 us is ruled out for any kernel that reloads CR3 often. x86 PS=1 can use stage-1 blocks (measured 13% gain at 64 MB).
-
-### Multi-vCPU
-One thread per `hv_vcpu_t`, EnTSO per vCPU (litmus measured two). Shadow tables and the block map shared under a lock;
-`b` patches are atomic under the ARM cross-modification rule; 16-byte hash entries rely on LSE2 LDP atomicity (FEAT
-present, reliance untested). Locked x86 RMW maps to LSE; unaligned locked ops across 16 bytes need an emulated split lock.
-Shootdowns stay the guest's IPIs, plus `is` TLBI.
-
-### Fallback to TCG
-Keep CPUX86State as the switch format. The vCPU thread runs TCG's `cpu_exec` for real mode, firmware, SMM, x87-heavy
-code, non-flat segments, then returns on a flat long-mode or protected-mode boundary. RAM is already shared. TCG blocks
-keep barriers, so a mixed VM remains correctly ordered. Whether QEMU tolerates two engines on one vCPU thread is untested.
-
-## Biggest unknowns
-
-1. Page-table write rate and shadow fill rate in a real macOS guest. Other trap rates are now known, and cost about 11% of one
-   vCPU with an EL1 monitor. Write-protect at 250 ns tolerates a high rate, but a fill still goes to the host unless the walker
-   also moves in-guest.
-2. MMIO: 83% of the remaining trap cost, and device model time on top is unmeasured. Whether hot registers can be served in-VM.
-3. Return prediction. `br` via the cache is 2.3-4x native and up to 1.3x Rosetta. A shadow return stack with real `bl`/`ret`
-   should help on call-heavy code; kernels are call-heavy.
-4. Non-canonical isolation. A guest load at the hole address (bit 47 set, canonical bits clear) hits private memory instead
-   of #GP. Execute-only stage 2, or an indirect table placed in code, may solve it. Not a host-safety issue; stage 2 still
-   bounds the guest. Compatibility risk only.
-5. Platform durability. `ACTLR_EL1.EnTSO` from HVF is undocumented as far as I know, and hardware TSO could leave future
-   Apple silicon when Rosetta goes. The app's deployment target is 15.0: `ACTLR_EL1` exists there, and default 16 KB stage 2
-   needs no 26.0 API, but only macOS 27.2 was tested.
-6. Translation on the host for cold code: 1 us plus translate per block during boot and app launch.
-
-## Next experiment
-
-Plain EL1 monitor: go. Guest EL2: no-go on this OS and hardware. Build the freestanding x86-64 test kernel with IDT, syscall, timer
-and fork-like page-table churn in this spike, translated at EL1 and EL0, and replace the hand-written rows with translated ones.
-Separately, count page-table writes and per-register MMIO in a real guest, as neither is known; that decides how much of the
-walker and device paths must also move into the VM.

@@ -1140,6 +1140,13 @@ static void emit_string(const Insn *in) {
     }
     u32 *start = tr_cc;
     u32 *skip = 0;
+    if (in->rep && (sub == 0 || sub == 2)) {
+        // Bulk first: a stub moves whole 32-byte chunks with exact registers between them. The plain loop below does what is left.
+        movimm(S1, (u64)(32 / sz));
+        if (sub == 2)
+            E(0x4E000C00u | (u32)sz << 16 | V_S0); // dup v24.<T>, the accumulator
+        bl_abs(PRIV_VA + OFF_STUBS + (sub == 0 ? STUB_OFF_REP_MOVS : STUB_OFF_REP_STOS));
+    }
     if (in->rep) {
         skip = tr_cc;
         cbz(0, 1, 1, 0);

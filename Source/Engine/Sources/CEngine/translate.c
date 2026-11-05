@@ -85,6 +85,21 @@ static void map_remove(int view, u64 rip) {
     }
 }
 
+// Ring-0 code in the high half is shared by every address space that reaches it through the same PML4 entry target: an x86 kernel keeps
+// those entries identical, and a change to them invalidates through the page-table write path. Everything else belongs to one view.
+#define KEY_DOMAIN 0x40000000
+static int view_high;
+static int block_key(int view, u64 cr3, int cpl, u64 rip) {
+    if (cpl == 0 && (rip >> 47)) {
+        u64 table = cr3 & 0x000FFFFFFFFFF000ULL;
+        if (table + 4096 <= cfg.ram_size) {
+            u64 e = *(u64 *)(cfg.ram + table + ((rip >> 39) & 0x1ff) * 8);
+            return KEY_DOMAIN | (int)((e >> 12) & 0x3FFFFFFF);
+        }
+    }
+    return view;
+}
+
 // ---- Guest memory, host's read-only view ----
 static u64 walk_cr3;
 static int walk_cpl;
@@ -509,7 +524,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     HostBlock *hb = &hblocks[idx];
     memset(hb, 0, sizeof *hb);
     hb->rip = rip;
-    hb->view = (u32)view;
+    hb->view = (u32)block_key(view, cr3, cpl, rip);
     hb->entry_word = (u32)(start - cc_base);
     hb->frame[0] = res.frames[0];
     hb->frame[1] = res.frames[1];
@@ -527,7 +542,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     be->map_off = map0;
     be->map_count = (u32)count;
     if (!single) {
-        map_insert(view, rip, idx + 1);
+        map_insert((int)hb->view, rip, idx + 1);
         hb->registered = true;
     }
     __sync_synchronize();
@@ -766,21 +781,44 @@ void tr_init(const TrConfig *config) {
 }
 
 TrResult tr_translate(int view, uint64_t cr3, int cpl, uint64_t rip, bool single) {
+    if (view > view_high)
+        view_high = view;
+    int key = block_key(view, cr3, cpl, rip);
     if (!single) {
-        u32 hit = map_find(view, rip);
+        u32 hit = map_find(key, rip);
         if (hit) {
             TrResult r = {0};
             r.arm = tr_cc_va(cc_base + hblocks[hit - 1].entry_word);
             r.frames[0] = hblocks[hit - 1].frame[0];
             r.frames[1] = hblocks[hit - 1].frame[1];
+            r.key = key;
             return r;
         }
     }
-    return do_translate(view, cr3, cpl, rip, single);
+    TrResult r = do_translate(view, cr3, cpl, rip, single);
+    r.key = key;
+    return r;
 }
 
-void tr_link(uint64_t site, int kind, uint64_t arm) {
+// The block holding a code cache word. Blocks only grow upward, so the table is sorted.
+static HostBlock *block_at(u32 word) {
+    u32 lo = 0, hi = hblock_count;
+    while (lo < hi) {
+        u32 mid = (lo + hi) / 2;
+        if (hblocks[mid].entry_word <= word)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo ? &hblocks[lo - 1] : 0;
+}
+
+void tr_link(uint64_t site, int kind, uint64_t arm, int key) {
     u32 *s = cc_host(site);
+    // A link is forever, so it may only join blocks of one domain: a chain from shared code into one view's code would be wrong in the next.
+    HostBlock *from = block_at((u32)(s - cc_base));
+    if (!from || (int)from->view != key)
+        return;
     i64 d = ((i64)arm - (i64)site) >> 2;
     if (kind == SVC_CALL)
         *s = 0x94000000u | ((u32)d & 0x3ffffff);
@@ -846,7 +884,11 @@ static void kill_block(u32 idx) {
     hb->dead = true;
     if (hb->registered) {
         map_remove((int)hb->view, hb->rip);
-        hash_remove((int)hb->view, hb->rip);
+        if (hb->view & KEY_DOMAIN) {
+            for (int v = 0; v <= view_high; v++)
+                hash_remove(v, hb->rip);
+        } else
+            hash_remove((int)hb->view, hb->rip);
     }
     u32 *entry = cc_base + hb->entry_word;
     *entry = 0xD4000001u | SVC_DEAD << 5;
@@ -880,12 +922,20 @@ int tr_invalidate_view_va(int view, uint64_t va) {
     u64 page = va & ~0xfffULL;
     for (u32 i = 0; i < hblock_count; i++) {
         HostBlock *hb = &hblocks[i];
-        if (!hb->dead && (int)hb->view == view && (hb->rip & ~0xfffULL) == page) {
+        if (!hb->dead && ((int)hb->view == view || (hb->view & KEY_DOMAIN)) && (hb->rip & ~0xfffULL) == page) {
             kill_block(i);
             n++;
         }
     }
     return n;
+}
+
+void tr_view_drop(int view) {
+    for (u32 i = 0; i < hblock_count; i++)
+        if (!hblocks[i].dead && (int)hblocks[i].view == view)
+            kill_block(i);
+    memset(hash_table(view), 0, HASH_BYTES);
+    ctx_ptr->tr_flushed = 1;
 }
 
 void tr_flush_all(void) {

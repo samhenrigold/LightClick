@@ -98,6 +98,8 @@ typedef struct {
     u64 ttbr0, ttbr1;
     u64 rs_saved, rs_top;
     u64 hash_va;
+    u64 last_used;
+    u32 keeper, pad;
 } View;
 static View views[MAX_VIEWS];
 static u32 view_count;
@@ -109,7 +111,8 @@ typedef struct {
     u32 view;
     u32 level; // 3 root .. 0 leaf table
     u32 next_mirror; // pool index + 1: next shadow table mirroring the same guest frame
-    u32 live; // entries in use, unused beyond statistics
+    u32 writes; // guest writes since the last walk through this table
+    u64 *parent; // the shadow entry pointing here; null for roots
 } ShadowDesc;
 
 #define POOL_PAGES (SHADOW_POOL_BYTES / 4096)
@@ -153,7 +156,8 @@ static u32 pool_alloc(u32 view, u32 level, u64 guest_table, u64 va_base) {
     d->view = view;
     d->level = level;
     d->next_mirror = 0;
-    d->live = 1;
+    d->writes = 0;
+    d->parent = 0;
     if (guest_table != ~0ULL && guest_table < c->ram_size) {
         u32 fr = (u32)(guest_table >> 12);
         d->next_mirror = mirror_head[fr];
@@ -358,7 +362,18 @@ static BlockEntry *find_block(u64 pc) {
 }
 
 // x86 rip of the instruction containing pc. exact is set when pc is its first word.
+static inline bool in_rep_stub(u64 pc) {
+    u64 s = PRIV_VA + OFF_STUBS;
+    return pc >= s + STUB_OFF_REP_MOVS && pc < s + STUB_OFF_REP_END;
+}
+
 static u64 rip_of_pc(u64 pc, bool *exact, bool *found) {
+    if (in_rep_stub(pc)) { // inside a rep instruction, called from its block; the loop heads are boundaries
+        bool e;
+        u64 s = PRIV_VA + OFF_STUBS, rip = rip_of_pc(c->x[R_LR] - 4, &e, found);
+        *exact = pc == s + STUB_OFF_REP_MOVS_HEAD || pc == s + STUB_OFF_REP_STOS_HEAD;
+        return rip;
+    }
     BlockEntry *b = find_block(pc);
     *exact = false;
     *found = b != 0;
@@ -440,19 +455,13 @@ static void rflags_set(u64 r) {
 }
 
 // ---- Views ----
-static View *view_find(u64 cr3_key, u32 cpl) {
-    for (u32 i = 0; i < view_count; i++)
-        if (views[i].cr3 == cr3_key && views[i].cpl == cpl)
-            return &views[i];
-    if (view_count >= MAX_VIEWS)
-        stop(STOP_UNSUPPORTED, 0, 2, cr3_key, cpl); // shortcut: no view eviction yet; real guests need LRU
-    u32 idx = view_count;
+static void view_build(u32 idx, u64 key, u32 cpl) {
     View *v = &views[idx];
-    v->cr3 = cr3_key;
+    v->cr3 = key;
     v->cpl = cpl;
     v->valid = 1;
-    u32 r0 = pool_alloc(idx, 3, cr3_key & X_ADDR, 0);
-    u32 r1 = pool_alloc(idx, 3, cr3_key & X_ADDR, 0xFFFF000000000000ULL); // upper half of the same guest table
+    u32 r0 = pool_alloc(idx, 3, key & X_ADDR, 0);
+    u32 r1 = pool_alloc(idx, 3, key & X_ADDR, 0xFFFF000000000000ULL); // upper half of the same guest table
     v->root0 = (u64)pool_page(r0);
     v->root1 = (u64)pool_page(r1);
     ((u64 *)v->root0)[(PRIV_VA >> 39) & 0x1ff] = hole_entry_priv;
@@ -465,8 +474,64 @@ static View *view_find(u64 cr3_key, u32 cpl) {
     u64 *sent = (u64 *)v->rs_top;
     sent[0] = ~0ULL; // never equals a canonical return address, so popping the sentinel misses
     sent[1] = 0;
-    view_count = idx + 1;
-    return v;
+}
+
+static void zap_table(u32 idx);
+static bool evicting;
+
+// Takes the least recently used view for reuse. A view that keeps a shared kernel domain's marks stays.
+static u32 view_evict(void) {
+    u32 best = MAX_VIEWS;
+    for (u32 i = 0; i < view_count; i++)
+        if (!views[i].keeper && i != c->view && (best == MAX_VIEWS || views[i].last_used < views[best].last_used))
+            best = i;
+    if (best == MAX_VIEWS)
+        stop(STOP_UNSUPPORTED, 0, 2, 0, 0); // every view is a keeper or running
+    View *v = &views[best];
+    c->stat_view_evictions++;
+    // Code marks need no invalidation one by one: the host drops all the view's own blocks together.
+    evicting = true;
+    zap_table(pool_index((void *)v->root0));
+    zap_table(pool_index((void *)v->root1));
+    evicting = false;
+    __asm__ volatile("dsb ishst\n tlbi aside1is, %0\n dsb ish\n isb" : : "r"((u64)view_asid(best) << 48));
+    c->req_a[0] = best;
+    hostcall(HC_VIEW_DROP);
+    v->valid = 0;
+    return best;
+}
+
+static View *view_find(u64 cr3_key, u32 cpl) {
+    for (u32 i = 0; i < view_count; i++)
+        if (views[i].cr3 == cr3_key && views[i].cpl == cpl && views[i].valid)
+            return &views[i];
+    u32 idx;
+    if (view_count >= MAX_VIEWS)
+        idx = view_evict();
+    else
+        idx = view_count++;
+    view_build(idx, cr3_key, cpl);
+    return &views[idx];
+}
+
+// The view that keeps code marks for a shared kernel domain: whichever view first translated from it. It is not evicted, so a write to a
+// kernel PTE always meets a mark, however many views have come and gone. Shortcut: a fixed table, more slots than kernels use.
+static View *domain_keeper(u64 pml4e_target, View *requester) {
+    static struct {
+        u64 target;
+        u32 view;
+    } keepers[16];
+    static u32 count;
+    for (u32 i = 0; i < count; i++)
+        if (keepers[i].target == pml4e_target)
+            return &views[keepers[i].view];
+    if (count == 16)
+        stop(STOP_UNSUPPORTED, 0, 16, pml4e_target, 0);
+    keepers[count].target = pml4e_target;
+    keepers[count].view = (u32)(requester - views);
+    count++;
+    requester->keeper = 1;
+    return requester;
 }
 
 static inline u64 cr3_key(u64 cr3) { return (c->cr4 & (1ULL << 17)) ? (cr3 & (X_ADDR | 0xfff)) : (cr3 & X_ADDR); }
@@ -477,6 +542,8 @@ static void view_activate(View *v) {
     View *old = view_current();
     if (old == v)
         return;
+    static u64 stamp;
+    v->last_used = ++stamp;
     old->rs_saved = c->x[R_RS];
     c->x[R_RS] = v->rs_saved;
     c->rs_top = v->rs_top;
@@ -509,6 +576,8 @@ static u64 *shadow_slot(View *v, u64 va, const Walk *w, int leaf_level_target, u
             u64 mask = ~((1ULL << (12 + 9 * (child + 1))) - 1);
             u64 base = va & mask;
             u32 idx = pool_alloc(vi, (u32)child, gt, base);
+            desc[idx].parent = e;
+            desc[idx].writes = 0;
             if (gt != ~0ULL && gt < c->ram_size && !(page_info[gt >> 12] & PI_PT)) {
                 page_info[gt >> 12] |= PI_PT;
                 write_protect_frame(gt);
@@ -516,6 +585,7 @@ static u64 *shadow_slot(View *v, u64 va, const Walk *w, int leaf_level_target, u
             *e = VA_TO_IPA((u64)pool_page(idx)) | PTE_VALID;
         }
         table_va = IPA_TO_VA(*e & PTE_ADDR);
+        desc[pool_index((void *)table_va)].writes = 0;
     }
     return &((u64 *)table_va)[(va >> (12 + 9 * leaf_level_target)) & 0x1ff];
 }
@@ -645,6 +715,11 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
     }
     track_root(v, rip, &w);
     *shadow_slot(v, rip, &w, 0, 0) |= PTE_X_MARK;
+    if (c->cpl == 0 && (rip >> 47)) { // shared with other views: the domain's keeper must see writes to this mapping too
+        View *keeper = domain_keeper(*w.chain[3] & X_ADDR, v);
+        if (keeper != v)
+            *shadow_slot(keeper, rip, &w, 0, 0) |= PTE_X_MARK;
+    }
     if (c->req_r[3]) { // a straddling instruction: a change to the next page's mapping must invalidate this block as well
         u64 next = (rip & ~0xfffULL) + 4096;
         Walk w2 = x86_walk(c->cr3, next, 0, false);
@@ -667,9 +742,10 @@ static void zap_entry(u64 *e, const ShadowDesc *d) {
         if (v & 1) {
             if ((v & AP_RO) == AP_RW && (v & PTE_ADDR) < c->ram_size)
                 rmap_remove(v & PTE_ADDR, e);
-            tlbi_va(view_asid(d->view), va);
+            if (!evicting)
+                tlbi_va(view_asid(d->view), va);
         }
-        if (v & PTE_X_MARK) {
+        if ((v & PTE_X_MARK) && !evicting) {
             c->req_a[0] = d->view;
             c->req_a[1] = va;
             hostcall(HC_VIEW_INVALIDATE_VA);
@@ -683,9 +759,14 @@ static void zap_entry(u64 *e, const ShadowDesc *d) {
 static void zap_table(u32 idx) {
     ShadowDesc *d = &desc[idx];
     u64 *t = pool_page(idx);
-    for (int i = 0; i < 512; i++)
+    for (int i = 0; i < 512; i++) {
+        if (d->level == 3 && (u64)i == ((PRIV_VA >> 39) & 0x1ff))
+            continue; // the private slots of a root are not shadows
+        if (d->level == 3 && (u64)i == ((RAM_ALIAS_VA >> 39) & 0x1ff))
+            continue;
         if (t[i])
             zap_entry(&t[i], d);
+    }
     if (d->guest_table != ~0ULL && d->guest_table < c->ram_size) {
         u32 *link = &mirror_head[d->guest_table >> 12];
         while (*link) {
@@ -696,18 +777,34 @@ static void zap_table(u32 idx) {
             link = &desc[*link - 1].next_mirror;
         }
     }
-    d->live = 0;
+
     *(u32 *)t = pool_free_head;
     pool_free_head = idx + 1;
     __asm__ volatile("dsb ishst");
 }
 
 // A guest wrote a tracked table: drop every shadow entry that mirrors the slot. The next access refaults and refills.
+// A frame written many times with no walk through it in between has stopped being a page table (a freed one reused as data, say). Unshadow
+// it, or every store to it would trap for as long as the frame lives.
+#define PT_FLOOD_WRITES 64
 static void pt_slot_changed(u64 gpa_slot) {
     u32 fr = (u32)(gpa_slot >> 12), i = (u32)((gpa_slot & 0xfff) >> 3);
-    for (u32 it = mirror_head[fr]; it; it = desc[it - 1].next_mirror) {
+    for (u32 it = mirror_head[fr], next; it; it = next) {
         ShadowDesc *d = &desc[it - 1];
         u64 *t = pool_page(it - 1);
+        next = d->next_mirror;
+        if (d->level < 3 && d->parent && ++d->writes > PT_FLOOD_WRITES) {
+            u64 *parent = d->parent;
+            ShadowDesc pd = desc[pool_index(parent)];
+            u32 view = d->view;
+            c->stat_pt_unshadow++;
+            zap_entry(parent, &pd);
+            __asm__ volatile("dsb ishst\n tlbi aside1is, %0\n dsb ish\n isb" : : "r"((u64)view_asid(view) << 48));
+            next = mirror_head[fr]; // the list changed; anything still on it restarts, each has a bounded counter
+            if (!next)
+                page_info[fr] &= ~PI_PT;
+            continue;
+        }
         if (d->level == 3) {
             View *v = &views[d->view];
             u64 *r = (i < 256) ? (u64 *)v->root0 : (u64 *)v->root1;
@@ -1035,6 +1132,10 @@ static void handle_data_abort(bool lower) {
         return;
     }
     if (w.gpa >= c->ram_size) { // device hole: emulate the ARM access itself, so all x86 forms of a move or RMW work
+        if (in_rep_stub(c->elr)) { // string instruction on a device: back to the plain per-element loop
+            c->elr = c->x[R_LR];
+            return;
+        }
         ArmAccess a;
         if (!arm_decode(*(u32 *)c->elr, &a))
             stop(STOP_UNSUPPORTED, rip_here(c->elr), 4, far, esr); // pair, atomic or SIMD access to a device
