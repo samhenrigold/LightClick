@@ -429,23 +429,30 @@ static void *fp_thread(void *arg) {
         uint64_t seed = ((uint64_t)me + 1) * 0x9E3779B97F4A7C15ULL + rounds;
         uint64_t in[2] __attribute__((aligned(16))) = {seed, ~seed}, out[2] __attribute__((aligned(16))), mm_out = 0;
         double x = (double)((me + 1) * 3) + (double)(rounds & 255), x87 = 0;
-        __asm__ volatile("movdqa %1, %%xmm7\n movdqa %%xmm7, %%xmm13\n"
-                         "movq %2, %%mm3\n paddq %%mm3, %%mm3\n"
-                         "fldl %3\n fldl %3\n faddp\n"
-                         : "=m"(out)
-                         : "m"(in), "m"(in[0]), "m"(x)
-                         : "xmm7", "xmm13", "mm3", "st");
+        // x87 and MMX by turns, with emms between. An MMX instruction sets TOP to 0 and marks every register in use, so
+        // one between fld and fstp leaves fstp reading another register, and one before fld overflows the stack. A CPU
+        // and TCG do that. Rosetta, which keeps them apart, does not, so it can't check this rule.
+        int use_x87 = rounds & 1;
+        __asm__ volatile("movdqa %1, %%xmm7\n movdqa %%xmm7, %%xmm13\n" : "=m"(out) : "m"(in) : "xmm7", "xmm13");
+        if (use_x87)
+            __asm__ volatile("fldl %0\n fldl %0\n faddp\n" : : "m"(x) : "st");
+        else
+            __asm__ volatile("movq %0, %%mm3\n paddq %%mm3, %%mm3\n" : : "m"(in[0]) : "mm3");
         sched_yield(); // and every timer tick. A switch that loses any of it shows below
         for (volatile int spin = 0; spin < 200; spin++) {
         }
-        __asm__ volatile("movdqa %%xmm13, %0\n movq %%mm3, %1\n fstpl %2\n emms\n"
-                         : "=m"(out), "=m"(mm_out), "=m"(x87));
+        __asm__ volatile("movdqa %%xmm13, %0\n" : "=m"(out));
         if (out[0] != in[0] || out[1] != in[1])
             fail("registers", "xmm across a switch", out[0], in[0]);
-        if (mm_out != in[0] + in[0])
-            fail("registers", "mm across a switch", mm_out, in[0] + in[0]);
-        if (x87 != x + x)
-            fail("registers", "x87 across a switch", (uint64_t)x87, (uint64_t)(x + x));
+        if (use_x87) {
+            __asm__ volatile("fstpl %0\n" : "=m"(x87));
+            if (x87 != x + x)
+                fail("registers", "x87 across a switch", (uint64_t)x87, (uint64_t)(x + x));
+        } else {
+            __asm__ volatile("movq %%mm3, %0\n emms\n" : "=m"(mm_out));
+            if (mm_out != in[0] + in[0])
+                fail("registers", "mm across a switch", mm_out, in[0] + in[0]);
+        }
         rounds++;
     }
     __atomic_add_fetch(&fp_rounds, rounds, __ATOMIC_RELAXED);

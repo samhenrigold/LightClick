@@ -1083,6 +1083,49 @@ static void test_reciprocals(void) {
     }
 }
 
+// What a kernel's lazy switch does to one task's x87 stack or MMX registers: #NM, fxsave, another task using them,
+// fxrstor. Each must come back whole. And MMX over a live stack does what a CPU does, which a program mixing the two
+// without emms finds out: TOP goes to 0, so fstp reads another register.
+static void test_x87_across_a_switch(void) {
+    static u8 area[512] __attribute__((aligned(16)));
+    static const double two = 2.0, three = 3.0;
+    u64 cr0;
+    double got = 0, other = 0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    u64 nm = nm_count;
+    __asm__ volatile("fninit\n fldl %0\n fldl %1\n" : : "m"(two), "m"(three)); // 2 below 3
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 8)); // switched away
+    __asm__ volatile("fninit"); // the next task's first FP use takes #NM, and its handler clears TS
+    CHECK(nm_count == nm + 1);
+    __asm__ volatile("fldpi\n fstpl %0\n" : "=m"(other));
+    CHECK(other > 3.14 && other < 3.15);
+    // That lost the stack, as nothing saved it: now as a kernel does it.
+    __asm__ volatile("fninit\n fldl %0\n fldl %1\n fxsave64 (%2)\n" : : "m"(two), "m"(three), "r"(area) : "memory");
+    __asm__ volatile("fninit\n fld1\n fld1\n fldpi\n fxrstor64 (%0)\n" : : "r"(area) : "memory");
+    __asm__ volatile("fstpl %0" : "=m"(got));
+    CHECK(got == 3.0);
+    __asm__ volatile("fstpl %0" : "=m"(got));
+    CHECK(got == 2.0);
+    // Registers saved under MMX come back to MMX.
+    u64 mm = 0x1122334455667788ULL, out = 0;
+    __asm__ volatile(
+        "emms\n movq %0, %%mm3\n fxsave64 (%1)\n emms\n fninit\n pxor %%mm3, %%mm3\n emms\n fxrstor64 (%1)\n"
+        :
+        : "m"(mm), "r"(area)
+        : "memory", "mm3");
+    __asm__ volatile("movq %%mm3, %0\n emms\n" : "=m"(out));
+    CHECK(out == mm);
+    // Without emms: fld at physical 7, TOP back to 0 by the MMX, and fstp reads physical 0, not what fld loaded. MMX
+    // writes leave that register's exponent all ones, so it isn't a plain 0.
+    u64 zero = 0;
+    __asm__ volatile(
+        "fninit\n emms\n movq %0, %%mm0\n emms\n fninit\n fldl %1\n movq %%mm3, %%mm3\n fstpl %2\n emms\n fninit\n"
+        :
+        : "m"(zero), "m"(three), "m"(got)
+        : "mm0", "mm3", "memory");
+    CHECK(got != 3.0);
+}
+
 // Kernel code, shared by every address space. A process exiting must leave its translations for the rest, and changes
 // to it must still reach them all.
 #define KERNEL_SHARED_VA 0xFFFF960000000000ULL
@@ -1769,6 +1812,7 @@ void kmain(void) {
     test_direct_map();
     test_tsc_deadline();
     test_reciprocals();
+    test_x87_across_a_switch();
     test_kernel_domain(root);
     test_many_blocks(root);
     test_linked_loop();
