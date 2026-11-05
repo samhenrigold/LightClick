@@ -823,12 +823,13 @@ static void note_process_syscall(u64 next) {
         note_wait_status = c->x[6];
     }
 }
-static void note_wait_returned(u64 rip) {
+static void note_wait_returned(u64 rip, u64 user_flags) {
     if (!note_wait_cr3 || note_wait_cr3 != c->cr3)
         return;
     c->req_a[0] = 2;
     c->req_a[1] = rip;
     c->req_a[2] = note_wait_status;
+    c->req_a[3] = user_flags & 1; // CF: Darwin's way of saying rax is an errno
     note_wait_cr3 = 0;
     hostcall(HC_NOTE);
 }
@@ -1027,6 +1028,14 @@ static u64 translate_here(u64 rip, u64 site, u32 kind, bool single) {
         if (m != me && held && (held == (c->req_r[2] & ~1ULL) + 1 || held == (c->req_r[3] & ~1ULL) + 1)) {
             mon_unlock();
             __asm__ volatile("yield");
+            if (c->stop_requested) // that vCPU may itself be waiting for this one to leave the code cache, which it can do here
+                hostcall(HC_PARK);
+            if (c->tr_flushed) { // and what the host translated above went with it
+                c->tr_flushed = 0;
+                code_cache_reset = true;
+                reset_all_return_stacks();
+                return translate_here(rip, 0, 0, false);
+            }
             mon_lock();
             cpu = ~0u; // and look at them all again
         }
@@ -2160,7 +2169,7 @@ static void do_sysexit(void) {
         return;
     }
     note_event('R', rip, c->x[0], 1);
-    note_wait_returned(rip);
+    note_wait_returned(rip, rflags_get());
     c->seg_sel[1] = (u16)(((cs + (op64 ? 32 : 16)) & 0xfffc) | 3);
     c->seg_sel[2] = (u16)(((cs + (op64 ? 40 : 24)) & 0xfffc) | 3);
     c->x[4] = rsp;
@@ -2184,7 +2193,7 @@ static void do_sysret(void) {
         return;
     }
     note_event('R', rip, c->x[0], 0);
-    note_wait_returned(rip);
+    note_wait_returned(rip, c->x[11]);
     u64 fl = (c->x[11] & 0x3C7FD7ULL) | RFLAGS_FIXED;
     rflags_set(fl);
     u16 base = (u16)((c->star >> 48) & 0xffff);
@@ -2240,7 +2249,7 @@ static void do_iret(void) {
     u32 cs = (u32)f[1] & 0xffff, ss = (u32)f[4] & 0xffff;
     u32 new_cpl = cs & 3;
     if (new_cpl == 3)
-        note_wait_returned(rip);
+        note_wait_returned(rip, rfl);
     if (new_cpl < c->cpl) {
         raise_gp(cs & ~3u, here);
         return;

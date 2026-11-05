@@ -288,6 +288,10 @@ final class HybridHarness {
                     FileHandle.standardError.write(Data("no directory was shared\n".utf8))
                     return 6
                 }
+                if !tally.contains("wait4 failed, error 10") || tally.contains("SIGNAL 65") {
+                    FileHandle.standardError.write(Data("a wait4 that failed was logged as something else\n".utf8))
+                    return 6
+                }
                 // 300 processes ran kernel code and exited, which must not cost the kernel its translations each time.
                 let higher =
                     tally.split(separator: "\n").first { $0.hasSuffix("a store higher in the tables") }?.split(

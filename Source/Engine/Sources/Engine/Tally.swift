@@ -171,6 +171,10 @@ public final class Tally: @unchecked Sendable {
         case 2:
             let status = engine.readGuest(c.req_a.2, count: 4)?.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
             let result = Int64(bitPattern: r[0])
+            if c.req_a.3 != 0 {  // rax is an errno, and the status word is whatever the caller had there
+                o += "wait4 failed, error \(result)"
+                break
+            }
             o += "wait4 returned \(result) status " + (status.map { hex(UInt64($0)) } ?? "unreadable")
             // With no child ready (WNOHANG returns 0) or an error, the kernel left the status word as it found it.
             if result > 0, let status, status & 0x7F != 0 {
