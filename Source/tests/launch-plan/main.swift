@@ -3,8 +3,8 @@ import Foundation
 let directory = URL(fileURLWithPath: CommandLine.arguments[1])
 let record = CommandLine.arguments.contains("--record")
 let scenarios = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appending(path: "scenarios.json"))) as! [[String: Any]]
-let usb3 = ["elcapitan", "sierra", "highsierra", "mojave", "catalina", "bigsur"]
-let preMetal = ["tiger", "leopard", "snowleopard", "lion", "mountainlion", "mavericks", "yosemite", "elcapitan", "sierra", "highsierra"]
+nonisolated let usb3 = ["elcapitan", "sierra", "highsierra", "mojave", "catalina", "bigsur"]
+nonisolated let preMetal = ["tiger", "leopard", "snowleopard", "lion", "mountainlion", "mavericks", "yosemite", "elcapitan", "sierra", "highsierra"]
 
 // Mirrors how VIMSession.m resolves these values before asking for a plan.
 func makeInput(_ s: [String: Any]) -> LaunchInput {
