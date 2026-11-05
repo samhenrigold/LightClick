@@ -1609,6 +1609,136 @@ static void tcg_out_extrl_i64_i32(TCGContext *s, TCGReg rd, TCGReg rn)
     tcg_out_mov(s, TCG_TYPE_I32, rd, rn);
 }
 
+/*
+ * Local experiment: x86's implicit barriers between neighboring guest accesses in a
+ * block, replaced with an address dependency where that keeps every order. The Arm
+ * memory model orders a read before any later access whose address depends on it,
+ * whatever the value, so the register holds zero computed from the read's data and is
+ * added to the next address. Neighboring means only ops that neither touch guest memory,
+ * run C code nor branch lie between. Before each access:
+ *
+ * - A load after a load drops dmb ishld, if another access follows it in the same way.
+ *   If not, what follows could rely on that barrier for the earlier loads, so it stays.
+ * - A store after a load uses dmb ishst and the dependency, for store and load order.
+ * - A store after a store uses dmb ishst, as the first store ordered the earlier loads.
+ * - Any other store uses a full dmb ish. QEMU asks only for ST_ST before a 16-byte store,
+ *   so this also gives it the load-to-store order x86 needs, which it otherwise lacks.
+ *
+ * A slow path's helper has its own barrier before its access. A load's slow path also has
+ * dmb ishld before it rejoins, so C code's read needs no dependency. Without barriers,
+ * under hardware TSO, this emits nothing. Bits other than those above keep the barrier.
+ */
+enum { PVG_MB_DEFAULT, PVG_MB_NONE, PVG_MB_ST, PVG_MB_FULL };
+
+static bool pvg_load_dep;
+static __thread struct {
+    bool live; /* the register depends on the last access, a load, and nothing intervened */
+    bool after_store; /* the last access was a store and nothing intervened */
+    bool use; /* the next access adds the register to its address */
+    bool save; /* the next load sets the register from its data */
+    uint8_t mb; /* how the next tcg_out_mb differs */
+} pvg_dep;
+
+#define PVG_DEP_REG TCG_REG_X28
+
+static bool pvg_dep_is_load(const TCGOp *op)
+{
+    return op->opc == INDEX_op_qemu_ld || op->opc == INDEX_op_qemu_ld2;
+}
+
+static bool pvg_dep_is_store(const TCGOp *op)
+{
+    return op->opc == INDEX_op_qemu_st || op->opc == INDEX_op_qemu_st2;
+}
+
+static bool pvg_dep_is_implicit_mb(const TCGOp *op)
+{
+    unsigned bar = op->args[0] & TCG_MO_ALL;
+
+    return op->opc == INDEX_op_mb &&
+           (bar == TCG_MO_LD_LD || bar == TCG_MO_ST_ST || bar == (TCG_MO_LD_ST | TCG_MO_ST_ST));
+}
+
+static bool pvg_dep_passes(const TCGOp *op)
+{
+    switch (op->opc) {
+    case INDEX_op_insn_start:
+    case INDEX_op_discard:
+    case INDEX_op_mov:
+    case INDEX_op_add:
+    case INDEX_op_sub:
+    case INDEX_op_and:
+    case INDEX_op_or:
+    case INDEX_op_xor:
+    case INDEX_op_shl:
+    case INDEX_op_shr:
+    case INDEX_op_sar:
+    case INDEX_op_ld:
+    case INDEX_op_st:
+    case INDEX_op_mov_vec:
+    case INDEX_op_ld_vec:
+    case INDEX_op_st_vec:
+        return true;
+    default:
+        return pvg_dep_is_implicit_mb(op);
+    }
+}
+
+/* The next guest access if only passing ops lie before it, and whether a barrier is among them. */
+static const TCGOp *pvg_dep_next(const TCGOp *op, bool *have_mb)
+{
+    int budget = 64;
+
+    *have_mb = false;
+    while (budget-- && (op = QTAILQ_NEXT(op, link))) {
+        if (pvg_dep_is_load(op) || pvg_dep_is_store(op)) {
+            return op;
+        }
+        if (!pvg_dep_passes(op)) {
+            return NULL;
+        }
+        *have_mb |= op->opc == INDEX_op_mb;
+    }
+    return NULL;
+}
+
+/* Called for each op before it is emitted. */
+static void tcg_out_pvg_dep_op(TCGContext *s, const TCGOp *op)
+{
+    const TCGOp *next;
+    bool have_mb;
+
+    if (!pvg_load_dep) {
+        return;
+    }
+    if (pvg_dep_is_load(op)) {
+        next = pvg_dep_next(op, &have_mb);
+        pvg_dep.save = pvg_dep.live = next && have_mb;
+        pvg_dep.after_store = false;
+    } else if (pvg_dep_is_store(op)) {
+        pvg_dep.live = false;
+        pvg_dep.after_store = true;
+    } else if (!pvg_dep_passes(op)) {
+        pvg_dep.live = pvg_dep.after_store = false;
+    } else if (op->opc == INDEX_op_mb) {
+        unsigned bar = op->args[0] & TCG_MO_ALL;
+
+        next = pvg_dep_next(op, &have_mb);
+        if (!next) {
+            return;
+        }
+        if (pvg_dep_is_load(next)) {
+            if (bar == TCG_MO_LD_LD && pvg_dep.live && pvg_dep_next(next, &have_mb)) {
+                pvg_dep.mb = PVG_MB_NONE;
+                pvg_dep.use = true;
+            }
+        } else if (bar != TCG_MO_LD_LD) {
+            pvg_dep.mb = pvg_dep.live || pvg_dep.after_store ? PVG_MB_ST : PVG_MB_FULL;
+            pvg_dep.use = pvg_dep.live;
+        }
+    }
+}
+
 static void tcg_out_mb(TCGContext *s, unsigned a0)
 {
     static const uint32_t sync[] = {
@@ -1618,7 +1748,14 @@ static void tcg_out_mb(TCGContext *s, unsigned a0)
         [TCG_MO_LD_ST]                = DMB_ISH | DMB_LD,
         [TCG_MO_LD_ST | TCG_MO_LD_LD] = DMB_ISH | DMB_LD,
     };
-    tcg_out32(s, sync[a0 & TCG_MO_ALL]);
+    uint8_t mode = pvg_dep.mb;
+
+    pvg_dep.mb = PVG_MB_DEFAULT;
+    if (mode == PVG_MB_NONE) {
+        return;
+    }
+    tcg_out32(s, mode == PVG_MB_ST ? DMB_ISH | DMB_ST :
+                 mode == PVG_MB_FULL ? DMB_ISH | DMB_LD | DMB_ST : sync[a0 & TCG_MO_ALL]);
 }
 
 typedef struct {
@@ -1631,6 +1768,27 @@ typedef struct {
 bool tcg_target_has_memory_bswap(MemOp memop)
 {
     return false;
+}
+
+static void tcg_out_pvg_dep_use(TCGContext *s, HostAddress *h)
+{
+    if (pvg_dep.use) {
+        pvg_dep.use = false;
+        tcg_out_insn(s, addsub_shift, ADD, 1, h->base, h->base, PVG_DEP_REG);
+    }
+}
+
+/* After the data is in place, on the path that a slow path rejoins. */
+static void tcg_out_pvg_dep_save(TCGContext *s, TCGReg lo, TCGReg hi)
+{
+    if (pvg_dep.save) {
+        pvg_dep.save = false;
+        tcg_out_insn(s, logic_shift, EOR, TCG_TYPE_I64, PVG_DEP_REG, lo, hi);
+        if (lo != hi) {
+            tcg_out_insn(s, logic_shift, EOR, TCG_TYPE_I64, PVG_DEP_REG,
+                         PVG_DEP_REG, PVG_DEP_REG);
+        }
+    }
 }
 
 static const TCGLdstHelperParam ldst_helper_param = {
@@ -1648,6 +1806,9 @@ static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *lb)
     tcg_out_ld_helper_args(s, lb, &ldst_helper_param);
     tcg_out_call_int(s, qemu_ld_helpers[opc & MO_SIZE]);
     tcg_out_ld_helper_ret(s, lb, false, &ldst_helper_param);
+    if (pvg_load_dep) {
+        tcg_out32(s, DMB_ISH | DMB_LD);
+    }
     tcg_out_goto(s, lb->raddr);
     return true;
 }
@@ -1863,6 +2024,7 @@ static void tgen_qemu_ld(TCGContext *s, TCGType data_type, TCGReg data_reg,
     HostAddress h;
 
     ldst = prepare_host_addr(s, &h, addr_reg, oi, true);
+    tcg_out_pvg_dep_use(s, &h);
     tcg_out_qemu_ld_direct(s, get_memop(oi), data_type, data_reg, h);
 
     if (ldst) {
@@ -1870,6 +2032,7 @@ static void tgen_qemu_ld(TCGContext *s, TCGType data_type, TCGReg data_reg,
         ldst->datalo_reg = data_reg;
         ldst->raddr = tcg_splitwx_to_rx(s->code_ptr);
     }
+    tcg_out_pvg_dep_save(s, data_reg, data_reg);
 }
 
 static const TCGOutOpQemuLdSt outop_qemu_ld = {
@@ -1884,6 +2047,7 @@ static void tgen_qemu_st(TCGContext *s, TCGType data_type, TCGReg data_reg,
     HostAddress h;
 
     ldst = prepare_host_addr(s, &h, addr_reg, oi, false);
+    tcg_out_pvg_dep_use(s, &h);
     tcg_out_qemu_st_direct(s, get_memop(oi), data_reg, h);
 
     if (ldst) {
@@ -1907,6 +2071,7 @@ static void tcg_out_qemu_ldst_i128(TCGContext *s, TCGReg datalo, TCGReg datahi,
     bool use_pair;
 
     ldst = prepare_host_addr(s, &h, addr_reg, oi, is_ld);
+    tcg_out_pvg_dep_use(s, &h);
 
     /* Compose the final address, as LDP/STP have no indexing. */
     if (h.index == TCG_REG_XZR) {
@@ -1994,6 +2159,7 @@ static void tcg_out_qemu_ldst_i128(TCGContext *s, TCGReg datalo, TCGReg datahi,
         ldst->datahi_reg = datahi;
         ldst->raddr = tcg_splitwx_to_rx(s->code_ptr);
     }
+    tcg_out_pvg_dep_save(s, datalo, datahi);
 }
 
 static void tgen_qemu_ld2(TCGContext *s, TCGType type, TCGReg datalo,
@@ -3718,6 +3884,10 @@ static void tcg_target_init(TCGContext *s)
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_TMP2);
     tcg_regset_set_reg(s->reserved_regs, TCG_VEC_TMP0);
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_V30); /* tgen_aa64_fp */
+    pvg_load_dep = tcg_use_softmmu && pvg_tcg_fast_path("PVG_TCG_LOAD_DEPENDENCY");
+    if (pvg_load_dep) {
+        tcg_regset_set_reg(s->reserved_regs, PVG_DEP_REG);
+    }
 }
 
 /* Saving pairs: (X19, X20) .. (X27, X28), (X29(fp), X30(lr)).  */
@@ -3807,6 +3977,7 @@ static void tcg_target_qemu_prologue(TCGContext *s)
 
 static void tcg_out_tb_start(TCGContext *s)
 {
+    memset(&pvg_dep, 0, sizeof(pvg_dep));
     tcg_out_bti(s, BTI_J);
 }
 
