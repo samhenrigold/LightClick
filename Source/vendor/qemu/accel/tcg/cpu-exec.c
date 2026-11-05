@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/pvg-tcg.h"
 #include "qemu/qemu-print.h"
 #include "qapi/error.h"
 #include "qapi/type-helpers.h"
@@ -70,8 +71,7 @@ static void __attribute__((constructor)) pvg_init_lookup_diagnostics(void)
 {
     const char *value = getenv("PVG_TCG_LOOKUP_DIAGNOSTICS");
     pvg_lookup_diagnostics = value && !strcmp(value, "1");
-    value = getenv("PVG_TCG_ALTERNATE_LOOKUP");
-    pvg_lookup_alternate = value && !strcmp(value, "1");
+    pvg_lookup_alternate = pvg_tcg_fast_path("PVG_TCG_ALTERNATE_LOOKUP");
 }
 #include "tb-context.h"
 #include "tb-internal.h"
@@ -1168,8 +1168,7 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
 
     cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
     cpu->tb_jmp_cache->generation = 1;
-    cpu->tb_jmp_cache->lazy_flush =
-        g_strcmp0(getenv("PVG_TCG_LAZY_JMP_CACHE"), "1") == 0;
+    cpu->tb_jmp_cache->lazy_flush = pvg_tcg_fast_path("PVG_TCG_LAZY_JMP_CACHE");
     tlb_init(cpu);
 #ifndef CONFIG_USER_ONLY
     tcg_iommu_init_notifier_list(cpu);

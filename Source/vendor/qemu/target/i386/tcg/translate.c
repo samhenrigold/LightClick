@@ -17,6 +17,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
+#include "qemu/pvg-tcg.h"
 
 #include "qemu/host-utils.h"
 #include "cpu.h"
@@ -47,10 +48,9 @@ static bool tail_dispatch;
 
 static void __attribute__((constructor)) init_inline_jmp_cache(void)
 {
-    const char *value = getenv("PVG_TCG_INLINE_JMP_CACHE");
-    emit_inline_jmp_cache = value && !strcmp(value, "1");
+    emit_inline_jmp_cache = pvg_tcg_fast_path("PVG_TCG_INLINE_JMP_CACHE");
     x86_tcg_inline_jmp_cache = emit_inline_jmp_cache;
-    value = getenv("PVG_TCG_DISPATCH_ACQUIRE");
+    const char *value = getenv("PVG_TCG_DISPATCH_ACQUIRE");
     dispatch_acquire_barrier = value && !strcmp(value, "1");
     value = getenv("PVG_TCG_SHARED_DISPATCH");
     shared_dispatch = value && !strcmp(value, "1");

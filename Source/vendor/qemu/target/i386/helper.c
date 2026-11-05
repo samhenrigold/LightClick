@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/pvg-tcg.h"
 #include "qapi/error.h"
 #include "qapi/qapi-events-run-state.h"
 #include "cpu.h"
@@ -180,10 +181,8 @@ static bool x86_tcg_pcid_contexts;
 
 static void __attribute__((constructor)) init_keep_phys_tlb(void)
 {
-    const char *value = getenv("PVG_TCG_KEEP_PHYS_TLB");
-    x86_tcg_keep_phys_tlb = value && !strcmp(value, "1");
-    value = getenv("PVG_TCG_PCID_CONTEXTS");
-    x86_tcg_pcid_contexts = value && !strcmp(value, "1");
+    x86_tcg_keep_phys_tlb = pvg_tcg_fast_path("PVG_TCG_KEEP_PHYS_TLB");
+    x86_tcg_pcid_contexts = pvg_tcg_fast_path("PVG_TCG_PCID_CONTEXTS");
 }
 
 void cpu_x86_update_cr3(CPUX86State *env, target_ulong new_cr3)

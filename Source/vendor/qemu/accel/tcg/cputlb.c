@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/pvg-tcg.h"
 #include "qemu/main-loop.h"
 #include "qemu/target-info.h"
 #include "accel/tcg/cpu-loop.h"
@@ -85,8 +86,9 @@ static uint32_t pvg_tlb_floor_mask = (1u << NB_MMU_MODES) - 1;
 static void __attribute__((constructor)) pvg_init_tlb_floor(void)
 {
 #if defined(__aarch64__)
-    pvg_context_jump_cache = getenv("PVG_TCG_CONTEXT_JMP_CACHE") &&
-        !strcmp(getenv("PVG_TCG_CONTEXT_JMP_CACHE"), "1");
+    pvg_context_jump_cache = pvg_tcg_fast_path("PVG_TCG_CONTEXT_JMP_CACHE");
+    pvg_tlb_floor_bits = 12;
+    pvg_tlb_floor_mask = 4;
     const char *value = getenv("PVG_TCG_TLB_FLOOR_BITS");
     if (value) {
         char *end;

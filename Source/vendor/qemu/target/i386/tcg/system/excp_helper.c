@@ -18,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/pvg-tcg.h"
 #include "cpu.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/probe.h"
@@ -70,8 +71,7 @@ bool x86_tcg_fast_ptw;
 
 static void __attribute__((constructor)) init_fast_ptw(void)
 {
-    const char *value = getenv("PVG_TCG_FAST_PTW");
-    x86_tcg_fast_ptw = value && !strcmp(value, "1");
+    x86_tcg_fast_ptw = pvg_tcg_fast_path("PVG_TCG_FAST_PTW");
 }
 
 static bool ptw_translate(PTETranslate *inout, hwaddr addr)

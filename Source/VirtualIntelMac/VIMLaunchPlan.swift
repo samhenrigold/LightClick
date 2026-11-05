@@ -413,9 +413,7 @@ public final class LaunchPlan: NSObject {
         env["VIM_DISPLAY_REFRESH_MS"] = nil
         env.merge([
             "PVG_OOP_HELPER": input.helperPath, "PVG_OOP_DONOR": input.donorPath,
-            "PVG_APP_DISPLAY_SOCKET": input.displaySocketPath, "PVG_TCG_TSO": "0",
-            "PVG_TCG_LAZY_JMP_CACHE": "1", "PVG_TCG_KEEP_PHYS_TLB": "1", "PVG_TCG_INLINE_JMP_CACHE": "1",
-            "PVG_TCG_NATIVE_FP_FLAGS": "0", "PVG_TCG_NATIVE_PACKED_FP": "1", "PVG_TCG_NATIVE_EXACT_FP": "1",
+            "PVG_APP_DISPLAY_SOCKET": input.displaySocketPath,
             // Panel capability, not the current logical mode. Creating a 1x-only
             // PVG panel prevents macOS from advertising any 2x mode for a later
             // live Retina selection. The guest-display tool selects 1x or 2x.
@@ -439,16 +437,11 @@ public final class LaunchPlan: NSObject {
                 env["VIM_DISPLAY_REFRESH_MS"] = String(interval >= 5 && interval <= 1000 ? interval : 16)
             }
         }
-        // These caches/fast paths are guarded by architectural MMU conditions,
-        // not by guest macOS version. The AIR repair is genuinely Mojave-only.
+        // The AIR repair is genuinely Mojave-only.
         if guest == .mojave { env["PVG_HOST_AIR_LLVM"] = input.llvmPath }
-        env.merge([
-            "PVG_TCG_ALTERNATE_LOOKUP": "1", "PVG_TCG_PCID_CONTEXTS": "1", "PVG_TCG_CONTEXT_JMP_CACHE": "1",
-            "PVG_TCG_FAST_PTW": "1", "PVG_TCG_TLB_FLOOR_BITS": "12", "PVG_TCG_TLB_FLOOR_MASK": "4",
-        ]) { _, new in new }
         if !input.appleSilicon {
             env = env.filter { key, _ in
-                !(key.hasPrefix("PVG_TCG_") || key.hasPrefix("PVG_SHADOW_") || key.hasPrefix("PVG_OOP_")
+                !(key.hasPrefix("PVG_SHADOW_") || key.hasPrefix("PVG_OOP_")
                     || key == "PVG_HOST_AIR_LLVM" || key == "PVG_PRESERVE_IOSURFACE")
             }
         }

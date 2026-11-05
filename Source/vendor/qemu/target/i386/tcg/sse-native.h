@@ -5,15 +5,15 @@
 #ifndef I386_SSE_NATIVE_H
 #define I386_SSE_NATIVE_H
 
+#include "qemu/pvg-tcg.h"
+
 bool x86_tcg_native_packed_fp;
 bool x86_tcg_native_exact_fp;
 
 static void __attribute__((constructor)) init_native_packed_fp(void)
 {
-    const char *value = getenv("PVG_TCG_NATIVE_PACKED_FP");
-    x86_tcg_native_packed_fp = value && !strcmp(value, "1");
-    value = getenv("PVG_TCG_NATIVE_EXACT_FP");
-    x86_tcg_native_exact_fp = value && !strcmp(value, "1");
+    x86_tcg_native_packed_fp = pvg_tcg_fast_path("PVG_TCG_NATIVE_PACKED_FP");
+    x86_tcg_native_exact_fp = pvg_tcg_fast_path("PVG_TCG_NATIVE_EXACT_FP");
 }
 
 enum {
