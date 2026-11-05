@@ -41,7 +41,10 @@ void tr_hash_insert(int view, uint64_t rip, uint64_t arm);
 // Invalidates every block translated from a guest frame, in all views. Returns the count. why: a KILL_ value.
 int tr_invalidate_frame(uint64_t gpa, uint32_t why);
 // Invalidates the blocks of one view at one x86 page (its mapping changed). unmoved: the page still maps the same frame.
-int tr_invalidate_view_va(int view, uint64_t va, uint32_t why, bool unmoved);
+// keeper: this view holds the marks of a shared domain. Other views forget the domain's blocks here but do not kill them.
+int tr_invalidate_view_va(int view, uint64_t va, uint32_t why, bool unmoved, bool keeper);
+// Empties a view's lookup table, leaving every block alive.
+void tr_view_forget(int view);
 // Forgets a view being reused for another address space: its own blocks and its lookup table.
 void tr_view_drop(int view);
 // Forgets one whole view.
@@ -58,6 +61,7 @@ typedef struct {
     // Cold blocks at a rip and frame some earlier block already covers, live in another view or dead with the frame unchanged:
     // what translations keyed by frame would have saved. Looks at only the first few blocks on the frame, so these are lower bounds.
     uint64_t again_live, again_dead;
+    uint64_t shared_blocks, shared_found; // translated into a shared user domain; found there by a view that had not looked before
 } TrStats;
 TrStats tr_stats(void);
 

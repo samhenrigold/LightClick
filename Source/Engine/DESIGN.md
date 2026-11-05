@@ -212,23 +212,23 @@ Fork, from a 60 s loop of 6,575 forks at 9.1 ms each: 2,430 cold blocks, 53,204 
 
 Inlined in translated code, measured in the test kernel, per operation: cr3, segment and sidt reads from 45 ns to about 0; rdtsc to about 0.5 ns; narrow shifts with dead flags to under 1 ns; `cli; sti` from 90 to 50 ns (the non-hybrid sti still traps). The monitor links to a block its view already knows without leaving the VM. Not measured: XNU's syscall, ctxsw and fork after this.
 
-### Sharing user translations: a design, waiting on one check
+### Sharing user translations
 
 Why: per fork in the 6,575-fork run, 2,430 cold blocks and 53,204 cold instructions, 2.84 ms translating of 9.1 ms, before exits; at least 56% of all cold blocks repeated a rip and frame already covered. A child runs the same library code as its parent and retranslates it.
 
-The check, from the tally's `cold user blocks by the page directory frame` rows on the next boot: from memory of XNU's pmap_nest, the shared region is nested by PDPT entry, so processes share page-directory frames there. Those rows should show large block counts under a few directory frames used by many address spaces, with rips in 0x7fff80000000 and up. If instead sharing shows only at page-table level, the key below moves down a level, and more unnesting splits it. If neither shows, this design is wrong.
+The check held: on a boot, 8,594,881 cold user blocks sat under one page directory frame, seen by 124 address spaces, at rips 0x7fff812f784e to 0x7fff8eccfae6. The next largest frame had 182,921, with one space.
 
-Design, an extension of the kernel domains (`block_key`):
+How it works, extending the kernel domains in `block_key`. `LC_HVDBT_NO_SHARE=1` turns it off.
 
-1. Key. For CPL 3, a rip under a directory frame other spaces share keeps its blocks under KEY_DOMAIN plus that frame and the CPL, so the existing map finds them from any view. A private frame is a domain of one, which behaves as a view does now.
-2. Links stay within a domain, as tr_link and link_here already insist, so chains survive into the next child. Going between domains takes the view's table, which is a monitor lookup with no host exit once the block is known.
-3. Validity. A block is valid wherever the directory frame is mapped at that slot, because its mappings are in that shared frame. A store to it must invalidate, and any mirror sees it, but a mirror can vanish with its process. So code marks go only on a keeper view for each domain, as the kernel's do, never on the translating child's view, whose exit must not kill shared blocks. Keepers are not evicted: at most one extra view per shared directory, a handful.
-4. A process that leaves the domain, by unnesting 2 MB for its own copy or by exit, changes its own upper-level slot. That zaps only its own shadow and kills nothing. A later entry finds a different frame, so it has a different key.
-5. Return prediction and the per-view tables are unchanged. A shared block enters a view's table on its first lookup there.
+1. Key. In the gigabyte at SHARED_USER_BASE, CPL 3, once a second address space reaches a page directory, blocks under it take KEY_DOMAIN plus its frame. A process that has not nested keeps blocks of its view.
+2. Links stay within a domain, as tr_link and link_here already insist, so chains survive into the next child. Between keys it takes the view's table, a monitor lookup with no host exit once the block is known. A domain has one directory, so every page a chain reaches maps alike wherever the chain runs.
+3. What changes for everyone: a store to the directory or below it, or to the code. Code is write-protected per frame as ever. Stores below reach mirrors of those tables, but any given view's can go away with its process. So code marks go only on one keeper view per directory, the first process to reach it, which eviction leaves alone. Its zap kills the blocks.
+4. What changes for one view: its own slot above the directory, as unnesting and exit do. Blocks are only reached through a view's lookup table, its return stack, or a chain already inside the domain. So a view that has looked up shared blocks has its table emptied and return stacks reset when the shadow entry for that slot goes, through any path to zap_entry. No block dies. A process leaving for its own directory then has another key.
+5. The keeper leaving is that same zap, on a view with the marks: everything it marked dies, safely, at the cost of retranslating. The next translation elects the requester. It walks the old keeper's tables, which may be freed and poisoned, so that walk tolerates anything.
 
-Risks: a stale link means running wrong code with no fault, so this needs a test of two spaces sharing a directory, with one rewriting a slot and one unnesting, and the keeper's own process exiting. The keeper's exit is the hard case: its slot store zaps marked entries, which kills the domain's blocks. That is safe and costs a retranslation, and pinning it to a long-lived process such as launchd avoids most of it.
+Tested in hybrid.c: spaces sharing a directory with the page moved, code written, the directory's slot rewritten, one space unnesting and coming back, another space at the same address with its own directory, the keeper leaving and its tables poisoned, a newcomer, 90 short-lived processes past the view limit with a change at each step, and a return across an unnest. Not tested: real unnesting in XNU, which only boots do.
 
-Expected, if the check holds: forks without most of the 2,430 cold blocks, so perhaps half the 9.1 ms. An estimate only.
+Expected: forks without most of the 2,430 cold blocks, so perhaps half the 9.1 ms. An estimate only.
 
 Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bitmap interplay beyond those few fallbacks. Cost per fallback is unknown; the tally's `tcg_ms` column gives it. Writes by a separate process into guest RAM (the OOP graphics helper) are not noted. Reset after hand-off is unexamined: firmware in 64-bit mode would run on the engine.
 

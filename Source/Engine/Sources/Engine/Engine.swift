@@ -232,6 +232,7 @@ public final class Engine {
         try hvCheck("unmask vtimer") { hv_vcpu_set_vtimer_mask(vcpu, false) }
         ctx.pointee.ram_size = ramTop
         ctx.pointee.hybrid = options.hybrid ? 1 : 0
+        ctx.pointee.share_user = options.hybrid && ProcessInfo.processInfo.environment["LC_HVDBT_NO_SHARE"] != "1" ? 1 : 0
         ctx.pointee.clts_on_host = options.hybrid && ProcessInfo.processInfo.environment["LC_HVDBT_CLTS_TCG"] == "1" ? 1 : 0
         ctx.pointee.tsc_den = 1
         ctx.pointee.resume_mxcsr = 0x1F80
@@ -391,7 +392,9 @@ public final class Engine {
         case Int(HC_SMC):
             _ = tr_invalidate_frame(c.pointee.req_a.0, UInt32(c.pointee.req_a.1))
         case Int(HC_VIEW_INVALIDATE_VA):
-            _ = tr_invalidate_view_va(Int32(c.pointee.req_a.0), c.pointee.req_a.1, UInt32(c.pointee.req_a.2), c.pointee.req_a.3 != 0)
+            _ = tr_invalidate_view_va(Int32(c.pointee.req_a.0), c.pointee.req_a.1, UInt32(c.pointee.req_a.2), c.pointee.req_a.3 != 0, c.pointee.req_a.4 != 0)
+        case Int(HC_VIEW_FORGET):
+            tr_view_forget(Int32(c.pointee.req_a.0))
         case Int(HC_VIEW_DROP):
             tr_view_drop(Int32(c.pointee.req_a.0))
         case Int(HC_SYSCALL):

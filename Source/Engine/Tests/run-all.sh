@@ -33,4 +33,5 @@ zsh "$here/diff-i386.sh" 4 | tail -1 | grep -q 'differences: 0$' && echo "pass t
 "$engine" --kernel "$images/kernel" > /dev/null && echo "pass kernel" || { echo "FAIL kernel"; fail=1; }
 "$engine" --kernel-capi "$images/kernel" > /dev/null 2>&1 && echo "pass kernel through the C API" || { echo "FAIL kernel through the C API"; fail=1; }
 "$engine" --hybrid "$images/hybrid" > /dev/null && echo "pass hybrid" || { echo "FAIL hybrid"; fail=1; }
+LC_HVDBT_NO_SHARE=1 "$engine" --hybrid "$images/hybrid" > /dev/null && echo "pass hybrid, no sharing" || { echo "FAIL hybrid, no sharing"; fail=1; }
 exit $fail

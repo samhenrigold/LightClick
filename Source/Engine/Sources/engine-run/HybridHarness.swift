@@ -108,17 +108,25 @@ final class HybridHarness {
             engine_note_write(handle, mailbox(2), UInt64(width - first))
         case 9:
             if s.fp_top != 0 || s.fp_tags != 0xFF || s.mm.3 != 0x1122_3344_5566_7788 || s.fp_exp.3 != 0xFFFF {
-                failed = "MMX state at a fallback: top \(s.fp_top), tags \(s.fp_tags), mm3 \(s.mm.3), exponent \(s.fp_exp.3)"
+                failed =
+                    "MMX state at a fallback: top \(s.fp_top), tags \(s.fp_tags), mm3 \(s.mm.3), exponent \(s.fp_exp.3)"
             }
             s.mm.3 = ~s.mm.3
         case 13:  // fld1, fldpi under RC up: TOP 6, two valid
-            let fp = s.fp_top == 6 && s.fp_tags == 0xC0 && s.fcw == 0xB7F && s.mm.6 == 0xC90F_DAA2_2168_C235 && s.fp_exp.6 == 0x4000 && s.mm.7 == 1 << 63
-            if !fp { failed = "x87 state at a fallback: top \(s.fp_top), tags \(s.fp_tags), cw \(s.fcw), st0 \(s.mm.6) \(s.fp_exp.6)" }
+            let fp =
+                s.fp_top == 6 && s.fp_tags == 0xC0 && s.fcw == 0xB7F && s.mm.6 == 0xC90F_DAA2_2168_C235
+                && s.fp_exp.6 == 0x4000 && s.mm.7 == 1 << 63
+            if !fp {
+                failed =
+                    "x87 state at a fallback: top \(s.fp_top), tags \(s.fp_tags), cw \(s.fcw), st0 \(s.mm.6) \(s.fp_exp.6)"
+            }
             s.mm.6 = 0xFEDC_BA98_7654_3210
             s.fp_exp.6 = 0x4005
             s.fsw = 0x20
         case 14:  // the operation that went to TCG hasn't touched anything
-            if s.fcw != 0x37E || s.fp_top != 6 || s.fp_tags != 0xC0 { failed = "unmasked x87 at a fallback: cw \(s.fcw), top \(s.fp_top)" }
+            if s.fcw != 0x37E || s.fp_top != 6 || s.fp_tags != 0xC0 {
+                failed = "unmasked x87 at a fallback: cw \(s.fcw), top \(s.fp_top)"
+            }
         case 15:
             if s.fsw & 0x80 == 0 { failed = "fwait at a fallback with nothing pending" }
         case 10:
@@ -241,6 +249,12 @@ final class HybridHarness {
                 ]
                 where !tally.contains(reason) {
                     FileHandle.standardError.write(Data("tally lacks \(reason)\n".utf8))
+                    return 6
+                }
+                if ProcessInfo.processInfo.environment["LC_HVDBT_NO_SHARE"] != "1",
+                    tally.contains("under 0 directories") || !tally.contains("shared user blocks")
+                {
+                    FileHandle.standardError.write(Data("no directory was shared\n".utf8))
                     return 6
                 }
                 // 250,000 stores go to a frame that stopped being a table: only the first may trap.
