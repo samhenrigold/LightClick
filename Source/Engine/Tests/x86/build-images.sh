@@ -48,7 +48,7 @@ ld -arch x86_64 -preload -e _kstart -no_uuid -pagezero_size 0 -segaddr __TEXT 0x
     -o "$out/kernel" "$out/kentry.o" "$out/kernel.o" "$out/kstubs.o"
 
 # The checks for hybrid mode: the same entry, no ring 3, no stubs of its own beyond its traps.
-clang "${kflags[@]}" -c "$here/kernel/hybrid.c" -o "$out/hybrid.o"
+clang "${kflags[@]}" -mno-implicit-float -fno-vectorize -fno-slp-vectorize -c "$here/kernel/hybrid.c" -o "$out/hybrid.o"
 ld -arch x86_64 -preload -e _kstart -no_uuid -pagezero_size 0 -segaddr __TEXT 0xFFFF800000100000 -segaddr __DATA 0xFFFF800000800000 \
     -o "$out/hybrid" "$out/kentry.o" "$out/hybrid.o"
 

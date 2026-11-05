@@ -17,6 +17,7 @@ final class HybridHarness {
     var acks = 0
     var slept: UInt64 = 0
     var portsSeen: [String] = []
+    nonisolated(unsafe) var timerOn = false
 
     func host(_ gpa: UInt64) -> UnsafeMutableRawPointer { ram + Int(gpa >= 1 << 32 ? gpa - (1 << 32) + below : gpa) }
     func mailbox(_ i: Int) -> UInt64 { host(0x3000).load(fromByteOffset: i * 8, as: UInt64.self) }
@@ -46,6 +47,8 @@ final class HybridHarness {
         case 7:
             // Every frame of low RAM, far more than the ring holds. Few are marked, so write far more notes than that: all of the kernel image.
             for _ in 0..<600 { engine_note_write(handle, 1 << 20, 16 << 20) }
+        case 10: timerOn = true
+        case 11: timerOn = false
         case 9:
             let want = ["1540:2:a5a52000", "1541:1:a5a50020", "112:1:a5a50006", "1544:4:12345678"]
             // Only the low `size` bytes of a value count: address_space_write takes those.
@@ -71,6 +74,15 @@ final class HybridHarness {
             return
         case 4: s.cr3 = s.gpr.12
         case 5: s.gpr.0 = 7
+        case 6, 7:
+            let image = host(s.gpr.12 &- 0xFFFF_8800_0000_0000) + 160
+            withUnsafeMutableBytes(of: &s.xmm) { registers in
+                if s.gpr.13 == 6 {
+                    image.copyMemory(from: registers.baseAddress!, byteCount: 256)
+                } else {
+                    registers.baseAddress!.copyMemory(from: image, byteCount: 256)
+                }
+            }
         default: break
         }
         s.rip += s.gpr.14
@@ -148,6 +160,11 @@ final class HybridHarness {
             while true {
                 usleep(2000)
                 engine_request_boundary(target)
+                if HybridHarness.current!.timerOn {
+                    HybridHarness.current!.pendingVector = true
+                    engine_set_irq_line(target, true)
+                    engine_kick(target)
+                }
             }
         }
         var fallbacks = 0

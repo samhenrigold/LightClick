@@ -1258,6 +1258,10 @@ static void handle_data_abort(bool lower) {
         return;
     }
     if (write && (pi & PI_PT)) {
+        if (in_rep_stub(c->elr)) { // 32 bytes at a time is more slots than the one-step path below resyncs: on with the plain loop, one element per store
+            c->elr = c->x[R_LR];
+            return;
+        }
         c->stat_pt_writes++;
         ArmAccess a;
         if (arm_decode(*(u32 *)c->elr, &a) && !a.load) { // a stage-1 fault has no register syndrome here, so decode the word
@@ -2342,6 +2346,8 @@ void mon_sync(void) {
             case SVC_WBINVD:
                 break; // the shadow is always in step: see the CR3 note
             case SVC_CLTS:
+                if (c->clts_on_host)
+                    stop(STOP_FALLBACK, rip_here(c->elr - 4), FB_CLTS, 0, 0);
                 c->cr0 &= ~8ULL;
                 fp_trap_sync();
                 break;

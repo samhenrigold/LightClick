@@ -170,6 +170,7 @@ enum {
     FB_RDMSR, // a[3] msr
     FB_WRMSR, // a[3] msr
     FB_FETCH_NOT_RAM, // a[3] gpa
+    FB_CLTS, // only with LC_HVDBT_CLTS_TCG=1, to compare
     FB_VMPORT, // the VMware backdoor port: its device model reads and writes the CPU's registers, which only TCG's CPU can show it
 };
 
@@ -241,7 +242,7 @@ typedef struct {
     uint32_t hybrid;
     uint32_t irq_line; // set from any thread: QEMU's APIC may have an interrupt. Level, not edge: stays set while IF is clear.
     uint32_t resume_mxcsr;
-    uint32_t pad3;
+    uint32_t clts_on_host;
     uint64_t tsc_ns_offset, tsc_num, tsc_den; // TSC = ns + ns * num / den + tsc_offset, ns = counter * 125 / 3 + tsc_ns_offset
     // Frames written behind the monitor's back (DMA, TCG), holding code or page tables. Many producers, consumed in the monitor.
     uint32_t note_head, note_tail, note_overflow, pad4;

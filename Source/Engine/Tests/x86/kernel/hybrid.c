@@ -53,8 +53,12 @@ typedef struct {
 static Gate idt[256] __attribute__((aligned(16)));
 volatile u64 nm_count, irq_count, bad_vector;
 
+volatile u64 fp_model, fp_live;
+
 __asm__(".text\n"
         "_nm_stub:\n"
+        "  cmpq $0, _fp_model(%rip)\n"
+        "  jne 7f\n"
         "  pushq %rax\n"
         "  incq _nm_count(%rip)\n"
         "  movq %cr0, %rax\n"
@@ -62,9 +66,28 @@ __asm__(".text\n"
         "  movq %rax, %cr0\n"
         "  popq %rax\n"
         "  iretq\n"
+        // The lazy FP model of the test below: what a kernel's trap does with state it holds, what it does on the way
+        // out of an interrupt.
+        "7: pushq %rax\n pushq %rcx\n pushq %rdx\n pushq %rsi\n pushq %rdi\n"
+        "  pushq %r8\n pushq %r9\n pushq %r10\n pushq %r11\n"
+        "  call _lazy_nm\n"
+        "  popq %r11\n popq %r10\n popq %r9\n popq %r8\n"
+        "  popq %rdi\n popq %rsi\n popq %rdx\n popq %rcx\n popq %rax\n"
+        "  iretq\n"
         "_irq_stub:\n"
         "  incq _irq_count(%rip)\n"
-        "  iretq\n"
+        "  cmpq $0, _fp_model(%rip)\n"
+        "  je 9f\n"
+        "  pushq %rax\n"
+        "  cmpq $0, _fp_live(%rip)\n"
+        "  je 8f\n"
+        "  clts\n"
+        "  jmp 6f\n"
+        "8: movq %cr0, %rax\n"
+        "  orq $8, %rax\n"
+        "  movq %rax, %cr0\n"
+        "6: popq %rax\n"
+        "9: iretq\n"
         "_bad_stub:\n"
         "  movq $1, _bad_vector(%rip)\n"
         "  hlt\n");
@@ -391,6 +414,165 @@ static void test_port_forms(void) {
     command(9); // the host checks what it saw
 }
 
+// ---- Two tasks' xmm state under lazy switching, as XNU does it ----
+// The state lives only in xmm registers, so C here mustn't use them: this file is built without implicit float.
+#define LAZY_STEPS 2000000
+typedef struct {
+    u8 *area; // fxsave image, in the physmap: the host plays fxsave and fxrstor there
+    u64 steps;
+    bool saved;
+    u64 result[6];
+} Task;
+static Task tasks[2];
+static volatile int lazy_current;
+static volatile u64 lazy_nm_count;
+static const u8 byte_swap[16] __attribute__((aligned(16))) = {3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12};
+
+static void task_seed(u64 seed) {
+    __asm__ volatile("pxor %%xmm0, %%xmm0\n pxor %%xmm1, %%xmm1\n pxor %%xmm2, %%xmm2\n pxor %%xmm3, %%xmm3\n"
+                     "pxor %%xmm4, %%xmm4\n pxor %%xmm5, %%xmm5\n pxor %%xmm6, %%xmm6\n pxor %%xmm8, %%xmm8\n pxor "
+                     "%%xmm15, %%xmm15\n"
+                     "movq %0, %%xmm0\n movq %0, %%xmm8\n"
+                     :
+                     : "r"(seed));
+}
+// Shapes of a SHA-1 round: pshufb, palignr, shuffles, integer adds, xor. No clobbers on purpose: the registers carry
+// state from one call to the next.
+static inline void task_step(u64 a, u64 b) {
+    u64 message[2] __attribute__((aligned(16))) = {a, b};
+    __asm__ volatile("movdqu (%0), %%xmm7\n pshufb (%1), %%xmm7\n paddd %%xmm7, %%xmm0\n movdqa %%xmm0, %%xmm3\n "
+                     "palignr $4, %%xmm1, %%xmm3\n"
+                     "movdqa %%xmm3, %%xmm1\n pxor %%xmm1, %%xmm2\n pshufd $0x39, %%xmm2, %%xmm3\n paddd %%xmm3, "
+                     "%%xmm4\n pxor %%xmm4, %%xmm5\n"
+                     "movdqa %%xmm5, %%xmm6\n palignr $8, %%xmm0, %%xmm6\n paddq %%xmm6, %%xmm0\n pxor %%xmm0, "
+                     "%%xmm8\n paddd %%xmm8, %%xmm15\n"
+                     :
+                     : "r"(message), "r"(byte_swap)
+                     : "memory");
+}
+static void task_read(u64 *out) {
+    __asm__ volatile("movups %%xmm0, (%0)\n movups %%xmm5, 16(%0)\n movups %%xmm15, 32(%0)\n" : : "r"(out) : "memory");
+}
+static void play_fxsave(u8 *area) {
+    __asm__ volatile("mov %0, %%r12\n mov $6, %%r13\n mov $5, %%r14\n .byte 0x41, 0x0F, 0xAE, 0x04, 0x24\n"
+                     :
+                     : "r"(area)
+                     : "r12", "r13", "r14", "memory");
+}
+static void play_fxrstor(u8 *area) {
+    __asm__ volatile("mov %0, %%r12\n mov $7, %%r13\n mov $5, %%r14\n .byte 0x41, 0x0F, 0xAE, 0x0C, 0x24\n"
+                     :
+                     : "r"(area)
+                     : "r12", "r13", "r14", "memory");
+}
+
+// #NM: load this task's state. Runs on the task's stack, with interrupts off through the gate.
+void lazy_nm(void) {
+    Task *t = &tasks[lazy_current];
+    lazy_nm_count++;
+    __asm__ volatile("clts");
+    if (t->saved)
+        play_fxrstor(t->area);
+    else
+        task_seed(lazy_current + 1);
+    t->saved = false;
+    fp_live = 1;
+}
+
+// A context switch: save what's live, set TS, leave the next task to take #NM.
+static void lazy_switch(void) {
+    __asm__ volatile("cli");
+    if (fp_live) {
+        Task *t = &tasks[lazy_current];
+        play_fxsave(t->area);
+        t->saved = true;
+        fp_live = 0;
+    }
+    u64 cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 8));
+    lazy_current ^= 1;
+    __asm__ volatile("sti");
+}
+
+static void test_lazy_fp(void) {
+    u64 golden[2][6];
+    for (int n = 0; n < 2; n++) {
+        task_seed(n + 1);
+        for (u64 i = 0; i < LAZY_STEPS; i++)
+            task_step(i * (n + 3), ~i);
+        task_read(golden[n]);
+    }
+    for (int n = 0; n < 2; n++) {
+        tasks[n].area = (u8 *)PHYS(frame());
+        tasks[n].steps = 0;
+        tasks[n].saved = false;
+    }
+    __asm__ volatile("cli");
+    command(10); // the host starts a timer interrupt
+    fp_model = 1;
+    fp_live = 0;
+    lazy_current = 0;
+    u64 cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 | 8));
+    __asm__ volatile("sti");
+    int finished = 0;
+    u64 quantum = 1;
+    while (finished < 2) {
+        Task *t = &tasks[lazy_current];
+        int n = lazy_current;
+        for (u64 run = 0; run < quantum && t->steps < LAZY_STEPS; run++, t->steps++) {
+            task_step(t->steps * (n + 3), ~t->steps);
+            if ((t->steps & 0xFFF) ==
+                0) // a fallback in the middle of a task: its xmm state goes through the host and back
+                __asm__ volatile("mov $0, %%r13\n mov $2, %%r14\n .byte 0xDB, 0xE3\n" : : : "r13", "r14");
+        }
+        if (t->steps == LAZY_STEPS) {
+            t->steps++;
+            task_read(t->result);
+            finished++;
+        }
+        quantum = quantum * 7 % 4093 + 1;
+        lazy_switch();
+    }
+    __asm__ volatile("cli");
+    fp_model = 0;
+    command(11);
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0 & ~8ULL));
+    __asm__ volatile("sti");
+    for (int n = 0; n < 2; n++)
+        for (int i = 0; i < 6; i++)
+            CHECK(tasks[n].result[i] == golden[n][i]);
+    CHECK(lazy_nm_count > 100);
+    CHECK(irq_count > 2);
+}
+
+// A bulk copy into a page table: every entry it reaches must be seen, past the first few slots too.
+static void test_rep_into_table(u64 root) {
+    enum { COUNT = 16 };
+    u64 frames[2];
+    frames[0] = frame();
+    frames[1] = frame();
+    PHYS(frames[0])[0] = 0xA;
+    PHYS(frames[1])[0] = 0xB;
+    u64 va = TEST_VA + 0x400000;
+    u64 *slots = pte_of(root, va);
+    static u64 fresh[COUNT] __attribute__((aligned(32)));
+    for (int i = 0; i < COUNT; i++) {
+        slots[i] = frames[0] | PRESENT_RW;
+        fresh[i] = frames[1] | PRESENT_RW;
+    }
+    for (int i = 0; i < COUNT; i++)
+        CHECK(*(volatile u64 *)(va + (u64)i * 4096) == 0xA);
+    u64 count = COUNT;
+    u64 *s = fresh, *d = slots;
+    __asm__ volatile("cld\n rep movsq" : "+S"(s), "+D"(d), "+c"(count) : : "memory");
+    for (int i = 0; i < COUNT; i++)
+        CHECK(*(volatile u64 *)(va + (u64)i * 4096) == 0xB);
+}
+
 void kmain(void) {
     __asm__ volatile("mov $0x10, %%ax\n mov %%ax, %%ds\n mov %%ax, %%es\n mov %%ax, %%ss\n" : : : "ax");
     tables();
@@ -406,6 +588,8 @@ void kmain(void) {
     test_cr4();
     test_vmport();
     test_port_forms();
+    test_rep_into_table(root);
+    test_lazy_fp();
     test_view_churn(root);
     CHECK(!bad_vector);
     puts_("hybrid checks passed\n");

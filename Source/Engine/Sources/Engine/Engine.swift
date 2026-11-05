@@ -228,6 +228,7 @@ public final class Engine {
         try hvCheck("unmask vtimer") { hv_vcpu_set_vtimer_mask(vcpu, false) }
         ctx.pointee.ram_size = ramTop
         ctx.pointee.hybrid = options.hybrid ? 1 : 0
+        ctx.pointee.clts_on_host = options.hybrid && ProcessInfo.processInfo.environment["LC_HVDBT_CLTS_TCG"] == "1" ? 1 : 0
         ctx.pointee.tsc_den = 1
         ctx.pointee.resume_mxcsr = 0x1F80
         let pageInfo = priv + Int(kOffPageInfo)
@@ -494,6 +495,7 @@ public final class Engine {
             case Int(FB_RDMSR): return "rdmsr \(hex(a.3))"
             case Int(FB_WRMSR): return "wrmsr \(hex(a.3))"
             case Int(FB_FETCH_NOT_RAM): return "fetch from a page outside RAM"
+            case Int(FB_CLTS): return "clts, on TCG by request"
             case Int(FB_VMPORT): return "vmport: its model uses the CPU's registers"
             default: return "fallback \(a.2)"
             }
