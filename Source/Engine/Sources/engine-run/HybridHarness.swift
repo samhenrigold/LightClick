@@ -74,6 +74,18 @@ final class HybridHarness {
             return
         case 4: s.cr3 = s.gpr.12
         case 5: s.gpr.0 = 7
+        case 8:  // a store across a page boundary, sent back as TCG would finish it
+            let width = Int(mailbox(3))
+            let first = 4096 - Int(s.gpr.12 & 0xFFF)
+            [s.gpr.11, s.gpr.11].withUnsafeBytes { value in
+                for i in 0..<width {
+                    let at =
+                        i < first ? host(mailbox(1) + UInt64(4096 - first + i)) : host(mailbox(2) + UInt64(i - first))
+                    at.storeBytes(of: value[i], as: UInt8.self)
+                }
+            }
+            engine_note_write(handle, mailbox(1) + UInt64(4096 - first), UInt64(first))
+            engine_note_write(handle, mailbox(2), UInt64(width - first))
         case 6, 7:
             let image = host(s.gpr.12 &- 0xFFFF_8800_0000_0000) + 160
             withUnsafeMutableBytes(of: &s.xmm) { registers in

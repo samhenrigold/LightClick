@@ -617,6 +617,112 @@ static void test_lazy_fp(u64 root) {
     CHECK(irq_count > 2);
 }
 
+// A store straddling into a page-table frame, as a kernel writes file data into a freed table that is still tracked.
+// Each byte must land where the instruction says.
+static void test_store_into_table(u64 root) {
+    // shortcut: straddling a tracked frame goes to TCG, not emulated. If a boot's tally ranks it high, emulate both
+    // halves here.
+    u64 va = TEST_VA + 0x600000;
+    u64 *slots = pte_of(root, va); // a leaf table in use, so its frame is tracked once it is walked
+    u64 table = ((u64)slots - PHYSMAP) & ~0xFFFULL;
+    u64 before = frame();
+    slots[0] = before | PRESENT_RW;
+    slots[1] = table | PRESENT_RW; // and it is mapped as data right after an ordinary page
+    volatile u8 *low = (volatile u8 *)va, *high = low + 4096;
+    low[0] = 1;
+    CHECK(high[9] == (u8)(table >> 8)); // the second slot of the frame, through the mapping: a walk has happened
+    static const int widths[] = {8, 4, 2};
+    for (int w = 0; w < 3; w++) {
+        for (int at = 1; at < widths[w]; at++) {
+            for (int i = 0; i < 16; i++) {
+                low[4080 + i] = 0;
+            }
+            u64 value = 0x1122334455667788ULL;
+            u64 saved = PHYS(table)[0];
+            volatile u8 *to = high - at;
+            // If the monitor sends it back, the harness does the store as TCG would, from the mailbox's frames.
+            MAILBOX[1] = before;
+            MAILBOX[2] = table;
+            MAILBOX[3] = (u64)widths[w];
+            if (widths[w] == 8)
+                __asm__ volatile(
+                    "mov %0, %%r11\n mov %1, %%r12\n mov $8, %%r13\n mov $4, %%r14\n .byte 0x4D, 0x89, 0x1C, 0x24\n"
+                    :
+                    : "r"(value), "r"(to)
+                    : "r11", "r12", "r13", "r14", "memory");
+            else if (widths[w] == 4)
+                __asm__ volatile(
+                    "mov %0, %%r11\n mov %1, %%r12\n mov $8, %%r13\n mov $4, %%r14\n .byte 0x45, 0x89, 0x1C, 0x24\n"
+                    :
+                    : "r"(value), "r"(to)
+                    : "r11", "r12", "r13", "r14", "memory");
+            else
+                __asm__ volatile("mov %0, %%r11\n mov %1, %%r12\n mov $8, %%r13\n mov $5, %%r14\n .byte 0x66, 0x45, "
+                                 "0x89, 0x1C, 0x24\n"
+                                 :
+                                 : "r"(value), "r"(to)
+                                 : "r11", "r12", "r13", "r14", "memory");
+            for (int i = 0; i < widths[w]; i++) {
+                u8 want = (u8)(value >> (i * 8));
+                // Through the physmap: a misplaced store lands on the slot that maps `low`, which would fault here
+                // instead of failing.
+                u8 got = i < at ? ((volatile u8 *)PHYS(before))[4096 - at + i] : ((volatile u8 *)PHYS(table))[i - at];
+                CHECK(got == want);
+            }
+            PHYS(table)[0] = saved;
+        }
+    }
+
+    // A 16-byte store across two tracked frames runs natively on one opened page at a time: neither may stay writable
+    // after it.
+    u64 va2 = TEST_VA + 0x800000;
+    u64 *slots2 = pte_of(root, va2);
+    u64 table2 = ((u64)slots2 - PHYSMAP) & ~0xFFFULL;
+    u64 first = frame(), second = frame();
+    PHYS(first)[0] = 0xA;
+    PHYS(second)[0] = 0xB;
+    slots2[3] = first | PRESENT_RW;
+    CHECK(*(volatile u64 *)(va2 + 3 * 4096) == 0xA);
+    // The second page gets a table of its own: rewriting the slot that maps the first page would take its writable
+    // mapping away and hide the bug.
+    u64 *slots3 = pte_of(root, TEST_VA + 0xA00000);
+    u64 table3 = ((u64)slots3 - PHYSMAP) & ~0xFFFULL;
+    slots3[1] = first | PRESENT_RW;
+    CHECK(*(volatile u64 *)(TEST_VA + 0xA00000 + 4096) == 0xA);
+    slots[0] = table2 | PRESENT_RW;
+    slots[1] = table3 | PRESENT_RW;
+    CHECK(low[3 * 8 + 1] == (u8)(first >> 8));
+    CHECK(high[9] == (u8)(first >> 8));
+    u64 value = 0x1122334455667788ULL;
+    volatile u8 *to = high - 8;
+    MAILBOX[1] = table2;
+    MAILBOX[2] = table3;
+    MAILBOX[3] = 16;
+    __asm__ volatile("mov %0, %%r11\n mov %1, %%r12\n mov $8, %%r13\n mov $5, %%r14\n movq %%r11, %%xmm0\n punpcklqdq "
+                     "%%xmm0, %%xmm0\n"
+                     ".byte 0x41, 0x0F, 0x11, 0x04, 0x24\n"
+                     :
+                     : "r"(value), "r"(to)
+                     : "r11", "r12", "r13", "r14", "xmm0", "memory");
+    CHECK(PHYS(table2)[511] == value);
+    CHECK(PHYS(table3)[0] == value);
+    PHYS(table3)[0] = 0;
+    PHYS(table2)[511] = 0;
+    *(volatile u64 *)(va + 3 * 8) =
+        second | PRESENT_RW; // through the mapping: only write protection tells the monitor of this one
+    CHECK(*(volatile u64 *)(va2 + 3 * 4096) == 0xB);
+    slots[0] = before | PRESENT_RW;
+    slots[1] = 0;
+
+    // A load that starts in RAM and ends in a device: emulating it at FAR would read the device for all 8 bytes.
+    u64 got;
+    __asm__ volatile("mov %1, %%r12\n mov $5, %%r13\n mov $4, %%r14\n .byte 0x49, 0x8B, 0x04, 0x24\n"
+                     : "=a"(got)
+                     : "r"(PHYSMAP + (1ULL << 30) - 4)
+                     : "r12", "r13", "r14", "memory");
+    CHECK(got == 7);
+}
+
 // A bulk copy into a page table: every entry it reaches must be seen, past the first few slots too.
 static void test_rep_into_table(u64 root) {
     enum { COUNT = 16 };
@@ -733,6 +839,7 @@ void kmain(void) {
     test_cr4();
     test_vmport();
     test_port_forms();
+    test_store_into_table(root);
     test_rep_into_table(root);
     test_lazy_fp(root);
     test_process_log(root);

@@ -972,6 +972,27 @@ static bool arm_decode(u32 w, ArmAccess *a) {
     return true;
 }
 
+// When only the second page refuses a split access, FAR is that page's start, so FAR can't say whether an access is split: work out its real address.
+static bool arm_splits(u32 w, const ArmAccess *a) {
+    if (a->rn == 31)
+        return false; // the translator reaches guest memory through general registers, never sp
+    u64 ea = c->x[a->rn];
+    if (w & (1u << 24)) {
+        ea += (u64)((w >> 10) & 0xfff) << (w >> 30);
+    } else if (w & (1u << 21)) {
+        u32 rm = (w >> 16) & 31, option = (w >> 13) & 7;
+        u64 off = rm == 31 ? 0 : c->x[rm];
+        if (option == 2)
+            off = (u32)off;
+        else if (option == 6)
+            off = (u64)(i64)(int32_t)off;
+        ea += (w & (1u << 12)) ? off << (w >> 30) : off;
+    } else if (((w >> 10) & 3) != 1) { // post-index accesses the base as it stands
+        ea += (u64)((i64)(int32_t)(w << 11) >> 23);
+    }
+    return (ea & 0xfff) + a->bytes > 4096;
+}
+
 // Finishes an emulated access: load value into the register, writeback, skip the word.
 static void arm_finish(const ArmAccess *a, u64 r) {
     if (a->load && a->rt != 31) {
@@ -1248,6 +1269,8 @@ static void handle_data_abort(bool lower) {
         ArmAccess a;
         if (!arm_decode(*(u32 *)c->elr, &a))
             stop(STOP_UNSUPPORTED, rip_here(c->elr), 4, far, esr); // pair, atomic or SIMD access to a device
+        if (arm_splits(*(u32 *)c->elr, &a))
+            stop(STOP_UNSUPPORTED, rip_here(c->elr), 15, far, esr); // part of it is on another page
         u64 val = a.rt == 31 ? 0 : c->x[a.rt];
         u64 r = 0;
         if (vapic_owns(w.gpa)) {
@@ -1293,7 +1316,7 @@ static void handle_data_abort(bool lower) {
         if (arm_decode(*(u32 *)c->elr, &a) && !a.load) { // a stage-1 fault has no register syndrome here, so decode the word
             u64 val = a.rt == 31 ? 0 : c->x[a.rt];
             u32 n = a.bytes;
-            if ((far & 0xfff) + n > 4096)
+            if (arm_splits(*(u32 *)c->elr, &a))
                 stop(STOP_UNSUPPORTED, rip_here(c->elr), 5, far, esr); // split store on a page table
             if (n == 8)
                 *(u64 *)RAM(w.gpa) = val;
@@ -1326,6 +1349,11 @@ static void handle_data_abort(bool lower) {
             return;
         }
         // Other atomics and pairs: let the instruction itself run on a writable mapping for exactly one step, then resync.
+        if (pt_step_slot) { // split across two tracked frames, and one step opens one: close it, or the first stays writable and its later writes go unseen
+            shadow_write_finish();
+            step_off();
+            stop(STOP_UNSUPPORTED, rip_here(c->elr), 5, far, esr);
+        }
         c->stat_pt_step++;
         Walk w2 = w;
         w2.write = true;
