@@ -12,7 +12,7 @@
 #define MAP_SIZE (1u << MAP_BITS)
 
 u32 *tr_cc;
-bool tr_precise_flags;
+bool tr_precise_flags, tr_has_tzcnt;
 int tr_cpl;
 u64 tr_stub_lookup, tr_stub_ret_miss, tr_stub_pushf, tr_stub_sahf;
 
@@ -262,25 +262,23 @@ static void emit_control(const Insn *in, int idx, int live_after) {
         case OP_JRCXZ: {
             u32 *back = internal_target(in->target, idx);
             int sub = in->sub;
+            int sf = in->addr32 ? 0 : 1; // with 67h the count is ecx
             if (sub >= 2)
-                add_imm(1, 1, 0, 1, 1, 1);
+                add_imm(sf, 1, 0, 1, 1, 1);
             if (sub == 0 || sub == 1) {
-                if (sub == 1)
-                    mov_reg(0, S0, 1);
-                int r = sub == 1 ? S0 : 1;
                 if (!back)
                     add_pending(tr_cc, in->target, SVC_JCC, 0);
-                cbz(0, 1, r, back ? (int)(back - tr_cc) : 0);
+                cbz(0, sub == 1 ? 0 : 1, 1, back ? (int)(back - tr_cc) : 0);
             } else if (sub == 2) {
                 if (!back)
                     add_pending(tr_cc, in->target, SVC_JCC, 0);
-                cbz(1, 1, 1, back ? (int)(back - tr_cc) : 0);
+                cbz(1, sf, 1, back ? (int)(back - tr_cc) : 0);
             } else {
                 u32 *over = tr_cc;
                 b_cond(sub == 3 ? 1 : 0, 0); // loope leaves when ZF is clear, loopne when it is set
                 if (!back)
                     add_pending(tr_cc, in->target, SVC_JCC, 0);
-                cbz(1, 1, 1, back ? (int)(back - tr_cc) : 0);
+                cbz(1, sf, 1, back ? (int)(back - tr_cc) : 0);
                 *over |= ((u32)(tr_cc - over) & 0x7ffff) << 5;
             }
             break;
@@ -757,6 +755,7 @@ void tr_init(const TrConfig *config) {
     pc_map = (PcMap *)(cfg.priv + OFF_PCMAP);
     ctx_ptr = (EngineCtx *)(cfg.priv + OFF_CTX);
     tr_precise_flags = cfg.precise_flags;
+    tr_has_tzcnt = cfg.has_tzcnt_lzcnt;
     tr_stub_lookup = cfg.stub_lookup;
     tr_stub_ret_miss = cfg.stub_ret_miss;
     tr_stub_pushf = cfg.stub_pushf;

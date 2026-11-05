@@ -1292,8 +1292,8 @@ static void emit_xadd(const Insn *in, int live) {
         mov_reg(1, S0, d);
         add_reg(1, 0, 0, S2, S0, src, 0);
         alu_flags(ALU_ADD, sz, live, S0, src, S2);
+        gpr_write(in->reg, sz, in->high_reg, S0); // destination last: xadd of a register with itself leaves the sum
         gpr_write(in->rm, sz, in->high_rm, S2);
-        gpr_write(in->reg, sz, in->high_reg, S0);
         return;
     }
     if (in->lock) {
@@ -1520,6 +1520,28 @@ void emit_int(const Insn *in, int live) {
             svc(SVC_POPF);
             break;
         }
+        case OP_ENTER: {
+            // All stores go below rsp through a scratch pointer; registers change only after the last one.
+            int level = in->sub, size = (int)in->imm;
+            Addr a = {.base = S0};
+            add_imm(1, 1, 0, S0, 4, sz);
+            ldst(0, sz, 5, a);
+            mov_reg(1, S3, S0);
+            for (int i = 1; i < level; i++) {
+                Addr prev = {.base = 5, .imm = -(i64)i * sz};
+                ldst(1, sz, S1, prev);
+                add_imm(1, 1, 0, S0, S0, sz);
+                ldst(0, sz, S1, a);
+            }
+            if (level) {
+                add_imm(1, 1, 0, S0, S0, sz);
+                ldst(0, sz, S3, a);
+            }
+            movimm(S2, (u64)size);
+            add_reg(1, 1, 0, 4, S0, S2, 0);
+            gpr_write(5, sz, false, S3);
+            break;
+        }
         case OP_LEAVE: {
             if (sz == 2) {
                 emit_stop(in->rip, "16-bit leave");
@@ -1550,10 +1572,36 @@ void emit_int(const Insn *in, int live) {
             break;
         case OP_TZCNT:
         case OP_LZCNT: {
-            // BMI and ABM are not advertised: as on such a CPU these encodings execute as bsf and bsr.
-            Insn t = *in;
-            t.op = in->op == OP_TZCNT ? OP_BSF : OP_BSR;
-            emit_bitscan(&t, live);
+            if (!tr_has_tzcnt) { // as on a CPU without BMI1 and ABM, these encodings execute as bsf and bsr
+                Insn t = *in;
+                t.op = in->op == OP_TZCNT ? OP_BSF : OP_BSR;
+                emit_bitscan(&t, live);
+                break;
+            }
+            if (!in->rm_reg)
+                ldst(1, sz, S0, addr_prepare(in, sz));
+            uext(S1, in->rm_reg ? in->rm : S0, sz);
+            if (in->op == OP_TZCNT) {
+                if (sz < 8) {
+                    movimm(S2, 1ULL << (sz * 8));
+                    logic_reg(1, 1, 0, S2, S1, S2);
+                    rbit(1, S2, S2);
+                } else
+                    rbit(1, S2, S1);
+                clz(1, S2, S2);
+            } else {
+                clz(1, S2, S1);
+                if (sz < 8)
+                    add_imm(1, 1, 0, S2, S2, 64 - sz * 8);
+            }
+            if (live & (F_C | F_Z)) {
+                add_imm(1, 1, 1, XZR, S1, 1); // C holds exactly when the source is non-zero, and C is the inverse of CF
+                uext(S3, S2, sz);
+                clz(1, S3, S3);
+                lsr_imm(1, S3, S3, 6);
+                rmif(S3, 62, 4); // ZF: the result is zero
+            }
+            gpr_write(in->reg, sz, false, S2);
             break;
         }
         case OP_BSWAP:

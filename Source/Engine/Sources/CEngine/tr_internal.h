@@ -54,6 +54,7 @@ enum {
     OP_PUSHF,
     OP_POPF,
     OP_LEAVE,
+    OP_ENTER, // imm size, sub level
     OP_SHIFT,
     OP_SHD, // shld/shrd; sub 0 left, 1 right
     OP_NEG,
@@ -149,7 +150,7 @@ bool insn_is_terminator(const Insn *in);
 
 // ---- emit state ----
 extern u32 *tr_cc; // write cursor
-extern bool tr_precise_flags;
+extern bool tr_precise_flags, tr_has_tzcnt;
 extern int tr_cpl;
 static inline void E(u32 v) { *tr_cc++ = v; }
 

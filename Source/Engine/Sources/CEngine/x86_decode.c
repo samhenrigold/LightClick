@@ -462,7 +462,12 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
         } else if (opc == 0xCA || opc == 0xCB) {
             set_bad(in, "far return");
         } else if (opc == 0xC8) {
-            set_bad(in, "enter");
+            in->op = OP_ENTER;
+            in->memop = true;
+            in->imm = *(u16 *)p;
+            p += 2;
+            in->sub = *p++ & 31;
+            w = sz == 2 ? 2 : 8;
         } else if (opc == 0x06 || opc == 0x07 || opc == 0x0E || opc == 0x16 || opc == 0x17 || opc == 0x1E ||
                    opc == 0x1F || opc == 0x27 || opc == 0x2F || opc == 0x37 || opc == 0x3F || opc == 0x60 ||
                    opc == 0x61 || opc == 0x62 || opc == 0x82 || opc == 0x9A || opc == 0xC4 || opc == 0xC5 ||

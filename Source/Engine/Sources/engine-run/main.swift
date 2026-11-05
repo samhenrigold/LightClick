@@ -22,6 +22,7 @@ do {
     let image = try MachOImage(bytes: [UInt8](Data(contentsOf: URL(fileURLWithPath: arguments[1]))))
     var options = EngineOptions()
     options.preciseFlags = ProcessInfo.processInfo.environment["ENGINE_FAST_FLAGS"] == nil
+    options.tzcntLzcnt = true // as Rosetta advertises: flat tests compare against it
     let guest = try FlatGuest(options: options)
     let code = try guest.run(
         image: image,

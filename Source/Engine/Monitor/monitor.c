@@ -1410,7 +1410,7 @@ static void h_shd(void) {
     bool cf = false;
     if (size == 2 && cnt > 16) {
         // Undefined in the manual. As hardware does: the rotation goes through a 48-bit composite.
-        u64 w = right ? (d | s << 16 | d << 32) : (s | d << 16 | s << 32);
+        u64 w = right ? (d | s << 16 | d << 32) : (d << 32 | s << 16 | d);
         r = right ? (w >> cnt) & 0xffff : (w >> (32 - cnt)) & 0xffff;
         cf = right ? (w >> (cnt - 1)) & 1 : (w >> (48 - cnt)) & 1;
     } else if (right) {

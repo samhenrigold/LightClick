@@ -25,6 +25,7 @@ public struct EngineOptions: Sendable {
     public var preciseFlags = true
     public var useTSO = true
     public var kernelModel = false
+    public var tzcntLzcnt = false
     public init() {}
 }
 
@@ -73,6 +74,7 @@ public final class Engine {
         config.ram = ram.assumingMemoryBound(to: UInt8.self)
         config.ram_size = options.ramBytes
         config.precise_flags = options.preciseFlags
+        config.has_tzcnt_lzcnt = options.tzcntLzcnt
         let stubs = kPrivVA + kOffStubs
         config.stub_lookup = stubs
         config.stub_ret_miss = stubs + 0x80

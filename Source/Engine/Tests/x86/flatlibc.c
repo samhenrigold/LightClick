@@ -90,6 +90,7 @@ void *memset(void *d, int v, unsigned long n) {
         *dd++ = (unsigned char)v;
     return d;
 }
+void __bzero(void *d, unsigned long n) { memset(d, 0, n); }
 int memcmp(const void *a, const void *b, unsigned long n) {
     const unsigned char *x = a, *y = b;
     for (; n; n--, x++, y++)
