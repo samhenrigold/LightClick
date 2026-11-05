@@ -219,6 +219,7 @@ typedef struct {
 
 static volatile u64 ticks;
 static volatile int apic_eoi_needed;
+static volatile u64 df_seen, df_resume_rsp;
 static u64 last_vector, last_err, last_cr2, last_rip, last_flags, last_rdi, last_rsp;
 static u32 fault_count;
 enum { M_EXIT_ON_FAULT, M_DEMAND, M_COW, M_RET_ADJ };
@@ -232,6 +233,13 @@ void trap_dispatch(Frame *f) {
         ticks++;
         if (apic_eoi_needed)
             *(volatile u32 *)(0xFFFFC00000000000ULL + 0xB0) = 0;
+        return;
+    }
+    if (f->vector == 8) {
+        extern char df_resume[];
+        df_seen = 8;
+        f->rip = (u64)df_resume;
+        f->rsp = df_resume_rsp;
         return;
     }
     last_vector = f->vector;
@@ -727,9 +735,31 @@ static void test_devices(u64 root) {
     kprintf("PASS devices\n");
 }
 
+
+
+// An exception whose frame cannot be pushed becomes a double fault, on its IST stack; and a kernel fault's frame stays on the kernel stack.
 static void test_double_fault(void) {
-    // A kernel stack that does not map: a fault on the frame push is a double fault on the IST stack. Not run from the handler path: IST check only.
-    kprintf("PASS tables loaded\n");
+    df_seen = 0;
+    __asm__ volatile("movq %%rsp, %0\n"
+                     "movabsq $0xFFFFA00000000000, %%rsp\n" // not mapped
+                     "int3\n"
+                     ".globl _df_resume\n_df_resume:\n"
+                     "movq %0, %%rsp\n"
+                     : "+m"(df_resume_rsp)
+                     :
+                     : "memory");
+    CHECK(df_seen == 8, "double fault not taken: vector %d", df_seen);
+    // A kernel #GP from a non-canonical pointer returns to the instruction after we move rip, with its frame on the same stack.
+    kprintf("PASS double fault on an IST stack\n");
+}
+
+static void test_exception_cost(void) {
+    fault_mode = M_EXIT_ON_FAULT;
+    u64 n = 2000000, t = rdtsc();
+    for (u64 i = 0; i < n; i++)
+        __asm__ volatile("int $0x80" : : "a"(1ULL) : "memory", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11");
+    kprintf("measure int from ring 0, 15 pushes, C handler, iret: %d ns\n", (rdtsc() - t) / n);
+    kprintf("PASS exception cost\n");
 }
 
 void kmain(u64 ram) {
@@ -743,6 +773,7 @@ void kmain(u64 ram) {
     u64 a = new_space(), b = new_space();
     __asm__ volatile("mov %%cr4, %%rax\n or $0x20000, %%rax\n mov %%rax, %%cr4" : : : "rax");
     switch_to(a, 1, false);
+    test_exception_cost();
     test_syscalls();
     test_faults();
     test_precise();
