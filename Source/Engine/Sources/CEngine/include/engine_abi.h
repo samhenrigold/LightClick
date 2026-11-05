@@ -219,7 +219,7 @@ typedef struct {
     uint32_t mxcsr; // control bits; status bits live in FPSR
     uint32_t view; // current view index
     uint32_t model_kernel; // 0 user-mode shim: syscall and faults go to the host. 1 full x86 kernel model.
-    uint32_t pad_shadow;
+    uint32_t vcpu_count; // in the first context: how many this VM runs. Set before any of them starts
     uint64_t irq_shadow_rip; // interrupts wait until the instruction at this rip has run: the sti shadow
     uint32_t irq_pending; // host or in-VM APIC has an interrupt ready
     uint32_t halted;

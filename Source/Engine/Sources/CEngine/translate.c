@@ -1015,6 +1015,10 @@ void tr_view_drop(int view) {
 }
 
 void tr_flush_all(void) {
+    if (ctx_ptr->vcpu_count > 1) { // other vCPUs are running in this cache. shortcut: needs them all stopped at an x86 boundary first; see "Multi-vCPU" in DESIGN.md
+        fprintf(stderr, "engine stop: code cache reset with several vCPUs is not built\n");
+        abort();
+    }
     ctx_ptr->tr_flushed = 1;
     tr_cc = cc_base;
     hblock_count = 0;
