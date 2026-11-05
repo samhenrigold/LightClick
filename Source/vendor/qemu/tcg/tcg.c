@@ -145,6 +145,21 @@ static bool tcg_out_xchg(TCGContext *s, TCGType type, TCGReg r1, TCGReg r2);
 static void tcg_out_exit_tb(TCGContext *s, uintptr_t arg);
 static void tcg_out_goto_tb(TCGContext *s, int which);
 static void tcg_out_goto_ptr(TCGContext *s, TCGReg dest);
+#if !defined(__aarch64__) || defined(CONFIG_TCG_INTERPRETER)
+/* Local experiment: never emitted for these hosts. */
+static void tcg_out_pvg_call(TCGContext *s, TCGReg slot, TCGLabel *l)
+{
+    g_assert_not_reached();
+}
+
+static void tcg_out_pvg_ret(TCGContext *s, TCGReg dest)
+{
+    g_assert_not_reached();
+}
+#else
+static void tcg_out_pvg_call(TCGContext *s, TCGReg slot, TCGLabel *l);
+static void tcg_out_pvg_ret(TCGContext *s, TCGReg dest);
+#endif
 static void tcg_out_mb(TCGContext *s, unsigned bar);
 static void tcg_out_br(TCGContext *s, TCGLabel *l);
 static void tcg_out_set_carry(TCGContext *s);
@@ -1247,6 +1262,8 @@ static const TCGOutOp * const all_outop[NB_OPS] = {
     OUTOP(INDEX_op_xor, TCGOutOpBinary, outop_xor),
 
     [INDEX_op_goto_ptr] = &outop_goto_ptr,
+    [INDEX_op_pvg_call] = &outop_goto_ptr,
+    [INDEX_op_pvg_ret] = &outop_goto_ptr,
 };
 
 #undef OUTOP
@@ -2388,6 +2405,8 @@ bool tcg_op_supported(TCGOpcode op, TCGType type, unsigned flags)
     case INDEX_op_exit_tb:
     case INDEX_op_goto_tb:
     case INDEX_op_goto_ptr:
+    case INDEX_op_pvg_call:
+    case INDEX_op_pvg_ret:
         return true;
 
     case INDEX_op_qemu_ld:
@@ -3029,6 +3048,7 @@ void tcg_dump_ops(TCGContext *s, FILE *f, bool have_prefs)
             case INDEX_op_set_label:
             case INDEX_op_br:
             case INDEX_op_brcond:
+            case INDEX_op_pvg_call:
                 col += ne_fprintf(f, "%s$L%d", k ? "," : "",
                                   arg_label(op->args[k])->id);
                 i++, k++;
@@ -3498,6 +3518,9 @@ void tcg_op_remove(TCGContext *s, TCGOp *op)
     case INDEX_op_brcond:
         remove_label_use(op, 3);
         break;
+    case INDEX_op_pvg_call:
+        remove_label_use(op, 1);
+        break;
     default:
         break;
     }
@@ -3596,6 +3619,9 @@ static void move_label_uses(TCGLabel *to, TCGLabel *from)
         case INDEX_op_brcond:
             op->args[3] = label_arg(to);
             break;
+        case INDEX_op_pvg_call:
+            op->args[1] = label_arg(to);
+            break;
         default:
             g_assert_not_reached();
         }
@@ -3670,6 +3696,7 @@ reachable_code_pass(TCGContext *s)
         case INDEX_op_br:
         case INDEX_op_exit_tb:
         case INDEX_op_goto_ptr:
+        case INDEX_op_pvg_ret:
             /* Unconditional branches; everything following is dead.  */
             dead = true;
             break;
@@ -5822,6 +5849,14 @@ static void tcg_reg_alloc_op(TCGContext *s, const TCGOp *op)
     case INDEX_op_goto_ptr:
         tcg_debug_assert(!const_args[0]);
         tcg_out_goto_ptr(s, new_args[0]);
+        break;
+
+    case INDEX_op_pvg_call:
+        tcg_out_pvg_call(s, new_args[0], arg_label(new_args[1]));
+        break;
+
+    case INDEX_op_pvg_ret:
+        tcg_out_pvg_ret(s, new_args[0]);
         break;
 
     default:

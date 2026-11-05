@@ -645,6 +645,8 @@ void tcg_flush_jmp_cache(CPUState *cpu)
         return;
     }
 
+    qatomic_inc(&jc->ret_tag);
+
     if (jc->lazy_flush) {
         uint64_t old;
 

@@ -3336,6 +3336,8 @@ void tcg_optimize(TCGContext *s)
         case INDEX_op_exit_tb:
         case INDEX_op_goto_tb:
         case INDEX_op_goto_ptr:
+        case INDEX_op_pvg_call:
+        case INDEX_op_pvg_ret:
             finish_ebb(&ctx);
             done = true;
             break;

@@ -1198,6 +1198,8 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
 
     cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
     cpu->tb_jmp_cache->generation = 1;
+    /* Zeroed ret_stack entries have tag 0, which can then never match. */
+    cpu->tb_jmp_cache->ret_tag = 1;
     cpu->tb_jmp_cache->lazy_flush = pvg_tcg_fast_path("PVG_TCG_LAZY_JMP_CACHE");
     tlb_init(cpu);
 #ifndef CONFIG_USER_ONLY

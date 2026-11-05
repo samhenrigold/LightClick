@@ -2721,6 +2721,18 @@ void tcg_gen_goto_ptr(TCGv_ptr ptr)
     tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
 }
 
+void tcg_gen_pvg_call(TCGv_ptr slot, TCGLabel *l)
+{
+    add_as_label_use(l, tcg_gen_op2(INDEX_op_pvg_call, TCG_TYPE_PTR,
+                                    tcgv_ptr_arg(slot), label_arg(l)));
+}
+
+void tcg_gen_pvg_ret(TCGv_ptr ptr)
+{
+    plugin_gen_disable_mem_helpers();
+    tcg_gen_op1i(INDEX_op_pvg_ret, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+}
+
 void tcg_gen_lookup_and_goto_ptr(void)
 {
     TCGv_ptr ptr;

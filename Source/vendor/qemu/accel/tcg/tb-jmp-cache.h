@@ -27,6 +27,16 @@ void pvg_lookup_diagnostics_set(bool value);
  * non-NULL value of 'tb'.  Strictly speaking pc is only needed for
  * CF_PCREL, but it's used always for simplicity.
  */
+/* Local experiment: x86 call/ret prediction. See gen_ret_predict_call. */
+#define PVG_RET_STACK_SIZE 64
+
+typedef struct PVGRetEntry {
+    const void *pad;    /* First: the backend stores it through the entry base */
+    uint64_t pc;
+    uint64_t tag;
+    uint64_t key;
+} PVGRetEntry;
+
 typedef struct CPUJumpCache {
     struct rcu_head rcu;
     /* Atomic: whole-cache invalidation can come from another vCPU. */
@@ -34,6 +44,13 @@ typedef struct CPUJumpCache {
     /* Owning-vCPU context key; remote invalidation never changes it. */
     uint64_t context_key;
     bool lazy_flush;
+    /* Atomic, like generation. Bumped by every event that can invalidate a jump
+     * cache entry, plus page flushes and context changes, so that a matching
+     * ret_stack tag means the pad's TB is live and its mapping is unchanged. */
+    uint64_t ret_tag;
+    /* Free-running; only the owning vCPU uses ret_sp and ret_stack. */
+    uint32_t ret_sp;
+    PVGRetEntry ret_stack[PVG_RET_STACK_SIZE];
     struct {
         TranslationBlock *tb;
         vaddr pc;

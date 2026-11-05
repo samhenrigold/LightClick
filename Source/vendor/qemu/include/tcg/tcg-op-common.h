@@ -87,6 +87,16 @@ void tcg_gen_lookup_and_goto_ptr(void);
 /* Jump to a checked TB code pointer, with the usual global-state sync. */
 void tcg_gen_goto_ptr(TCGv_ptr ptr);
 
+/*
+ * Local experiment, AArch64 hosts only. tcg_gen_pvg_call stores the address of
+ * the code following the op through @slot, then branches and links to @l, so
+ * the host return predictor expects that code. TCG sees a conditional branch
+ * whose fall-through is that code. tcg_gen_pvg_ret returns to @ptr with the
+ * predicted host ret.
+ */
+void tcg_gen_pvg_call(TCGv_ptr slot, TCGLabel *l);
+void tcg_gen_pvg_ret(TCGv_ptr ptr);
+
 void tcg_gen_plugin_cb(unsigned from);
 void tcg_gen_plugin_mem_cb(TCGv_i64 addr, unsigned meminfo);
 

@@ -44,6 +44,7 @@ static bool emit_inline_jmp_cache_cpl0;
 static bool dispatch_acquire_barrier;
 static bool dispatch_relaxed;
 static bool shared_dispatch;
+static bool ret_stack;
 #if defined(__APPLE__) && defined(__aarch64__) && !defined(CONFIG_USER_ONLY)
 void pvg_tcg_dispatch_tail(void);
 static bool tail_dispatch;
@@ -64,6 +65,7 @@ static void __attribute__((constructor)) init_inline_jmp_cache(void)
 #if defined(__APPLE__) && defined(__aarch64__) && !defined(CONFIG_USER_ONLY)
     value = getenv("PVG_TCG_TAIL_DISPATCH");
     tail_dispatch = value && !strcmp(value, "1");
+    ret_stack = pvg_tcg_fast_path("PVG_TCG_RET_STACK");
 #endif
 }
 
@@ -146,6 +148,7 @@ typedef struct DisasContext {
 #endif
     bool vex_w; /* used by AVX even on 32-bit processors */
     bool jmp_opt; /* use direct block chaining for direct jumps */
+    bool ret_predict; /* this TB ends in a near ret that checks ret_stack */
     bool cc_op_dirty;
 
     CCOp cc_op;  /* current CC operation */
@@ -1992,9 +1995,128 @@ static void gen_bnd_jmp(DisasContext *s)
     }
 }
 
+/*
+ * Local experiment: x86 call/ret prediction using paired host bl/ret.
+ *
+ * A call records { pc, tag, key, pad } in a per-vCPU ring and links to the
+ * callee, leaving the host return predictor expecting the pad that follows.
+ * The pad is goto_tb slot 1 of the calling TB, so ordinary chaining and
+ * unlinking keep it pointing at a valid continuation for the next instruction.
+ * A ret pops an entry and returns to its pad if the entry matches.
+ *
+ * Correctness needs no call/ret discipline. A hit proves that EIP is the pad's
+ * guest address, that flags and CS base are those it was translated for
+ * (s->flags is the runtime value in any TB that can chain, the invariant
+ * goto_tb already relies on), and that the tag is current, so the TB still
+ * exists and no page flush or context change has happened since. That makes
+ * running the pad equivalent to a lookup at EIP. Anything else, such as
+ * longjmp, a stack switch, a context switch, overflow or SMC, fails a compare
+ * and uses the normal path. Rings stay usable after a mismatch because later
+ * calls and rets still pair.
+ *
+ * - The record follows the guest push and the pop follows the guest load, so
+ *   a faulting push or pop leaves the ring untouched.
+ * - Requires CF_PCREL: there, tb_jmp_cache_inval_tb flushes every vCPU's jump
+ *   cache on any TB invalidation, which bumps ret_tag. Remote invalidation has
+ *   the same window as goto_tb chaining. tb_flush flushes first and is exclusive.
+ * - MPX is excluded because gen_bnd_jmp can clear HF_MPX_IU at runtime.
+ * - Log flags are checked here rather than at runtime, since a hit skips the
+ *   lookup that logs; goto_tb chaining skips it in the same way.
+ */
+static bool gen_ret_predict_ok(DisasContext *s)
+{
+    return ret_stack && s->jmp_opt &&
+           (tb_cflags(s->base.tb) & CF_PCREL) &&
+           !(tb_cflags(s->base.tb) & CF_NO_GOTO_PTR) &&
+           !(s->flags & HF_MPX_EN_MASK) &&
+           !qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC);
+}
+
+static uint64_t ret_predict_key(DisasContext *s)
+{
+    return ((uint64_t)(uint32_t)s->cs_base << 32) | s->flags;
+}
+
+/* Advance the ring for a push or pop. Returns the entry to write or check. */
+static TCGv_ptr gen_ret_stack_entry(TCGv_ptr cache, bool push)
+{
+    const ptrdiff_t cpu_off = -offsetof(X86CPU, env);
+    TCGv_i32 sp = tcg_temp_new_i32();
+    TCGv_i32 moved = tcg_temp_new_i32();
+    TCGv_ptr index = tcg_temp_new_ptr();
+    TCGv_ptr entry = tcg_temp_new_ptr();
+
+    tcg_gen_ld_ptr(cache, tcg_env, cpu_off + offsetof(CPUState, tb_jmp_cache));
+    tcg_gen_ld_i32(sp, cache, offsetof(CPUJumpCache, ret_sp));
+    tcg_gen_addi_i32(moved, sp, push ? 1 : -1);
+    tcg_gen_st_i32(moved, cache, offsetof(CPUJumpCache, ret_sp));
+    tcg_gen_andi_i32(sp, push ? moved : sp, PVG_RET_STACK_SIZE - 1);
+    tcg_gen_muli_i32(sp, sp, sizeof(PVGRetEntry));
+    tcg_gen_ext_i32_ptr(index, sp);
+    tcg_gen_add_ptr(entry, cache, index);
+    tcg_gen_addi_ptr(entry, entry, offsetof(CPUJumpCache, ret_stack));
+    return entry;
+}
+
+/* After the guest push of @next: record it and emit the pad. */
+static void gen_ret_predict_call(DisasContext *s, TCGv next)
+{
+    if (gen_ret_predict_ok(s)) {
+        TCGLabel *callee = gen_new_label();
+        TCGv_ptr cache = tcg_temp_new_ptr();
+        TCGv_ptr entry = gen_ret_stack_entry(cache, true);
+        TCGv_i64 tag = tcg_temp_new_i64();
+
+        tcg_gen_st_tl(next, entry, offsetof(PVGRetEntry, pc));
+        tcg_gen_ld_i64(tag, cache, offsetof(CPUJumpCache, ret_tag));
+        tcg_gen_st_i64(tag, entry, offsetof(PVGRetEntry, tag));
+        tcg_gen_st_i64(tcg_constant_i64(ret_predict_key(s)), entry,
+                       offsetof(PVGRetEntry, key));
+        tcg_gen_pvg_call(entry, callee);
+
+        /* The pad. EIP is already the next instruction when a ret lands here. */
+        if (translator_use_goto_tb(&s->base, s->pc)) {
+            tcg_gen_goto_tb(1);
+            tcg_gen_exit_tb(s->base.tb, 1);
+        } else {
+            tcg_gen_lookup_and_goto_ptr();
+        }
+        gen_set_label(callee);
+    }
+}
+
+/* At the end of a ret TB: return to the pad on a hit, else fall through. */
+static void gen_ret_predict_check(DisasContext *s)
+{
+    const ptrdiff_t cpu_off = -offsetof(X86CPU, env);
+    TCGLabel *miss = gen_new_label();
+    TCGv_ptr cache = tcg_temp_new_ptr();
+    TCGv_ptr entry = gen_ret_stack_entry(cache, false);
+    TCGv_ptr pad = tcg_temp_new_ptr();
+    TCGv_i64 value = tcg_temp_new_i64();
+    TCGv_i64 tag = tcg_temp_new_i64();
+    TCGv pc = tcg_temp_new();
+
+    tcg_gen_ld_tl(pc, entry, offsetof(PVGRetEntry, pc));
+    tcg_gen_brcond_tl(TCG_COND_NE, pc, cpu_eip, miss);
+    tcg_gen_ld_i64(value, entry, offsetof(PVGRetEntry, tag));
+    tcg_gen_ld_i64(tag, cache, offsetof(CPUJumpCache, ret_tag));
+    tcg_gen_brcond_i64(TCG_COND_NE, value, tag, miss);
+    tcg_gen_ld_i64(value, entry, offsetof(PVGRetEntry, key));
+    tcg_gen_brcondi_i64(TCG_COND_NE, value, ret_predict_key(s), miss);
+    tcg_gen_st8_i32(tcg_constant_i32(1), tcg_env,
+                    cpu_off + offsetof(CPUState, neg.can_do_io));
+    tcg_gen_ld_ptr(pad, entry, offsetof(PVGRetEntry, pad));
+    tcg_gen_pvg_ret(pad);
+    gen_set_label(miss);
+}
+
 /* Mirror tb_lookup's checked fast hit without a C helper round trip. */
 static void gen_cached_indirect_jump(DisasContext *s)
 {
+    if (s->ret_predict) {
+        gen_ret_predict_check(s);
+    }
 #if defined(TARGET_X86_64) && TCG_TARGET_REG_BITS == 64 && !defined(CONFIG_USER_ONLY)
 #if defined(__APPLE__) && defined(__aarch64__)
     if (tail_dispatch && (s->flags & HF_CS64_MASK) &&
@@ -3650,6 +3772,8 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->cpuid_xsave_features = env->features[FEAT_XSAVE];
     dc->jmp_opt = !((cflags & CF_NO_GOTO_TB) ||
                     (flags & (HF_RF_MASK | HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));
+
+    dc->ret_predict = false;
 
     dc->T0 = tcg_temp_new();
     dc->T1 = tcg_temp_new();

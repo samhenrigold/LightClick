@@ -1581,13 +1581,19 @@ static void gen_BZHI(DisasContext *s, X86DecodedInsn *decode)
 
 static void gen_CALL(DisasContext *s, X86DecodedInsn *decode)
 {
-    gen_push_v(s, eip_next_tl(s));
+    TCGv next = eip_next_tl(s);
+
+    gen_push_v(s, next);
+    gen_ret_predict_call(s, next);
     gen_JMP(s, decode);
 }
 
 static void gen_CALL_m(DisasContext *s, X86DecodedInsn *decode)
 {
-    gen_push_v(s, eip_next_tl(s));
+    TCGv next = eip_next_tl(s);
+
+    gen_push_v(s, next);
+    gen_ret_predict_call(s, next);
     gen_JMP_m(s, decode);
 }
 
@@ -3602,6 +3608,7 @@ static void gen_RET(DisasContext *s, X86DecodedInsn *decode)
     gen_stack_update(s, adjust + (1 << ot));
     gen_op_jmp_v(s, s->T0);
     gen_bnd_jmp(s);
+    s->ret_predict = gen_ret_predict_ok(s);
     s->base.is_jmp = DISAS_JUMP;
 }
 

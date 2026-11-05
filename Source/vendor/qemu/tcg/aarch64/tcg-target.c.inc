@@ -2069,6 +2069,23 @@ static void tcg_out_goto_ptr(TCGContext *s, TCGReg a0)
     tcg_out_insn(s, bcond_reg, BR, a0);
 }
 
+static void tcg_out_pvg_call(TCGContext *s, TCGReg slot, TCGLabel *l)
+{
+    const tcg_insn_unit *start = s->code_ptr;
+
+    /* LR is only a temporary here: TCG code does not keep values in it. */
+    tcg_out_insn(s, pcrel, ADR, TCG_REG_LR, 3 * sizeof(tcg_insn_unit));
+    tcg_out_st(s, TCG_TYPE_PTR, TCG_REG_LR, slot, 0);
+    tcg_out_reloc(s, s->code_ptr, R_AARCH64_JUMP26, l, 0);
+    tcg_out_insn(s, branch, BL, 0);
+    tcg_debug_assert(s->code_ptr - start == 3);
+}
+
+static void tcg_out_pvg_ret(TCGContext *s, TCGReg a0)
+{
+    tcg_out_insn(s, bcond_reg, RET, a0);
+}
+
 void tb_target_set_jmp_target(const TranslationBlock *tb, int n,
                               uintptr_t jmp_rx, uintptr_t jmp_rw)
 {
