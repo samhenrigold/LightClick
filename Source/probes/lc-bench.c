@@ -249,7 +249,7 @@ static NOINLINE uint64_t movups_copy_chunk(uint64_t n) {
 }
 
 // Integer and shuffle SSE on registers, so softmmu is not in it. punpck, pshuflw, pshufhw and pshufd test
-// PVG_TCG_INLINE_SSE_PACKED; pmaddwd, packuswb and psadbw test PVG_TCG_SSE_NO_GLOBALS, with mask, sum and i live across
+// PVG_TCG_INLINE_SSE_PACKED; pmaddwd, packuswb and psadbw are helper calls, with mask, sum and i live across
 // their helpers. The asm fixes the instructions, which intrinsics would let the compiler merge.
 typedef long long int2 __attribute__((vector_size(16)));
 
