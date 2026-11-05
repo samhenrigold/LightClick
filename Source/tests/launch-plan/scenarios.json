@@ -4106,6 +4106,41 @@
  },
  {
   "appleSilicon": true,
+  "argv": [
+   "--firmware-diagnostics"
+  ],
+  "audioDevices": {},
+  "audioIn": "default",
+  "audioOut": "default",
+  "backingScale": 2.0,
+  "config": {
+   "CPUCount": 4,
+   "Disk": "Disk.qcow2",
+   "Guest": "tiger",
+   "Identifier": "7F3A1C52-9B1E-4D6A-8C37-0A1B2C3D4E5F",
+   "InstallState": "installed",
+   "MemoryMiB": 4096,
+   "NVRAM": "NVRAM.fd"
+  },
+  "displayMode": "scaled",
+  "guest": "tiger",
+  "hasGraphics": false,
+  "inherited": {
+   "HOME": "/Fixture/Home"
+  },
+  "inprocessLibrary": null,
+  "installerDisplay": false,
+  "machineName": "Test Mac",
+  "machinePath": "/Fixture/Lib, rary/Test.virtualmac",
+  "name": "tiger-commas-diagnostics",
+  "refreshMS": 0,
+  "research": false,
+  "setupMedia": null,
+  "signatureOnly": false,
+  "supportsRetina": true
+ },
+ {
+  "appleSilicon": true,
   "argv": [],
   "audioDevices": {},
   "audioIn": "default",
@@ -5082,6 +5117,41 @@
   "machineName": "Mac, Old",
   "machinePath": "/Fixture/Lib, rary/Test.virtualmac",
   "name": "mavericks-commas",
+  "refreshMS": 0,
+  "research": false,
+  "setupMedia": null,
+  "signatureOnly": false,
+  "supportsRetina": true
+ },
+ {
+  "appleSilicon": true,
+  "argv": [
+   "--firmware-diagnostics"
+  ],
+  "audioDevices": {},
+  "audioIn": "default",
+  "audioOut": "default",
+  "backingScale": 2.0,
+  "config": {
+   "CPUCount": 4,
+   "Disk": "Disk.qcow2",
+   "Guest": "mavericks",
+   "Identifier": "7F3A1C52-9B1E-4D6A-8C37-0A1B2C3D4E5F",
+   "InstallState": "installed",
+   "MemoryMiB": 4096,
+   "NVRAM": "NVRAM.fd"
+  },
+  "displayMode": "scaled",
+  "guest": "mavericks",
+  "hasGraphics": false,
+  "inherited": {
+   "HOME": "/Fixture/Home"
+  },
+  "inprocessLibrary": null,
+  "installerDisplay": false,
+  "machineName": "Test Mac",
+  "machinePath": "/Fixture/Lib, rary/Test.virtualmac",
+  "name": "mavericks-commas-diagnostics",
   "refreshMS": 0,
   "research": false,
   "setupMedia": null,
@@ -6074,6 +6144,41 @@
  },
  {
   "appleSilicon": true,
+  "argv": [
+   "--firmware-diagnostics"
+  ],
+  "audioDevices": {},
+  "audioIn": "default",
+  "audioOut": "default",
+  "backingScale": 2.0,
+  "config": {
+   "CPUCount": 4,
+   "Disk": "Disk.qcow2",
+   "Guest": "catalina",
+   "Identifier": "7F3A1C52-9B1E-4D6A-8C37-0A1B2C3D4E5F",
+   "InstallState": "installed",
+   "MemoryMiB": 4096,
+   "NVRAM": "NVRAM.fd"
+  },
+  "displayMode": "scaled",
+  "guest": "catalina",
+  "hasGraphics": false,
+  "inherited": {
+   "HOME": "/Fixture/Home"
+  },
+  "inprocessLibrary": null,
+  "installerDisplay": false,
+  "machineName": "Test Mac",
+  "machinePath": "/Fixture/Lib, rary/Test.virtualmac",
+  "name": "catalina-commas-diagnostics",
+  "refreshMS": 0,
+  "research": false,
+  "setupMedia": null,
+  "signatureOnly": false,
+  "supportsRetina": true
+ },
+ {
+  "appleSilicon": true,
   "argv": [],
   "audioDevices": {},
   "audioIn": "default",
@@ -7050,6 +7155,41 @@
   "machineName": "Mac, Old",
   "machinePath": "/Fixture/Lib, rary/Test.virtualmac",
   "name": "bigsur-commas",
+  "refreshMS": 0,
+  "research": false,
+  "setupMedia": null,
+  "signatureOnly": false,
+  "supportsRetina": true
+ },
+ {
+  "appleSilicon": true,
+  "argv": [
+   "--firmware-diagnostics"
+  ],
+  "audioDevices": {},
+  "audioIn": "default",
+  "audioOut": "default",
+  "backingScale": 2.0,
+  "config": {
+   "CPUCount": 4,
+   "Disk": "Disk.qcow2",
+   "Guest": "bigsur",
+   "Identifier": "7F3A1C52-9B1E-4D6A-8C37-0A1B2C3D4E5F",
+   "InstallState": "installed",
+   "MemoryMiB": 4096,
+   "NVRAM": "NVRAM.fd"
+  },
+  "displayMode": "scaled",
+  "guest": "bigsur",
+  "hasGraphics": false,
+  "inherited": {
+   "HOME": "/Fixture/Home"
+  },
+  "inprocessLibrary": null,
+  "installerDisplay": false,
+  "machineName": "Test Mac",
+  "machinePath": "/Fixture/Lib, rary/Test.virtualmac",
+  "name": "bigsur-commas-diagnostics",
   "refreshMS": 0,
   "research": false,
   "setupMedia": null,

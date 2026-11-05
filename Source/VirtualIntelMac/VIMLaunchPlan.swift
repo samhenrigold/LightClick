@@ -316,6 +316,8 @@ public final class LaunchPlan: NSObject {
             // link reset, or delayed boot-time reconnect is necessary.
             "-device", "e1000-82545em,id=ethernet,bus=pcie.0,addr=0x6,netdev=net0,mac=\(input.macAddress)",
             "-qmp", "unix:\(input.qmpPath),server=on,wait=off",
+            // "file:" takes the rest of the option as a literal path, so unlike the
+            // options above a comma here must not be doubled. -debugcon below too.
             "-serial", preMetal ? "none" : "file:\(input.machinePath)/State/serial.log",
             "-monitor", "none", "-action", "reboot=shutdown",
             "-netdev", network,

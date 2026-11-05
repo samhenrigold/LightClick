@@ -64,6 +64,7 @@ for guest in ('tiger', 'mavericks', 'catalina', 'bigsur'):
     variant('research-gdb', {'LegacyGDBPort': 1234}, research=True)
     variant('gdb-not-research', {'LegacyGDBPort': 1234})
     variant('commas', machineName='Mac, Old', machinePath='/Fixture/Lib, rary/Test.virtualmac')
+    variant('commas-diagnostics', machinePath='/Fixture/Lib, rary/Test.virtualmac', argv=['--firmware-diagnostics'])
     variant('leaked-environment', inherited={
         'HOME': '/Fixture/Home', 'PVG_TCG_TSO': '1', 'PVG_STALE': '1', 'DYLD_INSERT_LIBRARIES': '/evil.dylib',
         'VIM_AUDIO_OUTPUT_DEVICE': 'Stale', 'VIM_AUDIO_INPUT_DEVICE': 'Stale', 'VIM_E1000_LINK_HISTORY': '1',
