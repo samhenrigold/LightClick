@@ -1078,10 +1078,19 @@ again:;
             continue;
         u64 gpa = fr & ~1ULL;
         if (!(page_info[gpa >> 12] & PI_CODE)) {
-            page_info[gpa >> 12] |= PI_CODE;
-            write_protect_frame(gpa);
+            write_protect_frame(gpa); // then the mark: the translator reads a frame only once it sees that
+            __atomic_store_n(&page_info[gpa >> 12], page_info[gpa >> 12] | PI_CODE, __ATOMIC_RELEASE);
             newly_code = true;
         }
+    }
+    if (!c->req_r[0]) { // the host refused until the frame was protected, which it is now
+        mon_unlock();
+        if (++attempts >= 8) { // a writer keeps opening it: one instruction from a one-off block is progress
+            single = true;
+            site = 0;
+            kind = 0;
+        }
+        goto again;
     }
     track_root(v, rip, &w);
     if (shared >= 0) { // this view just needs its own path built, so that a change to its slot above the directory reaches zap_entry
@@ -1117,9 +1126,8 @@ again:;
         }
     }
     if (smp) {
-        // The host read code and tables with nothing protecting them. From here a store or remap finds this block, and anything earlier shows now: look again, and if
-        // it moved or the frame was not protected when read, what was translated may be stale. shortcut: a first block on a frame is translated twice; marking its first
-        // frame before the host call would save that, if cold code shows up in a profile.
+        // The host read tables with nothing protecting them, and a frame's mark may have gone since. From here a store or remap finds this block, and anything earlier
+        // shows now: look again, and if it moved or the frame needed marking again, what was translated may be stale.
         Walk now = x86_walk(c->cr3, rip, 16 | (c->cpl == 3 ? 4 : 0), true);
         if (newly_code || !now.ok || (now.gpa & ~0xfffULL) != (c->req_r[2] & ~1ULL)) {
             u64 r2 = c->req_r[2], r3 = c->req_r[3];
@@ -1665,8 +1673,8 @@ static void handle_data_abort(bool lower) {
         c->req_a[0] = gpa;
         c->req_a[1] = KILL_STORE;
         c->stat_smc++;
+        __atomic_store_n(&page_info[gpa >> 12], pi & ~PI_CODE, __ATOMIC_RELEASE); // before the kill: see frame_unprotected
         hostcall(HC_SMC);
-        page_info[gpa >> 12] = pi & ~PI_CODE;
         reset_all_return_stacks();
         shadow_install(v, far, &w, true);
         tlbi_va(view_asid(c->view), far);
@@ -1998,8 +2006,8 @@ static void note_apply(u32 fr) {
         c->req_a[0] = (u64)fr << 12;
         c->req_a[1] = KILL_NOTE;
         c->stat_note_code++;
+        __atomic_store_n(&page_info[fr], pi & ~PI_CODE, __ATOMIC_RELEASE); // before the kill: see frame_unprotected
         hostcall(HC_SMC);
-        page_info[fr] &= ~PI_CODE;
         reset_all_return_stacks();
     }
     if (pi & PI_PT) {
@@ -2937,6 +2945,7 @@ static void do_cli_sti(bool sti) {
         c->rflags_sys &= ~RF_IF;
 }
 
+#define HLT_POLL_TICKS 2400 // 100 us of the 24 MHz counter
 void mon_sync(void) {
     if (me->smc_held)
         __atomic_store_n(&me->smc_held, 0, __ATOMIC_RELEASE);
@@ -3026,6 +3035,20 @@ void mon_sync(void) {
                 }
                 u64 next = next_rip_lit();
                 if (c->hybrid) {
+                    // Waking through TCG and the host's condition variable costs tens of us, and threads that take turns across vCPUs do it each turn. So wait a
+                    // little here first, as KVM's halt polling does: it costs an idle vCPU this long per hlt, and a stop still takes it straight to TCG.
+                    if ((c->rflags_sys & RF_IF) && !c->irq_pending) {
+                        u64 until = RSR(cntvct_el0) + HLT_POLL_TICKS;
+                        while (!__atomic_load_n(&c->irq_line, __ATOMIC_ACQUIRE) && !__atomic_load_n(&c->stop_requested, __ATOMIC_ACQUIRE) && RSR(cntvct_el0) < until)
+                            __asm__ volatile("yield");
+                        if (__atomic_load_n(&c->irq_line, __ATOMIC_ACQUIRE)) {
+                            hostcall(HC_IRQ);
+                            if (c->req_r[0] != ~0ULL) {
+                                c->irq_pending = (u32)c->req_r[0] + 1;
+                                c->stat_hlt_polled++;
+                            }
+                        }
+                    }
                     if (c->irq_pending && (c->rflags_sys & RF_IF)) { // sti; hlt with a vector already in hand: the hlt is over before it starts
                         c->elr = translate_here(next, 0, 0, false);
                         break;

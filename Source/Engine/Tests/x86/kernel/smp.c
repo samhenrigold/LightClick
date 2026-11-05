@@ -978,6 +978,52 @@ static void test_smc(u32 me) {
     }
 }
 
+// One vCPU storing into code that others call. Once a store is visible, no call begun after it may run the old bytes, even
+// when one vCPU translates just as another finds that translation: it takes three to see this.
+static void test_smc_visible(u32 me) {
+    static volatile u64 generation;
+    u64 code = CODE_VA + 0x3000;
+    if (me == 0) {
+        u64 f = frame_alloc();
+        u8 *p = (u8 *)(PHYSMAP + f);
+        p[3] = 0xB8; // mov $0, %eax; ret, with the value on a four-byte boundary
+        *(u32 *)(p + 4) = 0;
+        p[8] = 0xC3;
+        *pte_slot(boot_root, code) = f | P | W;
+        generation = 0;
+        lit.stop = 0;
+    }
+    barrier();
+    if (me == 0) {
+        for (u32 g = 1; g <= 300000; g++) {
+            __atomic_store_n((volatile u32 *)(code + 4), g, __ATOMIC_SEQ_CST);
+            __atomic_store_n(&generation, g, __ATOMIC_SEQ_CST);
+        }
+        lit.stop = 9;
+    } else {
+        u64 stale = 0, last_got = 0, last_want = 0;
+        while (lit.stop != 9) {
+            u32 want = (u32)__atomic_load_n(&generation, __ATOMIC_SEQ_CST);
+            u32 a = 0, b, c = 0, d;
+            __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d)); // serialising: what was translated before this is no excuse
+            u32 got = ((CodeFn)(code + 3))();
+            if (got < want) {
+                stale++;
+                last_got = got;
+                last_want = want;
+            }
+        }
+        if (stale) {
+            say("  last stale result ", last_got, "");
+            say("    against its generation ", last_want, "");
+        }
+        CHECK(stale == 0, "ran code older than a store it saw", stale);
+    }
+    barrier();
+    if (me == 0)
+        puts_("PASS a store to code is seen by every call after it\n");
+}
+
 // ---- Page tables changed by several vCPUs at once, in one leaf table ----
 #define PT_PAGES 128
 static void pt_stress(u32 me, u64 rounds, u64 *fills, u64 *stores) {
@@ -1189,6 +1235,7 @@ void kmain(u64 ram, u64 me) {
         test_ipi((u32)me);
         test_shootdown((u32)me);
         test_smc((u32)me);
+        test_smc_visible((u32)me);
         test_mixed_page(me);
     test_tables((u32)me);
         test_cr3((u32)me);

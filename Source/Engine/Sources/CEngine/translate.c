@@ -190,6 +190,16 @@ int tr_fetch(u64 va, u8 *out, int n) {
     return got;
 }
 
+// With several vCPUs a block is found the moment it exists, by vCPUs that may already have seen a later store. So its bytes must be read
+// protected. A writer clears the mark before it takes the translator lock to kill, so a mark seen here means any later store kills what this reads.
+static bool frame_unprotected(u64 va, u64 *frame) {
+    u64 gpa;
+    if (ctx_ptr->vcpu_count < 2 || !fetch_walk(va, &gpa))
+        return false;
+    *frame = gpa & ~0xfffULL;
+    return !(__atomic_load_n(&cfg.priv[OFF_PAGEINFO + (gpa >> 12)], __ATOMIC_ACQUIRE) & PI_CODE);
+}
+
 // ---- Liveness ----
 static int insn_reads(const Insn *in) {
     int r = in->reads;
@@ -462,6 +472,11 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     int count = 0;
     u64 pc = rip, page = rip & ~0xfffULL;
     do {
+        u64 frame;
+        if (!single && ((count == 0 && frame_unprotected(pc, &frame)) || ((pc & 0xfff) > 4096 - 15 && frame_unprotected((pc | 0xfff) + 1, &frame)))) {
+            res.unprotected = frame + 1;
+            return res;
+        }
         x86_decode(pc, &list[count]);
         Insn *in = &list[count];
         if (in->op == OP_BAD && in->why && !strcmp(in->why, "FETCH_FAULT")) {
@@ -1017,7 +1032,7 @@ TrResult tr_translate(int view, uint64_t cr3, int cpl, uint64_t rip, bool single
         }
     }
     TrResult r = do_translate(view, cr3, cpl, rip, single);
-    if ((key & KEY_DOMAIN) && cpl == 3)
+    if ((key & KEY_DOMAIN) && cpl == 3 && !r.unprotected)
         stats.shared_blocks++;
     r.key = key;
     return r;

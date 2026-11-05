@@ -24,6 +24,7 @@ typedef struct {
     uint64_t frames[2]; // GPA frames the block was read from (second is ~0 when unused)
     bool flushed; // the code cache was reset to make room: every pointer into it is stale
     int key; // the translation domain of the target: tr_link needs it
+    uint64_t unprotected; // nonzero: nothing translated, as this frame must be write-protected first (gpa + 1)
 } TrResult;
 
 void tr_init(const TrConfig *config);

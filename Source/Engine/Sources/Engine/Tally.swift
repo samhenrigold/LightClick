@@ -409,6 +409,7 @@ public final class Tally: @unchecked Sendable {
             ("cr3 writes", c.stat_cr3),
             ("iret", c.stat_iret), ("syscall", c.stat_syscall), ("interrupts delivered", c.stat_irq),
             ("arm steps to a boundary", c.stat_steps),
+            ("hlts ended by an interrupt while polling", c.stat_hlt_polled),
             ("mmio through the host", c.stat_mmio), ("#NM from CR0.TS", c.stat_nm),
             ("code frames noted by DMA or TCG", c.stat_note_code),
             ("table frames noted by DMA or TCG", c.stat_note_pt), ("view evictions", c.stat_view_evictions),

@@ -1220,6 +1220,20 @@ static void test_linked_loop(void) {
     (void)cr0;
 }
 
+// An interrupt raised just after a hlt ends it, polled in the monitor or through TCG if the host is slow, and the handler
+// returns past the hlt.
+static void test_hlt_poll(void) {
+    __asm__ volatile("sti");
+    for (int i = 0; i < 100; i++) {
+        u64 irqs = irq_count;
+        command(20);
+        __asm__ volatile("mov $0, %%r13\n mov $1, %%r14\n hlt\n" : : : "r13", "r14");
+        while (irq_count == irqs) // TCG's hlt, played by the harness, doesn't wait
+            __asm__ volatile("pause");
+    }
+    __asm__ volatile("cli");
+}
+
 // A second vCPU joins through the C API, as an application processor does under QEMU: it takes fallbacks and kicks here
 // while the first works on, with blocks shared between them.
 static volatile u64 second_count, second_done, second_direct_reads;
@@ -1829,6 +1843,7 @@ void kmain(void) {
     test_kernel_domain(root);
     test_many_blocks(root);
     test_linked_loop();
+    test_hlt_poll();
     test_second_vcpu(root);
     test_process_log(root);
     test_shared_region(root);

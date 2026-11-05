@@ -497,6 +497,13 @@ public final class Engine {
                 c.pointee.req_r.1 = result.fetch_fault_va + 1
                 return nil
             }
+            if result.unprotected != 0 {
+                c.pointee.req_r.0 = 0
+                c.pointee.req_r.1 = 0
+                c.pointee.req_r.2 = (result.unprotected - 1) | 1
+                c.pointee.req_r.3 = 0
+                return nil
+            }
             c.pointee.req_r.0 = result.arm
             c.pointee.req_r.1 = 0
             c.pointee.req_r.2 = result.frames.0 == ~0 ? 0 : result.frames.0 | 1
