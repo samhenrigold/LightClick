@@ -9,6 +9,8 @@ ENABLE_APP_SANDBOX = NO
 // embed-dev-runtime reads a packaged app whose files can't be listed as phase inputs.
 ENABLE_USER_SCRIPT_SANDBOXING = NO
 GENERATE_INFOPLIST_FILE = YES
+// SwiftPM imparts only a module map to clients; its generated X-Swift.h headers land here, for #import "X-Swift.h".
+HEADER_SEARCH_PATHS = $(inherited) "$(GENERATED_MODULEMAP_DIR)"
 INFOPLIST_FILE = support/App-Info.plist
 INFOPLIST_KEY_NSMainNibFile = MainMenu
 INFOPLIST_KEY_NSMicrophoneUsageDescription = Allow your virtual Macs to use this Mac’s microphone when a guest app records audio.

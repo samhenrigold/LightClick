@@ -265,6 +265,15 @@ static void vec_gen_ldst(TCGOpcode opc, TCGv_vec r, TCGv_ptr b, TCGArg o)
     vec_gen_3(opc, type, 0, ri, bi, o);
 }
 
+#if defined(__aarch64__)
+void tcg_gen_aa64_zip_vec(unsigned vece, TCGv_vec ret, TCGv_vec a, TCGv_vec b,
+                          bool high)
+{
+    vec_gen_4(INDEX_op_aa64_zip_vec, tcgv_vec_temp(ret)->base_type, vece,
+              tcgv_vec_arg(ret), tcgv_vec_arg(a), tcgv_vec_arg(b), high);
+}
+#endif
+
 void tcg_gen_ld_vec(TCGv_vec r, TCGv_ptr b, TCGArg o)
 {
     vec_gen_ldst(INDEX_op_ld_vec, r, b, o);

@@ -1,0 +1,20 @@
+#!/bin/zsh
+# Compile probes/tcg-sse-fastpath-test.c with QEMU's softfloat and run it. Takes seconds and boots nothing.
+#   scripts/test-sse-fastpath [ROUNDS]
+# BUILD is any QEMU build tree for arm64, for config-host.h; DEPENDENCIES holds glib's headers and library.
+set -eu
+source_root=${0:A:h:h}
+build_root=${LC_BUILD_ROOT:-$source_root/Build}
+BUILD=${BUILD:-$build_root/QEMU-perf/arm64}
+DEPENDENCIES=${DEPENDENCIES:-$build_root/UniversalDependencies/arm64}
+output=$(mktemp -d)
+trap 'rm -rf "$output"' EXIT
+# __FAST_MATH__ turns off softfloat's hardfloat path, which would otherwise compare the host FPU with itself.
+xcrun clang -arch arm64 -std=gnu11 -O1 -D_GNU_SOURCE -D__FAST_MATH__ -fno-strict-aliasing -fwrapv \
+    -I"$BUILD" -I"$source_root/vendor/qemu" -I"$source_root/vendor/qemu/include" \
+    -I"$DEPENDENCIES/include/glib-2.0" -I"$DEPENDENCIES/lib/glib-2.0/include" -I"$DEPENDENCIES/include" \
+    -include "$BUILD/config-host.h" \
+    "$source_root/probes/tcg-sse-fastpath-test.c" "$source_root/vendor/qemu/fpu/softfloat.c" \
+    -L"$DEPENDENCIES/lib" -lglib-2.0 -lintl -liconv -framework CoreFoundation -framework Foundation -lresolv -lpcre2-8 \
+    -o "$output/test" -Wno-everything
+"$output/test" "$@"

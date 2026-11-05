@@ -30,6 +30,7 @@ parser.add_argument('--boot-wait', type=int, default=45)
 parser.add_argument('--repeat', type=int, default=1, help='benchmark runs in the same boot; results are the fastest of each test')
 parser.add_argument('--events', action='store_true', help='record guest event counts in Build/bench/<tag>.events')
 parser.add_argument('--workload', help='run this in the guest with /bin/sh instead of lc-bench')
+parser.add_argument('--program', help='stage this local x86 program and run it once, saving its output as Build/bench/<tag>.txt')
 parser.add_argument('--sample', type=int, help='sample QEMU for this many seconds during the workload, into Build/bench/<tag>.sample')
 args = parser.parse_args()
 bench = source/'Build/bench/lc-bench'
@@ -114,7 +115,7 @@ try:
         print(f'workload exit {result.get("ExitCode")}, event seconds {lines} to {after}')
         print(str(result.get('Stderr'))[:300])
     else:
-        shutil.copyfile(bench, channel/'Transfer.bin')
+        shutil.copyfile(args.program or bench, channel/'Transfer.bin')
         start = time.time()
         staged = request({'Action': 'stage-probe'}, 900)
         if 'Error' in staged:
@@ -122,6 +123,11 @@ try:
         print(f'staged in {time.time()-start:.0f}s', flush=True)
         program = staged['Transfer']['Directory']+'/Transfer.bin'
         request({'Executable': '/bin/chmod', 'Arguments': ['0755', program]}, 120)
+        if args.program:
+            result = request({'Executable': program, 'Arguments': []}, 900)
+            (source/'Build/bench'/f'{args.tag}.txt').write_text(result.get('Stdout', ''))
+            print(f'program exit {result.get("ExitCode")} {str(result.get("Stderr"))[:200]}')
+            raise SystemExit(0)
         best = {}
         order = []
         for _ in range(args.repeat):
@@ -133,6 +139,8 @@ try:
                 if line.startswith('#') or len(parts) != 3:
                     continue
                 value = float(parts[1])
+                if parts[0] == 'largecode_cold' and parts[0] in best:
+                    continue  # code from the first run is no longer cold
                 if parts[0] not in best:
                     order.append(parts[0])
                     best[parts[0]] = (value, parts[2])
@@ -146,8 +154,20 @@ finally:
     time.sleep(6)
     if process.poll() is None:
         process.kill()
-    subprocess.run(['pkill', '-f', str(real)], check=False)  # the clone's own QEMU, by its unique path
-    time.sleep(1)
+    # Everything left that runs from this clone: its QEMU, and any helper QEMU spawned.
+    deadline = time.time()+20
+    while time.time() < deadline:
+        listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+        # Match the executable's path only: another app's VM may be using a disk in this folder.
+        leftovers = [int(line.split()[0]) for line in listing.splitlines()
+                     if line.split(None, 1)[1].startswith(str(work)+'/')]
+        if not leftovers:
+            break
+        for pid in leftovers:
+            os.kill(pid, signal.SIGKILL if time.time() > deadline-15 else signal.SIGTERM)
+        time.sleep(1)
+    else:
+        print(f'WARNING: processes from {work} are still running')
     shutil.rmtree(work, ignore_errors=True)
     # CFFIXED_USER_HOME doesn't redirect preferences: remove what this clone's paths left in them.
     listing = subprocess.run(['defaults', 'read', 'gold.samhenri.LightClick'], capture_output=True, text=True).stdout

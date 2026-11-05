@@ -1,6 +1,5 @@
 // Host-only check of the production media policy, without modifying the DVD.
 #import "../VirtualIntelMac/VIMTigerRestoreProfile.h"
-#import "../VirtualIntelMac/VIMInstallerSource.h"
 int main(int argc, const char **argv) {
     @autoreleasepool {
         if (argc != 1 && argc != 2)
@@ -42,15 +41,6 @@ int main(int argc, const char **argv) {
              "preparation");
         if (argc == 1)
             return 0;
-        NSURL *download = [NSURL
-            URLWithString:
-                @"https://dn720202.ca.archive.org/0/items/10.4.10-8-r-4088-acdt/10.4.10-8R4088-iMac7%2C1-Disc-1.dmg"];
-        if (![VIMInstallerSource isRestoreDVDAsset:download forGuest:@"tiger"] ||
-            ![VIMInstallerSource isApprovedURL:download] ||
-            [VIMInstallerSource isRestoreDVDAsset:download forGuest:@"leopard"] ||
-            [VIMInstallerSource
-                isApprovedURL:[NSURL URLWithString:[download.absoluteString stringByAppendingString:@"?other=1"]]])
-            return 10;
         NSURL *mount = [NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]] isDirectory:YES];
         if (!VIMTigerValidateRestoreDVD(mount, &error)) {
             fprintf(stderr, "%s\n", error.localizedDescription.UTF8String);

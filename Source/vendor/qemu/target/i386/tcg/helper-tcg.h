@@ -126,4 +126,6 @@ static inline void do_end_instruction(CPUX86State *env)
     env->hflags &= ~HF_INHIBIT_IRQ_MASK;
     env->eflags &= ~HF_RF_MASK;
 }
+extern bool x86_tcg_chain_sys_return;
+
 #endif /* I386_HELPER_TCG_H */

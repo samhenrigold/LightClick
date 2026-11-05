@@ -25,6 +25,7 @@
 #include "exec/translation-block.h"
 #include "tcg/tcg-op.h"
 #include "tcg/tcg-op-gvec.h"
+#include "tcg/tcg-temp-internal.h"
 #include "exec/translator.h"
 #include "exec/target_page.h"
 #include "fpu/softfloat.h"
@@ -41,6 +42,11 @@ bool x86_tcg_inline_jmp_cache;
 static bool emit_inline_jmp_cache;
 static bool emit_inline_jmp_cache_32;
 static bool emit_inline_jmp_cache_cpl0;
+static bool emit_bulk_rep;
+static bool emit_inline_fp;
+static bool emit_inline_sse_packed;
+static bool emit_sse_direct_load;
+bool x86_tcg_chain_sys_return;
 static bool dispatch_acquire_barrier;
 static bool dispatch_relaxed;
 static bool shared_dispatch;
@@ -59,6 +65,19 @@ static void __attribute__((constructor)) init_inline_jmp_cache(void)
     emit_inline_jmp_cache_32 = pvg_tcg_fast_path("PVG_TCG_INLINE_JMP_CACHE_32");
     emit_inline_jmp_cache_cpl0 =
         pvg_tcg_fast_path("PVG_TCG_INLINE_JMP_CACHE_CPL0");
+    emit_bulk_rep = pvg_tcg_fast_path("PVG_TCG_BULK_REP");
+    emit_inline_sse_packed = pvg_tcg_fast_path("PVG_TCG_INLINE_SSE_PACKED");
+    emit_sse_direct_load = pvg_tcg_fast_path("PVG_TCG_SSE_DIRECT_LOAD");
+    x86_tcg_chain_sys_return = pvg_tcg_fast_path("PVG_TCG_CHAIN_SYS_RETURN");
+
+    /* The guard loads this bitfield directly, so prove where it lives. */
+    float_status layout = { 0 };
+    uint16_t flags;
+    set_float_exception_flags(float_flag_inexact, &layout);
+    memcpy(&flags, &layout, sizeof(flags));
+    emit_inline_fp = flags == float_flag_inexact &&
+                     pvg_tcg_fast_path("PVG_TCG_INLINE_FP");
+
     const char *value = getenv("PVG_TCG_DISPATCH_ACQUIRE");
     dispatch_acquire_barrier = value && !strcmp(value, "1");
     dispatch_relaxed = pvg_tcg_fast_path("PVG_TCG_DISPATCH_RELAXED");
@@ -1361,6 +1380,10 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
         (!(tb_cflags(s->base.tb) & (CF_USE_ICOUNT | CF_SINGLE_STEP))
 	 && !(s->flags & (HF_TF_MASK | HF_INHIBIT_IRQ_MASK)));
     bool had_rf = s->flags & HF_RF_MASK;
+    /* Icount and single-step need each iteration, so they keep can_loop off. */
+    bool bulk = emit_bulk_rep && can_loop && s->aflag != MO_16 &&
+                (fn == gen_movs || fn == gen_stos);
+    TCGLabel *reenter = bulk ? gen_new_label() : NULL;
 
     /*
      * Even if EFLAGS.RF was set on entry (such as if we're on the second or
@@ -1380,6 +1403,29 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
      */
     gen_update_cc_op(s);
     tcg_set_insn_start_param(s->base.insn_start, 1, CC_OP_DYNAMIC);
+
+    if (bulk) {
+        TCGLabel *small = gen_new_label();
+        TCGv src = tcg_temp_new(), dst = tcg_temp_new();
+        TCGv_i32 more = tcg_temp_new_i32();
+
+        /* Short counts are the common case and the loop below does them well. */
+        tcg_gen_brcondi_tl(TCG_COND_TSTEQ, cpu_regs[R_ECX], cx_mask & ~15, small);
+        if (fn == gen_movs) {
+            gen_string_movl_A0_ESI(s);
+            tcg_gen_mov_tl(src, s->A0);
+        } else {
+            tcg_gen_movi_tl(src, 0);
+        }
+        gen_string_movl_A0_EDI(s);
+        tcg_gen_mov_tl(dst, s->A0);
+        gen_helper_rep_bulk(more, tcg_env, src, dst,
+                            tcg_constant_i32(ot | (s->aflag == MO_64) << 2 |
+                                             (fn == gen_movs) << 3 |
+                                             s->mem_index << 8));
+        tcg_gen_brcondi_i32(TCG_COND_NE, more, 0, reenter);
+        gen_set_label(small);
+    }
 
     /* Any iteration at all?  */
     tcg_gen_brcondi_tl(TCG_COND_TSTEQ, cpu_regs[R_ECX], cx_mask, done);
@@ -1420,7 +1466,8 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
 
     if (can_loop) {
         tcg_gen_subi_tl(cx_next, cx_next, 1);
-        tcg_gen_brcondi_tl(TCG_COND_TSTNE, cx_next, REP_MAX, loop);
+        /* With bulk, retry it soon after a page it could not take. */
+        tcg_gen_brcondi_tl(TCG_COND_TSTNE, cx_next, bulk ? 0xfff : REP_MAX, loop);
         tcg_gen_brcondi_tl(TCG_COND_TSTEQ, cx_next, cx_mask, last);
     }
 
@@ -1429,6 +1476,9 @@ static void do_gen_rep(DisasContext *s, MemOp ot, TCGv dshift,
      * but the last.  Set it here before giving the main loop a chance to
      * execute.  (For faults, seg_helper.c sets the flag as usual).
      */
+    if (bulk) {
+        gen_set_label(reenter);
+    }
     if (!had_rf) {
         gen_set_eflags(s, RF_MASK);
     }
@@ -2311,7 +2361,19 @@ gen_eob(DisasContext *s, int mode)
     }
     if (mode == DISAS_EOB_RECHECK_TF) {
         gen_helper_rechecking_single_step(tcg_env);
-        tcg_gen_exit_tb(NULL, 0);
+        /*
+         * Local experiment: SYSCALL and SYSRET need no trip through the main
+         * loop. The lookup uses the new hflags, CS base and CPL, and every TB
+         * entry still checks for exit requests. SYSCALL never raises IF. SYSRET
+         * can, so helper_sysret requests an exit if anything is pending, which
+         * the next TB entry then honors. A deferred interrupt after STI keeps
+         * the old exit.
+         */
+        if (x86_tcg_chain_sys_return && !inhibit_reset) {
+            gen_cached_indirect_jump(s);
+        } else {
+            tcg_gen_exit_tb(NULL, 0);
+        }
     } else if (s->flags & HF_TF_MASK) {
         gen_helper_single_step(tcg_env);
     } else if (mode == DISAS_JUMP &&

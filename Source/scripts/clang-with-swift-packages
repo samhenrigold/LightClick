@@ -1,0 +1,17 @@
+#!/bin/zsh
+# clang for probes that use the @objc classes in Packages/: builds each package for the host architecture, then adds its
+# generated header and static library. Pass -mmacosx-version-min=15.0 and no -arch.
+#
+#     clang-with-swift-packages GuestControl [InstallerKit] [MachineKit] -- <clang arguments>
+set -euo pipefail
+root=${0:A:h:h}
+flags=()
+while [[ $1 != -- ]]; do
+    package=$root/Packages/$1
+    swift build --package-path "$package" --product "$1" >&2
+    flags+=(-I "$package/.build/out/Intermediates.noindex/GeneratedModuleMaps"
+        -L "$(swift build --package-path "$package" --show-bin-path)" "-l$1")
+    shift
+done
+shift
+exec xcrun clang "$@" "${flags[@]}" -L "$(xcrun --show-sdk-path)/usr/lib/swift" -Wl,-rpath,/usr/lib/swift

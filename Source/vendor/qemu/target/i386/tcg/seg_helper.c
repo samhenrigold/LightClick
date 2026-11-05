@@ -1083,6 +1083,20 @@ static void do_interrupt64(CPUX86State *env, int intno, int is_int,
 }
 #endif /* TARGET_X86_64 */
 
+/*
+ * Local experiment: these returns chain to the next TB, so this replaces the main
+ * loop's interrupt check. A request that arrives after this load sets the exit
+ * flag itself, so one cannot be lost. Masked interrupts are simply rechecked there.
+ */
+static void x86_chained_return_check(CPUX86State *env)
+{
+    CPUState *cs = env_cpu(env);
+
+    if (x86_tcg_chain_sys_return && cpu_test_interrupt(cs, ~0)) {
+        qatomic_set(&cs->neg.icount_decr.u16.high, -1);
+    }
+}
+
 void helper_sysret(CPUX86State *env, int dflag)
 {
     PVG_EVENT(SYSRET);
@@ -1147,6 +1161,7 @@ void helper_sysret(CPUX86State *env, int dflag)
                                DESC_S_MASK | (3 << DESC_DPL_SHIFT) |
                                DESC_W_MASK | DESC_A_MASK);
     }
+    x86_chained_return_check(env);
 }
 
 /* real mode interrupt */
@@ -2289,6 +2304,7 @@ void helper_iret_protected(CPUX86State *env, int shift, int next_eip)
         helper_ret_protected(env, shift, 1, 0, GETPC());
     }
     env->hflags2 &= ~HF2_NMI_MASK;
+    x86_chained_return_check(env);
 }
 
 void helper_lret_protected(CPUX86State *env, int shift, int addend)
