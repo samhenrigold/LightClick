@@ -169,7 +169,7 @@ static NSError *CatalogError(NSString *text) {
     return nil;
 }
 + (void)refreshWithCompletion:(void (^)(VIMInstallerCatalog *, NSError *))completion {
-    NSURL *url = [NSURL URLWithString:@"https://raw.githubusercontent.com/nfzerox/VirtualIntelMacOnAppleSilicon/refs/"
+    NSURL *url = [NSURL URLWithString:@"https://raw.githubusercontent.com/samhenrigold/LightClick/refs/"
                                       @"heads/main/Source/VirtualIntelMac/InstallerCatalog.plist"];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
                                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData

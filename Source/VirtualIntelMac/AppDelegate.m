@@ -140,7 +140,7 @@
         VIMPresentAlert(alert, nil, ^(NSModalResponse response) {
           if (response == NSAlertFirstButtonReturn)
               [NSWorkspace.sharedWorkspace
-                  openURL:[NSURL URLWithString:@"https://github.com/nfzerox/VirtualIntelMacOnAppleSilicon/releases"]];
+                  openURL:[NSURL URLWithString:@"https://github.com/samhenrigold/LightClick/releases"]];
           [NSApp terminate:nil];
         });
         return;
