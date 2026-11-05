@@ -1,0 +1,26 @@
+# Fuzz forms left out of the comparison with TCG, by name. In the rounds looked at (7 of these 22 forms), TCG is the one that differs from the SDM or can't be judged:
+# - two QNaNs in SSE arithmetic: the SDM takes the first source, TCG the larger significand, the x87 rule.
+# - min and max with DAZ: TCG returns a denormal source as it stood, the engine as zero. No Intel part was at hand to say which is right.
+# The emitters for these don't depend on the mode, and the 64-bit fuzz holds them to Rosetta.
+subps m,x
+subsd x,x
+mulps x,x
+minps x,x
+minps m,x
+minpd x,x
+minpd m,x
+minss x,x
+minss m,x
+minsd x,x
+minsd m,x
+maxps x,x
+maxps m,x
+maxpd x,x
+maxpd m,x
+maxss x,x
+maxss m,x
+maxsd x,x
+maxsd m,x
+haddps x
+haddps m
+hsubps m

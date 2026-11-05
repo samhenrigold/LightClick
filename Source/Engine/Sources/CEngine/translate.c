@@ -667,7 +667,7 @@ static void emit_monitor_op(const Insn *in) {
     }
     switch (in->op) {
         case OP_SYSCALL:
-            svc(SVC_SYSCALL);
+            svc(tr_compat ? SVC_UD : SVC_SYSCALL); // as Intel's parts, and TCG with Intel's vendor: no CSTAR path. In hybrid mode TCG decides anyway
             break;
         case OP_SYSENTER:
             svc(SVC_SYSENTER);

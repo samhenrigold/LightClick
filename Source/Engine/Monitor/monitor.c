@@ -1798,7 +1798,6 @@ static void do_syscall(void) {
     c->stat_syscall++;
     note_event('S', next, c->x[0], 0);
     note_process_syscall(next);
-    u64 entry = c->compat ? c->cstar : c->lstar; // Intel's #UD here is AMD's CSTAR on TCG, the reference
     c->x[1] = next;
     u64 fl = rflags_get();
     c->x[11] = fl;
@@ -1807,7 +1806,7 @@ static void do_syscall(void) {
     c->seg_sel[1] = cs;
     c->seg_sel[2] = (u16)(cs + 8);
     set_mode(0, false);
-    c->elr = translate_here(entry, 0, 0, false);
+    c->elr = translate_here(c->lstar, 0, 0, false);
 }
 
 // The 32-bit fast path XNU's libsystem takes. The hidden parts of CS and SS come from the instruction, not a table: hvdbt.c forces CS's size bits to match.
@@ -1880,6 +1879,36 @@ static void do_sysret(void) {
 
 static void do_iret(void) {
     u64 here = rip_here(c->elr - 4);
+    if (c->compat && c->x[R_S0] == 4) { // 32-bit code's own: no change of ring or mode here, or TCG has it
+        u32 f[3];
+        if (!guest_read(c->x[4], f, 12, 4)) {
+            Walk w = x86_walk(c->cr3, c->x[4], 4, false);
+            if (w.ok) // the second page of the frame
+                w = x86_walk(c->cr3, (c->x[4] | 0xfff) + 1, 4, false), raise_pf((c->x[4] | 0xfff) + 1, w.fault_err, here);
+            else
+                raise_pf(c->x[4], w.fault_err, here);
+            return;
+        }
+        u32 cs = f[1] & 0xffff;
+        u64 cd;
+        if (!(cs & ~3u) || !desc_read(cs, &cd) || !(cd & DESC_S) || !(cd & DESC_CODE) || (cs & 3) != 3 || desc_dpl(cd) != 3 || !(cd & DESC_P)) {
+            raise_gp(cs & ~3u, here);
+            return;
+        }
+        if ((cd & DESC_L) || !(cd & DESC_D) || !desc_flat(cd) || (f[2] & RF_VM))
+            stop(STOP_UNSUPPORTED, here, 7, cs, cd);
+        u64 cur = rflags_get(), mask = RF_ARITH | RF_DF | RF_TF | RF_NT | RF_RF | RF_AC | (1ULL << 21);
+        if (((cur >> 12) & 3) == 3)
+            mask |= RF_IF;
+        u64 fl = (cur & ~mask) | (f[2] & mask) | RFLAGS_FIXED;
+        if (fl & RF_TF)
+            stop(STOP_UNSUPPORTED, here, 9, fl, 0);
+        rflags_set(fl);
+        c->x[4] = (u32)(c->x[4] + 12);
+        c->seg_sel[1] = (u16)cs;
+        c->elr = translate_here(f[0], 0, 0, false);
+        return;
+    }
     if (c->x[R_S0] != 8)
         stop(STOP_UNSUPPORTED, here, 7, c->x[R_S0], 0); // 16 or 32-bit iret
     c->stat_iret++;

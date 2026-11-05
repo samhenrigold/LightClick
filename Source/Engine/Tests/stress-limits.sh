@@ -11,4 +11,7 @@ for image in t_corpus_O2 t_corpus_O0 fuzz t_smc t_rep t_callret; do
     if [[ "$a" == "$b" ]]; then echo "pass $image"; else echo "FAIL $image"; fail=1; fi
 done
 if ENGINE_CC_BYTES=$small ENGINE_POOL_PAGES=${1:-512} ENGINE_STATS=1 "$engine" --kernel "$images/kernel" 2>&1 | grep -E 'FAIL|^done|^exits|engine stop' | cut -c1-260; then :; fi
+a=$(ENGINE_ALARM=120 ENGINE_TZCNT=1 "$engine" --kernel "$images/compat" 2>&1 | grep -av '^measure' | shasum)
+b=$(ENGINE_ALARM=120 ENGINE_TZCNT=1 ENGINE_CC_BYTES=$small ENGINE_POOL_PAGES=${1:-512} "$engine" --kernel "$images/compat" 2>&1 | grep -av '^measure' | shasum)
+if [[ "$a" == "$b" ]]; then echo "pass compat kernel"; else echo "FAIL compat kernel"; fail=1; fi
 exit $fail
