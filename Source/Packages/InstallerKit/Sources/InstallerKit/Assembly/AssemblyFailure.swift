@@ -56,6 +56,7 @@ public enum AssemblyFailure: Int, Sendable {
     case snowLeopardPackagesUnverified
     case automaticLaunchPolicyUnrecognized
     case automaticInstallerAlreadyPresent
+    case startupHookAlreadyPresent
     case installationDiskFailed
     case imageNotSavedReliably
     case imageNotReadable
@@ -181,6 +182,8 @@ public enum AssemblyFailure: Int, Sendable {
         case .automaticLaunchPolicyUnrecognized:
             "This OS X installer’s automatic launch policy is not recognized. Its original installer was not "
                 + "changed."
+        case .startupHookAlreadyPresent:
+            "This installer already has an unexpected startup hook. Its original files were retained."
         case .automaticInstallerAlreadyPresent:
             "Automatic installer preparation found an unexpected existing copy."
         case .installationDiskFailed:

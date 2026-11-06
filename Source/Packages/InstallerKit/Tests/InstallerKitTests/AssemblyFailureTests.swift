@@ -114,6 +114,10 @@ import Testing
             .automaticLaunchPolicyUnrecognized,
             "This OS X installer’s automatic launch policy is not recognized. Its original installer was not changed."
         ),
+        (
+            .startupHookAlreadyPresent,
+            "This installer already has an unexpected startup hook. Its original files were retained."
+        ),
         (.automaticInstallerAlreadyPresent, "Automatic installer preparation found an unexpected existing copy."),
         (
             .installationDiskFailed,

@@ -225,8 +225,9 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                                                                error:error])
         return NO;
     NSURL *hook = [mount URLByAppendingPathComponent:@"private/etc/rc.cdrom.local"];
-    return ![fm fileExistsAtPath:hook.path] &&
-           [VIMRecoveryText.serialHookScript writeToURL:hook atomically:NO encoding:NSUTF8StringEncoding error:error] &&
+    if ([fm fileExistsAtPath:hook.path])
+        return AssemblyError(error, VIMAssemblyFailureStartupHookAlreadyPresent);
+    return [VIMRecoveryText.serialHookScript writeToURL:hook atomically:NO encoding:NSUTF8StringEncoding error:error] &&
            [fm setAttributes:@{NSFilePosixPermissions : @0755} ofItemAtPath:hook.path error:error];
 }
 - (BOOL)prepareLeopardRecoveryMemoryAtMount:(NSURL *)mount error:(NSError **)error {
@@ -447,8 +448,10 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     // missing relative files yet exits zero, producing an empty archive.
     // Give the child a real cwd, then extract/read back its actual members.
     NSArray *entries = [fm contentsOfDirectoryAtPath:expanded.path error:error];
-    if (!entries.count)
+    if (!entries)
         return NO;
+    if (!entries.count)
+        return AssemblyError(error, VIMAssemblyFailureSnowLeopardPackagesUnverified);
     if (![self perform:[VIMToolInvocation createArchive:output.path members:entries directory:expanded.path]
                  error:error])
         return NO;
@@ -460,8 +463,10 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                       error:error] isEqual:patched])
         return AssemblyError(error, VIMAssemblyFailureSnowLeopardPackagesUnverified);
     NSData *bytes = [NSData dataWithContentsOfURL:output options:0 error:error];
-    if (!bytes.length || bytes.length > 8 * 1024 * 1024)
+    if (!bytes)
         return NO;
+    if (!bytes.length || bytes.length > 8 * 1024 * 1024)
+        return AssemblyError(error, VIMAssemblyFailureSnowLeopardPackagesUnverified);
     return RewriteGeneratedFile(package, bytes, error);
 }
 // WRITES the attached working copy. Stops at the first refusal.
@@ -480,8 +485,9 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                              error:error] &&
                    [self perform:[VIMToolInvocation copy:support.path to:target.path timeout:180] error:error];
         case VIMRecoveryEditKindCreateScript:
-            return ![fm fileExistsAtPath:target.path] &&
-                   [edit.contents writeToURL:target atomically:NO encoding:NSUTF8StringEncoding error:error] &&
+            if ([fm fileExistsAtPath:target.path])
+                return AssemblyError(error, VIMAssemblyFailureStartupHookAlreadyPresent);
+            return [edit.contents writeToURL:target atomically:NO encoding:NSUTF8StringEncoding error:error] &&
                    [fm setAttributes:@{NSFilePosixPermissions : @0755} ofItemAtPath:target.path error:error];
         case VIMRecoveryEditKindPatchStartup: {
             NSString *patched = [edit patched:[NSString stringWithContentsOfURL:target
@@ -1232,7 +1238,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                                                              mountPoint:sourceMount.path]
                                            error:error];
                 if (snow)
-                    copied = [fm fileExistsAtPath:[packages URLByAppendingPathComponent:@"OSInstall.mpkg"].path] &&
+                    copied = ([fm fileExistsAtPath:[packages URLByAppendingPathComponent:@"OSInstall.mpkg"].path] ||
+                              AssemblyError(error, VIMAssemblyFailureSnowLeopardPackagesUnverified)) &&
                              [self removeRestoreModelRestrictionAtMount:mount error:error];
                 if (leopard)
                     copied = LeopardRestoreProfile(mount, guest, error) &&
