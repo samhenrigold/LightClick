@@ -59,6 +59,8 @@ parser.add_argument('--configuration', choices=['Debug', 'Release'], default='De
 parser.add_argument('--signing-identity', default=os.environ.get('VIM_CODESIGN_IDENTITY'),
                     help='persistent Keychain signing identity; preserves the app identity across development updates')
 args = parser.parse_args()
+if subprocess.run([sys.executable, str(source/'scripts/generate-machine-options'), '--check']).returncode:
+    sys.exit(1)
 if args.package_release:
     if args.ui_only:
         parser.error('--package-release requires the complete bundled app, not --ui-only')

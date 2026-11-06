@@ -1,4 +1,5 @@
 #include "qemu/osdep.h"
+#include "qemu/machine-options.h"
 #include "system/system.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-ui.h"
@@ -192,7 +193,7 @@ void qmp_input_send_event(const char *device,
      * the BQL, so a retry cannot duplicate already accepted transitions.
      * Legacy QMP clients retain their existing behavior.
      */
-    if (g_strcmp0(g_getenv("VIM_INPUT_BACKPRESSURE"), "1") == 0) {
+    if (g_strcmp0(g_getenv(LC_OPTION_VIM_INPUT_BACKPRESSURE), "1") == 0) {
         QemuInputHandlerState *s =
             qemu_input_find_handler(INPUT_EVENT_MASK_KEY, con);
 
