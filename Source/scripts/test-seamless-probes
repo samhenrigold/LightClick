@@ -1,0 +1,18 @@
+#!/bin/zsh
+# Tests the seamless wire format, then the whole loop on this host: the x86_64 guest tool under Rosetta streams a test
+# pattern over TCP to a real window, whose synthetic click and key must come back as different on-screen pixels. Shows
+# a window for a few seconds. Boots nothing, and doesn't touch a real guest window.
+set -euo pipefail
+source_root=${0:A:h:h}
+work=$(mktemp -d)
+trap 'kill ${viewer_pid:-} ${guest_pid:-} 2>/dev/null || true; rm -rf "$work"' EXIT
+xcrun clang -std=c99 -Wall -Wextra -fsanitize=address,undefined -g -O1 "$source_root/probes/seamless-wire-test.c" -o "$work/wire-test"
+"$work/wire-test"
+"$source_root/scripts/build-seamless-probes" "$work"
+port=$((20000 + RANDOM % 20000))
+"$work/seamless-viewer" --port "$port" --self-test &
+viewer_pid=$!
+sleep 1
+"$work/seamless-guest" stream --test-pattern --host 127.0.0.1 --port "$port" --fps 30 &
+guest_pid=$!
+wait "$viewer_pid"

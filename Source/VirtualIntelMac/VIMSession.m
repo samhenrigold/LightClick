@@ -2141,6 +2141,19 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                     }];
         return;
     }
+    if ([command[@"Action"] isEqual:@"display-request"]) {
+        if (!self.task.running) {
+            finish(@{@"Error" : @"Start the virtual Mac before asking for a display size."});
+            return;
+        }
+        // Past what the window would ask for, to find what a guest display can do: probes/seamless-driver.py. This only
+        // offers the size; the guest selects it. Remembering it stops a pending resize timer from undoing it.
+        NSUInteger width = [command[@"Width"] unsignedIntegerValue], height = [command[@"Height"] unsignedIntegerValue];
+        self.lastRequestedSize = NSMakeSize(width, height);
+        [self.displayConnection requestWidth:width height:height density:[command[@"Density"] unsignedIntegerValue]];
+        finish(@{@"Requested" : @YES});
+        return;
+    }
     if ([command[@"Action"] isEqual:@"network-details"]) {
         NSMutableDictionary *details = [[VIMSession networkDetailsForMachine:self.machine] mutableCopy];
         NSMutableArray *items = [NSMutableArray new];
