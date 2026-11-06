@@ -63,6 +63,22 @@ import Testing
         #expect(small.processorTitles == ["1", "2 (Recommended)"])
     }
 
+    @Test func theProcessorPopupShowsTheSavedCount() {
+        let saved = limits.processorChoices(saved: 3)
+        #expect(saved.counts == [1, 2, 3, 4, 5, 6])
+        #expect(saved.titles == limits.processorTitles)
+        #expect(saved.selectedIndex == 2)
+        #expect(limits.processorChoices(saved: 6).selectedIndex == 5)
+        #expect(limits.processorChoices(saved: 0).selectedIndex == 0)
+    }
+
+    @Test func aSavedCountPastTheHostGetsItsOwnEntry() {
+        let moved = limits.processorChoices(saved: 12)
+        #expect(moved.counts == [1, 2, 3, 4, 5, 6, 12])
+        #expect(moved.titles.last == "12 (more than this Mac has)")
+        #expect(moved.selectedIndex == 6)
+    }
+
     @Test func typedMemoryMustFit() {
         #expect(limits.memoryMiB(from: "2048") == .success(2048))
         #expect(limits.memoryMiB(from: " 15360 ") == .success(15360))

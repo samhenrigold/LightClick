@@ -116,6 +116,18 @@ public struct SettingsHardwareLimits: Equatable, Sendable {
         return (1...processorCount).map { "\($0)\($0 == min(4, processorCount) ? " (Recommended)" : "")" }
     }
 
+    /// What the processor popup offers and which entry it shows. A saved count past this host, from a machine moved here,
+    /// gets its own entry: it's what the machine would start with, and picking a lower one is the edit that changes it.
+    public func processorChoices(saved: Int) -> (counts: [Int], titles: [String], selectedIndex: Int) {
+        var counts = processorCount > 0 ? Array(1...processorCount) : []
+        var titles = processorTitles
+        if saved > processorCount {
+            counts.append(saved)
+            titles.append("\(saved) (more than this Mac has)")
+        }
+        return (counts, titles, saved > processorCount ? counts.count - 1 : max(0, saved - 1))
+    }
+
     public var summary: String {
         "This Mac has \(processorCount) logical processors and \(physicalMemoryGiB) GB of memory. Leave resources "
             + "available for other apps."
