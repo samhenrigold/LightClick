@@ -29,7 +29,10 @@
 #include "chardev/char.h"
 #include "crypto/cipher.h"
 #include "crypto/init.h"
+#include <execinfo.h>
 #include "exec/cpu-common.h"
+#include "system/ramblock.h"
+#include "system/ramlist.h"
 #include "gdbstub/syscalls.h"
 #include "hw/core/boards.h"
 #include "hw/core/resettable.h"
@@ -888,11 +891,27 @@ void qemu_system_guest_pvshutdown(void)
     qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
 }
 
+/* A kernel that panicked and then reset itself leaves its panic text in RAM: the only trace of it, if it has no time to save it. */
+static int panic_text_scan(RAMBlock *block, void *opaque)
+{
+    size_t size = qemu_ram_get_used_length(block);
+    const char *start = qemu_ram_get_host_addr(block), *at = start;
+    while (at && (at = memmem(at, size - (at - start), "panic(cpu ", 10))) {
+        int n = strnlen(at, MIN(2500, size - (at - start)));
+        fprintf(stderr, "guest panic text in %s: %.*s\n", qemu_ram_get_idstr(block), n, at);
+        at += MAX(n, 10);
+    }
+    return 0;
+}
+
 void qemu_system_reset_request(ShutdownCause reason)
 {
     if (current_cpu && current_cpu->cpu_index >= 0) {
-        fprintf(stderr, "reset requested, cause %d, on vCPU %d:\n", reason, current_cpu->cpu_index);
+        void *callers[16]; /* which device or fault asked: a triple fault, 0xcf9, the keyboard controller */
+        fprintf(stderr, "reset requested, cause %d, on vCPU %d, by:\n", reason, current_cpu->cpu_index);
+        backtrace_symbols_fd(callers, backtrace(callers, 16), 2);
         cpu_dump_state(current_cpu, stderr, CPU_DUMP_CODE | CPU_DUMP_CCOP);
+        qemu_ram_foreach_block(panic_text_scan, NULL);
     }
     if (reboot_action == REBOOT_ACTION_SHUTDOWN &&
         reason != SHUTDOWN_CAUSE_SUBSYSTEM_RESET) {

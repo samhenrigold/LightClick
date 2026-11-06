@@ -17,6 +17,8 @@ public enum ProxyEvent: Codable, Hashable, Sendable {
     case dragExited
     /// The user moved this window on the host, which the guest's doesn't follow. Its new place, down from the top of the primary screen.
     case surfaceMoved(windowID: Int, x: Double, y: Double)
+    /// The host's Dock or the user took this window there or brought it back, not the guest.
+    case surfaceMinimized(windowID: Int, minimized: Bool)
     case dragDropped(windowID: Int, x: Double, y: Double)
     case pointerLeftWithButtonDown(windowID: Int)
     case promiseRequested(id: Int, destination: String)
@@ -35,6 +37,7 @@ public enum ProxyEvent: Codable, Hashable, Sendable {
 /// runs it or treats a name as a path.
 public enum SessionCommand: Codable, Hashable, Sendable {
     case setMenuBar([GuestMenuItem])
+    case minimizeSurface(id: Int, minimized: Bool)
     case setDockMenu([GuestMenuItem])
     case setBadge(String?)
     case requestAttention(critical: Bool)

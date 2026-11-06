@@ -405,68 +405,19 @@ private let checks = GuestPreparationChecks(initialReport: report)
     }
 }
 
-@Suite struct GuestPreparationBridgeTests {
-    private let objectiveCReport = report.values.mapValues(\.foundationObject) as NSDictionary
-
-    private func objectiveC(_ result: GuestCommandResult) -> NSDictionary {
-        result.values.mapValues(\.foundationObject) as NSDictionary
-    }
-
-    @Test func aRefusalKeepsItsDomainAndMessageForTheApp() throws {
-        let error = try #require(GuestPreparationBridge.refusal(ofUtilities: nil))
+@Suite struct GuestPreparationErrorTests {
+    @Test func aRefusalKeepsItsDomainAndMessageForTheApp() {
+        let error = GuestPreparationError.utilitiesNotPrepared as NSError
         #expect(error.domain == "VirtualIntelMac.GuestPreparation")
         #expect(error.code == 1)
         #expect(error.localizedDescription == "Could not prepare guest utilities.")
     }
 
-    @Test func aGuestDiagnosticIsTheMessageShown() throws {
-        let result = objectiveC(try command(stderr: "a guest tool's words", exitcode: 1))
-        let error = try #require(GuestPreparationBridge.refusal(ofEnvironment: result, report: objectiveCReport))
-        #expect(error.localizedDescription == "a guest tool's words")
-    }
-
-    @Test func wrongTypesRefuseRatherThanTrap() {
-        #expect(GuestPreparationBridge.refusal(ofInitialReport: nil, allowingHeadlessRepair: true) != nil)
-        #expect(GuestPreparationBridge.refusal(ofInitialReport: "x", allowingHeadlessRepair: true) != nil)
-        #expect(GuestPreparationBridge.refusal(ofStagedCopy: nil) != nil)
-        #expect(GuestPreparationBridge.refusal(ofStagedCopy: 1) != nil)
-        #expect(GuestPreparationBridge.refusal(ofTransaction: nil) != nil)
-        #expect(GuestPreparationBridge.refusal(ofPlan: 1, report: objectiveCReport) != nil)
-        #expect(GuestPreparationBridge.refusal(ofLaterReport: nil, report: objectiveCReport) != nil)
-        #expect(GuestPreparationBridge.refusal(ofSupportDiscInfo: "x") != nil)
-        #expect(GuestPreparationBridge.refusal(ofSupportDiscMount: nil) != nil)
-        #expect(GuestPreparationBridge.supportDisc(inDiskList: nil, mayRetry: true).refusal != nil)
-        #expect(GuestPreparationBridge.json(fromCommand: 1) == nil)
-    }
-
-    @Test func aDiscLookupSaysWhichOfTheThreeItIs() throws {
-        let empty = objectiveC(try command(plist: ["AllDisksAndPartitions": [] as [Any]]))
-        let waiting = GuestPreparationBridge.supportDisc(inDiskList: empty, mayRetry: true)
-        #expect(waiting.identifier == nil && waiting.refusal == nil)
-        #expect(GuestPreparationBridge.supportDisc(inDiskList: empty, mayRetry: false).refusal != nil)
-        let disc: [String: Any] = ["VolumeName": "Virtual Intel Mac Support", "DeviceIdentifier": "disk2"]
-        let found = objectiveC(try command(plist: ["AllDisksAndPartitions": [disc]]))
-        #expect(GuestPreparationBridge.supportDisc(inDiskList: found, mayRetry: false).identifier == "disk2")
-    }
-
-    @Test func jsonIsReturnedVerbatimForTheJournal() throws {
-        let result = objectiveC(try command(json: #"{"Files":[{"Size":5}],"Ratio":1.5,"Flag":true}"#))
-        let json = try #require(GuestPreparationBridge.json(fromCommand: result))
-        let expected =
-            try JSONSerialization.jsonObject(
-                with: Data(#"{"Files":[{"Size":5}],"Ratio":1.5,"Flag":true}"#.utf8)) as? NSDictionary
-        #expect(json == expected)
-    }
-
     @Test func aLogIsTextOrItsFallbackOrNothing() throws {
-        let log = { (result: GuestCommandResult) in
-            GuestPreparationBridge.log(
-                fromCommand: result.values.mapValues(\.foundationObject) as NSDictionary, nonText: "fallback")
-        }
-        #expect(log(try command(stderr: "text")) == "text")
-        #expect(log(try command()) == nil)
-        #expect(log(GuestCommandResult(values: ["stderr": .data(Data([0xFF]))])) == "fallback")
-        let binary = GuestCommandResult(values: ["stderr": .data(Data([0xFF]))]).values.mapValues(\.foundationObject)
-        #expect(GuestPreparationBridge.log(fromCommand: binary as NSDictionary, nonText: nil) == nil)
+        #expect(try command(stderr: "text").log(nonText: "fallback") == "text")
+        #expect(try command().log(nonText: "fallback") == nil)
+        let binary = GuestCommandResult(values: ["stderr": .data(Data([0xFF]))])
+        #expect(binary.log(nonText: "fallback") == "fallback")
+        #expect(binary.log(nonText: nil) == nil)
     }
 }

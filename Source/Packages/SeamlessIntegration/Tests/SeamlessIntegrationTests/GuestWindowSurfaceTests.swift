@@ -35,7 +35,7 @@ import Testing
     message.storeBytes(of: UInt32(1), toByteOffset: 24, as: UInt32.self)  // One descriptor.
     message.storeBytes(of: IOSurfaceCreateMachPort(surface), toByteOffset: 28, as: UInt32.self)
     message.storeBytes(of: UInt32(MACH_MSG_TYPE_COPY_SEND) << 16, toByteOffset: 36, as: UInt32.self)  // Disposition; a port's type is 0.
-    for (offset, value) in [(40, 321), (44, 7), (48, 8), (52, 4), (56, -192), (60, -148)] {
+    for (offset, value) in [(40, 0x10000 | 321), (44, 7), (48, 8), (52, 4), (56, -192), (60, -148)] {
         message.storeBytes(of: Int32(value), toByteOffset: offset, as: Int32.self)
     }
     #expect(
@@ -44,7 +44,7 @@ import Testing
 
     var iterator = stream.makeAsyncIterator()
     let frame = try #require(await iterator.next())
-    #expect(frame.window == 321)
+    #expect(frame.window == 321 && frame.isShape)
     #expect(frame.frame == 7)
     #expect(IOSurfaceGetWidth(frame.surface) == 8)
     #expect(frame.origin.x == -192 && frame.origin.y == -148)

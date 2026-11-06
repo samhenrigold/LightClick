@@ -227,6 +227,13 @@ public final class MachineModelBridge: NSObject {
         GuestReport(foundationObject: report)?.admitsUpdateRepair(guest: guestNamed(name)) ?? false
     }
 
+    @objc(bootPolicyReadyAtURL:guest:identifier:)
+    public class func bootPolicyReady(at journal: URL, guest: Any?, identifier: Any?) -> Bool {
+        GuestBootPolicyRecord.isReady(
+            at: journal, guest: guest.map(PropertyListValue.init(foundationObject:)),
+            identifier: identifier.map(PropertyListValue.init(foundationObject:)))
+    }
+
     @objc(verifiedInstallationSuperseded:report:)
     public class func verifiedInstallationSuperseded(_ state: Any?, report: Any?) -> Bool {
         guard let state = propertyList(state), let report = GuestReport(foundationObject: report) else { return false }
@@ -311,22 +318,6 @@ public final class MachineModelBridge: NSObject {
     @objc(report:bootPolicyRepairNeedsRestart:)
     public class func bootPolicyRepairNeedsRestart(report: Any?, policy: Any?) -> Bool {
         GuestReport(foundationObject: report)?.bootPolicyRepairNeedsRestart(policy: propertyList(policy)) ?? false
-    }
-
-    @objc(report:reconciliationVerifiesAfterRebootWithJournal:)
-    public class func reconciliationVerifiesAfterReboot(report: Any?, journal: Any?) -> Bool {
-        (GuestReport(foundationObject: report) ?? GuestReport(values: [:]))
-            .reconciliationVerifiesAfterReboot(journal: propertyList(journal))
-    }
-
-    @objc(report:isVerifiedByReconciliation:)
-    public class func isVerifiedByReconciliation(report: Any?, result: Any?) -> Bool {
-        GuestReport(foundationObject: report)?.isVerifiedByReconciliation(result: propertyList(result)) ?? false
-    }
-
-    @objc(reconciliationMessageForResult:verified:)
-    public class func reconciliationMessage(result: Any?, verified: Bool) -> String {
-        GuestReport.reconciliationMessage(result: propertyList(result), verified: verified)
     }
 
     @objc(consoleUsernameFromStatOutput:expectedUID:)

@@ -14,6 +14,10 @@ public struct GuestWindowSurface: @unchecked Sendable {
     /// Goes up with each frame sent for this window. A gap means frames the guest drew and this never got.
     public let frame: UInt32
     public let surface: IOSurfaceRef
+    /// Not the window's pixels but its shape, for masking a host material behind it: on Mojave, wherever `surface`'s alpha
+    /// isn't zero is the window, leaving out its shadow. Its size and origin are the window's surface's. It comes when the
+    /// window is drawn whole, and only for a window with materials.
+    public let isShape: Bool
     /// Where the surface's top-left pixel is on the guest's display, or zero where the tool's window says it instead.
     public let origin: (x: Int32, y: Int32)
 }
@@ -96,10 +100,12 @@ public final class GuestWindowSurfaceReceiver: @unchecked Sendable {
         let surface = IOSurfaceLookupFromMachPort(right)
         mach_port_deallocate(mach_task_self_, right)
         guard let surface else { return nil }
+        let window = message.load(fromByteOffset: 40, as: UInt32.self)
         return GuestWindowSurface(
-            window: message.load(fromByteOffset: 40, as: UInt32.self),
+            window: window & 0xffff,
             frame: message.load(fromByteOffset: 44, as: UInt32.self),
             surface: surface,
+            isShape: window & 0x10000 != 0,
             origin: (message.load(fromByteOffset: 56, as: Int32.self), message.load(fromByteOffset: 60, as: Int32.self))
         )
     }

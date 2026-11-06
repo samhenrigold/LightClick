@@ -443,8 +443,9 @@ static void DGMarkDrawableDamage(struct DGHostContext *c) {
 #include "passthrough-opengl-draw-witness.c"
 #endif
 static const char *dg_seamless_dir;
-static void DGSeamlessDrawn(struct DGHostContext *, struct DGMessage *, const struct DGVertexArray *, unsigned, uint64_t,
-                            GLenum, const void *);
+static int DGSeamlessDisplayOff(struct DGHostContext *);
+static void DGSeamlessDrawn(struct DGHostContext *, struct DGMessage *, const struct DGVertexArray *, unsigned,
+                            uint64_t, GLenum, const void *);
 #include "passthrough-opengl-arrays-host.c"
 #include "passthrough-opengl-pbo-host.c"
 /* Only retired, unshared allocations may enter this bounded cache. Guest

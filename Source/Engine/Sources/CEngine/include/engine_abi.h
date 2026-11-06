@@ -282,7 +282,7 @@ typedef struct {
     // Statistics, read by the host.
     uint64_t stat_svc[128];
     uint64_t stat_fills, stat_dirty, stat_pf_delivered, stat_pt_writes, stat_pt_writes_zap, stat_pt_step, stat_smc,
-        stat_irq, stat_steps, stat_hlt_polled, stat_cr3, stat_iret, stat_syscall, stat_mmio, stat_mmio_vm, stat_view_evictions, stat_pt_unshadow, stat_pool_reclaim;
+        stat_mon_wait, stat_mon_hold[6], stat_irq, stat_steps, stat_hlt_polled, stat_cr3, stat_iret, stat_syscall, stat_mmio, stat_mmio_vm, stat_view_evictions, stat_pt_unshadow, stat_pool_reclaim;
 
     // Hybrid mode: QEMU's TCG owns everything the engine does not, and takes single instructions back through HC_FALLBACK.
     uint32_t hybrid;

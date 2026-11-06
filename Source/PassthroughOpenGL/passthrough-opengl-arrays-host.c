@@ -325,7 +325,8 @@ static int DGHostDraw(struct DGHostContext *context, struct DGMessage *m) {
          * then enable the requested set so a later generic disable does not
          * accidentally turn the compatibility position array back off. */
         DGHostArrayEnables(context, enabled);
-        if (instanced) {
+        if (dg_seamless_dir && DGSeamlessDisplayOff(context)) {
+        } else if (instanced) {
             if (type)
                 dg_core_api.elements_instanced((GLenum)m->args[0], (GLsizei)count, type, indices, (GLsizei)instances);
             else

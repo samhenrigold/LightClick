@@ -5,16 +5,18 @@
  * glPassThrough tokens from probes/seamless-ws-hook.c: a no-op in GL, so neither the guest's GL client nor the wire
  * changes. Off unless LC_SEAMLESS_GPU_REPLAY is set.
  *
+ * With the hook's gpu_mode on, a marker says the display is off: the display's own draws don't run, only the window's.
+ *
  * shortcut: only what WindowServer draws arrives, so a covered part of a window stays stale until it's uncovered.
- * shortcut: a frame is sent once its fence has passed, seen at the next publish, so one frame later than it could be,
- * and a last frame waits for the next publish. A worker waiting on fences, as direct-display-sender-host.c does, fixes
- * it.
+ * shortcut: a frame's fence is waited for here, for up to 8 ms, which holds up the stream that long at most, as a
+ * repaint with nothing after it has no later publish to be sent from. One that takes longer waits for the next. A
+ * worker waiting on fences, as direct-display-sender-host.c does, would hold nothing up.
  */
 #include <mach/mach.h>
 #include <math.h>
 #include <servers/bootstrap.h>
 #define SG_LAYER_MAGIC 11184809.0f
-#define SG_LAYER_FIELDS 8
+#define SG_LAYER_FIELDS 10
 #define SG_MARGIN_POINTS 96 // As probes/seamless-viewer.m found: an active window's shadow fits in this.
 #define SG_BUFFERS 3
 #define SG_FRAME_MESSAGE 0x53474652
@@ -27,7 +29,7 @@ struct SGFrameMessage {
 };
 struct SGTreeEntry {
     uint32_t id;
-    int level, margin;
+    int level, margin, whole;
     float x, y, width, height; // Pixels, on the primary drawable.
 };
 struct SGWindow {
@@ -36,6 +38,7 @@ struct SGWindow {
     IOSurfaceRef surface[SG_BUFFERS];
     GLuint texture[SG_BUFFERS], framebuffer[SG_BUFFERS];
     int front, back, drawn, dirty;
+    int cleared; // In this frame.
     int pending;
     GLsync pending_sync;
     uint64_t frames, sent, drops, draws;
@@ -52,7 +55,7 @@ static mach_port_t sg_port;
 static uint64_t sg_next_lookup, sg_next_rates;
 static uint64_t sg_sealed, sg_presents, sg_replayed, sg_unplaced, sg_spent, sg_blits, sg_marks, sg_odd, sg_in_use;
 static FILE *sg_rates;
-static int sg_replay_enabled;
+static int sg_replay_enabled, sg_display_off;
 static mach_timebase_info_data_t sg_timebase;
 struct SGImmediate {
     uint32_t op, target;
@@ -60,7 +63,8 @@ struct SGImmediate {
 };
 static struct SGImmediate sg_immediate[8192];
 static unsigned sg_immediate_count;
-static int sg_immediate_active, sg_immediate_mode;
+static int sg_immediate_active, sg_immediate_mode, sg_immediate_masked;
+static GLboolean sg_immediate_mask[4];
 
 static void SGToken(float value) {
     if (value == SG_LAYER_MAGIC) {
@@ -74,11 +78,17 @@ static void SGToken(float value) {
         return;
     sg_token_count = -1;
     const float *f = sg_tokens;
+    sg_display_off = f[8] != 0;
     // One scale for the display: a window with no backing says 1 whatever the display is.
     sg_scale = fmaxf(sg_scale, f[7] / 16);
-    sg_layer = (struct SGTreeEntry){
-        (uint32_t)f[0],  (int)f[1] - 1,  (int)(f[6] * sg_scale), (f[2] - 16384) * sg_scale, (f[3] - 16384) * sg_scale,
-        f[4] * sg_scale, f[5] * sg_scale};
+    sg_layer = (struct SGTreeEntry){(uint32_t)f[0],
+                                    (int)f[1] - 1,
+                                    (int)(f[6] * sg_scale),
+                                    f[9] != 0,
+                                    (f[2] - 16384) * sg_scale,
+                                    (f[3] - 16384) * sg_scale,
+                                    f[4] * sg_scale,
+                                    f[5] * sg_scale};
     ++sg_marks;
 }
 
@@ -250,7 +260,7 @@ static struct SGWindow *SGRedirect(struct DGHostContext *c, struct SGSaved *save
         ++sg_unplaced;
         return NULL;
     }
-    if (t->level < 0 || t->width * t->height < 64 * 64)
+    if (t->level < 0 || (!sg_display_off && t->width * t->height < 64 * 64))
         return NULL; // The desktop and the like: nobody asks for them.
     struct SGWindow *w = SGWindowFor(c, t);
     if (!w)
@@ -264,6 +274,24 @@ static struct SGWindow *SGRedirect(struct DGHostContext *c, struct SGSaved *save
         glGetIntegerv(GL_SCISSOR_BOX, saved->scissor);
         glScissor(saved->scissor[0] - w->x, saved->scissor[1] - w->y, saved->scissor[2], saved->scissor[3]);
     }
+    // What's behind it on the display is drawn first, and here what's behind is the last frame, which a shadow would
+    // build up on. So a window drawn whole starts clear, and one drawn in part has no shadow.
+    if (t->whole && !w->cleared) {
+        w->cleared = 1;
+        GLfloat color[4];
+        GLboolean mask[4];
+        glGetFloatv(GL_COLOR_CLEAR_VALUE, color);
+        glGetBooleanv(GL_COLOR_WRITEMASK, mask);
+        glClearColor(0, 0, 0, 0);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        if (saved->scissor_on)
+            glDisable(GL_SCISSOR_TEST);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (saved->scissor_on)
+            glEnable(GL_SCISSOR_TEST);
+        glColorMask(mask[0], mask[1], mask[2], mask[3]);
+        glClearColor(color[0], color[1], color[2], color[3]);
+    }
     return w;
 }
 static void SGRestore(struct SGWindow *w, const struct SGSaved *saved) {
@@ -273,6 +301,15 @@ static void SGRestore(struct SGWindow *w, const struct SGSaved *saved) {
         glScissor(saved->scissor[0], saved->scissor[1], saved->scissor[2], saved->scissor[3]);
     ++w->draws;
     ++sg_replayed;
+}
+
+// Whether a draw is the display's, and nobody's looking at the display. Called by DGHostDraw for its own draw.
+static int DGSeamlessDisplayOff(struct DGHostContext *c) {
+    if (!sg_replay_enabled || !sg_display_off || c != sg_display || !c->drawable || c->drawable->name != sg_primary)
+        return 0;
+    GLint draw = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING_EXT, &draw);
+    return (GLuint)draw == c->framebuffer;
 }
 
 // Called by DGHostDraw once its arrays are set and its draw has run.
@@ -326,7 +363,7 @@ static void SGSendReady(void) {
             sg_port = 0;
     }
     for (struct SGWindow *w = sg_windows; w; w = w->next) {
-        if (!w->pending || glClientWaitSync(w->pending_sync, 0, 0) == GL_TIMEOUT_EXPIRED)
+        if (!w->pending || glClientWaitSync(w->pending_sync, GL_SYNC_FLUSH_COMMANDS_BIT, 8000000) == GL_TIMEOUT_EXPIRED)
             continue;
         glDeleteSync(w->pending_sync);
         w->pending = 0;
@@ -370,6 +407,7 @@ static void SGEndFrame(void) {
             w->pending_sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
             w->pending = 1;
             w->dirty = 0;
+            w->cleared = 0;
             w->drawn = 1;
             w->front = w->back;
             ++w->frames;
@@ -429,8 +467,8 @@ static void DGSeamlessBefore(struct DGInterpreter *s, struct DGMessage *m) {
         if ((CGLGetCurrentContext() == c->cgl || !CGLSetCurrentContext(c->cgl)) && !c->inside_begin) {
             uint64_t began = mach_absolute_time();
             if (sg_replay_enabled) {
-                SGSendReady();
                 SGEndFrame();
+                SGSendReady();
             }
             SGWriteRates();
             sg_spent += mach_absolute_time() - began;
@@ -443,6 +481,12 @@ static void DGSeamlessBefore(struct DGInterpreter *s, struct DGMessage *m) {
         sg_immediate_active = 1;
         sg_immediate_mode = (int)(uint32_t)m->args[0];
         sg_immediate_count = 0;
+        // The real draw runs, as there's no skipping it from here, and leaves nothing.
+        sg_immediate_masked = DGSeamlessDisplayOff(c);
+        if (sg_immediate_masked) {
+            glGetBooleanv(GL_COLOR_WRITEMASK, sg_immediate_mask);
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        }
     } else if (sg_immediate_active && sg_immediate_count < sizeof(sg_immediate) / sizeof(*sg_immediate)) {
         struct SGImmediate *v = &sg_immediate[sg_immediate_count];
         if (m->op == DG_OP_vertex2f || m->op == DG_OP_tex_coord2f) {
@@ -466,6 +510,10 @@ static void DGSeamlessAfter(struct DGInterpreter *s, struct DGMessage *m) {
         return;
     sg_immediate_active = 0;
     struct DGHostContext *c = m->context && m->context < s->next ? &s->contexts[m->context] : NULL;
+    if (sg_immediate_masked) {
+        glColorMask(sg_immediate_mask[0], sg_immediate_mask[1], sg_immediate_mask[2], sg_immediate_mask[3]);
+        sg_immediate_masked = 0;
+    }
     if (c && c == sg_display && !c->inside_begin && c->drawable && sg_immediate_count)
         SGReplayImmediate(c);
 }

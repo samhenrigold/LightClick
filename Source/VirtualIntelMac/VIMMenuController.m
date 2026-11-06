@@ -1,9 +1,7 @@
 #import "VIMMenuController.h"
 #import "Light_Click-Swift.h"
-#import "VIMLibraryViewController.h"
 #import "VIMMachine.h"
 #import "VIMSession.h"
-#import "AppDelegate.h"
 #import "VIMSymbolImages.h"
 
 @interface VIMMenuController ()
@@ -18,7 +16,7 @@
 @property BOOL guestContext;
 @end
 @implementation VIMMenuController
-- (instancetype)initWithLibrary:(VIMLibraryViewController *)library {
+- (instancetype)initWithLibrary:(id)library {
     if ((self = [super init])) {
         self.library = library;
         NSMenu *main = NSApp.mainMenu;

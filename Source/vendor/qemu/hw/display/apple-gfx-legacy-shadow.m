@@ -83,8 +83,7 @@ static id capture_library_data(id self, SEL cmd, dispatch_data_t data, NSError *
  * per render target in <dir>/passes.txt, and how many frames the display asked to show. */
 static const char *seamless_pvg_dir;
 /* A guest IOSurface a render pass finishes in is a host IOSurface here, so it goes to VIM_SEAMLESS_PVG_SERVICE as it is,
- * as probes/seamless-gpu-viewer.m takes it. shortcut: the display's own surfaces are told apart only by their size in
- * VIM_SEAMLESS_PVG_SKIP (WxH), and the sender says nothing of which window it is. A hook's own surfaces would say. */
+ * as probes/seamless-gpu-viewer.m takes it. */
 #define SEAMLESS_FRAME_MESSAGE 0x53474652
 struct SeamlessFrameMessage {
     mach_msg_header_t header;
@@ -115,8 +114,8 @@ static void seamless_send_surface(IOSurfaceRef surface, uint32_t window)
     m.surface.name = capability;
     m.surface.disposition = MACH_MSG_TYPE_COPY_SEND;
     m.surface.type = MACH_MSG_PORT_DESCRIPTOR;
-    m.window = window ? window : (uint32_t)IOSurfaceGetWidth(surface) * 4096 + (uint32_t)IOSurfaceGetHeight(surface);
-    m.frame = ++sent[window & 4095];
+    m.window = window;
+    m.frame = ++sent[window & 4095]; /* A shape's share a count with its window's. */
     m.width = (uint32_t)IOSurfaceGetWidth(surface);
     m.height = (uint32_t)IOSurfaceGetHeight(surface);
     mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, 0, 0, 0);
@@ -124,15 +123,89 @@ static void seamless_send_surface(IOSurfaceRef surface, uint32_t window)
 }
 static uint64_t seamless_frames;
 void apple_gfx_seamless_frame(void) { __atomic_fetch_add(&seamless_frames, 1, __ATOMIC_RELAXED); }
-/* A composite is several command buffers, on the same surface in a moment. One that nothing follows for 6 ms is the last,
- * so the surface goes then, once. Consumes the reference on `surface`. */
-static void seamless_composite_done(IOSurfaceRef surface, uint32_t window)
+/* Which surface each window's composite last drew into. A composite is several command buffers, and after them the hook
+ * draws into a small surface of its own, which is how a finished one is known, on the guest's own queue. So a surface only
+ * goes if its marker follows: one of the guest's own that merely has such a size goes nowhere.
+ * shortcut: one whose size also names a real window between its composites would be taken for it. Unseen. A channel other
+ * than size would end that, and neither a texture's label nor, so far, anything else reaches here. */
+static os_unfair_lock seamless_latest_lock = OS_UNFAIR_LOCK_INIT;
+static IOSurfaceRef seamless_latest[8192]; /* After a window's, its shape's. */
+static uint64_t seamless_latest_passes[8192], seamless_sent_passes[8192];
+static void seamless_composite_drew(IOSurfaceRef surface, uint32_t window)
 {
-    static volatile uint32_t latest[4096];
-    uint32_t mine = __atomic_add_fetch(&latest[window & 4095], 1, __ATOMIC_RELAXED);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 6 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
-        if (__atomic_load_n(&latest[window & 4095], __ATOMIC_RELAXED) == mine) seamless_send_surface(surface, window);
-        CFRelease(surface);
+    CFRetain(surface);
+    os_unfair_lock_lock(&seamless_latest_lock);
+    IOSurfaceRef old = seamless_latest[window];
+    seamless_latest[window] = surface;
+    seamless_latest_passes[window]++;
+    os_unfair_lock_unlock(&seamless_latest_lock);
+    if (old) CFRelease(old);
+}
+static void seamless_composite_finished(uint32_t window)
+{
+    for (uint32_t slot = window; slot <= window + 4096; slot += 4096) {
+        IOSurfaceRef surface = NULL;
+        os_unfair_lock_lock(&seamless_latest_lock);
+        if (seamless_latest_passes[slot] != seamless_sent_passes[slot] && seamless_latest[slot]) {
+            surface = seamless_latest[slot];
+            CFRetain(surface);
+            seamless_sent_passes[slot] = seamless_latest_passes[slot];
+        }
+        os_unfair_lock_unlock(&seamless_latest_lock);
+        if (surface) {
+            /* A shape goes as the window's ID with 0x10000. */
+            seamless_send_surface(surface, slot >= 4096 ? window | 0x10000 : window);
+            CFRelease(surface);
+        }
+    }
+}
+/* What a guest's draws sample, with VIM_SEAMLESS_PVG_SAMPLED: whether its layers' contents have a host IOSurface. Each
+ * second, a line per kind of texture in <dir>/sampled.txt. */
+static IMP original_set_fragment_texture, original_set_fragment_textures;
+static void seamless_note_sampled(id<MTLTexture> t)
+{
+    static NSMutableDictionary *counts;
+    static uint64_t next;
+    static FILE *file;
+    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    if (!t || !guest_render_depth) return;
+    os_unfair_lock_lock(&lock);
+    if (!counts) {
+        counts = [NSMutableDictionary new];
+        file = fopen([NSString stringWithFormat:@"%s/sampled.txt", seamless_pvg_dir].UTF8String, "w");
+    }
+    NSString *key = [NSString stringWithFormat:@"%s storage=%lu fmt=%lu",
+        t.iosurface ? "iosurface" : t.buffer ? "buffer" : "private", (unsigned long)t.storageMode, (unsigned long)t.pixelFormat];
+    counts[key] = @([counts[key] unsignedLongLongValue] + 1);
+    NSString *size = [NSString stringWithFormat:@"%@ big=%d", key, t.width >= 64 && t.height >= 64];
+    counts[size] = @([counts[size] unsignedLongLongValue] + 1);
+    uint64_t now = apple_gfx_oop_now();
+    if (now >= next && file) {
+        fprintf(file, "-- %llu ms\n", now / 1000000);
+        for (NSString *name in counts) fprintf(file, "%s n=%llu\n", name.UTF8String, [counts[name] unsignedLongLongValue]);
+        fflush(file);
+        [counts removeAllObjects];
+        next = now + 1000000000ull;
+    }
+    os_unfair_lock_unlock(&lock);
+}
+static void seamless_set_fragment_texture(id self, SEL cmd, id<MTLTexture> texture, NSUInteger index)
+{
+    seamless_note_sampled(texture);
+    ((void (*)(id, SEL, id, NSUInteger))original_set_fragment_texture)(self, cmd, texture, index);
+}
+static void seamless_set_fragment_textures(id self, SEL cmd, const id<MTLTexture> *textures, NSRange range)
+{
+    for (NSUInteger i = 0; i < range.length; i++) seamless_note_sampled(textures[i]);
+    ((void (*)(id, SEL, const id *, NSRange))original_set_fragment_textures)(self, cmd, (const id *)textures, range);
+}
+static void seamless_watch_sampling(id encoder)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class c = [encoder class];
+        original_set_fragment_texture = class_replaceMethod(c, @selector(setFragmentTexture:atIndex:), (IMP)seamless_set_fragment_texture, "v@:@Q");
+        original_set_fragment_textures = class_replaceMethod(c, @selector(setFragmentTextures:withRange:), (IMP)seamless_set_fragment_textures, "v@:^@{_NSRange=QQ}");
     });
 }
 /* With <VIM_SEAMLESS_PVG_DIR>/nodisplay present, nobody shows the display, so its frames aren't encoded. */
@@ -180,28 +253,48 @@ static id preserving_render_encoder(id self, SEL cmd, MTLRenderPassDescriptor *p
         seamless_note_pass(pass);
         id<MTLTexture> target = pass.colorAttachments[0].texture;
         IOSurfaceRef surface = target.iosurface;
-        /* A surface from probes/seamless-ws-mojave.h says its window in its size. Others only with VIM_SEAMLESS_PVG_SKIP. */
-        const char *skip = getenv("VIM_SEAMLESS_PVG_SKIP");
-        int skip_width = 0, skip_height = 0;
-        if (skip) sscanf(skip, "%dx%d", &skip_width, &skip_height);
+        /* A surface from probes/seamless-ws-mojave.h says its window in its size: 0xa0 for a window's, 0xb0 for its marker, 0xc0 for its shape. */
         uint32_t width = (uint32_t)target.width, height = (uint32_t)target.height;
-        uint32_t window = (height & 0xf0) == 0xa0 ? (width & 0xff) | (height & 0x0f) << 8 : 0;
-        if (surface && width > 256 && height > 256 && (window || (skip && !((int)width == skip_width && (int)height == skip_height)))) {
-            /* One a command buffer: a composite has several passes in one, and is finished when it is. */
-            static char once;
-            if (!objc_getAssociatedObject(self, &once)) {
-                objc_setAssociatedObject(self, &once, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                CFRetain(surface);
-                [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> done) {
-                    (void)done;
-                    seamless_composite_done(surface, window);
-                }];
+        uint32_t tag = height & 0xf0, window = (width & 0xff) | (height & 0x0f) << 8;
+        if (surface && width > 256 && height > 256) {
+            /* The guest's GPU keeps what it doesn't draw on with "don't care". This one doesn't, and a composite is only
+             * part of a window. */
+            if ((tag == 0xa0 || tag == 0xc0) && pass.colorAttachments[0].loadAction == MTLLoadActionDontCare) {
+                adjusted = [pass copy];
+                adjusted.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            }
+            if (tag == 0xa0) {
+                /* What the guest gave it, for telling whether a value set there can name a window. */
+                static uint32_t told[64];
+                static unsigned next_told;
+                uint32_t identity = IOSurfaceGetID(surface);
+                int known = 0;
+                for (unsigned i = 0; i < 64; i++) known |= told[i] == identity;
+                if (!known) {
+                    told[next_told++ % 64] = identity;
+                    CFDictionaryRef values = IOSurfaceCopyAllValues(surface);
+                    NSLog(@"seamless surface %ux%u window %u values %@", width, height, window, values);
+                    if (values) CFRelease(values);
+                }
+                seamless_composite_drew(surface, window);
+            } else if (tag == 0xc0) {
+                seamless_composite_drew(surface, window + 4096);
+            } else if (tag == 0xb0) {
+                static char once;
+                if (!objc_getAssociatedObject(self, &once)) {
+                    objc_setAssociatedObject(self, &once, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> done) {
+                        (void)done;
+                        seamless_composite_finished(window);
+                    }];
+                }
             }
         }
     }
     id result = ((id (*)(id, SEL, id))original_render_encoder)(
         self, cmd, adjusted ?: pass);
     [adjusted release];
+    if (seamless_pvg_dir && guest_render_depth && getenv("VIM_SEAMLESS_PVG_SAMPLED")) seamless_watch_sampling(result);
     return result;
 }
 

@@ -983,6 +983,17 @@ static int drain_input(struct Stream *s) {
                                       : CGPointMake(g->x / 16.0, g->y / 16.0);
             swi_gesture(&context, g, point);
             s->gesture_events++;
+        } else if (m.type == SWM_SET_MINIMIZED) {
+            printf("# %.1f host asks window %u minimized %u, app pid %d\n", now(), m.u.window_id, m.minimized, session_app_pid);
+            fflush(stdout);
+            if (session_menu_tool && session_app_pid && !fork()) {
+                char pid[16], window[16];
+                snprintf(pid, sizeof(pid), "%d", session_app_pid);
+                snprintf(window, sizeof(window), "%u", m.u.window_id);
+                execl(session_menu_tool, session_menu_tool, "set-minimized", "--pid", pid, "--window", window, "--state",
+                      m.minimized ? "1" : "0", (char *)NULL);
+                _exit(127);
+            }
         } else if (m.type == SWM_FOCUS)
             activate_owner(s);
         offset += used;
@@ -1422,6 +1433,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
+    int minimized;
     int surface_x, surface_y, has_surface, cover_count;
     uint32_t covers_hash;
     int cropping, covered; // cropping: the message the host last had, if it's taking this from the display.
@@ -1775,8 +1787,9 @@ static int tree_send_surface_origin(struct Stream *s, struct TreeWindow *w, CGWi
     return 0;
 }
 
-// Says what's in front of this window, of any app, when that changes, so the host never shows it as this window's, and returns how
-// many there are. Its own sheets and menus don't count: they're in the same place on the host. Nor does the cursor or menu bar.
+// Says what's in front of this window, of any app, when that changes, so the host never shows it as this window's, and
+// returns how many there are. Its own sheets and menus don't count: they're in the same place on the host. Nor does the
+// cursor or menu bar.
 static int tree_send_covers(struct Stream *s, struct TreeWindow *w, const struct TreeItem *item, int *count) {
     enum { MOST = 32 };
     int32_t rects[MOST * 4];
@@ -1810,6 +1823,32 @@ static int tree_send_covers(struct Stream *s, struct TreeWindow *w, const struct
     for (int i = 0; i < n * 4; i++)
         swm_w32(message + SWM_HEADER_SIZE + 8 + i * 4, (uint32_t)rects[i]);
     return send_all(s->fd, message, SWM_HEADER_SIZE + size);
+}
+
+// Asks the app, as a minimized window isn't in WindowServer's list by its number, even when asked for by that number.
+static int tree_window_is_minimized(CGWindowID id, pid_t pid) {
+    if (!session_menu_tool)
+        return 0;
+    char pid_text[16], window[16];
+    snprintf(pid_text, sizeof(pid_text), "%d", pid);
+    snprintf(window, sizeof(window), "%u", id);
+    char *const ask[] = {(char *)session_menu_tool, "is-minimized", "--pid", pid_text, "--window", window, NULL};
+    char *said = run_tool(ask);
+    int minimized = said && strstr(said, "minimized yes");
+    printf("# %.1f window %u left the screen: %s\n", now(), id, said ? said : "(no answer)");
+    fflush(stdout);
+    free(said);
+    return minimized;
+}
+
+static int tree_send_minimized(struct Stream *s, CGWindowID id, int minimized) {
+    printf("# %.1f window %u %s\n", now(), id, minimized ? "minimized" : "back");
+    fflush(stdout);
+    uint8_t message[SWM_HEADER_SIZE + 8];
+    swm_header(message, SWM_MINIMIZED, 8);
+    swm_w32(message + SWM_HEADER_SIZE, id);
+    swm_w32(message + SWM_HEADER_SIZE + 4, (uint32_t)minimized);
+    return send_all(s->fd, message, sizeof(message));
 }
 
 static int tree_surface_has_shadow(CGWindowID id) {
@@ -1894,6 +1933,11 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                     w = &windows[k];
             if (!w)
                 continue;
+            if (w->minimized) {
+                w->minimized = 0;
+                if (tree_send_minimized(s, id, 0))
+                    goto done;
+            }
             int fresh = w->id != id;
             w->id = id;
             w->seen = 1;
@@ -1901,10 +1945,10 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             CGRect bounds = item->bounds;
             const char *title = item->title, *owner = item->owner;
             int alpha = item->alpha, layer = item->layer;
-            // The host shows everything from the display's own frames. An opaque, ordinary window has the host's corners
-            // and shadow. One a window in front covers also gets a capture a second, for the part under that window, which
-            // only shows when nothing's over it on the host either, as in Mission Control. Anything else, such as a menu, a
-            // popover or a sheet, gets a capture a second for its alpha.
+            // The host shows everything from the display's own frames. An opaque, ordinary window has the host's
+            // corners and shadow. One a window in front covers also gets a capture a second, for the part under that
+            // window, which only shows when nothing's over it on the host either, as in Mission Control. Anything else,
+            // such as a menu, a popover or a sheet, gets a capture a second for its alpha.
             int own_surface = tree_shared && tree_gpu_table && tree_gpu_table->gpu_mode;
             int crop = (no_pixels && item->layer == 0 && item->title[0] && item->alpha == 0x10000) || own_surface;
             int covered = 0;
@@ -1913,8 +1957,11 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 covered = front->layer == 0 && front->title[0] && CGRectIntersectsRect(front->bounds, item->bounds) &&
                           tree_group(front->id) != tree_group(id);
             }
-            // Room for the guest's shadow if its surface has one, or else there's the window's own shape for the host's.
-            int margin = own_surface && tree_surface_has_shadow(id) ? item->margin : crop || tree_shared ? 0 : item->margin;
+            // Room for the guest's shadow if its surface has one, or else there's the window's own shape for the
+            // host's.
+            int margin = own_surface && tree_surface_has_shadow(id) ? item->margin
+                         : crop || tree_shared                      ? 0
+                                                                    : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
                 sized = !CGSizeEqualToSize(bounds.size, w->bounds.size) || margin != w->margin;
             uint32_t seed = 0;
@@ -2123,6 +2170,17 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             }
             order++;
         }
+        for (int i = 0; i < TREE_MAX_WINDOWS; i++)
+            if (windows[i].id && !windows[i].seen && tree_shared &&
+                (windows[i].minimized || tree_window_is_minimized(windows[i].id, windows[i].pid))) {
+                // Once it's known, only its coming back, or the app's going, changes that.
+                if (!windows[i].minimized) {
+                    windows[i].minimized = 1;
+                    if (tree_send_minimized(s, windows[i].id, 1))
+                        goto done;
+                }
+                windows[i].seen = 1;
+            }
         for (int i = 0; i < TREE_MAX_WINDOWS; i++)
             if (windows[i].id && !windows[i].seen) {
                 uint8_t gone[SWM_HEADER_SIZE + SWM_GONE_SIZE];
@@ -2500,15 +2558,16 @@ static int leap_restore(const char *menu_tool) {
     return dock != 0;
 }
 
-// For the display's frames: on windows' own surfaces, the Dock and shadows aren't in anything shown. Restarting the Dock there would
-// also bring it new windows the hook wasn't told to skip.
+// For the display's frames: on windows' own surfaces, the Dock and shadows aren't in anything shown. Restarting the
+// Dock there would also bring it new windows the hook wasn't told to skip.
 static void leap_hide_for_frames(void) {
     leap_set_home();
     leap_set_guest_shadows(1);
     system(leap_hide_dock);
 }
 
-// Puts everything back however this process ends, which includes the display, if windows' own surfaces had turned it off.
+// Puts everything back however this process ends, which includes the display, if windows' own surfaces had turned it
+// off.
 static void leap_arrange_restore(const char *menu_tool) {
     int ends[2];
     if (pipe(ends))
@@ -2693,6 +2752,25 @@ int main(int argc, char **argv) {
             t->gpu_skip_count = skipped;
             printf("skipping %u windows\n", skipped);
         }
+        if (option(argc, argv, "--blobs", NULL)) {
+            // Each of a census's contents to a file, 4 bytes a pixel: blob-N-WxH-ROW.raw.
+            for (uint32_t i = 0; i < t->gpu_blob_count; i++) {
+                char path[512];
+                const struct SWSBlob *b = &t->gpu_blobs[i];
+                snprintf(path, sizeof(path), "%s/blob-%u-%ux%u-%u.raw", option(argc, argv, "--blobs", "/tmp"), i,
+                         b->width, b->height, b->row);
+                int out = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (out >= 0) {
+                    write(out, t->arena + b->offset, (size_t)b->height * b->row);
+                    close(out);
+                }
+            }
+            printf("%u blobs\n", t->gpu_blob_count);
+        }
+        if (option(argc, argv, "--census", NULL))
+            t->gpu_census = atoi(option(argc, argv, "--census", "0"));
+        if (option(argc, argv, "--no-shadow", NULL))
+            t->gpu_no_shadow = (uint32_t)atoi(option(argc, argv, "--no-shadow", "0"));
         if (option(argc, argv, "--mode", NULL))
             t->gpu_mode = (uint32_t)atoi(option(argc, argv, "--mode", "0"));
         printf("gpu mode %u scale %g generate %llu composites %llu whole %llu seconds %.3f\n", t->gpu_mode,

@@ -1,9 +1,9 @@
 import Foundation
 
-/// Why guest preparation stopped. The messages and domain are the ones VIMGuestPreparation reported, and they're shown to
-/// the user. The ones that carry text show a guest tool's own diagnostic.
+/// Why guest preparation stopped. They're shown to the user. The ones that carry text show a guest tool's own diagnostic.
 public enum GuestPreparationError: Error, Equatable, Sendable, LocalizedError, CustomNSError {
     case unsuitableSystem
+    case supportDiscIncomplete
     case supportDiscNotLocated
     case diskListNotRecognized
     case supportDiscMissingOrAmbiguous
@@ -29,6 +29,7 @@ public enum GuestPreparationError: Error, Equatable, Sendable, LocalizedError, C
         switch self {
         case .unsuitableSystem:
             "Preparation requires a matching installed Mojave, Catalina or Big Sur system with verified volume identity. Initial setup also requires a usable desktop."
+        case .supportDiscIncomplete: "This app’s guest support disc is incomplete. Reinstall the app and try again."
         case .supportDiscNotLocated: "The support disc couldn’t be located before login. Nothing was installed."
         case .diskListNotRecognized: "The guest disk list was not recognized."
         case .supportDiscMissingOrAmbiguous: "The guest support disc is missing or ambiguous. Nothing was installed."
