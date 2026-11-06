@@ -13,7 +13,7 @@ Labels: **[measured]** by a probe here. **[read]** seen in code or a binary. **[
 
 ## Try it on your Mac
 
-A normal build has this now. **Use a clone: making a Dock app changes the machine.** It adds a library to its WindowServer, in `/System/Library/LaunchDaemons/com.apple.WindowServer.plist`. Mavericks is what's been tested, and nothing yet has been seen on a display.
+A normal build has this now. **Use a clone: making a Dock app changes the machine.** It adds a library to its WindowServer, in `/System/Library/LaunchDaemons/com.apple.WindowServer.plist`. Mavericks is what's been tested in full, on its own proxy, at 2x and 1x. Nothing yet has been seen on a display.
 
 1. Build, from `Source`:
 
@@ -91,6 +91,8 @@ Proxy quits now answer `.terminateCancel` and quit on the session's word. `.term
 - **Scroll:** a real `NSEvent` through the input view reached the guest as a gesture. Gestures now go by `CGEventPostToPid` on 10.9, since in a run of `seamless-try input` only that route delivered all of magnify, rotate, swipe, smart magnify and quick look; force click arrives only as an ordinary click at pressure 1. Mojave stays on its agent's route, unrun. **Badge and attention:** "7" and attention came from `_LSCopyApplicationInformationItem`, which AppKit's badge writes to; `lsappinfo` printed nothing here. The JSON the session writes decodes as the proxy's commands in a package test.
 
 But the host's half of both drags was stood in for, with nobody at the Mac and no pointer to move: these events came from the session as the proxy would report them, not from a real `NSDraggingSession`. The proxy's view for them is now an overlay that refuses mouse hits, which nothing has tested against a real drag. The badge test's source is a helper, not TextEdit. Pinch, rotate, swipe and force click have the same route as the scroll but can't be made without a trackpad.
+
+**Then from a real `build-app`,** with `verify-release-build.py` passing and the engine on: `seamless-session-try` made the proxy through the same code as the menu, then ran all of this, 19 checks, at 2x and at 1x. The composed prompt at 2x shows the dropped file as an attachment in the new document, so the drop is real, as far as the guest goes.
 
 Not from a real Dock click: that needs someone at the Mac. Since then this has moved into the app: `SeamlessSession` in the `SeamlessIntegration` package replaces `seamless-viewer` for a session, talking to the machine's agent directly, not through the diagnostics channel; `build-app` adds what it needs to `Contents/Resources/Seamless`, and **Actions > Make Dock App…** makes the proxy and installs the hook, which takes effect at the guest's next start. A session runs by capture until then. `seamless-viewer` stays for the probes in `seamless-try`. The session itself is still `probes/seamless-viewer.m`, moved in, not rewritten. The composed views are made from window pixels with the display asleep, as above; **nobody has seen this on a display**, including whether the machine's window flashes before it's cleared, which it can for up to 0.25 s. AppKit calls the machine's windows ordered out, while WindowServer still lists them as on screen with the display asleep, at alpha 0, so they're cleared as well.
 

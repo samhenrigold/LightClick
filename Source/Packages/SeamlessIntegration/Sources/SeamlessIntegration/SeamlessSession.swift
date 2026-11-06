@@ -103,7 +103,9 @@ public final class SeamlessSession {
         // has reached the user yet, so that only means starting over.
         for attempt in 1...3 {
             guard let ran = await runInGuest() else { return }
-            note("# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")")
+            note(
+                "# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")"
+            )
             if ran.exitCode != nil || everConnected || attempt == 3 { break }
             note("# trying again")
         }
@@ -130,7 +132,8 @@ public final class SeamlessSession {
         _ = await guest.run("/bin/sh", ["-c", Self.setupScript, "sh", tool, menuTool])
         note("# running \(configuration.guestApp) in the guest")
         var arguments = [
-            "SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "tree", "--app", configuration.guestApp, "--open", "--session", "--hook",
+            "SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "tree", "--app", configuration.guestApp, "--open", "--session",
+            "--hook",
             "--menu-tool", "/tmp/sg/ig", "--port", String(port), "--seconds", "0"
         ]
         if test != nil { arguments.append("--test-badge") }
@@ -147,7 +150,7 @@ public final class SeamlessSession {
     /// about the responsible process, and from a daemon that's the agent.
     private static var setupScript: String {
         let clients = [
-            "/private/tmp/sg/ig", "/tmp/sg/ig", "/private/tmp/sg/g", "/usr/bin/sudo", "/usr/bin/env",
+            "/private/tmp/sg/ig", "/tmp/sg/ig", "/private/tmp/sg/g", "/usr/bin/sudo", "/usr/bin/env", "/bin/launchctl",
             "/Library/Application Support/Virtual Intel Mac/GuestTools/opengl-install-bootstrap"
         ]
         let rows = clients.map {
@@ -300,10 +303,7 @@ public final class SeamlessSession {
             guard let items = try? JSONDecoder().decode([GuestMenuItem].self, from: json) else { return }
             lastMenu = items
             proxy?.send(SessionCommand.setMenuBar(items))
-            if let test, !testStarted {
-                testStarted = true
-                runTest(test)
-            }
+            startTestOnce()
         case .document(let piece): receive(piece)
         case .dragState(let json): beginDragOut(json)
         case .appState(let json): applyAppState(json)
@@ -338,6 +338,12 @@ public final class SeamlessSession {
         }
         surface.window = window
         tellProxy(surface)
+        // A guest whose menu can't be read still gets its test.
+        if test != nil, !testStarted {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+                MainActor.assumeIsolated { self.startTestOnce() }
+            }
+        }
     }
 
     /// A layer in a context of this process, which the proxy's `CALayerHost` shows by its ID. Both are private classes, and
@@ -569,6 +575,12 @@ public final class SeamlessSession {
     }
 
     // MARK: A test with nobody at the host
+
+    private func startTestOnce() {
+        guard let test, !testStarted else { return }
+        testStarted = true
+        runTest(test)
+    }
 
     private func runTest(_ test: SeamlessSessionTest) {
         func after(_ seconds: Double, _ step: @escaping @MainActor () -> Void) {
