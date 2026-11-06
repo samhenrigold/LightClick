@@ -31,6 +31,13 @@
 static int connectionFD = -1; // Main thread.
 static BOOL selfTest;
 static NSString *sessionSocketPath;
+// A session the app started: the guest agent's channel, what to run, and the programs to put in the guest.
+static NSString *channelPath, *guestAppName, *guestToolsPath;
+static BOOL testSession;
+static pid_t proxyPID;
+static NSMutableDictionary<NSNumber *, NSString *> *documentPaths;
+static NSMutableDictionary<NSNumber *, NSMutableData *> *documentsComing;
+static NSMutableArray<NSString *> *documentsWaiting;
 static int proxyFD = -1; // Main thread. A connected proxy, when this viewer is its session process.
 static NSString *testMenuPath;
 static pid_t hidePID;
@@ -362,8 +369,12 @@ static NSData *lastMenu;
     if (input) {
         NSData *bytes = [[NSData alloc] initWithBase64EncodedString:input[@"bytes"] options:0];
         sendToGuest(bytes.bytes, bytes.length);
+    } else if (event[@"openDocuments"]) {
+        for (NSString *path in event[@"openDocuments"][@"paths"])
+            [self sendDocument:path];
     } else if (event[@"hello"]) {
         printf("# proxy said hello: %s\n", [event[@"hello"] description].UTF8String);
+        proxyPID = [event[@"hello"][@"pid"] intValue];
         fflush(stdout);
         if (lastMenu)
             [self sendMenu:lastMenu];
@@ -373,8 +384,234 @@ static NSData *lastMenu;
             out, swm_put_u32_message(out, sizeof(out), SWM_FOCUS, self.windows.allKeys.firstObject.unsignedIntValue));
     } else if (event[@"menuChosen"])
         [self pressMenu:[event[@"menuChosen"][@"path"] componentsJoinedByString:@"/"]];
-    else if (event[@"quit"])
-        [self sendToProxy:@{@"terminate" : @{}}];
+    else if (event[@"quit"]) {
+        if (channelPath && connectionFD >= 0) {
+            uint8_t out[32];
+            sendToGuest(out, swm_put_u32_message(out, sizeof(out), SWM_QUIT_APP, 0));
+            puts("# the proxy asked to quit, so the guest app was asked");
+        } else {
+            // shortcut: quitting before the guest is up leaves the app to shut the machine down, which waits for its
+            // agent.
+            [self sendToProxy:@{@"terminate" : @{}}];
+            if (channelPath)
+                exit(0);
+        }
+    }
+}
+// A file of the host's goes into the guest and opens there. It waits if the guest isn't here yet.
+- (void)sendDocument:(NSString *)path {
+    if (connectionFD < 0) {
+        [documentsWaiting addObject:path];
+        return;
+    }
+    static uint32_t nextDocument;
+    NSData *file = [NSData dataWithContentsOfFile:path];
+    NSData *name = [path.lastPathComponent dataUsingEncoding:NSUTF8StringEncoding];
+    if (!file || name.length > 255) {
+        printf("# can't send %s: only plain files go to the guest\n", path.UTF8String);
+        return;
+    }
+    uint32_t identifier = ++nextDocument;
+    documentPaths[@(identifier)] = path;
+    NSMutableData *out = [NSMutableData dataWithLength:SWM_HEADER_SIZE + SWM_DOCUMENT_FIXED + 255 + SWM_DOCUMENT_PIECE];
+    NSUInteger offset = 0;
+    do {
+        uint32_t piece = (uint32_t)MIN(file.length - offset, SWM_DOCUMENT_PIECE);
+        size_t prefix = swm_put_document_prefix(out.mutableBytes, identifier, offset + piece == file.length, name.bytes,
+                                                (uint16_t)name.length, piece);
+        memcpy((uint8_t *)out.mutableBytes + prefix, (const uint8_t *)file.bytes + offset, piece);
+        sendToGuest(out.bytes, prefix + piece);
+        offset += piece;
+    } while (offset < file.length);
+    printf("# sent %s to the guest, %lu bytes\n", path.UTF8String, (unsigned long)file.length);
+}
+// The guest is untrusted: it only ever names a document this session sent it, and the file goes where that came from.
+- (void)receiveDocument:(const uint8_t *)bytes length:(uint32_t)length {
+    if (length < SWM_DOCUMENT_FIXED)
+        return;
+    NSNumber *identifier = @(swm_r32(bytes));
+    size_t offset = SWM_DOCUMENT_FIXED + (size_t)swm_r16(bytes + 6);
+    NSString *path = documentPaths[identifier];
+    if (!path || offset > length)
+        return;
+    NSMutableData *coming = documentsComing[identifier];
+    if (!coming)
+        coming = documentsComing[identifier] = [NSMutableData data];
+    [coming appendBytes:bytes + offset length:length - offset];
+    if (coming.length > (NSUInteger)1 << 32) {
+        [documentsComing removeObjectForKey:identifier];
+        return;
+    }
+    if (bytes[4]) {
+        NSError *error = nil;
+        BOOL wrote = [coming writeToFile:path options:NSDataWritingAtomic error:&error];
+        printf("# the guest saved %s, %lu bytes: %s\n", path.UTF8String, (unsigned long)coming.length,
+               wrote ? "written" : error.localizedDescription.UTF8String);
+        [documentsComing removeObjectForKey:identifier];
+    }
+    fflush(stdout);
+}
+- (NSDictionary *)channelRequest:(NSDictionary *)command timeout:(double)timeout {
+    NSString *result = [channelPath stringByAppendingPathComponent:@"Result.json"];
+    NSString *temporary = [channelPath stringByAppendingPathComponent:@"Request.tmp"];
+    unlink(result.fileSystemRepresentation);
+    [[NSJSONSerialization dataWithJSONObject:command options:0 error:nil] writeToFile:temporary atomically:NO];
+    rename(temporary.fileSystemRepresentation,
+           [channelPath stringByAppendingPathComponent:@"Request.json"].fileSystemRepresentation);
+    for (double waited = 0; waited < timeout; waited += 0.2) {
+        if (getppid() == 1)
+            exit(1); // The app has gone, and the machine with it.
+        NSData *data = [NSData dataWithContentsOfFile:result];
+        NSDictionary *answer = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        if ([answer isKindOfClass:NSDictionary.class])
+            return answer;
+        usleep(200000);
+    }
+    return @{@"Error" : @"timed out"};
+}
+- (NSDictionary *)channelRun:(NSString *)executable arguments:(NSArray<NSString *> *)arguments timeout:(double)timeout {
+    return [self channelRequest:@{@"Executable" : executable, @"Arguments" : arguments} timeout:timeout];
+}
+- (NSString *)stageInGuest:(NSString *)name {
+    NSString *transfer = [channelPath stringByAppendingPathComponent:@"Transfer.bin"];
+    unlink(transfer.fileSystemRepresentation);
+    if (![NSFileManager.defaultManager copyItemAtPath:[guestToolsPath stringByAppendingPathComponent:name]
+                                               toPath:transfer
+                                                error:nil])
+        return nil;
+    NSDictionary *staged = [self channelRequest:@{@"Action" : @"stage-probe"} timeout:900];
+    NSString *directory = staged[@"Transfer"][@"Directory"];
+    return directory ? [directory stringByAppendingPathComponent:@"Transfer.bin"] : nil;
+}
+- (void)failSession:(NSString *)why {
+    printf("# ERROR the session stopped: %s\n", why.UTF8String);
+    fflush(stdout);
+    dispatch_sync(dispatch_get_main_queue(), ^{
+      [self sendToProxy:@{@"terminate" : @{}}];
+    });
+    exit(1);
+}
+// What scripts/seamless-try's driver does for a probe, for a real session: waits for the guest, gets it ready and runs
+// the app's windows until the app quits. The app shuts the machine down when this process exits.
+- (void)driveSession {
+    for (double waited = 0; ![NSFileManager.defaultManager fileExistsAtPath:channelPath]; waited += 1) {
+        if (waited > 600 || getppid() == 1)
+            exit(1);
+        sleep(1);
+    }
+    NSString *windowServer = @"/System/Library/LaunchDaemons/com.apple.WindowServer.plist";
+    for (int attempt = 0;; attempt++) {
+        if (attempt > 2)
+            [self failSession:@"the hook isn't there after a restart"];
+        // The agent isn't there until well into the boot, and answers with an error until it is.
+        NSDictionary *release = nil;
+        for (double started = CFAbsoluteTimeGetCurrent(); ![release[@"ExitCode"] isEqual:@0]; sleep(5)) {
+            if (CFAbsoluteTimeGetCurrent() - started > 900)
+                [self failSession:[NSString stringWithFormat:@"no answer from the guest: %@", release]];
+            release = [self channelRun:@"/usr/bin/uname" arguments:@[ @"-r" ] timeout:900];
+        }
+        if (![release[@"Stdout"] hasPrefix:@"13."])
+            break; // shortcut: only 10.9 has a hook, and the others run by capture alone.
+        NSDictionary *found = [self channelRun:@"/usr/bin/grep"
+                                     arguments:@[ @"-q", @"seamless-ws-hook", windowServer ]
+                                       timeout:60];
+        if ([found[@"ExitCode"] isEqual:@0])
+            break;
+        // Uses a restart, once, since launchd only reads a job's environment when it loads.
+        puts("# first session on this machine: installing the hook and restarting the guest");
+        fflush(stdout);
+        NSString *hook = [self stageInGuest:@"seamless-ws-hook.dylib"];
+        NSString *install = [NSString
+            stringWithFormat:
+                @"set -e; cp \"$1\" /var/tmp/seamless-ws-hook.dylib; chmod 755 /var/tmp/seamless-ws-hook.dylib; "
+                @"/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables dict\" %1$@ || true; "
+                @"/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string "
+                @"/var/tmp/seamless-ws-hook.dylib\" %1$@; /usr/bin/plutil -lint %1$@; "
+                @"(sleep 5; /sbin/reboot) >/dev/null 2>&1 &",
+                windowServer];
+        NSDictionary *done =
+            hook ? [self channelRun:@"/bin/sh" arguments:@[ @"-c", install, @"sh", hook ] timeout:120] : nil;
+        if (![done[@"ExitCode"] isEqual:@0])
+            [self failSession:[NSString stringWithFormat:@"couldn't install the hook: %@", done]];
+        sleep(90);
+    }
+    NSString *tool = [self stageInGuest:@"seamless-guest"];
+    NSString *menuTool = [self stageInGuest:@"seamless-integration-guest"];
+    if (!tool || !menuTool)
+        [self failSession:@"couldn't put the programs in the guest"];
+    // 10.9 asks TCC about the responsible process, and from a daemon that's the agent.
+    NSMutableString *setup = [NSMutableString
+        stringWithString:
+            @"mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp \"$1\" /tmp/sg/g; cp \"$2\" /tmp/sg/ig; chmod 755 /tmp/sg/g "
+            @"/tmp/sg/ig; /usr/bin/sqlite3 \"/Library/Application Support/com.apple.TCC/TCC.db\" \""];
+    for (NSString *client in @[
+             @"/private/tmp/sg/ig", @"/tmp/sg/ig", @"/private/tmp/sg/g", @"/usr/bin/sudo", @"/usr/bin/env",
+             @"/Library/Application Support/Virtual Intel Mac/GuestTools/opengl-install-bootstrap"
+         ])
+        [setup appendFormat:@"INSERT OR REPLACE INTO access (service,client,client_type,allowed,prompt_count) VALUES "
+                            @"('kTCCServiceAccessibility','%@',1,1,1);",
+                            client];
+    [setup appendString:@"\"; /usr/bin/killall tccd; sleep 2"];
+    [self channelRun:@"/bin/sh" arguments:@[ @"-c", setup, @"sh", tool, menuTool ] timeout:120];
+    printf("# running %s in the guest\n", guestAppName.UTF8String);
+    fflush(stdout);
+    NSDictionary *ran =
+        [self channelRun:@"/usr/bin/env"
+               arguments:@[
+                   @"SEAMLESS_RUN_IN_PLACE=1", @"/tmp/sg/g", @"tree", @"--app", guestAppName, @"--open", @"--session",
+                   @"--hook", @"--menu-tool", @"/tmp/sg/ig", @"--port", @(self.port).stringValue, @"--seconds", @"0"
+               ]
+                 timeout:1e9];
+    printf("# the guest's side ended, exit %s\n%s\n%s\n", [ran[@"ExitCode"] description].UTF8String,
+           [ran[@"Stdout"] description].UTF8String, [(ran[@"Stderr"] ?: ran[@"Error"]) description].UTF8String);
+    fflush(stdout);
+    dispatch_sync(dispatch_get_main_queue(), ^{
+      [self sendToProxy:@{@"terminate" : @{}}];
+    });
+    usleep(200000);
+    exit(0);
+}
+// With nobody at the host: dirty a new document as well as the opened one, quit the way the Dock's menu does, and
+// answer the prompt that brings.
+- (void)runTestSession {
+    void (^after)(double, dispatch_block_t) = ^(double seconds, dispatch_block_t step) {
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(seconds * NSEC_PER_SEC)), dispatch_get_main_queue(),
+                     step);
+    };
+    after(10, ^{
+      puts("# test: typing in the document");
+      [self sendToProxy:@{@"testInput" : @{}}];
+    });
+    after(20, ^{
+      [self pressMenu:@"File/New"];
+    });
+    after(32, ^{
+      puts("# test: typing in the new document");
+      [self sendToProxy:@{@"testInput" : @{}}];
+    });
+    after(44, ^{
+      printf("# test: asking the proxy, pid %d, to quit\n", proxyPID);
+      [[NSRunningApplication runningApplicationWithProcessIdentifier:proxyPID] terminate];
+    });
+    after(150, ^{
+      puts("# ERROR test: the guest app didn't exit after the answer");
+      [NSThread detachNewThreadSelector:@selector(failSession:) toTarget:self withObject:@"test timed out"];
+    });
+    after(60, ^{
+      NSMutableArray *titles = [NSMutableArray array];
+      for (GuestWindow *window in self.windows.allValues)
+          [titles addObject:[NSString stringWithFormat:@"%u %@ %gx%g", window.guestID, window.title,
+                                                       window.frame.size.width, window.frame.size.height]];
+      printf("# test: at the prompt, windows are: %s\n", [titles componentsJoinedByString:@"; "].UTF8String);
+      fflush(stdout);
+      [self takeScreenshot];
+      // Return: the default button, Save.
+      for (int down = 1; down >= 0; down--) {
+          struct SWMKey key = {.keycode = 36, .down = (uint8_t)down};
+          uint8_t out[64];
+          sendToGuest(out, swm_put_key(out, sizeof(out), &key));
+      }
+    });
 }
 - (void)pressMenu:(NSString *)path {
     NSData *text = [path dataUsingEncoding:NSUTF8StringEncoding];
@@ -804,9 +1041,18 @@ static NSData *lastMenu;
         [self.windows removeObjectForKey:@(m->u.window_id)];
         [window close];
         [self sendToProxy:@{@"removeSurface" : @{@"id" : @(m->u.window_id)}}];
+    } else if (m->type == SWM_DOCUMENT) {
+        [self receiveDocument:m->u.data.bytes length:m->u.data.length];
+    } else if (m->type == SWM_APP_GONE) {
+        puts("# the guest app has exited");
+        [self sendToProxy:@{@"terminate" : @{}}];
     } else if (m->type == SWM_MENU) {
         [self sendMenu:[NSData dataWithBytes:m->u.data.bytes length:m->u.data.length]];
-        static BOOL pressed;
+        static BOOL pressed, testing;
+        if (testSession && !testing) {
+            testing = YES;
+            [self runTestSession];
+        }
         if (testMenuPath && !pressed) {
             pressed = YES;
             // After the proxy's click and key, so the effect can be told from theirs.
@@ -824,6 +1070,10 @@ static NSData *lastMenu;
 - (void)serve:(int)client {
     dispatch_sync(dispatch_get_main_queue(), ^{
       connectionFD = client;
+      NSArray<NSString *> *waiting = [documentsWaiting copy];
+      [documentsWaiting removeAllObjects];
+      for (NSString *path in waiting)
+          [self sendDocument:path];
     });
     size_t capacity = 1 << 20, have = 0;
     uint8_t *buffer = malloc(capacity);
@@ -891,7 +1141,16 @@ static NSData *lastMenu;
         perror("listen");
         exit(1);
     }
+    socklen_t bound = sizeof(address);
+    getsockname(listener, (struct sockaddr *)&address, &bound);
+    self.port = ntohs(address.sin_port);
     printf("Listening on 127.0.0.1:%d, which a guest reaches as 10.0.2.2:%d\n", self.port, self.port);
+    if (channelPath) {
+        documentPaths = [NSMutableDictionary dictionary];
+        documentsComing = [NSMutableDictionary dictionary];
+        documentsWaiting = [NSMutableArray array];
+        [NSThread detachNewThreadSelector:@selector(driveSession) toTarget:self withObject:nil];
+    }
     if (sessionSocketPath) {
         [self listenForProxy];
         // shortcut: until a headless launch exists, the VM's own window is hidden, not absent.
@@ -921,6 +1180,9 @@ static NSData *lastMenu;
 
 int main(int argc, const char **argv) {
     @autoreleasepool {
+        // A proxy can go at any moment, and a session's log goes to a file that should be current if this ends badly.
+        signal(SIGPIPE, SIG_IGN);
+        setvbuf(stdout, NULL, _IOLBF, 0);
         Controller *controller = [Controller new];
         controller.port = 7654;
         for (int i = 1; i < argc; i++) {
@@ -930,6 +1192,14 @@ int main(int argc, const char **argv) {
                 screenshotPrefix = @(argv[++i]);
             else if (!strcmp(argv[i], "--session-socket") && i + 1 < argc)
                 sessionSocketPath = @(argv[++i]);
+            else if (!strcmp(argv[i], "--channel") && i + 1 < argc)
+                channelPath = @(argv[++i]);
+            else if (!strcmp(argv[i], "--guest-app") && i + 1 < argc)
+                guestAppName = @(argv[++i]);
+            else if (!strcmp(argv[i], "--guest-tools") && i + 1 < argc)
+                guestToolsPath = @(argv[++i]);
+            else if (!strcmp(argv[i], "--test-session"))
+                testSession = YES;
             else if (!strcmp(argv[i], "--test-menu") && i + 1 < argc)
                 testMenuPath = @(argv[++i]);
             else if (!strcmp(argv[i], "--hide-pid") && i + 1 < argc)

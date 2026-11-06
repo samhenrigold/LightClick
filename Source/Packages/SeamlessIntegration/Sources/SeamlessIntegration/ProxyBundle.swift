@@ -37,6 +37,8 @@ public struct ProxyBundle: Sendable {
     public static let machinePathKey = "LCMachinePath"
     public static let guestPathKey = "LCGuestPath"
     public static let guestIdentifierKey = "LCGuestBundleIdentifier"
+    /// The Light Click that made this proxy, and so runs its machine. Any other might not be able to.
+    public static let hostAppKey = "LCHostApp"
 
     /// Stable, so the Dock and LaunchServices keep treating a regenerated proxy as the same app.
     public var bundleIdentifier: String {
@@ -52,7 +54,7 @@ public struct ProxyBundle: Sendable {
     /// A bundle name a guest can't use to step out of `directory`.
     public var bundleName: String { hostFileName(for: displayName) + ".app" }
 
-    public func infoPlist(sessionSocket: String, iconFile: String?) -> [String: Any] {
+    public func infoPlist(sessionSocket: String, iconFile: String?, hostApp: String? = nil) -> [String: Any] {
         var plist: [String: Any] = [
             "CFBundleIdentifier": bundleIdentifier,
             "CFBundleName": displayName,
@@ -73,6 +75,7 @@ public struct ProxyBundle: Sendable {
             Self.guestIdentifierKey: app.bundleIdentifier
         ]
         if let iconFile { plist["CFBundleIconFile"] = iconFile }
+        if let hostApp { plist[Self.hostAppKey] = hostApp }
         let types = app.documentTypes.compactMap { type -> [String: Any]? in
             guard !type.contentTypes.isEmpty || !type.extensions.isEmpty || !type.osTypes.isEmpty else { return nil }
             var entry: [String: Any] = [
@@ -94,7 +97,7 @@ public struct ProxyBundle: Sendable {
     /// file if it could be read. No URL schemes are declared: a proxy must not be able to take over `http`.
     @discardableResult
     public func write(
-        to directory: URL, proxyExecutable: URL, sessionSocket: String, guestIcon: URL? = nil
+        to directory: URL, proxyExecutable: URL, sessionSocket: String, guestIcon: URL? = nil, hostApp: String? = nil
     ) throws -> URL {
         let manager = FileManager.default
         try manager.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -112,7 +115,7 @@ public struct ProxyBundle: Sendable {
             let output = resources.appending(path: "GuestApp.icns")
             if (try? IconConversion.convert(guestIcon, to: output)) != nil { iconFile = "GuestApp.icns" }
         }
-        let plist = infoPlist(sessionSocket: sessionSocket, iconFile: iconFile)
+        let plist = infoPlist(sessionSocket: sessionSocket, iconFile: iconFile, hostApp: hostApp)
         try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
             .write(to: contents.appending(path: "Info.plist"))
 
