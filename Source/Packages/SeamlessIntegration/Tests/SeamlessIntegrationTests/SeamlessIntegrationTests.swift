@@ -4,6 +4,19 @@ import Testing
 
 @testable import SeamlessIntegration
 
+/// The session is Objective-C and writes these by hand, so what it writes has to decode here.
+@Test func sessionCommandsDecodeAsTheSessionWritesThem() throws {
+    func decode(_ json: String) throws -> SessionCommand {
+        try JSONDecoder().decode(SessionCommand.self, from: Data(json.utf8))
+    }
+    #expect(try decode(#"{"setBadge":{"_0":"7"}}"#) == .setBadge("7"))
+    #expect(try decode(#"{"setBadge":{}}"#) == .setBadge(nil))
+    #expect(try decode(#"{"requestAttention":{"critical":true}}"#) == .requestAttention(critical: true))
+    #expect(try decode(#"{"beginDragOut":{"names":["a.txt"]}}"#) == .beginDragOut(names: ["a.txt"], imagePNG: nil))
+    #expect(try decode(#"{"promiseFulfilled":{"id":1}}"#) == .promiseFulfilled(id: 1, error: nil))
+    #expect(try decode(#"{"terminate":{}}"#) == .terminate)
+}
+
 @Test func guestNameCannotEscapeTheFolder() {
     #expect(!hostFileName(for: "../../etc/passwd").contains("/"))
     #expect(hostFileName(for: "..") == "Untitled")

@@ -1530,8 +1530,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     launch.researchCPUModel = researchCPUModel;
     launch.systemDiskInterface = systemDiskInterface;
     launch.audioOutputSelection = VIMAudioSelection(config, NO);
-    // Opening the microphone blocks QEMU until TCC answers, and a session has no window to ask from.
-    // shortcut: a seamless session has no microphone, until QEMU can open it when the guest does.
+    // Core Audio can stop answering QEMU's open of the microphone, and of the failed queue's close, which stops a boot nobody
+    // can see. shortcut: a seamless session has no microphone, until QEMU opens it when the guest does.
     BOOL seamless = [NSProcessInfo.processInfo.arguments containsObject:@"--seamless-session"];
     launch.audioInputSelection = seamless ? @"disabled" : VIMAudioSelection(config, YES);
     launch.audioOutputRate = (NSInteger)VIMHostOutputSampleRate(VIMAudioSelection(config, NO));

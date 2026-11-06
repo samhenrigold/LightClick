@@ -473,6 +473,16 @@ static int guest_document_count;
 static const char *session_app;
 static pid_t session_app_pid;
 
+// A file to drag, or being dragged, and the helper doing it, whose readiness the pointer has to wait for: its shields
+// have to be up for the press, and until then the moves are only remembered. See seamless-integration.md, "Drag in".
+#define SESSION_DRAG_FILES 16
+static char *drag_paths[SESSION_DRAG_FILES];
+static int drag_path_count;
+static pid_t drag_helper;
+static int drag_helper_out = -1, drag_ready, drag_waiting_up;
+static struct SWMPointer drag_last;
+static const char *session_menu_tool;
+
 static void session_run(char *const arguments[]) {
     pid_t child = fork();
     if (child == 0) {
@@ -480,6 +490,36 @@ static void session_run(char *const arguments[]) {
         _exit(127);
     }
     printf("# %s: %s, %d\n", arguments[0], arguments[arguments[2] ? 2 : 1], child);
+}
+
+static void start_drag(void) {
+    char *arguments[8 + 2 * SESSION_DRAG_FILES];
+    int n = 0;
+    arguments[n++] = (char *)session_menu_tool;
+    arguments[n++] = "drag-in";
+    arguments[n++] = "--no-image";
+    for (int i = 0; i < drag_path_count; i++) {
+        arguments[n++] = "--file";
+        arguments[n++] = drag_paths[i];
+    }
+    arguments[n] = NULL;
+    int ends[2];
+    if (!session_menu_tool || pipe(ends))
+        return;
+    drag_helper = fork();
+    if (drag_helper == 0) {
+        dup2(ends[1], 1);
+        close(ends[0]);
+        close(ends[1]);
+        execv(arguments[0], arguments);
+        _exit(127);
+    }
+    close(ends[1]);
+    fcntl(ends[0], F_SETFL, O_NONBLOCK);
+    drag_helper_out = ends[0];
+    drag_ready = drag_waiting_up = 0;
+    printf("# %.1f drag helper %d started with %d files\n", now(), drag_helper, drag_path_count);
+    drag_path_count = 0;
 }
 
 static void receive_document(const uint8_t *bytes, uint32_t length) {
@@ -515,11 +555,18 @@ static void receive_document(const uint8_t *bytes, uint32_t length) {
             document->id = id;
             document->saved = info.st_mtimespec;
             guest_document_count++;
-            char *const arguments[] = {"/usr/bin/open", "-a", (char *)session_app, document->path, NULL};
-            session_run(arguments);
+            if (bytes[5] & SWD_DRAG) {
+                if (drag_path_count < SESSION_DRAG_FILES)
+                    drag_paths[drag_path_count++] = strdup(document->path);
+            } else {
+                char *const arguments[] = {"/usr/bin/open", "-a", (char *)session_app, document->path, NULL};
+                session_run(arguments);
+            }
         }
     }
     free(folder);
+    if (bytes[4] && (bytes[5] & SWD_DRAG_START))
+        start_drag();
 }
 
 static void quit_app(void) {
@@ -529,6 +576,8 @@ static void quit_app(void) {
     session_run(arguments);
 }
 
+static int send_file_back(int fd, uint32_t id, const char *path);
+
 static int send_saved_documents(int fd) {
     for (int i = 0; i < guest_document_count; i++) {
         struct GuestDocument *document = &guest_documents[i];
@@ -536,25 +585,207 @@ static int send_saved_documents(int fd) {
         if (stat(document->path, &info) || (info.st_mtimespec.tv_sec == document->saved.tv_sec &&
                                             info.st_mtimespec.tv_nsec == document->saved.tv_nsec))
             continue;
-        int file = open(document->path, O_RDONLY);
-        if (file < 0)
-            continue;
         document->saved = info.st_mtimespec;
         printf("# %s changed, sending it back\n", document->path);
-        static uint8_t out[SWM_HEADER_SIZE + SWM_DOCUMENT_FIXED + SWM_DOCUMENT_PIECE];
-        off_t remaining = info.st_size;
-        do {
-            uint32_t piece = remaining > SWM_DOCUMENT_PIECE ? SWM_DOCUMENT_PIECE : (uint32_t)remaining;
-            size_t prefix = swm_put_document_prefix(out, document->id, remaining <= SWM_DOCUMENT_PIECE, "", 0, piece);
-            if (read(file, out + prefix, piece) != (ssize_t)piece || send_all(fd, out, prefix + piece)) {
-                close(file);
-                return -1;
-            }
-            remaining -= piece;
-        } while (remaining > 0);
-        close(file);
+        if (send_file_back(fd, document->id, document->path))
+            return -1;
     }
     return 0;
+}
+
+static int send_file_back(int fd, uint32_t id, const char *path) {
+    struct stat info;
+    int file = open(path, O_RDONLY);
+    if (file < 0 || fstat(file, &info)) {
+        if (file >= 0)
+            close(file);
+        return 0;
+    }
+    static uint8_t out[SWM_HEADER_SIZE + SWM_DOCUMENT_FIXED + SWM_DOCUMENT_PIECE];
+    off_t remaining = info.st_size;
+    do {
+        uint32_t piece = remaining > SWM_DOCUMENT_PIECE ? SWM_DOCUMENT_PIECE : (uint32_t)remaining;
+        size_t prefix = swm_put_document_prefix(out, id, remaining <= SWM_DOCUMENT_PIECE, 0, "", 0, piece);
+        if (read(file, out + prefix, piece) != (ssize_t)piece || send_all(fd, out, prefix + piece)) {
+            close(file);
+            return -1;
+        }
+        remaining -= piece;
+    } while (remaining > 0);
+    close(file);
+    return 0;
+}
+
+// The app's Dock badge and whether it's asking for attention, which AppKit keeps with LaunchServices, so nothing has to
+// be injected. shortcut: polled every 2 s, until LaunchServices' change notifications are used.
+static void send_app_state(struct Stream *s, pid_t pid) {
+    static CFTypeRef (*create_asn)(CFAllocatorRef, pid_t);
+    static CFTypeRef (*copy_item)(int, CFTypeRef, CFStringRef);
+    static const CFStringRef *attention_key;
+    if (!create_asn) {
+        create_asn = dlsym(RTLD_DEFAULT, "_LSASNCreateWithPid");
+        copy_item = dlsym(RTLD_DEFAULT, "_LSCopyApplicationInformationItem");
+        attention_key = dlsym(RTLD_DEFAULT, "_kLSApplicationDesiresAttentionKey");
+    }
+    if (!create_asn || !copy_item)
+        return;
+    CFTypeRef asn = create_asn(kCFAllocatorDefault, pid);
+    if (!asn)
+        return;
+    char badge[128] = "", state[512];
+    CFTypeRef status = copy_item(-2, asn, CFSTR("StatusLabel"));
+    if (status && CFGetTypeID(status) == CFDictionaryGetTypeID()) {
+        CFStringRef label = CFDictionaryGetValue(status, CFSTR("label"));
+        if (label && CFGetTypeID(label) == CFStringGetTypeID())
+            CFStringGetCString(label, badge, sizeof(badge), kCFStringEncodingUTF8);
+    }
+    CFTypeRef wants = attention_key ? copy_item(-2, asn, *attention_key) : NULL;
+    int attention = wants && CFGetTypeID(wants) == CFBooleanGetTypeID() && CFBooleanGetValue(wants);
+    if (status)
+        CFRelease(status);
+    if (wants)
+        CFRelease(wants);
+    CFRelease(asn);
+    // A guest's badge is any text, so it can't go in the JSON as it stands.
+    for (char *c = badge; *c; c++)
+        if (*c == '"' || *c == '\\' || (unsigned char)*c < ' ')
+            *c = ' ';
+    snprintf(state, sizeof(state), "{\"badge\":\"%s\",\"attention\":%s}", badge, attention ? "true" : "false");
+    static char last[512];
+    if (strcmp(state, last)) {
+        strlcpy(last, state, sizeof(last));
+        printf("# app state %s\n", state);
+        uint8_t header[SWM_HEADER_SIZE];
+        swm_header(header, SWM_APP_STATE, (uint32_t)strlen(state));
+        send_all(s->fd, header, sizeof(header));
+        send_all(s->fd, state, strlen(state));
+    }
+}
+
+static pid_t session_test_badge_pid;
+
+static void post_pointer(struct Stream *s, const struct SWMPointer *e);
+
+static void end_drag_helper(void) {
+    if (drag_helper_out >= 0)
+        close(drag_helper_out);
+    drag_helper_out = -1;
+    // A helper left running keeps its place as the front app, and takes the keyboard.
+    if (drag_helper > 0) {
+        kill(drag_helper, SIGTERM);
+        waitpid(drag_helper, NULL, 0);
+    }
+    drag_helper = 0;
+}
+
+// While the helper starts, the pointer only remembers where it's been. Once it's ready: the press its shield is waiting
+// for, and then anything that happened in the meantime, including the drop.
+static void service_drag(struct Stream *s) {
+    if (drag_helper_out < 0)
+        return;
+    char said[512];
+    ssize_t n = read(drag_helper_out, said, sizeof(said) - 1);
+    if (n == 0) {
+        printf("# %.1f drag helper has finished\n", now());
+        end_drag_helper();
+        return;
+    }
+    if (n < 0)
+        return;
+    said[n] = 0;
+    printf("# drag helper says: %.200s\n", said);
+    if (drag_ready || !strstr(said, "ready"))
+        return;
+    drag_ready = 1;
+    printf("# %.1f drag helper is ready, pressing at %.1f,%.1f\n", now(), drag_last.x / 16.0, drag_last.y / 16.0);
+    struct SWMPointer down = drag_last;
+    down.window = 0;
+    down.kind = SWM_DOWN;
+    post_pointer(s, &down);
+    usleep(300000); // The shield goes and the drag starts on the press; a move before that is lost.
+    down.kind = SWM_DRAG;
+    post_pointer(s, &down);
+    if (drag_waiting_up) {
+        usleep(300000);
+        down.kind = SWM_UP;
+        post_pointer(s, &down);
+    }
+}
+
+static int drag_pointer(const struct SWMPointer *e) {
+    drag_last = *e; // Even with no helper yet: the move that says where a drag starts comes before its file.
+    if (drag_helper_out < 0 || drag_ready)
+        return 0;
+    drag_waiting_up = e->kind == SWM_UP;
+    return 1;
+}
+
+static void cancel_drag(struct Stream *s) {
+    if (drag_helper_out < 0)
+        return;
+    if (drag_ready) {
+        // Escape is how a dragging session is cancelled; the release then finds nothing to drop.
+        CGEventRef escape = CGEventCreateKeyboardEvent(NULL, 53, true);
+        CGEventPost(kCGHIDEventTap, escape);
+        CFRelease(escape);
+        escape = CGEventCreateKeyboardEvent(NULL, 53, false);
+        CGEventPost(kCGHIDEventTap, escape);
+        CFRelease(escape);
+        struct SWMPointer up = drag_last;
+        up.window = 0;
+        up.kind = SWM_UP;
+        post_pointer(s, &up);
+    }
+    end_drag_helper();
+    puts("# drag cancelled");
+}
+
+// The guest's drag pasteboard to the host. If it holds files, a host drag takes over, and the guest's drag ends on a
+// sink, so its source sees a finished copy and nothing slides back.
+static void answer_drag_query(struct Stream *s) {
+    if (!session_menu_tool)
+        return;
+    char *const read_it[] = {(char *)session_menu_tool, "drag-read", NULL};
+    char *said = run_tool(read_it);
+    const char *json = said ? strchr(said, '{') : NULL;
+    printf("# drag pasteboard: %.300s\n", said ? said : "");
+    if (json) {
+        uint8_t header[SWM_HEADER_SIZE];
+        swm_header(header, SWM_DRAG_STATE, (uint32_t)strlen(json));
+        send_all(s->fd, header, sizeof(header));
+        send_all(s->fd, json, strlen(json));
+    }
+    if (json && strstr(json, "\"files\"")) {
+        int ends[2];
+        if (!pipe(ends)) {
+            pid_t sink = fork();
+            if (sink == 0) {
+                dup2(ends[1], 1);
+                close(ends[0]);
+                close(ends[1]);
+                execl(session_menu_tool, session_menu_tool, "drag-sink", "--seconds", "30", (char *)NULL);
+                _exit(127);
+            }
+            close(ends[1]);
+            char ready[128];
+            ssize_t n = read(ends[0], ready, sizeof(ready)); // Blocks until its window is up, about a second.
+            close(ends[0]);
+            printf("# sink %d said %zd bytes\n", sink, n);
+            CGEventRef here = CGEventCreate(NULL);
+            struct SWMPointer at = {0};
+            CGPoint point = CGEventGetLocation(here);
+            CFRelease(here);
+            at.x = (int32_t)(point.x * 16);
+            at.y = (int32_t)(point.y * 16);
+            at.kind = SWM_DRAG;
+            post_pointer(s, &at);
+            usleep(300000);
+            at.kind = SWM_UP;
+            post_pointer(s, &at);
+        }
+    }
+    free(said);
+    end_drag_helper();
 }
 
 static void menu_press(struct Stream *s, const char *path, uint32_t length) {
@@ -595,9 +826,21 @@ static int drain_input(struct Stream *s) {
         }
         if (result == SWM_NEED_MORE)
             break;
-        if (m.type == SWM_POINTER)
-            post_pointer(s, &m.u.pointer);
-        else if (m.type == SWM_KEY)
+        if (m.type == SWM_POINTER) {
+            if (!drag_pointer(&m.u.pointer))
+                post_pointer(s, &m.u.pointer);
+        } else if (m.type == SWM_DRAG_CANCEL)
+            cancel_drag(s);
+        else if (m.type == SWM_DRAG_QUERY)
+            answer_drag_query(s);
+        else if (m.type == SWM_DRAG_SEND && m.u.data.length > 4) {
+            char path[PATH_MAX];
+            uint32_t size = m.u.data.length - 4 < sizeof(path) - 1 ? m.u.data.length - 4 : sizeof(path) - 1;
+            memcpy(path, m.u.data.bytes + 4, size);
+            path[size] = 0;
+            printf("# sending %s to the host for a drag\n", path);
+            send_file_back(s->fd, swm_r32(m.u.data.bytes), path);
+        } else if (m.type == SWM_KEY)
             post_key(s, &m.u.key);
         else if (m.type == SWM_MENU_PRESS)
             menu_press(s, (const char *)m.u.data.bytes, m.u.data.length);
@@ -1050,6 +1293,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
+    uint32_t surface_flushes;
     CGWindowID id;
     uint32_t seed, order;
     int alpha;
@@ -1350,7 +1594,16 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             break;
         if (send_menu_if_new(s))
             goto done;
-        int item_count = tree_table ? tree_items_from_hook(items, app, pid) : tree_items_from_list(items, app, pid);
+        // A hook for a build it doesn't know in full publishes no tree.
+        int item_count = tree_table && tree_table->tree_count ? tree_items_from_hook(items, app, pid)
+                                                              : tree_items_from_list(items, app, pid);
+        service_drag(s);
+        static int was_empty;
+        if ((item_count == 0) != was_empty) {
+            was_empty = !item_count;
+            printf("# %.1f %s windows: hook says %u, names %d\n", now(), item_count ? "has" : "no",
+                   tree_table ? tree_table->tree_count : 0, tree_name_count);
+        }
         static double session_checked;
         if (session_app && tick - session_checked > 1) {
             session_checked = tick;
@@ -1359,6 +1612,13 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                     session_app_pid = items[i].pid;
             if (send_saved_documents(s->fd))
                 goto done;
+            static double state_checked;
+            if (tick - state_checked > 2) {
+                state_checked = tick;
+                pid_t watched = session_test_badge_pid ? session_test_badge_pid : session_app_pid;
+                if (watched && !kill(watched, 0))
+                    send_app_state(s, watched);
+            }
             if (session_app_pid && kill(session_app_pid, 0) && errno == ESRCH) {
                 uint8_t gone[SWM_HEADER_SIZE + SWM_GONE_SIZE];
                 send_all(s->fd, gone, swm_put_u32_message(gone, sizeof(gone), SWM_APP_GONE, 0));
@@ -1399,12 +1659,17 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             if (entry) {
                 entry->id = id;
                 // A capture only for what the backing doesn't hold: the shadow when it changes, and GL or video always.
-                if (entry->present && !entry->accelerated && entry->width && !fresh && !sized && w->previous)
-                    // shortcut: nothing yet says when a surface changed, so a window with any is captured at 15 Hz.
-                    // That includes plain text views, which get a surface for their overlay scrollers; a hook on
-                    // surface flushes would end this.
+                if (entry->present && !entry->accelerated && entry->width && !fresh && !sized && w->previous) {
+                    // A window with surfaces gets a capture when one flushes, up to 15 Hz, and once a second for what
+                    // doesn't come by that request.
+                    uint32_t flushes = tree_table->surface_flushes[id % SWS_FLUSHES];
                     stale =
-                        (item->has_surfaces && tick - w->last_capture > 1.0 / 15) || item->shadow_key != w->shadow_key;
+                        (item->has_surfaces && ((flushes != w->surface_flushes && tick - w->last_capture > 1.0 / 15) ||
+                                                tick - w->last_capture > 1)) ||
+                        item->shadow_key != w->shadow_key;
+                    if (stale)
+                        w->surface_flushes = flushes;
+                }
             }
             s->window = id;
             s->pid = w->pid;
@@ -1805,6 +2070,11 @@ int main(int argc, char **argv) {
         if (flag(argc, argv, "--open") && !open_app(app))
             return 1;
         menu_tool = option(argc, argv, "--menu-tool", NULL);
+        session_menu_tool = menu_tool;
+        if (session_app && flag(argc, argv, "--test-badge") && !(session_test_badge_pid = fork())) {
+            execl(menu_tool, menu_tool, "badge-self", "--seconds", "60", (char *)NULL);
+            _exit(127);
+        }
         menu_app = app;
         if (menu_tool) {
             pthread_t thread;

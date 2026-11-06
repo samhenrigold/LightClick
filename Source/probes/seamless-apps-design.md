@@ -59,6 +59,14 @@ All images are composed by the viewer from each window's exact pixels, over gray
 
 Proxy quits now answer `.terminateCancel` and quit on the session's word. `.terminateLater` holds an app in a modal run loop, while the sheet it's waiting for needs input.
 
+**Then drags, gestures, badge and bounce,** in the same run, with the machine on the engine. All reported by `seamless-session-try`:
+
+- **Drag in:** the host file goes to the guest, a helper's shield takes the press, and a real guest drag ends in a real drop on TextEdit's text view (`drag_ended ... operation 1`), as `seamless-integration.md` planned.
+- **Drag out:** with a guest drag live, the session reads `NSDragPboard`, asks the proxy for a host drag, ends the guest's on a sink, and on a promise request copies the file back. It arrived byte for byte.
+- **Scroll:** a real `NSEvent` through the input view reached the guest as a gesture. **Badge and attention:** "7" and attention came from `_LSCopyApplicationInformationItem`, which AppKit's badge writes to; `lsappinfo` printed nothing here. The JSON the session writes decodes as the proxy's commands in a package test.
+
+But the host's half of both drags was stood in for, with nobody at the Mac and no pointer to move: these events came from the session as the proxy would report them, not from a real `NSDraggingSession`. The proxy's view for them is now an overlay that refuses mouse hits, which nothing has tested against a real drag. The badge test's source is a helper, not TextEdit. Pinch, rotate, swipe and force click have the same route as the scroll but can't be made without a trackpad.
+
 Not from a real Dock click: that needs someone at the Mac. The session itself is still `probes/seamless-viewer.m`, moved in, not rewritten. The composed views are made from window pixels with the display asleep, as above; **nobody has seen this on a display**, including whether the machine's window flashes before it's cleared, which it can for up to 0.25 s. AppKit calls the machine's windows ordered out, while WindowServer still lists them as on screen with the display asleep, at alpha 0, so they're cleared as well.
 
 ### Per-window composite: tried, and not worth having yet
@@ -83,7 +91,21 @@ So I put it in the tool, placing its image inside the frame by the shadow's side
 | Tool's CPU | 38 / 33% | 31 / 28% | 31 / 30% |
 | WindowServer's CPU | 84 / 82% | 44 / 40% | 56 / 57% |
 
-One run each on a Mac that had other clones on it, so small differences mean nothing, but the large gain isn't there, and Safari got worse. **So it's not adopted.** WindowServer is near a whole core with Safari animating, and that's the limit: compositing itself, in software, on TCG. A cheaper way to ask doesn't change that. What should: a guest GPU path (vmware-svga and PassthroughOpenGL, or PVG), or fewer pixels, as a 1x guest display is a quarter of the work. Neither was tried here.
+One run each on a Mac that had other clones on it, so small differences mean nothing, but the large gain isn't there, and Safari got worse. **So it's not adopted.** WindowServer is near a whole core with Safari animating, on TCG, and a cheaper way to ask doesn't change that. The next section's numbers do.
+
+### The engine and a 1x display change the picture
+
+One boot per column, each case 22 s, hook on, four vCPUs, the microphone off, by plain capture. `guest-bench --env LC_HVDBT=1` and `--plist` set them. All one run each, with other clones on this Mac.
+
+| Frames/s reaching the host (capture ms, WindowServer CPU %) | TCG, 2x | TCG, 1x | Engine, 2x | Engine, 1x |
+| --- | --- | --- | --- | --- |
+| Safari, animated page | 6.0 (104, 74) | 19.2 (36, 57) | 10.8 (43, 40) | **27.7 (14, 29)** |
+| TextEdit, overlay scrollers: its content barely changes | 1.9 (34, 39) | 1.9 (14, 21) | 1.9 (15, 14) | 1.9 (8, 9) |
+| Demo, a GL view in one of its windows | 26.5 (17, 57) | 37.4 (9, 43) | 37.7 (8, 22) | 39.0 (5, 17) |
+
+So Safari goes up 4.6 times with both, and past that WindowServer has room to spare. These machines already have PassthroughOpenGL, so calling this "software compositing" was wrong: its session log shows contexts on the host's GPU. What limited it on TCG was running the guest. A guest GPU path has less to win than this document assumed, and the question it leaves is whether 2x at 11 frames/s is good enough, or a session should choose 1x for animated windows, which looks soft on a Retina host. Nobody has looked at that on a display.
+
+**Surface flushes:** TextEdit's 13 captures a second bought 1.9 frames. The hook now sees a surface flush as a request arrives at WindowServer, by `msgh_id` in its `mach_msg` interposer, `0x7268` and inline `0x7267` on 13F34, and counts by window; there's no state left behind to read afterward. A window with surfaces gets a capture when one flushes, or once a second. In a session, TextEdit's windows came to 13 captures in about 200 s. A scrolling overlay scroller's look with this wasn't checked, and if its surface doesn't flush through these requests it updates once a second.
 
 What was wrong before these worked: `launchctl bsexec` only moves the bootstrap port, and prints "bsexec failed: Inappropriate ioctl for device" on 10.9. WindowServer finds a
 client's GUI session from its **audit session**, so a tool started by the guest agent stayed in the system's: the connection and display calls worked, but the window list and session
@@ -94,7 +116,7 @@ dictionary came back empty. `probes/seamless-session-join.h` now joins Finder's 
 - The composed images are made by the viewer from each host window's exact pixels, not read from the screen, because the host's display was asleep and `screencapture` failed. Nobody has yet
   looked at these as real windows on a display, with the real Dock, Mission Control or menu bar.
 - The hook delivers backing-store contents and the tree. Shadows, GL, text views with overlay scrollers and whole CA-backed windows such as Safari's still come from a capture, at about 4 frames/s for an animated Safari. See "Per-window composite" for why a composite in the server wasn't the answer.
-- The machine still has a window and a library window, cleared and ordered out; a session has no microphone, because opening it blocks QEMU on a TCC prompt nobody can see; and the app's `--guest-diagnostics-root` channel, a developer path, is what a session runs the guest through. A session is packaged by `scripts/seamless-package` after a build, not by `build-app`, and no menu in the app makes a proxy yet: `SeamlessMakeProxy` does. It's only been run with a binary built from this branch placed in a recent app, not a full `build-app` of the branch.
+- The machine still has a window and a library window, cleared and ordered out; a session has no microphone, since Core Audio can stop answering QEMU's open of it and hang the boot: `AudioQueueStart` returned `268451843`, which is `MACH_RCV_TIMED_OUT`, so `coreaudiod` not answering, and later a boot sat in `AudioQueueDispose` on the same device; and the app's `--guest-diagnostics-root` channel, a developer path, is what a session runs the guest through. A session is packaged by `scripts/seamless-package` after a build, not by `build-app`, and no menu in the app makes a proxy yet: `SeamlessMakeProxy` does. It's only been run with a binary built from this branch placed in a recent app, not a full `build-app` of the branch.
 - A document is copied into the guest and copied back when its modification date changes: plain files only, with the host's copy losing if both change. Second launches, reopening, Cancel at the prompt, a guest crash during a session and quitting before the guest is up weren't run. A lost session quits the proxy.
 - Only 10.9 has a hook. A hook already in a guest isn't replaced by a newer one.
 - Pixels go over TCP through slirp. Nothing is zero-copy yet.
@@ -375,9 +397,11 @@ Stable now: `probes/seamless-wire.h`. Numbers 32-47 are reserved for input, 48-6
 2. Done on Mavericks: the window tree from the hook, GL and Safari exercised, scroll, drag and resize, and a generated proxy with windows, Dock identity, menu and input.
 3. Done on Mavericks: a composite in the server, tried and not adopted; a proxy launching a machine with no window, opening a document, quitting with a save prompt and unregistering.
 4. Next, once someone can watch: **the whole thing on a display**, with a real Dock click.
-5. **A guest GPU path**, zero-copy for vmware-svga through PassthroughOpenGL, or a 1x guest display. Safari at 4 frames/s with WindowServer at 84% is the largest gap.
-6. **Mojave hook**, and the PVG transport.
-7. **Real integration and input** from the parallel work; snapshot and resume; multiple VMs; AX bridge; then the versions between, one at a time.
+5. **Mojave's hook**, from its row in the hook's table of builds.
+6. A menu in the app that makes a proxy, and the session in typed Swift.
+7. A guest GPU path or zero-copy transport, if a display shows that 11 frames/s at 2x isn't enough.
+8. The PVG transport.
+9. Snapshot and resume; multiple VMs; AX bridge; then the versions between, one at a time.
 
 ## Running with nobody at the guest
 

@@ -33,6 +33,8 @@ library.mkdir(parents=True)
 machine = library/f'Clone of {original_machine.name}'
 subprocess.run(['cp', '-c', '-R', str(original_machine), str(machine)], check=True)
 (machine/'State/PendingConfiguration.plist').unlink(missing_ok=True)
+# What the machine runs with counts as much as the session: scripts/seamless-try's numbers are on this.
+subprocess.run(['plutil', '-replace', 'ExecutionEngine', '-string', os.environ.get('SEAMLESS_ENGINE', 'on'), str(machine/'Machine.plist')], check=True)
 for key in ('SSHEnabled', 'FileSharingEnabled'):
     subprocess.run(['plutil', '-replace', key, '-bool', 'NO', str(machine/'Machine.plist')], check=True)
 print(f'WARNING: "{machine.stem}" is a throwaway clone, and preferences stay shared with the real app.', flush=True)
@@ -75,7 +77,11 @@ for old in results.glob('seamless-session-*.png'):
     old.unlink()
 
 check('no machine is running this clone before the proxy opens', not running(str(machine)))
-arguments = '\n'.join(['--test-session', '--png', str(results/'seamless-session-window'),
+dragged = work/'Dragged from the host.txt'
+dragged.write_text('Dragged in.\n')
+dragged_out = work/'dragged-out'
+dragged_out.mkdir()
+arguments = '\n'.join(['--test-session', '--test-drag', str(dragged), str(dragged_out), '--png', str(results/'seamless-session-window'),
                        '--screenshots', str(results/'seamless-session-screen')])
 subprocess.run(['/usr/bin/open', '--env', f'CFFIXED_USER_HOME={home}', '--env', f'LC_SEAMLESS_VIEWER_ARGS={arguments}', '-a', bundle, str(document)], check=True)
 print('# opened the proxy with a document; the guest boots now, which takes some minutes, more on a first session', flush=True)
@@ -112,6 +118,12 @@ check('the save prompt came up as its own window', '# test: at the prompt' in sa
 check('the guest app exited after that', '# the guest app has exited' in said)
 after = document.read_bytes()
 check('the saved document came back to the host', after != before, repr(after[:80]))
+check('a guest drop was taken', 'drag_ended' in said or 'drag helper is ready' in said, next((line for line in said.splitlines() if 'drag_' in line), ''))
+came_out = dragged_out/dragged.name
+check('a guest drag came out as a promised file', came_out.exists() and came_out.read_bytes() == dragged.read_bytes())
+check('the app\'s badge reached the proxy', '"badge":"7"' in said, next((line for line in said.splitlines() if 'app state {' in line), ''))
+check('its request for attention did too', '"attention":true' in said)
+check('a scroll came through the input view', ' 0 gesture' not in said and ' gesture' in said, next((line for line in said.splitlines() if line.startswith('input ')), ''))
 check('the proxy has quit', not running(f'{bundle}/Contents/MacOS/SeamlessProxy'))
 for _ in range(36):
     if not running(str(machine)):

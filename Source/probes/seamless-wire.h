@@ -38,6 +38,12 @@ enum SWMType {
     SWM_DOCUMENT = 50, // Either way, a piece of a file: see swm_put_document.
     SWM_QUIT_APP = 51, // Host to guest: ask the app to quit, which may ask to save. The value is unused.
     SWM_APP_GONE = 52, // Guest to host: the app has exited. The value is unused.
+    SWM_DRAG_CANCEL = 53, // Host to guest: a host drag left before dropping. The value is unused.
+    SWM_DRAG_QUERY =
+        54, // Host to guest: the pointer left with the button down. Is a guest drag live? The value is unused.
+    SWM_DRAG_STATE = 55, // Guest to host: the guest's drag pasteboard, as JSON.
+    SWM_DRAG_SEND = 56, // Host to guest: a document id, then a guest path: send that file back under that id.
+    SWM_APP_STATE = 57, // Guest to host: JSON with the app's badge, and whether it wants attention.
 };
 enum SWMPointerKind { SWM_MOVE = 0, SWM_DOWN = 1, SWM_UP = 2, SWM_DRAG = 3 };
 
@@ -242,17 +248,20 @@ static inline size_t swm_put_key(uint8_t *out, size_t capacity, const struct SWM
     swm_w32(p + 4, k->flags);
     return SWM_HEADER_SIZE + SWM_KEY_SIZE;
 }
-// A document's piece: its id, whether it's the last, the file's name and the bytes. A guest's receive buffer is small,
-// so a file goes as many of these, and the same message carries a saved file back.
+// // A document's piece: its id, whether it's the last, the file's name and the bytes. A guest's receive buffer is
+// small, so a file goes as many of these, and the same message carries a saved file back. Flags say what it's for:
+// without them the app opens the file, and with SWD_DRAG it's for a drag, which SWD_DRAG_START says to begin with the
+// files so far.
+enum SWMDocumentFlags { SWD_DRAG = 1, SWD_DRAG_START = 2 };
 #define SWM_DOCUMENT_FIXED 8u
 #define SWM_DOCUMENT_PIECE 32768u
-static inline size_t swm_put_document_prefix(uint8_t *out, uint32_t id, int last, const char *name,
+static inline size_t swm_put_document_prefix(uint8_t *out, uint32_t id, int last, uint8_t flags, const char *name,
                                              uint16_t name_length, uint32_t piece) {
     swm_header(out, SWM_DOCUMENT, SWM_DOCUMENT_FIXED + name_length + piece);
     uint8_t *p = out + SWM_HEADER_SIZE;
     swm_w32(p, id);
     p[4] = last != 0;
-    p[5] = 0;
+    p[5] = flags;
     swm_w16(p + 6, name_length);
     memcpy(p + SWM_DOCUMENT_FIXED, name, name_length);
     return SWM_HEADER_SIZE + SWM_DOCUMENT_FIXED + name_length;
@@ -321,7 +330,8 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
         return SWM_NEED_MORE;
     uint16_t type = swm_r16(data + 4);
     uint32_t length = swm_r32(data + 8);
-    if (type == SWM_MENU || type == SWM_MENU_PRESS || type == SWM_DOCUMENT) {
+    if (type == SWM_MENU || type == SWM_MENU_PRESS || type == SWM_DOCUMENT || type == SWM_DRAG_STATE ||
+        type == SWM_DRAG_SEND || type == SWM_APP_STATE) {
         if (swm_r16(data + 6) || !length || length > SWM_MAX_MENU)
             return SWM_BAD;
         *used = SWM_HEADER_SIZE + (size_t)length;
@@ -346,6 +356,8 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
         case SWM_GONE:
         case SWM_QUIT_APP:
         case SWM_APP_GONE:
+        case SWM_DRAG_CANCEL:
+        case SWM_DRAG_QUERY:
             fixed = SWM_GONE_SIZE;
             break;
         case SWM_POINTER:
