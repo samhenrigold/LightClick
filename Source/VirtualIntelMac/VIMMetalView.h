@@ -67,5 +67,7 @@ NS_ASSUME_NONNULL_BEGIN
                  width:(NSUInteger)width
                 height:(NSUInteger)height
             completion:(void (^)(BOOL presented))completion;
+/// A click in the display's middle, for measuring, leaving the host's pointer and focus alone. Returns when it was sent.
+- (NSTimeInterval)testClick;
 @end
 NS_ASSUME_NONNULL_END

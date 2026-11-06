@@ -358,23 +358,40 @@ def placement():
 
 
 def windowed(seconds):
-    # The bar: frames the same page gets through windowed mode's own path, counted where they reach the app.
+    # The bar: the same page and clicks as the seamless side of scripts/seamless-compare, through windowed mode's own path.
     guest = stage(guest_tool)
-    print(run(guest, ['open-app', '--app', 'Safari'])[0], flush=True)
+    page = (source/'probes/seamless-compare-page.html').read_text()
+    print(request({'Executable': '/bin/sh', 'Arguments': ['-c', 'printf %s "$1" > /tmp/seamless-page.html; open -a Safari /tmp/seamless-page.html', 'sh', page]}, 120).get('ExitCode'), flush=True)
     time.sleep(15)
+    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+    app_pid = next((row.split()[0] for row in listing.splitlines() if f'Build/bench/{tag}/' in row and 'Contents/MacOS/Light Click' in row), '0')
+    windows = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
+    window = next((re.search(r'id=(\d+)', row).group(1) for row in windows.splitlines() if f'pid={app_pid} ' in row and 'title="Clone of' in row), None)
+    meter = str(results/'seamless-present-meter')
+    if window:
+        clicks = results/f'{tag}-clicks.txt'
+        for _ in range(2):
+            request({'Action': 'test-click'}, 60)
+            time.sleep(1)
+        clicks.write_text('')
+        timing = subprocess.Popen([meter, window, '16', '--clicks', str(clicks)], stdout=subprocess.PIPE, text=True)
+        for _ in range(15):
+            at = request({'Action': 'test-click'}, 60).get('At')
+            with clicks.open('a') as file:
+                file.write(f'{at}\n')
+            time.sleep(1)
+        print('windowed_' + timing.communicate()[0].strip().replace('\n', '\nwindowed_'), flush=True)
+        time.sleep(7)
+    # And over the frames, what its window really shows, by that one window's ID.
+    presenting = subprocess.Popen([meter, window, str(seconds)], stdout=subprocess.PIPE, text=True) if window else None
     first = request({'Action': 'display-frames'}, 60)
     started = time.time()
     time.sleep(seconds)
     last = request({'Action': 'display-frames'}, 60)
     spent = time.time() - started
     print(f'windowed_frames {(last.get("Arrived", 0) - first.get("Arrived", 0)) / spent:.1f} /s', flush=True)
-    # And what its window really shows, by that one window's ID.
-    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
-    app_pid = next((row.split()[0] for row in listing.splitlines() if f'Build/bench/{tag}/' in row and 'Contents/MacOS/Light Click' in row), '0')
-    windows = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
-    window = next((re.search(r'id=(\d+)', row).group(1) for row in windows.splitlines() if f'pid={app_pid} ' in row and 'title="Clone of' in row), None)
-    if window:
-        print('windowed_' + subprocess.run([str(results/'seamless-present-meter'), window, str(seconds)], capture_output=True, text=True).stdout.strip(), flush=True)
+    if presenting:
+        print('windowed_' + presenting.communicate()[0].strip(), flush=True)
     print(f'windowed_distinct {(last.get("Distinct", 0) - first.get("Distinct", 0)) / spent:.1f} /s', flush=True)
 
 

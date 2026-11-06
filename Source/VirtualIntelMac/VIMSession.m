@@ -1990,6 +1990,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         finish(@{@"Arrived" : @(self.displayView.arrivedFrames), @"Distinct" : @(self.displayView.differentFrames)});
         return;
     }
+    if ([command[@"Action"] isEqual:@"test-click"]) {
+        finish(@{@"At" : @(self.displayView.testClick)});
+        return;
+    }
     if ([command[@"Action"] isEqual:@"display-request"]) {
         if (!self.task.running) {
             finish(@{@"Error" : @"Start the virtual Mac before asking for a display size."});

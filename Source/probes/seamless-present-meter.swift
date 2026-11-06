@@ -1,26 +1,30 @@
 // What a window really has on the display: reads that one window from WindowServer as fast as it can, by its ID, never the screen,
 // and counts how many reads differ. It can only see as many frames as it gets reads, so it prints both.
 //
-//     seamless-present-meter WINDOW_ID SECONDS [--times]
+//     seamless-present-meter WINDOW_ID SECONDS [--clicks FILE]
+//
+// With --clicks, FILE holds the time of each input, one a line, and it also prints how long each took to change the window.
 import AppKit
 
 let arguments = CommandLine.arguments
 guard arguments.count >= 3, let id = CGWindowID(arguments[1]), let seconds = Double(arguments[2]) else {
-    print("usage: seamless-present-meter WINDOW_ID SECONDS [--times]")
+    print("usage: seamless-present-meter WINDOW_ID SECONDS [--clicks FILE]")
     exit(64)
 }
 _ = NSApplication.shared  // For the window server connection.
-// Swift's SDK has hidden it in favour of ScreenCaptureKit, which delivered nothing for a window here.
-typealias Read = @convention(c) (CGRect, UInt32, CGWindowID, UInt32) -> Unmanaged<CGImage>?
-let read = unsafeBitCast(dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage"), to: Read.self)
+// CGWindowListCreateImage manages one read a second on this macOS, and ScreenCaptureKit delivered nothing for a window.
+typealias Read = @convention(c) (Int32, UnsafePointer<UInt32>, Int32, UInt32) -> Unmanaged<CFArray>?
+let skyLight = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW)
+let connection = unsafeBitCast(dlsym(skyLight, "SLSMainConnectionID"), to: (@convention(c) () -> Int32).self)()
+let read = unsafeBitCast(dlsym(skyLight, "SLSHWCaptureWindowList"), to: Read.self)
+var window = id
 var reads = 0, distinct = 0
 var last: UInt64 = 0
 var times: [Double] = []
 let started = Date()
 while Date().timeIntervalSince(started) < seconds {
     guard
-        let image = read(CGRect.null, CGWindowListOption.optionIncludingWindow.rawValue, id,
-            CGWindowImageOption([.boundsIgnoreFraming, .nominalResolution]).rawValue)?.takeRetainedValue(),
+        let images = read(connection, &window, 1, 1 | 1 << 11)?.takeRetainedValue() as? [CGImage], let image = images.first,
         let data = image.dataProvider?.data, let base = CFDataGetBytePtr(data)
     else { continue }
     reads += 1
@@ -37,6 +41,12 @@ while Date().timeIntervalSince(started) < seconds {
 }
 let spent = Date().timeIntervalSince(started)
 print(String(format: "presented %.1f distinct/s, from %.1f reads/s, over %.0f s", Double(distinct) / spent, Double(reads) / spent, spent))
-if arguments.contains("--times") {
-    print("times " + times.map { String(format: "%.4f", $0) }.joined(separator: " "))
+if let flag = arguments.firstIndex(of: "--clicks"), let text = try? String(contentsOfFile: arguments[flag + 1], encoding: .utf8) {
+    let clicks = text.split(separator: "\n").compactMap { Double($0) }
+    let delays = clicks.compactMap { click in times.first { $0 > click }.map { ($0 - click) * 1000 } }.filter { $0 < 900 }.sorted()
+    if let worst = delays.last {
+        print(String(format: "input to window change: median %.0f ms, worst %.0f ms, %d of %d", delays[delays.count / 2], worst, delays.count, clicks.count))
+    } else {
+        print("input to window change: none of \(clicks.count) inputs changed it")
+    }
 }

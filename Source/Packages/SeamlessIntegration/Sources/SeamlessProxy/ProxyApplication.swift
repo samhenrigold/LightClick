@@ -19,6 +19,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     private var socketPath: String { info[ProxyBundle.sessionSocketKey] as? String ?? "" }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        armTestClicks()
         NSApp.mainMenu = NSMenu()
         // The Dock draws an icon from a bundle inside a system tile on current macOS. Set at run time it doesn't.
         if let icon = Bundle.main.url(forResource: "GuestApp", withExtension: "icns").flatMap(NSImage.init(contentsOf:))
@@ -210,6 +211,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     }
 
     private var surfaces: [Int: Surface] = [:]
+    private var clickSignal: DispatchSourceSignal?
 
     private func showSurface(
         id: Int, contextID: UInt32, frame: NSRect, margin: Double, level: Int, alpha: Double, order: Int, title: String,
@@ -244,9 +246,26 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         if isFirstSurface && ProcessInfo.processInfo.environment["LC_SEAMLESS_QUIET"] == nil { NSApp.activate() }
     }
 
+    /// Each SIGUSR1 is one click, noted in LC_SEAMLESS_CLICK_LOG, for measuring input to the window changing.
+    private func armTestClicks() {
+        guard let path = ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] else { return }
+        signal(SIGUSR1, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let file = fopen(path, "a") else { return }
+                fputs("\(Date().timeIntervalSince1970)\n", file)
+                fclose(file)
+                self.testClick()
+            }
+        }
+        source.resume()
+        clickSignal = source
+    }
+
     /// Real NSEvents through the real input view, from the window's middle. It doesn't exercise WindowServer's delivery,
     /// but it needs no permission and doesn't touch the host's pointer.
-    private func testInput() {
+    private func testClick() {
         guard let surface = surfaces.values.min(by: { $0.order < $1.order }) else { return }
         let window = surface.window
         let place = NSPoint(x: window.frame.width / 2, y: window.frame.height / 2)
@@ -262,6 +281,12 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                 surface.input.mouseUp(with: event)
             }
         }
+    }
+
+    private func testInput() {
+        guard let surface = surfaces.values.min(by: { $0.order < $1.order }) else { return }
+        let window = surface.window
+        testClick()
         // A real scroll event through the trackpad's path. The other gestures can't be made without a trackpad.
         if let scroll = CGEvent(
             scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -40, wheel2: 0, wheel3: 0),

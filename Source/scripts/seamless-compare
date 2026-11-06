@@ -3,7 +3,8 @@
 
     scripts/seamless-compare <app built by build-app> <machine.vintelmac>
 
-Fails unless seamless delivers at least 90% of windowed's frames per second, counted where each path's frames reach the app.
+Fails unless seamless's window changes at least 90% as often as windowed's, read from WindowServer by each window's ID, with
+the same click-to-change times printed beside it. It's WindowServer's copy, not photons, in both.
 The proxy's window is saved with screencapture -l, by window, so whether what's on the display is right can be checked.
 """
 import os
@@ -11,16 +12,19 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
 
 source = Path(__file__).resolve().parents[1]
+PAGE = (source/'probes/seamless-compare-page.html').read_text()
 os.environ['VIM_COUNT_DISTINCT_FRAMES'] = '1'
 original_app, original_machine = Path(sys.argv[1]), Path(sys.argv[2])
 results = source/'Build/seamless'
 results.mkdir(parents=True, exist_ok=True)
 tag = original_machine.stem.split()[0].lower()
+clicks = results/f'seamless-compare-{tag}-clicks.txt'
 
 windowed = subprocess.run([str(source/'scripts/guest-bench'), str(original_app), str(original_machine), f'seamless-compare-{tag}', '--driver',
                            str(source/'probes/seamless-driver.py'), '--driver-arg', 'windowed', '--env', 'LC_HVDBT=1'],
@@ -28,6 +32,8 @@ windowed = subprocess.run([str(source/'scripts/guest-bench'), str(original_app),
 print(windowed.stdout[-800:], windowed.stderr[-300:], flush=True)
 match = re.search(r'windowed_distinct ([0-9.]+)', windowed.stdout)
 windowed_rate = float(match.group(1)) if match else 0
+match = re.search(r'windowed_presented ([0-9.]+)', windowed.stdout)
+windowed_presented = float(match.group(1)) if match else 0
 shutil.rmtree(source/f'Build/bench/seamless-compare-{tag}', ignore_errors=True)
 
 work = source/'Build/bench/seamless-compare-session'
@@ -60,34 +66,49 @@ def session(label, extra):
     log.unlink(missing_ok=True)
     (results/f'seamless-compare-{tag}-{label}.png').unlink(missing_ok=True)
     page = work/f'{label}.html'
-    page.write_text('<title>Seamless page</title><style>@-webkit-keyframes m{to{-webkit-transform:translate3d(400px,0,0)}}'
-                    'div{width:80px;height:80px;background:#28c;-webkit-animation:m 2s infinite alternate}</style>'
-                    '<h1>A page in a guest browser</h1><div></div><p>Some text.</p>\n')
-    subprocess.run(['/usr/bin/open', '-g', '--env', f'CFFIXED_USER_HOME={home}', '--env', 'LC_SEAMLESS_QUIET=1', '--env', 'VIM_COUNT_DISTINCT_FRAMES=1', '--env', 'LC_SEAMLESS_STOP_AFTER=45',
+    page.write_text(PAGE)
+    subprocess.run(['/usr/bin/open', '-g', '--env', f'CFFIXED_USER_HOME={home}', '--env', 'LC_SEAMLESS_QUIET=1', '--env', 'VIM_COUNT_DISTINCT_FRAMES=1', '--env', 'LC_SEAMLESS_STOP_AFTER=60', '--env', f'LC_SEAMLESS_CLICK_LOG={clicks}',
                     *[item for pair in extra for item in ('--env', pair)], '-a', bundle, str(page)], check=True)
     deadline = time.time()+900
-    metered = False
+    metered = clicked = False
     seen = {}
 
     def first_seen(text):
         return seen.setdefault('at', time.time())
+
+    def window_rows():
+        proxies = running(f'{bundle}/Contents/MacOS/SeamlessProxy')
+        if not proxies:
+            return []
+        listing = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
+        return [line for line in listing.splitlines() if f'pid={proxies[0].split()[0]} ' in line and ' 0x0' not in line]
 
     said = ''
     while time.time() < deadline:
         said = log.read_text(errors='replace') if log.exists() else ''
         if 'guest\'s side ended' in said:
             break
-        # The same meter as windowed's, on this one window, over the session's own measuring time.
-        if '# first window' in said and not metered and time.time() - first_seen(said) > 18:
-            proxies = running(f'{bundle}/Contents/MacOS/SeamlessProxy')
-            pid = proxies[0].split()[0] if proxies else '0'
-            listing = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
-            rows = [line for line in listing.splitlines() if f'pid={pid} ' in line and ' 0x0' not in line]
-            if rows:
-                metered = True
-                presented = subprocess.run([str(results/'seamless-present-meter'), re.search(r'id=(\d+)', rows[0]).group(1), '22'],
-                                           capture_output=True, text=True).stdout.strip()
-                print(f'seamless_{presented}', flush=True)
+        # The same meter as windowed's, on this one window, clicks first and then over the session's own measuring time.
+        rows = window_rows()
+        if '# first window' in said and rows and not clicked and time.time() - first_seen(said) > 12:
+            clicked = True
+            window, pid = re.search(r'id=(\d+)', rows[0]).group(1), int(running(f'{bundle}/Contents/MacOS/SeamlessProxy')[0].split()[0])
+            for _ in range(2):
+                os.kill(pid, signal.SIGUSR1)
+                time.sleep(1)
+            clicks.write_text('')
+            meter = subprocess.Popen([str(results/'seamless-present-meter'), window, '16', '--clicks', str(clicks)], stdout=subprocess.PIPE, text=True)
+            for _ in range(15):
+                os.kill(pid, signal.SIGUSR1)
+                time.sleep(1)
+            print('seamless_'+meter.communicate()[0].strip().replace('\n', '\nseamless_'), flush=True)
+            continue
+        if clicked and not metered and rows and time.time() - first_seen(said) > 39:
+            metered = True
+            presented = subprocess.run([str(results/'seamless-present-meter'), re.search(r'id=(\d+)', rows[0]).group(1), '18'],
+                                       capture_output=True, text=True).stdout.strip()
+            print(f'seamless_{presented}', flush=True)
+            seen['presented'] = presented
         # While it's showing: this app's windows only, never the whole screen.
         proxies = running(f'{bundle}/Contents/MacOS/SeamlessProxy')
         if proxies and 'running Safari' in said and not (results/f'seamless-compare-{tag}-{label}.png').exists():
@@ -105,14 +126,16 @@ def session(label, extra):
     for row in running(str(machine))+running(f'{bundle}/'):
         os.kill(int(row.split()[0]), 9)
     rate = re.search(r'# frames: [0-9.]+/s, ([0-9.]+) distinct', said)
-    return float(rate.group(1)) if rate else 0, said
+    found = re.search(r'presented ([0-9.]+)', seen.get('presented', ''))
+    return float(rate.group(1)) if rate else 0, float(found.group(1)) if found else 0
 
 
-frames_rate, said = session('frames', [])
-print(f'distinct frames/s: windowed {windowed_rate:.1f}; seamless, cropping those frames, {frames_rate:.1f}', flush=True)
+frames_rate, presented_rate = session('frames', [])
+print(f'distinct frames/s at the app: windowed {windowed_rate:.1f}; seamless {frames_rate:.1f}', flush=True)
+print(f'distinct frames/s in WindowServer\'s copy of the window: windowed {windowed_presented:.1f}; seamless {presented_rate:.1f}', flush=True)
 subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', bundle])
 shutil.rmtree(work, ignore_errors=True)
-if frames_rate < windowed_rate * 0.9 or windowed_rate <= 0:
+if presented_rate < windowed_presented * 0.9 or windowed_presented <= 0:
     print('FAIL: seamless doesn\'t match windowed')
     sys.exit(1)
 print('PASS: seamless matches windowed')

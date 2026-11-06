@@ -785,6 +785,16 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
     if (self.inputHandler)
         self.inputHandler(events);
 }
+- (NSTimeInterval)testClick {
+    NSTimeInterval at = NSDate.date.timeIntervalSince1970;
+    [self emit:@[
+        @{@"type" : @"abs", @"data" : @{@"axis" : @"x", @"value" : @16384}},
+        @{@"type" : @"abs", @"data" : @{@"axis" : @"y", @"value" : @16384}},
+        @{@"type" : @"btn", @"data" : @{@"button" : @"left", @"down" : @YES}}
+    ]];
+    [self emit:@[ @{@"type" : @"btn", @"data" : @{@"button" : @"left", @"down" : @NO}} ]];
+    return at;
+}
 - (void)sendKey:(NSString *)key down:(BOOL)down {
     if ([self.pressedKeys containsObject:key] == down)
         return;
