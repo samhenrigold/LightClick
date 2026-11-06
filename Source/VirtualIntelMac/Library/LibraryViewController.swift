@@ -9,6 +9,37 @@ private let registeredPackagesKey = "VIMRegisteredPackages"
 private struct LibraryScan: Sendable {
     var machines: [VIMMachine]
     var catalog: [String: LibraryRecord]
+    var libraryUnavailable: Bool
+    var unavailableCount: Int
+}
+
+/// A strip under the toolbar for news about the library. As a titlebar accessory, it leaves the rows' sizing alone.
+@MainActor
+private final class LibraryNoticeBar: NSTitlebarAccessoryViewController {
+    private let label = NSTextField(labelWithString: "")
+
+    override func loadView() {
+        let bar = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 28))
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = .secondaryLabelColor
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: bar.trailingAnchor, constant: -16),
+            label.centerYAnchor.constraint(equalTo: bar.centerYAnchor)
+        ])
+        view = bar
+        layoutAttribute = .bottom
+    }
+
+    func show(_ text: String?) {
+        loadViewIfNeeded()
+        label.stringValue = text ?? ""
+        label.toolTip = text
+        isHidden = text == nil
+    }
 }
 
 /// The library window: its table of Macs, and the catalog and order kept for each library in preferences.
@@ -27,6 +58,8 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private var wantsLibraryWindow = false
     private var libraryRequestedExplicitly = false
     private var automaticContentSize = NSSize.zero
+    private let noticeBar = LibraryNoticeBar()
+    private var libraryUnavailable = false
 
     private var defaults: UserDefaults { .standard }
     private var libraryPath: String { LibraryLocationBridge.currentURL.path }
@@ -48,6 +81,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 540, height: 378))
         wantsLibraryWindow = true
+        noticeBar.show(nil)
         compact = defaults.bool(forKey: "VIMCompactLibrary")
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.verticalScrollElasticity = .none
@@ -111,6 +145,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         window.toolbar = toolbar
         window.toolbarStyle = .unified
         window.tabbingMode = .disallowed
+        window.addTitlebarAccessoryViewController(noticeBar)
         sizeLibraryWindow()
         updateLibraryVisibility()
     }
@@ -342,6 +377,10 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             // Known rows stay while an external library is disconnected.
             libraryLoaded = true
             machines = scan.machines
+            libraryUnavailable = scan.libraryUnavailable
+            noticeBar.show(
+                LibraryNotice.text(
+                    libraryUnavailable: scan.libraryUnavailable, unavailableCount: scan.unavailableCount))
             defaults.set(scan.catalog.mapValues(\.foundationObject), forKey: key)
             applyFilter()
         }
@@ -351,9 +390,19 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         library: URL, known: [String: LibraryRecord], registered: [String], savedOrder: [String]
     ) -> LibraryScan {
         let files = FileManager.default
-        let found =
-            (try? files.contentsOfDirectory(
-                at: library, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? []
+        var found: [URL] = []
+        var libraryUnavailable = false
+        do {
+            found = try files.contentsOfDirectory(
+                at: library, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)
+        } catch {
+            let libraryRoot = library.deletingLastPathComponent()
+            libraryUnavailable = LibraryNotice.libraryIsUnavailable(
+                readFailed: true, machinesFolderMissing: (error as NSError).code == NSFileReadNoSuchFileError,
+                rootExists: files.fileExists(atPath: libraryRoot.path),
+                isStandardLibrary: libraryRoot.standardizedFileURL
+                    == LibraryLocationBridge.defaultURL.standardizedFileURL)
+        }
         let inFolder = found.filter(LibraryCatalog.isPackage).map { $0.resolvingSymlinksInPath().path }
         var loaded: [VIMMachine] = []
         var packages: [LibraryPackage] = []
@@ -383,7 +432,9 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             UnavailableMac(url: URL(fileURLWithPath: $0.path), name: $0.name, guest: $0.guest) as VIMMachine
         }
         let machines = LibraryOrder.sorted(loaded + rows, savedOrder: savedOrder, path: \.url.path, name: \.name)
-        return LibraryScan(machines: machines, catalog: result.catalog)
+        return LibraryScan(
+            machines: machines, catalog: result.catalog, libraryUnavailable: libraryUnavailable,
+            unavailableCount: rows.count)
     }
 
     private func arrangementValue(of machine: VIMMachine, _ chosen: LibraryArrangement) -> LibraryArrangement.Value {
@@ -428,7 +479,8 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
     private func updateLibraryVisibility() {
         guard libraryLoaded, let window else { return }
-        guard !machines.isEmpty else {
+        // With no library to create a Mac in, the window stays to say why.
+        guard !machines.isEmpty || libraryUnavailable else {
             window.orderOut(nil)
             if !presentedEmptyCreation {
                 presentedEmptyCreation = true
@@ -557,8 +609,8 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         let thumbnail = NSView()
         thumbnail.wantsLayer = true
         thumbnail.layer?.masksToBounds = true
-        let wallpaper = NSImage(named: machine.guest + "Wallpaper") ?? NSImage(named: "tigerWallpaper")
-        // A disconnected or registered package may have no saved OS type, and its recovery row must stay usable.
+        let wallpaper = NSImage(
+            named: LibraryRowText.wallpaperName(guest: machine.guest) { NSImage(named: $0) != nil })
         let image = NSImageView()
         image.image = wallpaper
         image.imageScaling = .scaleProportionallyUpOrDown

@@ -129,6 +129,38 @@ import Testing
                 preMetalGuest: false, installState: "installing", requiresInstallerDisplay: false))
     }
 
+    @Test func aRowWithNoArtworkShowsTiger() {
+        let assets: Set<String> = ["lionWallpaper", "tigerWallpaper"]
+        #expect(LibraryRowText.wallpaperName(guest: "lion", isAvailable: assets.contains) == "lionWallpaper")
+        #expect(LibraryRowText.wallpaperName(guest: "", isAvailable: assets.contains) == "tigerWallpaper")
+        #expect(LibraryRowText.wallpaperName(guest: "unknown", isAvailable: assets.contains) == "tigerWallpaper")
+    }
+
+    @Test func aMissingMachinesFolderIsOnlyEmptyWhereTheLibraryIsThere() {
+        func unavailable(failed: Bool = true, missing: Bool = true, root: Bool, standard: Bool = false) -> Bool {
+            LibraryNotice.libraryIsUnavailable(
+                readFailed: failed, machinesFolderMissing: missing, rootExists: root, isStandardLibrary: standard)
+        }
+        #expect(!unavailable(failed: false, missing: false, root: true))
+        #expect(!unavailable(root: true), "A connected library with nothing in it yet.")
+        #expect(!unavailable(root: false, standard: true), "A first launch.")
+        #expect(unavailable(root: false), "A disconnected drive.")
+        #expect(unavailable(missing: false, root: true), "A folder there's no permission to read.")
+        #expect(unavailable(missing: false, root: true, standard: true))
+    }
+
+    @Test func theNoticeSaysTheMostImportantThing() {
+        #expect(LibraryNotice.text(libraryUnavailable: false, unavailableCount: 0) == nil)
+        #expect(
+            LibraryNotice.text(libraryUnavailable: false, unavailableCount: 1)?.hasPrefix("1 Mac package needs") == true
+        )
+        #expect(
+            LibraryNotice.text(libraryUnavailable: false, unavailableCount: 3)?.hasPrefix("3 Mac packages need") == true
+        )
+        #expect(
+            LibraryNotice.text(libraryUnavailable: true, unavailableCount: 3)?.hasPrefix("Library unavailable") == true)
+    }
+
     @Test func aRowsActionGoesByWhatItsMacCanDo() {
         #expect(LibraryRowText.action(unavailable: true, running: true, continuingSetup: true) == "Locate")
         #expect(LibraryRowText.action(unavailable: false, running: true, continuingSetup: true) == "Show")

@@ -158,8 +158,37 @@ public enum LibraryArrangement: Sendable, Equatable {
     }
 }
 
+/// What the library window says about the library as a whole.
+public enum LibraryNotice {
+    /// Whether the library's folder can't be read. A Machines folder that just hasn't been made yet is an empty library,
+    /// in the standard location or beneath a selected root that's there. A selected root that's gone is a disconnected
+    /// drive.
+    public static func libraryIsUnavailable(
+        readFailed: Bool, machinesFolderMissing: Bool, rootExists: Bool, isStandardLibrary: Bool
+    ) -> Bool {
+        readFailed && !(machinesFolderMissing && (rootExists || isStandardLibrary))
+    }
+
+    /// Nil when there's nothing to say. A disconnected library explains its unavailable rows, so it comes first.
+    public static func text(libraryUnavailable: Bool, unavailableCount: Int) -> String? {
+        if libraryUnavailable { return "Library unavailable. Connect its drive, or choose a library in Settings." }
+        switch unavailableCount {
+        case 0: return nil
+        case 1: return "1 Mac package needs attention. Check its files in Finder."
+        default: return "\(unavailableCount) Mac packages need attention. Check their files in Finder."
+        }
+    }
+}
+
 /// What a row says about its Mac.
 public enum LibraryRowText {
+    /// The asset to show for `guest`. A disconnected or registered package may have no saved or known OS type, and its
+    /// recovery row still needs a picture.
+    public static func wallpaperName(guest: String, isAvailable: (String) -> Bool) -> String {
+        let name = guest + "Wallpaper"
+        return isAvailable(name) ? name : "tigerWallpaper"
+    }
+
     /// "4 CPU · 8 GB RAM · 64 GB". `locale` is the user's, outside tests.
     public static func resources(cpuCount: Any?, memoryMiB: Double, diskBytes: UInt64, locale: Locale = .current)
         -> String
