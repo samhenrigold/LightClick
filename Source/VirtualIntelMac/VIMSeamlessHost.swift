@@ -163,6 +163,10 @@ final class SeamlessHost: NSObject {
 
     private static func make(appNamed name: String, machinePath: String) async -> String? {
         let guest = AgentGuest(machinePath: machinePath)
+        // From the command line the machine has only just started, and its agent answers with an error until it's up.
+        for _ in 0..<180 where await guest.run("/usr/bin/uname", ["-r"]).exitCode != 0 {
+            try? await Task.sleep(for: .seconds(5))
+        }
         guard let app = await installedApps(guest)?.first(where: { $0.name == name }) else { return nil }
         return await make(app, guest: guest, machinePath: machinePath)
     }
