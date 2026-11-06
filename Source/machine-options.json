@@ -119,6 +119,9 @@
     {"name": "VIM_PVG_POSTED_MMIO", "type": "flag", "reader": "qemu", "default": "off", "meaning": "Post allow-listed MMIO writes to PVG without waiting."},
     {"name": "VIM_PVG_SCATTER", "type": "flag", "reader": "qemu", "default": "on", "meaning": "Scatter shadow downloads through RAM windows."},
     {"name": "VIM_PVG_SLAB", "type": "flag", "reader": "qemu", "default": "on", "meaning": "Keep shadow baselines in a slab."},
-    {"name": "VIM_PVG_TIMING", "type": "flag", "reader": "qemu", "default": "off", "meaning": "Print PVG timing lines, at most every 5 s per metric."}
+    {"name": "VIM_PVG_TIMING", "type": "flag", "reader": "qemu", "default": "off", "meaning": "Print PVG timing lines, at most every 5 s per metric."},
+    {"name": "VIM_SEAMLESS_PVG_DIR", "type": "path", "reader": "qemu", "default": "unset", "meaning": "Research, for seamless: directory of the per-window PVG surface files, including nodisplay."},
+    {"name": "VIM_SEAMLESS_PVG_SERVICE", "type": "string", "reader": "qemu", "default": "unset", "meaning": "Research, for seamless: Mach service that receives per-window PVG surfaces."},
+    {"name": "VIM_SEAMLESS_PVG_SKIP", "type": "string", "reader": "qemu", "default": "unset", "meaning": "Research, for seamless: WxH of a surface the sender leaves out."}
   ]
 }
