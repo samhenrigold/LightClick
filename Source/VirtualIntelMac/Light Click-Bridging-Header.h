@@ -12,6 +12,7 @@
 #import "VIMMachine.h"
 #import "VIMMetalView.h"
 #import "VIMNetworkDefaults.h"
+#import "VIMPlayButton.h"
 #import "VIMSMBService.h"
 #import "VIMSessionPrivate.h"
 #import "VIMSettingsIcon.h"

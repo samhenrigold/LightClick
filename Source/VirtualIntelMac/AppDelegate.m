@@ -1,7 +1,6 @@
 #import "AppDelegate.h"
 #import "VIMUpdateChecker.h"
 #import "VIMLibraryLocation.h"
-#import "VIMLibraryViewController.h"
 #import "VIMSession.h"
 #import "VIMMachine.h"
 #import "VIMInstallerWindow.h"

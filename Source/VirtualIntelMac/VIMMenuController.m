@@ -1,6 +1,5 @@
 #import "VIMMenuController.h"
 #import "Light_Click-Swift.h"
-#import "VIMLibraryViewController.h"
 #import "VIMMachine.h"
 #import "VIMSession.h"
 #import "AppDelegate.h"
