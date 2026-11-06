@@ -681,7 +681,7 @@ static View *view_find_locked(u64 cr3_key, u32 cpl) {
 
 // A pinned view can't go away, so a CPL change in the same address space touches nothing shared: syscalls and iret stay off the lock.
 static View *view_find(u64 cr3_key, u32 cpl) {
-    u32 *pin = &me->pin[cpl == 3];
+    u32 *pin = &me->pin[(cpl & 3) == 3]; // cpl here has 4 added in compatibility mode
     if (*pin) {
         View *p = &views[*pin - 1];
         if (p->cr3 == cr3_key && p->cpl == cpl)

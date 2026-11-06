@@ -503,7 +503,7 @@ public final class Engine {
             let site = c.pointee.req_a.2
             let kind = Int32(c.pointee.req_a.3)
             let coldBefore = tally != nil ? tr_stats().blocks : 0
-            let result = tr_translate(view, c.pointee.req_a.5, Int32(c.pointee.cpl), rip, c.pointee.req_a.4 != 0)
+            let result = tr_translate(view, c.pointee.req_a.5, Int32(c.pointee.cpl), c.pointee.compat != 0, rip, c.pointee.req_a.4 != 0)
             if let tally, c.pointee.cpl == 3, tr_stats().blocks != coldBefore { tally.coldUserBlock(rip: rip, cr3: c.pointee.req_a.5) }
             if result.fetch_fault_va != 0 {
                 c.pointee.req_r.1 = result.fetch_fault_va + 1
