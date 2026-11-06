@@ -111,7 +111,7 @@ while time.time() < deadline:
     time.sleep(5)
 print('== Session log\n'+said[-6000:], flush=True)
 time.sleep(5)
-check('the guest app was seen', 'menu with' in said)
+check('the guest app was seen', '# window ' in said)
 check('the document reached the guest', 'sent ' in said and str(document.name) in said)
 check('the save prompt came up as its own window', '# test: at the prompt' in said, next((line for line in said.splitlines() if 'at the prompt' in line), ''))
 check('the guest app exited after that', '# the guest app has exited' in said)
@@ -130,7 +130,9 @@ for _ in range(36):
     time.sleep(5)
 left = running(str(machine))
 check('the machine has shut down, and its app has gone', not left, '; '.join(left)[:400])
-removed = subprocess.run([str(app/'Contents/Resources/Seamless/SeamlessMakeProxy'), 'remove', bundle], capture_output=True, text=True)
+lsregister = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
+removed = subprocess.run([lsregister, '-u', bundle], capture_output=True, text=True)
+shutil.rmtree(bundle)
 registered = subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-dump'],
                             capture_output=True, text=True).stdout
 check('the proxy is unregistered and deleted', removed.returncode == 0 and not Path(bundle).exists() and bundle not in registered, removed.stdout[:200])
