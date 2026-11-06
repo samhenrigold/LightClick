@@ -960,8 +960,14 @@ static void test_smc(u32 me) {
             u32 got = ((CodeFn)code3)();
             calls++;
             u64 now = sd_gen;
-            if (now - g < TAGS / 4 && ((got - g) & (TAGS - 1)) >= TAGS / 2) // from before the acknowledged shootdown g
+            if (now - g < TAGS / 4 && ((got - g) & (TAGS - 1)) >= TAGS / 2) { // from before the acknowledged shootdown g
+                if (!stale) {
+                    say("  first stale: generation ", g, "");
+                    say("    and ran the code of ", got, "");
+                    say("    with the generation now ", now, "");
+                }
                 stale++;
+            }
         }
         say("  code page remapped, shootdown done, stale results: ", stale, "");
         say("    of calls: ", calls, "");
