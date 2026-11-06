@@ -438,7 +438,7 @@ final class ConfigurationWindow: NSWindowController, NSToolbarDelegate, NSTableV
     }
 
     private func memoryEdited(_ text: String) {
-        switch hardwareLimits.memoryMiB(from: text) {
+        switch hardwareLimits.memoryMiB(from: text, saved: (editable["MemoryMiB"] as? NSNumber)?.intValue) {
         case .failure(let issue):
             feedback.stringValue = issue.message
             invalidField = true

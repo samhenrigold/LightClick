@@ -45,9 +45,3 @@ static inline NSDictionary *VIMImageClearedSelections(NSDictionary *configuratio
     }
     return changes;
 }
-static inline NSString *VIMImageSlotDevice(NSUInteger slot, NSString *format) {
-    BOOL disk = [format isEqual:@"dmg"];
-    if (!slot)
-        return disk ? @"image-device" : @"cdrom-device";
-    return [NSString stringWithFormat:@"image-disk-%lu", (unsigned long)slot];
-}

@@ -425,3 +425,130 @@ private let exitCases = [
         #expect(followUp(installerDisplay: true) == .keepPolling)
     }
 }
+
+@Suite struct SessionAdmissionTests {
+    private var idle: GuestSessionState {
+        var state = GuestSessionState()
+        state.running = true
+        return state
+    }
+
+    private func with(_ change: (inout GuestSessionState) -> Void) -> GuestSessionState {
+        var state = idle
+        change(&state)
+        return state
+    }
+
+    @Test func onlyARunningEmulatorThatHasNotAnsweredIsStalled() {
+        #expect(idle.controlStalled)
+        #expect(!GuestSessionState().controlStalled)
+        #expect(!with { $0.controlConnected = true }.controlStalled)
+    }
+
+    @Test func anIdleRunningGuestIsFree() {
+        #expect(idle.guestAgentFree)
+        #expect(idle.mayRunGuestAction)
+        #expect(idle.mayProvisionHelpers)
+        #expect(!GuestSessionState().mayRunGuestAction)
+    }
+
+    @Test func setupAndCommandsHoldEveryKindOfAction() {
+        let holds: [(inout GuestSessionState) -> Void] = [
+            { $0.preparing = true }, { $0.preparationRequested = true }, { $0.guestPending = true },
+            { $0.diagnosticPending = true }
+        ]
+        for hold in holds {
+            let state = with(hold)
+            #expect(!state.mayRunGuestAction && !state.guestAgentFree && !state.mayProvisionHelpers)
+        }
+    }
+
+    @Test func helperProvisioningOnlyHoldsTheAgentForOtherActions() {
+        for hold in [with { $0.clipboardPending = true }, with { $0.bootPolicyPending = true }] {
+            #expect(hold.mayRunGuestAction)
+            #expect(!hold.guestAgentFree)
+            #expect(!hold.mayProvisionHelpers)
+        }
+    }
+
+    @Test func aPendingInstallationOnlyHoldsHelpers() {
+        let state = with { $0.installationRequested = true }
+        #expect(state.guestAgentFree)
+        #expect(!state.mayProvisionHelpers)
+    }
+
+    @Test func anAsleepGuestHoldsOnlyWhatNeedsItAwake() {
+        for run in ["paused", "suspended"] {
+            let state = with { $0.runState = run }
+            #expect(!state.guestAgentFree)
+            #expect(state.mayRunGuestAction)
+            #expect(state.mayProvisionHelpers)
+        }
+    }
+
+    private func awake(_ state: GuestSessionState, media: Bool = false, install: String? = nil, report: Bool = false)
+        -> Bool
+    {
+        state.keepsHostAwake(hasInstallerMedia: media, installState: install, hasCompletionReport: report)
+    }
+
+    @Test func setupKeepsTheHostAwakeUntilReported() {
+        #expect(!awake(idle))
+        #expect(awake(idle, media: true))
+        #expect(awake(idle, install: "patching"))
+        #expect(awake(idle, install: "host-populated"))
+        #expect(!awake(idle, install: "installed"))
+        #expect(!awake(idle, media: true, report: true))
+        #expect(awake(with { $0.preparing = true }, report: true))
+        #expect(awake(with { $0.preparationRequested = true }))
+        #expect(awake(with { $0.installationRequested = true }))
+    }
+
+    @Test func aHaltedOrStoppedGuestDoesNot() {
+        #expect(!awake(GuestSessionState(), media: true))
+        for run in ["paused", "suspended", "shutdown", "io-error", "guest-panicked"] {
+            #expect(
+                !awake(
+                    with {
+                        $0.preparing = true
+                        $0.runState = run
+                    }, media: true))
+        }
+    }
+
+    @Test func menuActionsFollowTheSession() {
+        let stopped = GuestSessionState()
+        #expect(stopped.enablesMenuAction("startAgain:", controlReady: false) == true)
+        #expect(idle.enablesMenuAction("startAgain:", controlReady: true) == false)
+        for action in ["paste:", "forceStop:", "resetMachine:", "sendMenuShortcut:", "takeScreenshot:"] {
+            #expect(stopped.enablesMenuAction(action, controlReady: true) == false)
+            #expect(idle.enablesMenuAction(action, controlReady: false) == true)
+        }
+        let preparing = with { $0.preparing = true }
+        #expect(preparing.enablesMenuAction("paste:", controlReady: true) == true)
+        #expect(preparing.enablesMenuAction("sendForceQuitKey:", controlReady: true) == false)
+        #expect(preparing.enablesMenuAction("shutdown:", controlReady: true) == false)
+        #expect(with { $0.runState = "paused" }.enablesMenuAction("toggleScreenSharing:", controlReady: true) == false)
+    }
+
+    @Test func someActionsWaitForTheControlConnection() {
+        #expect(idle.enablesMenuAction("shutdown:", controlReady: true) == true)
+        #expect(idle.enablesMenuAction("shutdown:", controlReady: false) == false)
+        #expect(idle.enablesMenuAction("toggleUSBDevice:", controlReady: false) == false)
+    }
+
+    @Test func otherActionsAreNotTheSessionsToSay() {
+        #expect(idle.enablesMenuAction("ejectOpticalMedia:", controlReady: true) == nil)
+        #expect(idle.enablesMenuAction("about:", controlReady: true) == nil)
+    }
+
+    @Test func aMachinesStatusReadsItsState() {
+        let status = SessionRunState.status
+        #expect(status(false, nil, false) == "Shut down")
+        #expect(status(false, "running", true) == "Installation in progress")
+        #expect(status(true, "suspended", true) == "Sleeping")
+        #expect(status(true, "paused", false) == "Paused")
+        #expect(status(true, nil, true) == "Installing macOS")
+        #expect(status(true, "running", false) == "Running")
+    }
+}

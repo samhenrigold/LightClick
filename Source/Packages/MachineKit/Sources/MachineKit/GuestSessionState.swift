@@ -26,6 +26,9 @@ public struct GuestSessionState: Sendable {
 
     public var preparing = false
     public var preparationRequested = false
+    public var installationRequested = false
+    /// What QEMU last said its state was.
+    public var runState: String?
     public var repairRequested = false
     public var explicitRepair = false
     public var verifiedUpdateRepair = false
@@ -33,6 +36,9 @@ public struct GuestSessionState: Sendable {
     public var updateRepairHeld = false
     /// The modern setup failures already shown to the user since the guest last started.
     public var presentedSetupFailures: Set<String> = []
+
+    /// QEMU has answered on its control connection since it started.
+    public var controlConnected = false
 
     public var guestPending = false
     public var diagnosticPending = false
@@ -75,6 +81,55 @@ public struct GuestSessionState: Sendable {
     public var mayForceReset: Bool { running && !lifecycle.resetRequested }
     public var mayStartGraphicsAction: Bool { running && !preparing && !preparationRequested && !relaunchForGraphics }
     public var graphicsActionsEnabled: Bool { mayStartGraphicsAction && !guestPending }
+
+    /// How long a new emulator gets to answer before the window says so. A cold start under load can take a while, so this
+    /// only says what's known, and nothing stops the emulator.
+    public static let controlStallSeconds: TimeInterval = 60
+    public static let controlStallNotice =
+        "This Mac’s emulator has started but isn’t responding yet. It may still finish starting, and this message will "
+        + "go away if it does. If it stays here, use Controls → Force Stop, then start it again."
+
+    /// The emulator is running, and has yet to answer.
+    public var controlStalled: Bool { running && !controlConnected }
+
+    /// A one-off user action in the guest, such as turning on Remote Login, may start. The guest may still be asleep.
+    public var mayRunGuestAction: Bool {
+        running && !preparing && !preparationRequested && !guestPending && !diagnosticPending
+    }
+
+    /// Nothing else has the agent or needs it, and the guest can answer it.
+    public var guestAgentFree: Bool {
+        mayRunGuestAction && !clipboardPending && !bootPolicyPending && runState != "paused"
+            && runState != "suspended"
+    }
+
+    /// The clipboard and display-power helpers may be set up in the guest. They wait for setup and for the agent, but not
+    /// for a guest that's merely asleep.
+    public var mayProvisionHelpers: Bool {
+        mayRunGuestAction && !installationRequested && !clipboardPending && !bootPolicyPending
+    }
+
+    /// Whether a menu action is available, going by the session alone, or nil if it depends on the item or anything else.
+    /// `controlReady` means the control connection has answered.
+    public func enablesMenuAction(_ action: String, controlReady: Bool) -> Bool? {
+        switch action {
+        case "startAgain:": !running
+        case "resetMachine:": mayForceReset
+        case "sendForceQuitKey:", "takeScreenshot:", "sendMenuShortcut:": running && !preparing
+        case "undo:", "cut:", "copy:", "paste:", "selectAll:", "forceStop:": running
+        case "shutdown:": mayRequestShutdown && controlReady
+        case "toggleUSBDevice:": running && controlReady
+        case "toggleScreenSharing:": guestAgentFree
+        default: nil
+        }
+    }
+
+    /// Whether the host should stay awake for this session: it's installing something and isn't halted.
+    public func keepsHostAwake(hasInstallerMedia: Bool, installState: String?, hasCompletionReport: Bool) -> Bool {
+        let settingUp = hasInstallerMedia || installState == "patching" || installState == "host-populated"
+        return running && !SessionRunState.isHalted(runState)
+            && (preparing || preparationRequested || installationRequested || (settingUp && !hasCompletionReport))
+    }
 
     public var nextRefreshStep: GuestRefreshStep {
         if guestPending || preparing || shutdownRequested || !running { return .busy }

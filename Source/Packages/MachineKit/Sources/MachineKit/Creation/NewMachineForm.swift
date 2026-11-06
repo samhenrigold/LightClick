@@ -49,6 +49,13 @@ public struct NewMachineDefaults: Equatable, Sendable {
         diskGiB = (volumeBytes ?? 0) >= 256 << 30 && (freeBytes ?? 0) >= 96 << 30 ? 128 : 64
     }
 
+    /// Whether the configuration page starts over for `guest`. `pageGuest` is the guest it was last filled in for, nil
+    /// when nothing on it needs keeping. Going Back and Continuing to the same guest keeps what the user typed, and a
+    /// saved job's guest was filled in from the job.
+    public static func pageStartsOver(pageGuest: Guest?, jobGuest: Guest?, guest: Guest) -> Bool {
+        guest != pageGuest && guest != jobGuest
+    }
+
     /// The name to show after switching to `guest`. A name the user typed stays; an empty or generated one follows the
     /// guest. "macOS Mojave" and its siblings are what older versions generated.
     public static func name(_ current: String, afterSwitchingTo guest: Guest) -> String {

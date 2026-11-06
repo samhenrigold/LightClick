@@ -27,7 +27,8 @@ final class MachineSettings: NSObject {
             controller = ConfigurationWindow(machine: machine)
             windows[key] = controller
         }
-        controller.completion = completion
+        // Opened again from somewhere with nothing to refresh, the window still owes the library its refreshes.
+        if let completion { controller.completion = completion }
         if controller.window?.isMiniaturized == true { controller.window?.deminiaturize(nil) }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
