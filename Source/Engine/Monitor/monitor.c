@@ -1132,7 +1132,12 @@ again:;
         // The host read tables with nothing protecting them, and a frame's mark may have gone since. From here a store or remap finds this block, and anything earlier
         // shows now: look again, and if it moved or the frame needed marking again, what was translated may be stale.
         Walk now = x86_walk(c->cr3, rip, 16 | (c->cpl == 3 ? 4 : 0), true);
-        if (newly_code || !now.ok || (now.gpa & ~0xfffULL) != (c->req_r[2] & ~1ULL)) {
+        bool moved = !now.ok || (now.gpa & ~0xfffULL) != (c->req_r[2] & ~1ULL);
+        if (c->req_r[3]) { // a block that runs onto the next page
+            Walk next = x86_walk(c->cr3, (rip & ~0xfffULL) + 4096, 16 | (c->cpl == 3 ? 4 : 0), false);
+            moved = moved || !next.ok || (next.gpa & ~0xfffULL) != (c->req_r[3] & ~1ULL);
+        }
+        if (newly_code || moved) {
             u64 r2 = c->req_r[2], r3 = c->req_r[3];
             mon_unlock();
             c->req_a[1] = KILL_STORE;
