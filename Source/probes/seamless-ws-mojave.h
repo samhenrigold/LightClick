@@ -526,7 +526,7 @@ enum {
 static void *(*image_retain_iosurface)(void *);
 static void *(*surface_lookup)(uint32_t);
 static int (*surface_lock)(void *, uint32_t, void *), (*surface_unlock)(void *, uint32_t, void *);
-static size_t (*surface_width)(void *), (*surface_height)(void *), (*surface_alloc)(void *);
+static size_t (*surface_width)(void *), (*surface_height)(void *), (*surface_row)(void *);
 static void *(*surface_base)(void *);
 static void (*census_log)(int, const char *, ...);
 static const void *census_seen[4096];
@@ -539,7 +539,7 @@ static void census_blob(const void *object, uint32_t seed, void *surface) {
             found = i;
     if (found == 4096 && table->gpu_blob_count < 4096 && surface && !surface_lock(surface, 1, NULL)) {
         size_t width = surface_width(surface), height = surface_height(surface);
-        size_t row = height ? (surface_alloc(surface) / height) & ~(size_t)63 : 0;
+        size_t row = surface_row(surface);
         if (row < width * 4)
             row = width * 4;
         uint64_t size = (uint64_t)height * row;
@@ -589,7 +589,7 @@ static void gpu_census_install(void) {
     surface_unlock = dlsym(RTLD_DEFAULT, "IOSurfaceUnlock");
     surface_width = dlsym(RTLD_DEFAULT, "IOSurfaceGetWidth");
     surface_height = dlsym(RTLD_DEFAULT, "IOSurfaceGetHeight");
-    surface_alloc = dlsym(RTLD_DEFAULT, "IOSurfaceGetAllocSize");
+    surface_row = dlsym(RTLD_DEFAULT, "IOSurfaceGetBytesPerRow");
     surface_base = dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
     const uint8_t *stub = (const uint8_t *)loaded_image() + copy_region_stub;
     const uint8_t *quartz = NULL;
@@ -604,7 +604,7 @@ static void gpu_census_install(void) {
     static const uint8_t surface_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
                                             0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0x38, 0x01, 0x00, 0x00};
     if (!print_trees || !copy_region_original || !set_message_function || !surface_lookup || !surface_lock ||
-        !surface_unlock || !surface_width || !surface_height || !surface_alloc || !surface_base || !quartz ||
+        !surface_unlock || !surface_width || !surface_height || !surface_row || !surface_base || !quartz ||
         stub[0] != 0xff || stub[1] != 0x25) {
         note("no census\n");
         return;
