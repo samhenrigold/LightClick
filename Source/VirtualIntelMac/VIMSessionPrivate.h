@@ -1,5 +1,6 @@
 // The session state its Swift helpers reach. The rest of the class's private state stays in VIMSession.m.
 #import "VIMSession.h"
+@class VIMMetalView;
 NS_ASSUME_NONNULL_BEGIN
 @interface VIMSession ()
 @property(nullable) VIMMachine *machine;
@@ -8,9 +9,27 @@ NS_ASSUME_NONNULL_BEGIN
 @property(readonly, nullable) id controlConnection;
 @property(readonly, nullable) id guestAgentConnection;
 @property(nullable) id guestProgress;
+@property(readonly, nullable) id usbDevicesObject;
+@property(readonly, nullable) id imageDrivesObject;
 - (id)currentSessionState;
 
 @property NSTextField *guestStatus;
+@property(nullable) VIMMetalView *displayView;
+@property(nullable) NSTextField *status;
+@property(nullable) NSStackView *statePanel;
+@property(nullable) NSTextField *stateLabel;
+@property(nullable) NSButton *stateAction;
+@property(nullable) NSButton *shutdownButton;
+@property(nullable) NSArray<NSString *> *guestIPAddresses;
+@property(nullable) NSString *displayToolDirectory;
+@property(nullable) NSString *lastRunState;
+@property(nullable) NSArray<NSDate *> *recentGuestReboots;
+@property(nullable) NSURL *pendingHostConnectionURL;
+@property(nullable, copy) void (^pendingHostConnectionCompletion)(NSError *_Nullable);
+- (void)noteGuestRebootExpected;
+- (void)cleanUp;
+- (void)showStoppedScreen;
++ (nullable VIMSession *)sessionForMachine:(VIMMachine *)machine NS_SWIFT_NAME(session(for:));
 @property(nonatomic) BOOL preparing;
 @property(nonatomic) BOOL preparationRequested;
 @property(nonatomic) BOOL installationRequested;

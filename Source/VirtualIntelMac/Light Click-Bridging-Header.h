@@ -9,6 +9,7 @@
 #import "VIMImageSlots.h"
 #import "VIMInstallerAssembly.h"
 #import "VIMMachine.h"
+#import "VIMMetalView.h"
 #import "VIMNetworkDefaults.h"
 #import "VIMSMBService.h"
 #import "VIMSessionPrivate.h"

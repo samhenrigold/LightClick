@@ -224,7 +224,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property(readonly) VIMGuestSessionState *state;
 - (void)logNote:(NSString *)format, ... NS_FORMAT_FUNCTION(1, 2);
 @property NSFileHandle *log;
-@property VIMMetalView *displayView;
 @property VIMDisplayConnection *displayConnection;
 @property VIMQMPConnection *control;
 @property VIMGuestAgent *guestAgent;
@@ -239,8 +238,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property(copy) NSString *closedSetupNoticeHeading;
 @property BOOL previewSetupNotice;
 @property NSTimer *guestTimer;
-@property NSURL *pendingHostConnectionURL;
-@property(copy) void (^pendingHostConnectionCompletion)(NSError *);
 - (void)servicePendingHostConnection;
 @property NSString *diagnosticDirectory;
 @property VIMSessionDiagnostics *diagnostics;
@@ -248,12 +245,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (void)applyDisplayMode:(NSString *)mode completion:(void (^)(NSDictionary *, NSError *))completion;
 @property(weak) NSWindow *diagnosticAboutWindow;
 @property BOOL automaticInstallation;
-@property NSArray<NSDate *> *recentGuestReboots;
 @property NSTimer *handoffTimer;
 @property VIMInstallationActivity *sleepActivity;
 @property NSString *lastGuestMessage;
-@property NSTextField *status;
-@property NSButton *shutdownButton;
 @property NSTimer *resizeTimer;
 @property NSSize lastRequestedSize;
 @property BOOL resizeArmed;
@@ -273,23 +267,17 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property NSArray<NSDictionary *> *audioOutputChoices;
 @property NSArray<NSDictionary *> *audioInputChoices;
 @property BOOL audioChoicesPending;
-@property NSArray<NSString *> *guestIPAddresses;
 @property NSTimer *statusTimer;
 @property BOOL statusPending;
 @property BOOL runStateQueryFailed;
-@property NSString *lastRunState;
 @property VIMModernSetup *modernSetup;
 @property NSTimer *controlRetryTimer;
 @property NSTimer *controlStallTimer;
 @property BOOL controlStallShown;
 @property(readonly) VIMUSBDevices *usbDevices;
 @property int machineLock;
-@property NSStackView *statePanel;
-@property NSTextField *stateLabel;
-@property NSButton *stateAction;
 @property(nonatomic) BOOL retinaEnabled;
 @property(nonatomic) NSString *displayMode;
-@property NSString *displayToolDirectory;
 @property VIMImageDrives *imageDrives;
 @end
 @implementation VIMSession
@@ -363,6 +351,18 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         VIMStartHostUSBNotifications();
     }
     return self;
+}
+- (id)usbDevicesObject {
+    return self.usbDevices;
+}
+- (id)imageDrivesObject {
+    return self.imageDrives;
+}
+- (void)noteGuestRebootExpected {
+    [self applyLifecycleEvent:VIMSessionEventGuestRebootExpected];
+}
++ (VIMSession *)sessionForMachine:(VIMMachine *)machine {
+    return sessions[SessionKey(machine)];
 }
 - (id)controlConnection {
     return self.control;
@@ -1145,51 +1145,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       VIMSession *session = eventSession;
       if (!session)
           return;
-      VIMQMPEvent *qmp = [[VIMQMPEvent alloc] initWithEvent:event];
-      switch (qmp.kind) {
-          case VIMQMPEventKindDeviceDeleted:
-              [session.usbDevices deviceWasDeleted:event[@"data"][@"device"]];
-              [session.imageDrives deviceDeleted:qmp.device];
-              break;
-          case VIMQMPEventKindReset:
-              session.guestIPAddresses = nil;
-              session.displayToolDirectory = nil;
-              session.displayView.displaySleeping = YES;
-              session.displayView.displaySleeping = NO;
-              break;
-          case VIMQMPEventKindSuspend:
-          case VIMQMPEventKindShutdown:
-              if (qmp.expectsGuestReboot)
-                  [session applyLifecycleEvent:VIMSessionEventGuestRebootExpected];
-              session.displayView.displaySleeping = YES;
-              session.statePanel.hidden = YES;
-              if (qmp.kind == VIMQMPEventKindSuspend) {
-                  session.lastRunState = @"suspended";
-                  session.status.stringValue = @"Sleeping";
-              }
-              break;
-          case VIMQMPEventKindWakeup:
-              session.lastRunState = @"running";
-              session.displayView.displaySleeping = NO;
-              session.statePanel.hidden = YES;
-              session.status.stringValue = @"Running";
-              break;
-          case VIMQMPEventKindTrayOpened: {
-              NSDictionary *removed = [session.imageDrives trayOpenedOnDevice:qmp.device];
-              NSDictionary *settings = VIMImageClearedSelections(session.machine.editableConfiguration, removed);
-              NSError *failure = nil;
-              if (settings.count && ![session.machine saveSettings:settings error:&failure])
-                  VIMPresentError(failure, session.window);
-              if (settings.count)
-                  [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
-              break;
-          }
-          case VIMQMPEventKindOther:
-              break;
-      }
-      NSData *json = [NSJSONSerialization dataWithJSONObject:event options:0 error:NULL];
-      NSString *line = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
-      [session logNote:@"Lifecycle: %@", line];
+      [session handleLifecycleEvent:event];
     };
     self.guestAgent = [[VIMGuestAgent alloc]
         initWithSocketPath:[self.runtimeDirectory stringByAppendingPathComponent:@"guest-agent"]];
@@ -1451,75 +1407,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         VIMSession *session = weakSelf;
         if (!session || session.task != task)
             return;
-        [session.control drainLifecycleEventsAfterExitWithCompletion:^{
-          SessionExitPlan *exitPlan =
-              [session.state exitPlanWithExited:task.terminationReason == NSTaskTerminationReasonExit
-                              terminationStatus:task.terminationStatus
-                             recentGuestReboots:session.recentGuestReboots];
-          BOOL relaunch = exitPlan.relaunch;
-          session.status.stringValue = exitPlan.statusText;
-          session.displayView.displaySleeping = YES;
-          session.stateLabel.stringValue = exitPlan.stateText;
-          session.statePanel.hidden = NO;
-          session.stateAction.hidden = NO;
-          // For the session that replaces this one to carry on with: see continueFromSession.
-          session.recentGuestReboots = exitPlan.guestReboot ? exitPlan.recentGuestReboots : nil;
-          NSURL *waitingURL = relaunch ? session.pendingHostConnectionURL : nil;
-          void (^waitingCompletion)(NSError *) = relaunch ? session.pendingHostConnectionCompletion : nil;
-          if (relaunch) {
-              session.pendingHostConnectionURL = nil;
-              session.pendingHostConnectionCompletion = nil;
-          }
-          session.shutdownButton.enabled = NO;
-          [session cleanUp];
-          if (exitPlan.showStoppedScreen)
-              [session showStoppedScreen];
-          if (exitPlan.rebootLoop)
-              VIMPresentError(VIMSessionError(@"This Mac restarted repeatedly and was stopped. Open Session Details to "
-                                              @"check its boot log, then try starting it again."),
-                              session.window);
-          if (exitPlan.closeWindow)
-              [session.window close];
-          if (!relaunch && VIMCreatingGuestFromArguments()) {
-              // The window would wait for a click on Start. Cleanup above finished an install that was verified.
-              if ([session.machine.configuration[@"InstallState"] isEqual:@"installed"])
-                  exit(0);
-              VIMFailCreateGuest(
-                  [NSString stringWithFormat:@"%@ before the installation finished.", exitPlan.statusText]);
-          }
-          // Successful openMachine publishes its own library notification once
-          // the replacement owns the session lock. Do not invite background
-          // maintenance into the gap between cleanup and that acquisition.
-          if (!relaunch)
-              [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
-          if (relaunch) {
-              NSError *failure = nil;
-              VIMMachine *fresh = [VIMMachine loadURL:session.machine.URL error:&failure];
-              NSWindow *previousWindow = session.window;
-              NSRect previousFrame = previousWindow.frame;
-              // The new session chooses its own safe display hardware. A valid
-              // setup/privacy restart must also work before graphics publishing;
-              // requiring acceleration here strands an otherwise bootable VM.
-              session.pendingHostConnectionURL = waitingURL;
-              session.pendingHostConnectionCompletion = waitingCompletion;
-              if (fresh && [VIMSession openMachine:fresh error:&failure]) {
-                  VIMSession *replacement = sessions[SessionKey(fresh)];
-                  [replacement.window setFrame:previousFrame display:YES];
-                  if (replacement.window != previousWindow)
-                      [previousWindow close];
-              } else {
-                  session.guestStatus.stringValue =
-                      failure.localizedDescription ?: @"Restart paused: graphics installation needs recovery.";
-                  VIMFailCreateGuest(session.guestStatus.stringValue);
-                  [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
-                  session.pendingHostConnectionURL = nil;
-                  session.pendingHostConnectionCompletion = nil;
-                  if (waitingCompletion)
-                      waitingCompletion(
-                          failure ?: VIMSessionError(@"The virtual Mac couldn’t restart to open the connection."));
-              }
-          }
-        }];
+        [session handleExitOfTask:task];
       });
     };
     if (![self.task launchAndReturnError:error]) {
