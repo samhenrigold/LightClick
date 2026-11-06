@@ -497,6 +497,30 @@ def desktop():
         print(said, flush=True)
         check('input still reaches it there', re.search(r'median \d+ ms', said) is not None)
         check('it stayed there', place(window) == after)
+        # Two apps' windows overlap in the guest. TextEdit's over Safari's, so apart on the host, Safari's must show its own page there,
+        # dark from a click, and no TextEdit. Saved by each window's ID, for looking at.
+        command = results/f'{tag}-clicks.txt.command'
+        textedit = proxy_pid('TextEdit')
+        other = next((re.search(r'id=(\d+)', row).group(1) for row in proxy_windows() if 'TextEdit' in row), None)
+        command.write_text('move')
+        if textedit:
+            os.kill(textedit, signal.SIGUSR2)
+        time.sleep(2)
+        os.kill(safari, signal.SIGUSR1)
+        os.kill(safari, signal.SIGUSR1)
+        time.sleep(1)
+        for name, wanted in (('safari', window), ('textedit', other)):
+            if wanted:
+                subprocess.run(['screencapture', '-x', '-o', '-l', wanted, str(results/f'{tag}-apart-{name}.png')])
+        command.write_text('resize')
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(1)
+        during = subprocess.run([meter, window, '1'], capture_output=True, text=True).stdout
+        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-resizing.png')])
+        time.sleep(4)
+        print('during a resize', during, flush=True)
+        print('after resize', next((row[-40:] for row in proxy_windows() if f'id={window} ' in row), ''), flush=True)
+        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-resized.png')])
         frame = capture(f'{tag}-desktop-frame.png')
         print('guest frame', frame, flush=True)
     pressed = time.time()

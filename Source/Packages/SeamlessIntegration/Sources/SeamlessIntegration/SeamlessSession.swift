@@ -68,6 +68,7 @@ public final class SeamlessSession {
         var hostOffset: NSPoint?
         /// Where its own surface starts on the guest's display, with its shadow, once the guest has said.
         var surfaceOrigin: (x: Int32, y: Int32)?
+        var ownSurfaceLayer: CALayer?
         init(window: SessionWire.Window, context: NSObject, layer: CALayer) {
             self.window = window
             self.context = context
@@ -590,21 +591,30 @@ public final class SeamlessSession {
         }
         let layer = surface.layer
         if let own = pixelSource?.surface(forWindow: window.id), let origin = surface.surfaceOrigin {
-            let width = Double(IOSurfaceGetWidth(own))
-            let height = Double(IOSurfaceGetHeight(own))
             setPieces(of: surface, to: [], from: own, place: place, height: whole.height)
             layer.mask = nil
-            layer.contents = own
-            // The window and the room around it for its shadow, which is the guest's. The surface is padded right and bottom.
-            layer.contentsRect = CGRect(
-                x: (Double(window.x) - side - Double(origin.x)) * scale / width,
-                y: (height - (Double(window.y) - side - Double(origin.y) + whole.height) * scale) / height,
-                width: whole.width * scale / width, height: whole.height * scale / height)
+            layer.contents = nil
             layer.cornerRadius = 0
-            layer.masksToBounds = false
-            layer.perform(NSSelectorFromString("setContentsChanged"))
+            layer.masksToBounds = true
+            // Placed whole, where it is on the guest's display, rather than cropped: past the window there's only its shadow,
+            // then transparency. A layer behind this one is where a host material would go.
+            let sublayer = surface.ownSurfaceLayer ?? CALayer()
+            if surface.ownSurfaceLayer == nil {
+                sublayer.edgeAntialiasingMask = []
+                layer.addSublayer(sublayer)
+                surface.ownSurfaceLayer = sublayer
+            }
+            let size = CGSize(width: Double(IOSurfaceGetWidth(own)) / scale, height: Double(IOSurfaceGetHeight(own)) / scale)
+            let top = Double(origin.y) - (Double(window.y) - side)
+            sublayer.frame = CGRect(
+                x: Double(origin.x) - (Double(window.x) - side), y: whole.height - top - size.height,
+                width: size.width, height: size.height)
+            sublayer.contents = own
+            sublayer.perform(NSSelectorFromString("setContentsChanged"))
             return
         }
+        surface.ownSurfaceLayer?.removeFromSuperlayer()
+        surface.ownSurfaceLayer = nil
         // One guest pixel to one host pixel takes none of its neighbours' at the edges.
         let filter: CALayerContentsFilter = scale == (NSScreen.main?.backingScaleFactor ?? 0) ? .nearest : .linear
         layer.magnificationFilter = filter

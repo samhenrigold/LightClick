@@ -309,7 +309,32 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         send(.surfaceMoved(windowID: id, x: frame.minX, y: primary - frame.maxY))
     }
 
-    /// Each SIGUSR2 moves the front window by a screen's worth of the way as a host drag would, for a test with no pointer to drag.
+    private var testCommandPath: String {
+        (ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] ?? "") + ".command"
+    }
+
+    /// Drags the guest window's bottom right corner in, in steps, through the input view, as a live resize.
+    private func testResize(_ surface: Surface) {
+        let window = surface.window
+        let margin = (window as? SurfaceWindow)?.margin ?? 0
+        let start = NSPoint(x: window.frame.width - margin - 3, y: margin + 3)
+        func event(_ type: NSEvent.EventType, _ at: NSPoint) -> NSEvent? {
+            NSEvent.mouseEvent(
+                with: type, location: at, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+        }
+        if let down = event(.leftMouseDown, start) { surface.input.mouseDown(with: down) }
+        for step in 1...30 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(step) * 0.05) {
+                let place = NSPoint(x: start.x - Double(step) * 6, y: start.y + Double(step) * 4)
+                if step < 30, let drag = event(.leftMouseDragged, place) { surface.input.mouseDragged(with: drag) }
+                if step == 30, let up = event(.leftMouseUp, place) { surface.input.mouseUp(with: up) }
+            }
+        }
+    }
+
+    /// Each SIGUSR2 is, by LC_SEAMLESS_CLICK_LOG's .command file, a live resize, or else moving the front window to the corner of
+    /// its screen as a host drag would, for a test with no pointer to drag.
     private func armTestMoves() {
         guard ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil else { return }
         signal(SIGUSR2, SIG_IGN)
@@ -317,6 +342,11 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         source.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, let front = self.surfaces.min(by: { $0.value.order < $1.value.order }) else { return }
+                let command = (try? String(contentsOfFile: self.testCommandPath, encoding: .utf8)) ?? ""
+                if command.hasPrefix("resize") {
+                    self.testResize(front.value)
+                    return
+                }
                 let screen = front.value.window.screen?.visibleFrame ?? .zero
                 front.value.window.setFrameOrigin(NSPoint(x: screen.maxX - front.value.window.frame.width, y: screen.minY))
                 self.surfaceMoved(front.key)
