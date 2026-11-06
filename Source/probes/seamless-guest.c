@@ -2361,18 +2361,24 @@ static void leap_hide_desktop(void) {
     system(leap_hide_dock);
     if (fork() == 0) {
         close(ends[1]);
-        // Not to keep the agent's run open.
-        int null = open("/dev/null", O_RDWR);
-        dup2(null, 0);
-        dup2(null, 1);
-        dup2(null, 2);
+        // Not to keep the agent's run open, nor to go when whatever started this cleans up after it.
+        setsid();
+        int out = open("/tmp/sg/leap-restore.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        dup2(out, 0);
+        dup2(out, 1);
+        dup2(out, 2);
+        printf("# waiting\n");
+        fflush(stdout);
         signal(SIGHUP, SIG_IGN);
         signal(SIGTERM, SIG_IGN);
         char byte;
         while (read(ends[0], &byte, 1) > 0) {
         }
+        printf("# restoring\n");
+        fflush(stdout);
         leap_set_guest_shadows(0);
-        system(leap_show_dock);
+        printf("# dock: %d\n", system(leap_show_dock));
+        fflush(stdout);
         _exit(0);
     }
     close(ends[0]);
