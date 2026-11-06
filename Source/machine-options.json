@@ -122,6 +122,6 @@
     {"name": "VIM_PVG_TIMING", "type": "flag", "reader": "qemu", "default": "off", "meaning": "Print PVG timing lines, at most every 5 s per metric."},
     {"name": "VIM_SEAMLESS_PVG_DIR", "type": "path", "reader": "qemu", "default": "unset", "meaning": "Research, for seamless: directory of the per-window PVG surface files, including nodisplay."},
     {"name": "VIM_SEAMLESS_PVG_SERVICE", "type": "string", "reader": "qemu", "default": "unset", "meaning": "Research, for seamless: Mach service that receives per-window PVG surfaces."},
-    {"name": "VIM_SEAMLESS_PVG_SKIP", "type": "string", "reader": "qemu", "default": "unset", "meaning": "Research, for seamless: WxH of a surface the sender leaves out."}
+    {"name": "VIM_SEAMLESS_PVG_SAMPLED", "type": "flag", "reader": "qemu", "default": "off", "meaning": "Research, for seamless: log how sampled textures are backed, for sizing the layer-tree work."}
   ]
 }
