@@ -17,5 +17,8 @@ swift build -c release --package-path "$source_root/Packages/SeamlessIntegration
   --scratch-path "$source_root/Build/seamless-integration-swift" --product SeamlessProxy >&2
 swift build -c release --package-path "$source_root/Packages/SeamlessIntegration" \
   --scratch-path "$source_root/Build/seamless-integration-swift" --product seamless-integration-probe >&2
+swift build -c release --package-path "$source_root/Packages/SeamlessIntegration" \
+  --scratch-path "$source_root/Build/seamless-integration-swift" --product SeamlessMakeProxy >&2
 cp "$source_root/Build/seamless-integration-swift/release/SeamlessProxy" "$output/SeamlessProxy"
+cp "$source_root/Build/seamless-integration-swift/release/SeamlessMakeProxy" "$output/SeamlessMakeProxy"
 cp "$source_root/Build/seamless-integration-swift/release/seamless-integration-probe" "$output/seamless-integration-probe"

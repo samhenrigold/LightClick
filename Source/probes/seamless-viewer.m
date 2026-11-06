@@ -22,12 +22,19 @@
 #include <dlfcn.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 static int connectionFD = -1; // Main thread.
 static BOOL selfTest;
+static NSString *sessionSocketPath;
+static int proxyFD = -1; // Main thread. A connected proxy, when this viewer is its session process.
+static NSString *testMenuPath;
+static pid_t hidePID;
+static BOOL testMotion;
 static NSString *screenshotPrefix;
 static BOOL treeMode;
 static NSPoint guestOffset; // Host top-left-origin screen point = guest point + this.
@@ -61,6 +68,10 @@ static void sendToGuest(const uint8_t *bytes, size_t size) {
 @property NSSize points;
 @property NSInteger buttons;
 @property uint32_t order, margin;
+@property(strong) id remoteContext;
+@property(strong) NSData
+    *lastMessage; // The struct SWMWindow, for showing it to a proxy that connects later. Its strings aren't used.
+@property(strong) CALayer *remoteLayer;
 @property NSPoint guestOrigin;
 @property int layer_;
 @property(copy) NSString *label;
@@ -200,9 +211,12 @@ static void sendToGuest(const uint8_t *bytes, size_t size) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     self.layer.contents = (__bridge id)image;
+    self.remoteLayer.contents = (__bridge id)image;
     [CATransaction commit];
     CGImageRelease(image);
     [self.window invalidateShadow];
+    if (self.remoteLayer)
+        [CATransaction flush];
 }
 @end
 
@@ -211,6 +225,9 @@ static void sendToGuest(const uint8_t *bytes, size_t size) {
 @property int port;
 @property NSUInteger framesShown, bytesShown;
 @property CFTimeInterval firstFrame;
+- (void)sendToProxy:(NSDictionary *)message;
+- (void)sendMenu:(NSData *)json;
+- (void)pressMenu:(NSString *)path;
 - (void)applyTreeWindow:(GuestWindow *)window message:(const struct SWMWindow *)w;
 - (void)saveWindow:(GuestWindow *)window;
 @property NSMutableArray<NSString *> *seenTitles;
@@ -252,6 +269,8 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
     }];
 }
 
+static NSData *lastMenu;
+
 @implementation Controller
 - (void)fail:(const char *)why {
     fprintf(stderr, "self-test FAILED: %s\n", why);
@@ -276,6 +295,151 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
            view.label.UTF8String, view.pixelWidth, view.pixelHeight, total ? 100.0 * clear / total : 0,
            total ? 100.0 * partial / total : 0, path.UTF8String);
     fflush(stdout);
+}
+// The proxy .app holds the real windows and this process holds their pixels, in a layer it hosts across processes.
+- (void)sendToProxy:(NSDictionary *)message {
+    if (proxyFD < 0)
+        return;
+    NSMutableData *line = [[NSJSONSerialization dataWithJSONObject:message options:0 error:nil] mutableCopy];
+    [line appendBytes:"\n" length:1];
+    for (size_t sent = 0; sent < line.length;) {
+        ssize_t n = write(proxyFD, (const char *)line.bytes + sent, line.length - sent);
+        if (n <= 0)
+            return;
+        sent += (size_t)n;
+    }
+}
+- (void)showInProxy:(GuestWindow *)window message:(const struct SWMWindow *)w {
+    GuestView *view = (GuestView *)window.contentView;
+    if (!view.remoteLayer) {
+        Class contextClass = NSClassFromString(@"CAContext");
+        static int (*connection)(void);
+        if (!connection)
+            connection = dlsym(dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
+                               "SLSMainConnectionID");
+        id (*make)(id, SEL, int, NSDictionary *) =
+            (void *)[contextClass methodForSelector:NSSelectorFromString(@"contextWithCGSConnection:options:")];
+        view.remoteContext = make(contextClass, NSSelectorFromString(@"contextWithCGSConnection:options:"),
+                                  connection(), @{@"kCAContextCIFilterBehavior" : @"ignore"});
+        view.remoteLayer = [CALayer layer];
+        view.remoteLayer.anchorPoint = CGPointZero;
+        view.remoteLayer.contentsGravity = kCAGravityResize;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [view.remoteContext setValue:view.remoteLayer forKey:@"layer"];
+        [CATransaction commit];
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    view.remoteLayer.frame = CGRectMake(0, 0, window.frame.size.width, window.frame.size.height);
+    [CATransaction commit];
+    [CATransaction flush];
+    [self sendToProxy:@{
+        @"showSurface" : @{
+            @"id" : @(w->window),
+            @"contextID" : [view.remoteContext valueForKey:@"contextId"],
+            @"x" : @(window.frame.origin.x),
+            @"y" : @(window.frame.origin.y),
+            @"width" : @(window.frame.size.width),
+            @"height" : @(window.frame.size.height),
+            @"margin" : @(w->margin),
+            @"level" : @(w->layer),
+            @"alpha" : @(w->alpha / 65536.0),
+            @"order" : @(w->order),
+            @"title" : window.title ?: @"",
+            @"offsetX" : @(guestOffset.x),
+            @"offsetY" : @(guestOffset.y)
+        }
+    }];
+}
+// Everything a proxy says is untrusted only in that it arrives on a private socket; what matters here is keeping the
+// guest in sync. Its input is already in wire format.
+- (void)handleProxyLine:(NSData *)line {
+    NSDictionary *event = [NSJSONSerialization JSONObjectWithData:line options:0 error:nil];
+    if (![event isKindOfClass:NSDictionary.class])
+        return;
+    NSDictionary *input = event[@"input"];
+    if (input) {
+        NSData *bytes = [[NSData alloc] initWithBase64EncodedString:input[@"bytes"] options:0];
+        sendToGuest(bytes.bytes, bytes.length);
+    } else if (event[@"hello"]) {
+        printf("# proxy said hello: %s\n", [event[@"hello"] description].UTF8String);
+        fflush(stdout);
+        if (lastMenu)
+            [self sendMenu:lastMenu];
+    } else if (event[@"activated"]) {
+        uint8_t out[32];
+        sendToGuest(
+            out, swm_put_u32_message(out, sizeof(out), SWM_FOCUS, self.windows.allKeys.firstObject.unsignedIntValue));
+    } else if (event[@"menuChosen"])
+        [self pressMenu:[event[@"menuChosen"][@"path"] componentsJoinedByString:@"/"]];
+    else if (event[@"quit"])
+        [self sendToProxy:@{@"terminate" : @{}}];
+}
+- (void)pressMenu:(NSString *)path {
+    NSData *text = [path dataUsingEncoding:NSUTF8StringEncoding];
+    NSMutableData *out = [NSMutableData dataWithLength:SWM_HEADER_SIZE];
+    swm_header(out.mutableBytes, SWM_MENU_PRESS, (uint32_t)text.length);
+    [out appendData:text];
+    sendToGuest(out.bytes, out.length);
+    printf("# asked the guest to press %s\n", path.UTF8String);
+}
+- (void)sendMenu:(NSData *)json {
+    lastMenu = json;
+    NSArray *items = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
+    if (![items isKindOfClass:NSArray.class])
+        return;
+    printf("# menu with %lu top items reached the session\n", (unsigned long)items.count);
+    fflush(stdout);
+    // The enum's unlabeled payload, as Swift's Codable writes it.
+    [self sendToProxy:@{@"setMenuBar" : @{@"_0" : items}}];
+}
+- (void)listenForProxy {
+    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    strlcpy(address.sun_path, sessionSocketPath.fileSystemRepresentation, sizeof(address.sun_path));
+    unlink(address.sun_path);
+    if (bind(listener, (struct sockaddr *)&address, sizeof(address)) || chmod(address.sun_path, 0600) ||
+        listen(listener, 4)) {
+        perror("proxy socket");
+        exit(1);
+    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      for (;;) {
+          int client = accept(listener, NULL, NULL);
+          if (client < 0)
+              continue;
+          dispatch_sync(dispatch_get_main_queue(), ^{
+            proxyFD = client;
+            for (GuestWindow *window in self.windows.allValues)
+                if (((GuestView *)window.contentView).lastMessage)
+                    [self showInProxy:window message:((GuestView *)window.contentView).lastMessage.bytes];
+          });
+          NSMutableData *pending = [NSMutableData data];
+          uint8_t chunk[65536];
+          for (ssize_t n; (n = read(client, chunk, sizeof(chunk))) > 0;) {
+              [pending appendBytes:chunk length:(NSUInteger)n];
+              const uint8_t *bytes = pending.bytes;
+              const uint8_t *newline;
+              while ((newline = memchr(pending.bytes, '\n', pending.length))) {
+                  NSData *line = [pending subdataWithRange:NSMakeRange(0, (NSUInteger)(newline - bytes))];
+                  dispatch_sync(dispatch_get_main_queue(), ^{
+                    [self handleProxyLine:line];
+                  });
+                  [pending replaceBytesInRange:NSMakeRange(0, (NSUInteger)(newline - bytes) + 1)
+                                     withBytes:NULL
+                                        length:0];
+                  bytes = pending.bytes;
+              }
+          }
+          close(client);
+          dispatch_sync(dispatch_get_main_queue(), ^{
+            proxyFD = -1;
+          });
+      }
+    });
 }
 - (void)reorderWindows {
     NSArray<GuestWindow *> *sorted =
@@ -325,7 +489,10 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
     view.layer_ = w->layer;
     BOOL reordered = view.order != w->order || !window.visible;
     view.order = w->order;
-    if (reordered)
+    view.lastMessage = [NSData dataWithBytes:w length:sizeof(*w)];
+    if (sessionSocketPath)
+        [self showInProxy:window message:w];
+    else if (reordered)
         [self reorderWindows];
 }
 // What these windows look like together: every window's exact pixels at its position, level and order, over gray. It's
@@ -391,6 +558,74 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
     }
     fflush(stdout);
     exit(self.framesShown ? 0 : 1);
+}
+// Scroll, drag by the title bar and resize by the corner, in the demo's quiet seconds, after its sheet has gone. Sent
+// as a host would: guest screen points, moving a step at a time, while the host window follows the guest's.
+- (void)sendTestMotion:(GuestWindow *)window {
+    GuestView *view = (GuestView *)window.contentView;
+    static const double start = 20;
+    void (^at)(double, void (^)(void)) = ^(double when, void (^what)(void)) {
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(when * NSEC_PER_SEC)), dispatch_get_main_queue(), what);
+    };
+    void (^pointer)(uint8_t, double, double) = ^(uint8_t kind, double x, double y) {
+      uint8_t out[64];
+      struct SWMPointer e = {
+          0, kind, 0, kind == SWM_MOVE || kind == SWM_DRAG ? 0 : 1, (int32_t)(x * 16), (int32_t)(y * 16), 0};
+      sendToGuest(out, swm_put_pointer(out, sizeof(out), &e));
+    };
+    void (^stroke)(double, double, double, double, double) = ^(double when, double x, double y, double dx, double dy) {
+      at(when, ^{
+        NSPoint o = view.guestOrigin;
+        pointer(SWM_MOVE, o.x + x, o.y + y);
+        pointer(SWM_DOWN, o.x + x, o.y + y);
+        printf("# stroke from %g,%g, window at %g,%g %gx%g\n", o.x + x, o.y + y, o.x, o.y, view.points.width,
+               view.points.height);
+        for (int i = 1; i <= 12; i++)
+            at(i * 0.08, ^{
+              pointer(SWM_DRAG, o.x + x + dx * i / 12, o.y + y + dy * i / 12);
+            });
+        at(13 * 0.08 + 0.2, ^{
+          pointer(SWM_UP, o.x + x + dx, o.y + y + dy);
+        });
+      });
+    };
+    at(start, ^{
+      NSPoint o = view.guestOrigin;
+      puts("# scrolling");
+      for (int i = 0; i < 40; i++)
+          at(i * 0.03, ^{
+            uint8_t out[64];
+            struct SWMGesture g = {0,
+                                   SWG_SCROLL,
+                                   i == 0    ? SWP_BEGAN
+                                   : i == 39 ? SWP_ENDED
+                                             : SWP_CHANGED,
+                                   0,
+                                   0,
+                                   (int32_t)((o.x + 150) * 16),
+                                   (int32_t)((o.y + 160) * 16),
+                                   0,
+                                   -12,
+                                   0,
+                                   SWG_PRECISE,
+                                   0};
+            sendToGuest(out, swm_put_gesture(out, sizeof(out), &g));
+          });
+    });
+    stroke(start + 3, 200, 10, 180, 120);
+    at(start + 6, ^{
+      printf("# after the drag: window at %g,%g %gx%g\n", view.guestOrigin.x, view.guestOrigin.y, view.points.width,
+             view.points.height);
+    });
+    // The bottom right corner, from the top-left origin it still has.
+    at(start + 6.1, ^{
+      stroke(0, view.points.width - 4, view.points.height - 4, 160, 110);
+    });
+    at(start + 10, ^{
+      printf("# after the resize: window at %g,%g %gx%g\n", view.guestOrigin.x, view.guestOrigin.y, view.points.width,
+             view.points.height);
+      fflush(stdout);
+    });
 }
 - (void)sendTestInput:(GuestWindow *)window {
     // In a tree the demo's schedule leaves only its first seconds for this, and the window can't be addressed: all
@@ -512,7 +747,7 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
         else if (created)
             [window makeKeyAndOrderFront:nil];
         if (created) {
-            if (treeMode && NSApp.keyWindow == nil)
+            if (treeMode && NSApp.keyWindow == nil && !sessionSocketPath)
                 [window makeKeyWindow];
             [window makeFirstResponder:view];
             view.label = owner;
@@ -523,11 +758,23 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
                 shooting = YES;
                 [self performSelector:@selector(takeScreenshot) withObject:nil afterDelay:1];
             }
+            // With a proxy, it's the proxy's own input view that gets exercised.
+            static BOOL proxyTested;
+            if (testClick.x >= 0 && sessionSocketPath && !proxyTested) {
+                proxyTested = YES;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                  puts("# asked the proxy to click and type");
+                  [self sendToProxy:@{@"testInput" : @{}}];
+                });
+            }
             // Only once: a tree's later windows aren't what the click is aimed at.
             static BOOL tested;
-            if (testClick.x >= 0 && !tested) {
+            if (testClick.x >= 0 && !tested && !sessionSocketPath &&
+                (!treeMode || [title hasPrefix:@"Seamless demo"])) {
                 tested = YES;
                 [self sendTestInput:window];
+                if (testMotion)
+                    [self sendTestMotion:window];
             }
             if (exitAfter > 0)
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(exitAfter * NSEC_PER_SEC)),
@@ -556,6 +803,17 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
         [self saveWindow:window];
         [self.windows removeObjectForKey:@(m->u.window_id)];
         [window close];
+        [self sendToProxy:@{@"removeSurface" : @{@"id" : @(m->u.window_id)}}];
+    } else if (m->type == SWM_MENU) {
+        [self sendMenu:[NSData dataWithBytes:m->u.data.bytes length:m->u.data.length]];
+        static BOOL pressed;
+        if (testMenuPath && !pressed) {
+            pressed = YES;
+            // After the proxy's click and key, so the effect can be told from theirs.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+              [self pressMenu:testMenuPath];
+            });
+        }
     } else if (m->type == SWM_HELLO && m->u.version != SWM_VERSION)
         NSLog(@"Guest protocol %u, not %u", m->u.version, SWM_VERSION);
 }
@@ -634,6 +892,12 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
         exit(1);
     }
     printf("Listening on 127.0.0.1:%d, which a guest reaches as 10.0.2.2:%d\n", self.port, self.port);
+    if (sessionSocketPath) {
+        [self listenForProxy];
+        // shortcut: until a headless launch exists, the VM's own window is hidden, not absent.
+        if (hidePID)
+            [[NSRunningApplication runningApplicationWithProcessIdentifier:hidePID] hide];
+    }
     fflush(stdout);
     if (selfTest)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
@@ -650,7 +914,8 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
           [self serve:client];
       }
     });
-    [NSApp activateIgnoringOtherApps:YES];
+    if (!sessionSocketPath)
+        [NSApp activateIgnoringOtherApps:YES];
 }
 @end
 
@@ -663,6 +928,14 @@ int main(int argc, const char **argv) {
                 selfTest = YES;
             else if (!strcmp(argv[i], "--screenshots") && i + 1 < argc)
                 screenshotPrefix = @(argv[++i]);
+            else if (!strcmp(argv[i], "--session-socket") && i + 1 < argc)
+                sessionSocketPath = @(argv[++i]);
+            else if (!strcmp(argv[i], "--test-menu") && i + 1 < argc)
+                testMenuPath = @(argv[++i]);
+            else if (!strcmp(argv[i], "--hide-pid") && i + 1 < argc)
+                hidePID = atoi(argv[++i]);
+            else if (!strcmp(argv[i], "--test-motion"))
+                testMotion = YES;
             else if (!strcmp(argv[i], "--tree"))
                 treeMode = YES;
             else if (!strcmp(argv[i], "--exit-after") && i + 1 < argc)
@@ -677,7 +950,9 @@ int main(int argc, const char **argv) {
                 controller.port = atoi(argv[++i]);
         }
         NSApplication *app = NSApplication.sharedApplication;
-        app.activationPolicy = NSApplicationActivationPolicyRegular;
+        // As a proxy's session, it's a background process with no window of its own.
+        app.activationPolicy =
+            sessionSocketPath ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular;
         app.delegate = controller;
         [app run];
     }

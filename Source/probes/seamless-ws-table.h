@@ -23,6 +23,19 @@ struct SWSEntry {
     uint32_t seed, opaque; // `opaque`: no alpha in these rows, so treat every pixel as solid.
 };
 
+// One visible window, in WindowServer's own order, as of the last walk. Replaces asking for the window list.
+struct SWSTreeEntry {
+    uint32_t id, connection;
+    int32_t level;
+    float alpha;
+    double x, y, width, height; // Points, top-left origin.
+    uint32_t margin; // Points of shadow around the bounds, at most, or 0 for no shadow.
+    uint32_t shadow_key; // Changes when the window's shadow does, such as on losing focus.
+    uint32_t has_surfaces; // GL, video or CA surfaces drawn over the backing, which the backing doesn't hold.
+    uint32_t reserved;
+};
+#define SWS_TREE 256
+
 struct SWSTable {
     uint32_t magic, version;
     volatile uint64_t passes;
@@ -30,6 +43,9 @@ struct SWSTable {
     uint64_t arena_used;
     uint32_t ticks_numer, ticks_denom; // mach_timebase_info, for the tool to convert ticks_spent.
     struct SWSEntry slots[SWS_SLOTS];
+    volatile uint32_t tree_generation; // Odd while being written.
+    uint32_t tree_count;
+    struct SWSTreeEntry tree[SWS_TREE];
     uint8_t arena[SWS_ARENA];
 };
 #endif

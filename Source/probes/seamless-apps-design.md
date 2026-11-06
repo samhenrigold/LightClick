@@ -37,6 +37,19 @@ frame by frame. A click on a real button and a typed key, sent from the host, ch
   windows at a login desktop, only one was accelerated: the Dock (2306x86).
 - **One-window TextEdit stream, by capture:** 26 ms at 1310x854 pixels, 51 ms at 2560x1410. A click on the zoom button zoomed it and a typed key entered its text, through `CGEventPost` from the console user.
 
+**Since then, on the same clones:**
+
+- **Window tree from the hook.** It walks `WSGetVisibleWindowArray` every 33 ms and publishes ID, connection, level, alpha, bounds and shadow margin, read where WindowServer keeps them (`+0xe0` is the read-only state `CGSWindowROState*` read). Checked against `CGWindowList` once a second:
+  0 to 5 of about 370 to 530 samples differed, always while a window was animating. The walk runs front first. `CGWindowList` is still read for titles. Walking before a session exists crashes WindowServer, as the array is then at address `0x20`; it's guarded by `CGXGetCurrentSessionWindowData`.
+- **Shadow by event, not timer.** A hash of the shadow parameters at `+0x134` to `+0x148` says when to recapture, such as on losing focus, and `CGXGetShadowMarginForWindow` gives the exact margin. The pixels still come from a capture, since `CGXWindowShadowGet` returns a cached object nothing here reads yet. A window against the display's edge has its shadow cut there, as the capture is clipped by the display.
+- **GL.** A GL view shows correctly, by capture, at the same rate as the rest. Its window has a backing as well, which doesn't hold the GL, and `state + 0xb` says so. A window with any surface is captured at 15 Hz. Plain text views count too, because of their overlay scrollers: **TextEdit is captured at 13 a second for this reason, at 43% of the tool's time.** Knowing when a surface flushed would fix that.
+- **Safari**, with an animated page: **no backing store at all**, so capture only: 6.6 captures/s at 2884x1734 pixels, 91 ms each, 60% of the tool's time, and 6.9 frames/s reaching the host. This is the main limit now, for any big or animated window. Only a composite in the server fixes it.
+- **Scroll, drag, resize**, sent as a host would, in guest screen points: a scroll of 40 events moved a real text view by about 33 lines, through `SWI_RECORD`. A title-bar drag of (180, 120) moved the window by exactly that, and a corner drag of (160, 110) resized it from 420x282 to 580x390, with the host window following each step. These were scripted over the wire, not with a real host pointer.
+- **A real proxy app.** `seamless-try proxy`: a generated, ad-hoc signed `TextEdit (Mavericks).app`, launched with `open`, `type="Foreground"` with its own bundle ID, whose windows hold `CALayerHost`s of layers in the session process, with the VM's app hidden and none of its windows on screen. Its input view's events (real `NSEvent`s made in-process, as nothing may touch this Mac's pointer) reached TextEdit: the click activated it, and a typed "b" appeared in the document. TextEdit's whole menu came through Accessibility in 0.5 to 1.4 s, 15 KB, to the proxy's menu bar, and pressing Edit > Select All through the session selected the document, seen in the frames.
+- **Accessibility on 10.9:** `AXIsProcessTrusted` asks TCC about the **responsible process**, which from a daemon is the guest agent, `opengl-install-bootstrap`. A grant to the tool itself does nothing; it took a row for the agent's path. A real agent running as a launch agent in the session wouldn't have this problem [inferred].
+
+All images are composed by the viewer from each window's exact pixels, over gray, and aren't read from the screen: the Mac's display was asleep throughout, and `screencapture` fails then. So **nobody has seen a proxy window on a display**, and whether `CALayerHost` drew there has only the earlier host probe behind it.
+
 What was wrong before these worked: `launchctl bsexec` only moves the bootstrap port, and prints "bsexec failed: Inappropriate ioctl for device" on 10.9. WindowServer finds a
 client's GUI session from its **audit session**, so a tool started by the guest agent stayed in the system's: the connection and display calls worked, but the window list and session
 dictionary came back empty. `probes/seamless-console.h` now joins Finder's audit session. **Anything else using bsexec this way on 10.9 has the same problem**
@@ -46,10 +59,10 @@ dictionary came back empty. `probes/seamless-console.h` now joins Finder's audit
 
 - The composed images are made by the viewer from each host window's exact pixels, not read from the screen, because the host's display was asleep and `screencapture` failed. Nobody has yet
   looked at these as real windows on a display, with the real Dock, Mission Control or menu bar.
-- The hook only delivers window contents. The shadow still comes from a capture, refreshed every 5 s and on resize, so an active window going inactive keeps its old shadow for up to 5 s. Accelerated
-  windows and GL views also still need capturing. No accelerated window or GL view has been in the demo, so that path is unmeasured. A window's order, bounds, alpha and title still come from `CGWindowList`, polled.
+- The hook delivers backing-store contents and the tree. Shadows, GL, text views with overlay scrollers and whole CA-backed windows such as Safari's still come from a capture. A composite in the server for those is the next real step.
+- The session is still the viewer probe, not the app, and the VM's window is hidden rather than absent: there's no headless launch. Nothing about launching from the Dock with no VM running, reopening, quitting with a save prompt, or a second window position after a host-side drag has run.
 - Pixels go over TCP through slirp. Nothing is zero-copy yet. No GPU composite, and nothing headless.
-- Dragging a window, resizing, scrolling and full-screen weren't exercised in the tree. Tooltips and drag images weren't tried.
+- Full screen wasn't exercised. Tooltips and drag images weren't tried. Host-native dragging isn't done: dragging runs in the guest, with the host window following.
 - Mojave: no hook. Its symbols are read, not run. A `tree` run on the Mojave Test clone never ran: no one logged in to its desktop within 300 s, and I didn't look into why.
 
 ## Answer
@@ -267,8 +280,8 @@ symbol and branch validation, and `PVGMetalCompat` runs inside WindowServer [rea
    on the main thread, resolves local symbols from the on-disk `CoreGraphics`, comparing each function's bytes with memory since the file's `LC_UUID` needn't match the shared cache,
    and publishes wanted windows' changed rows through a shared file. It changes nothing WindowServer does.
 2. **Done on Mavericks: damage**, from the flush seed at `*(window + 0xe0) + 0x1c`.
-3. **Next: the window tree and shadow from inside**, with `WSGetVisibleWindowArray` and `CGXWindowShadowGet`, which removes the remaining captures. Then per-window composite in the server for accelerated
-   windows, Mojave `WSCompositeWindowToDestination`, Mavericks `CGXRedrawWindowToLayer`, into an IOSurface per window, on the GPU.
+3. **Done on Mavericks: the window tree** from `WSGetVisibleWindowArray`, and shadow changes as events.
+4. **Next: per-window composite in the server**, for what a backing doesn't hold: Safari, GL, overlay scrollers. Mojave `WSCompositeWindowToDestination`, Mavericks `CGXRedrawWindowToLayer`, into an IOSurface per window, on the GPU. Also knowing when a surface flushed.
 4. **Hand that surface to the host** without a CPU copy (below).
 5. **Headless:** skip the framebuffer composite with `WSDisplayUpdatesAreDisabled` or by returning early once all windows are delivered.
 
@@ -323,8 +336,8 @@ Stable now: `probes/seamless-wire.h`. Numbers 32-47 are reserved for input, 48-6
 ## Plan
 
 1. Done: capture measured, injection and offsets proven, backing stores delivered on Mavericks. See [above](#measured-on-a-mavericks-clone).
-2. Next: **window tree and shadow from the hook** on Mavericks, removing polling and the last captures.
-3. **Accelerated windows:** per-window composite for them, and a Safari or GL app in the demo.
+2. Done on Mavericks: the window tree from the hook, GL and Safari exercised, scroll, drag and resize, and a generated proxy with windows, Dock identity, menu and input.
+3. Next: **a composite in the server** for windows without a useful backing. Safari at 7 frames/s is the largest gap.
 4. **Zero-copy for vmware-svga**, through PassthroughOpenGL.
 5. **Proxies:** `CALayerHost`, generated bundles, session process, invisible VM.
 6. **Mojave hook**, and the PVG transport.
@@ -337,6 +350,9 @@ Stable now: `probes/seamless-wire.h`. Numbers 32-47 are reserved for input, 48-6
     M="$HOME/Library/Application Support/Virtual Intel Mac/Machines/Mavericks.vintelmac"
     A="$PWD/Build/Products/Current/Light Click.app"
 
+    scripts/seamless-try proxy "$A" "$M"      # TextEdit as a generated host app: windows, menu, input, VM hidden.
+    scripts/seamless-try motion "$A" "$M"     # The demo through the hook, with GL, a scroll, a drag and a resize.
+    scripts/seamless-try safari "$A" "$M"     # Safari with an animated page, through the hook.
     scripts/seamless-try hook "$A" "$M"       # The demo, by capture and then through the hook. Reboots the clone.
     scripts/seamless-try tree "$A" "$M"       # The demo by capture only.
     scripts/seamless-try stream "$A" "$M"     # One TextEdit window, with a test click and key.

@@ -62,6 +62,8 @@ static int run_in_console_session(int argc, char **argv, int as_user) {
     snprintf(account, sizeof(account), "#%u", console.st_uid);
     if (chmod(directory, 0755) || copyfile(self, copy, NULL, COPYFILE_DATA) || chmod(copy, 0755))
         return 74;
+    // A caller that has already put this where the user can run it may have granted that path permissions. Stay there.
+    const char *run_from = getenv("SEAMLESS_RUN_IN_PLACE") ? self : copy;
     int modern = darwin_major() >= 14;
     snprintf(target, sizeof(target), "%d", modern ? (int)console.st_uid : finder);
     char *arguments[64];
@@ -80,7 +82,7 @@ static int run_in_console_session(int argc, char **argv, int as_user) {
     arguments[n++] = "/usr/bin/env";
     arguments[n++] = "-i";
     arguments[n++] = "PATH=/usr/bin:/bin:/usr/sbin:/sbin";
-    arguments[n++] = copy;
+    arguments[n++] = (char *)run_from;
     for (int i = 1; i < argc && n < 62; i++)
         arguments[n++] = argv[i];
     arguments[n++] = "--in-session";
