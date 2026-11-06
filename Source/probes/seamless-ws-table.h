@@ -37,6 +37,7 @@ struct SWSTreeEntry {
 #define SWS_TREE 256
 #define SWS_FLUSHES 4096
 #define SWS_PLACEMENTS 64
+#define SWS_BACKDROPS 1024
 
 struct SWSTable {
     uint32_t magic, version;
@@ -70,6 +71,15 @@ struct SWSTable {
         float x, y, width, height; // The surface's content: the window with its shadow.
         float window_x, window_y, window_width, window_height;
     } gpu_rows[SWS_TREE];
+    // A rectangle of a window's material, in points, top-left origin. Odd while being written.
+    volatile uint32_t gpu_backdrop_generation, gpu_backdrop_count;
+    volatile struct SWSBackdrop {
+        uint32_t id, order, material, active, blend;
+        float x, y, width, height, saturation;
+        float color[12];
+    } gpu_backdrops[SWS_BACKDROPS];
+    // Set by the hook once all its patches are in, for seamless-ws-inject to read.
+    volatile int32_t installed_pid;
     uint8_t arena[SWS_ARENA];
 };
 #endif

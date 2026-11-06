@@ -18,7 +18,6 @@
 //
 // A surface's size says which window it is, as there's no other channel to the host. The low 8 bits of its width are
 // the ID's, and of its height 0xA0 and the ID's top 4 bits. Past the window it's transparent.
-#include <dlfcn.h>
 
 void *objc_autoreleasePoolPush(void);
 void objc_autoreleasePoolPop(void *);
@@ -38,6 +37,11 @@ static char (*region_is_empty)(void *);
 static void (*region_bounds)(struct RectResult *, void *);
 static void (*region_free)(void *);
 static void *(*device_rgb)(void);
+static long (*array_count)(const void *);
+static const void *(*array_value)(const void *, long);
+static void *(*backdrop_screen_shape)(void *);
+static void (*enumerator_make)(void *, void *);
+static char (*enumerator_next_bounds)(void *, int *, int *, int *, int *);
 
 struct GPUWindow {
     uint32_t id;
@@ -96,10 +100,18 @@ static char generate_layers_hook(char *state, char *window) {
         return generate_layers_original(state, window);
     table->gpu_generate_calls++;
     uint32_t id = *(const uint32_t *)(window + 0x10);
+    struct RectResult rect = window_rect(window);
+    // By bounds: a window's shadow reaches under the menu bar, and shouldn't count. One nobody will show still covers
+    // what's behind it on the display, as the Dock does.
+    int covered = 0;
+    for (unsigned i = 0; i < gpu_front_count && !covered; i++)
+        covered = rect.x < gpu_front[i].x + gpu_front[i].width && gpu_front[i].x < rect.x + rect.width &&
+                  rect.y < gpu_front[i].y + gpu_front[i].height && gpu_front[i].y < rect.y + rect.height;
+    if (gpu_front_count < SWS_TREE)
+        gpu_front[gpu_front_count++] = rect;
     for (uint32_t i = 0; i < table->gpu_skip_count && i < 64; i++)
         if (table->gpu_skip[i] == id)
             return 0;
-    struct RectResult rect = window_rect(window);
     // shortcut: a row per window seen, by search. A real session keeps these in the window's own record.
     static struct {
         uint32_t id;
@@ -119,13 +131,6 @@ static char generate_layers_hook(char *state, char *window) {
         asked = gpu_contributors[i] == connection;
     void *damage = *(void **)(state + 0x50);
     void *shape = capture_shape(window, 1);
-    // By bounds: a window's shadow reaches under the menu bar, and shouldn't count.
-    int covered = 0;
-    for (unsigned i = 0; i < gpu_front_count && !covered; i++)
-        covered = rect.x < gpu_front[i].x + gpu_front[i].width && gpu_front[i].x < rect.x + rect.width &&
-                  rect.y < gpu_front[i].y + gpu_front[i].height && gpu_front[i].y < rect.y + rect.height;
-    if (gpu_front_count < SWS_TREE)
-        gpu_front[gpu_front_count++] = rect;
     void *touched = damage && shape ? region_intersection(damage, shape) : NULL;
     if (touched && region_is_empty(touched)) {
         region_free(touched);
@@ -193,6 +198,44 @@ static void *gpu_make_surface(int id, const struct RectResult *bounds, float sca
     return surface;
 }
 
+// What's behind a window's material, in the order it's drawn: a composite of the window alone leaves those parts clear,
+// with only what's over them, as a backdrop samples what's already in the destination. So the host can put its own
+// there.
+static void gpu_publish_backdrops(uint32_t id, char *window) {
+    table->gpu_backdrop_generation++;
+    uint32_t kept = 0, count = table->gpu_backdrop_count;
+    for (uint32_t i = 0; i < count; i++)
+        if (table->gpu_backdrops[i].id != id)
+            table->gpu_backdrops[kept++] = table->gpu_backdrops[i];
+    const void *backdrops = *(void **)(window + 0x3c0);
+    long total = backdrops ? array_count(backdrops) : 0;
+    for (long b = 0; b < total; b++) {
+        char *backdrop = (char *)array_value(backdrops, b);
+        void *shape = backdrop_screen_shape(backdrop);
+        if (!shape)
+            continue;
+        uint64_t enumerator[64];
+        int x, y, right, bottom;
+        enumerator_make(enumerator, shape);
+        while (kept < SWS_BACKDROPS && enumerator_next_bounds(enumerator, &x, &y, &right, &bottom)) {
+            struct SWSBackdrop *row = (struct SWSBackdrop *)&table->gpu_backdrops[kept++];
+            row->id = id;
+            row->order = (uint32_t)b;
+            row->material = *(uint32_t *)(backdrop + 0x20);
+            row->active = *(uint8_t *)(backdrop + 0xc8);
+            row->x = (float)x;
+            row->y = (float)y;
+            row->width = (float)(right - x);
+            row->height = (float)(bottom - y);
+            memcpy((void *)row->color, backdrop + 0x80, sizeof(row->color));
+            row->saturation = *(float *)(backdrop + 0xb0);
+            row->blend = *(uint32_t *)(backdrop + 0x24);
+        }
+    }
+    table->gpu_backdrop_count = kept;
+    table->gpu_backdrop_generation++;
+}
+
 static void gpu_compose_one(uint32_t id) {
     char *window = window_by_id(id);
     void *shape = window ? capture_shape(window, 1) : NULL;
@@ -245,7 +288,8 @@ static void gpu_compose_one(uint32_t id) {
         double transform[6] = {1, 0, 0, 1, 0, 0};
         memcpy(&transform[4], window + 0x208, 16);
         if (destination) {
-            composite_window(window, destination, *(void **)(surface + 0x80), clip, transform, 1, 1, 1, 1);
+            // The first of the last four leaves out the shadow.
+            composite_window(window, destination, *(void **)(surface + 0x80), clip, transform, 0, 1, 1, 1);
             cf_release(destination);
         }
         gpu_clear_only = NULL;
@@ -256,6 +300,7 @@ static void gpu_compose_one(uint32_t id) {
         w->previous = w->pending;
         w->pending = NULL;
         table->gpu_composites++;
+        gpu_publish_backdrops(id, window);
         for (unsigned i = 0; i < table->gpu_row_count; i++)
             if (table->gpu_rows[i].id == id) {
                 struct SWSGPURow *row = &table->gpu_rows[i];
@@ -304,7 +349,17 @@ static void update_hook(void *context, double time) {
     gpu_compose_damaged();
 }
 
-static void gpu_install(void) {
+static const uint8_t contributors_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53,
+                                             0x50, 0x80, 0xbe, 0x00, 0x02, 0x00, 0x00, 0x00};
+static const uint8_t clear_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41,
+                                      0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50};
+static const uint8_t update_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
+                                       0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x30};
+#define GPU_PATCHES 4
+static struct Patch gpu_patches[GPU_PATCHES];
+
+// Everything needed, found and checked, with nothing changed.
+static int gpu_prepare(void) {
     capture_shape = resolved[2];
     compositor_for_device = resolved[3];
     display_accelerator = resolved[4];
@@ -320,37 +375,26 @@ static void gpu_install(void) {
     region_bounds = dlsym(RTLD_DEFAULT, "CGRegionGetBoundingBox");
     region_free = dlsym(RTLD_DEFAULT, "CGRegionRelease");
     device_rgb = dlsym(RTLD_DEFAULT, "CGColorSpaceCreateDeviceRGB");
-    if (!region_intersection || !region_union || !cf_release || !main_display_device || !regions_intersect ||
-        !region_is_empty || !region_bounds || !region_free || !device_rgb) {
+    array_count = dlsym(RTLD_DEFAULT, "CFArrayGetCount");
+    array_value = dlsym(RTLD_DEFAULT, "CFArrayGetValueAtIndex");
+    backdrop_screen_shape = resolved[12];
+    enumerator_make = dlsym(RTLD_DEFAULT, "CGRegionForwardEnumeratorMake");
+    enumerator_next_bounds = dlsym(RTLD_DEFAULT, "CGRegionForwardEnumeratorGetNextBounds");
+    if (!array_count || !array_value || !enumerator_make || !enumerator_next_bounds || !region_intersection ||
+        !region_union || !cf_release || !main_display_device || !regions_intersect || !region_is_empty ||
+        !region_bounds || !region_free || !device_rgb) {
         note("gpu: a library symbol is missing; off\n");
-        return;
+        return 0;
     }
-    // Other threads stop while code changes under them. Between here and resuming them, nothing may take a lock they
-    // might hold, so no logging and no allocating.
-    thread_act_array_t threads = NULL;
-    mach_msg_type_number_t thread_count = 0;
-    thread_t me = mach_thread_self();
-    task_threads(mach_task_self(), &threads, &thread_count);
-    for (mach_msg_type_number_t i = 0; i < thread_count; i++)
-        if (threads[i] != me)
-            thread_suspend(threads[i]);
-    generate_layers_original = (char (*)(char *, char *))patch_entry(resolved[1], (const void *)generate_layers_hook);
-    // Its entry differs from the others: pushes and a compare, 17 bytes, which can run anywhere.
-    static const uint8_t contributors_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53,
-                                                 0x50, 0x80, 0xbe, 0x00, 0x02, 0x00, 0x00, 0x00};
-    static const uint8_t clear_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41,
-                                          0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50};
-    clear_original = (void (*)(void *, void *, float))patch_entry_with(resolved[10], (const void *)clear_hook,
-                                                                       clear_entry, sizeof(clear_entry));
-    static const uint8_t update_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
-                                           0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x30};
-    update_original = (void (*)(void *, double))patch_entry_with(resolved[11], (const void *)update_hook, update_entry,
-                                                                 sizeof(update_entry));
-    contributors_original = (void (*)(void *, void *))patch_entry_with(resolved[6], (const void *)contributors_hook,
-                                                                       contributors_entry, sizeof(contributors_entry));
-    for (mach_msg_type_number_t i = 0; i < thread_count; i++)
-        if (threads[i] != me)
-            thread_resume(threads[i]);
-    note("gpu: hooked %p %p %p %p, %u threads stopped\n", (void *)generate_layers_original,
-         (void *)contributors_original, (void *)clear_original, (void *)update_original, thread_count);
+    const struct Patch patches[GPU_PATCHES] = {
+        PUSHES_PATCH(resolved[1], generate_layers_hook, generate_layers_original),
+        {resolved[10], clear_entry, sizeof(clear_entry), sizeof(clear_entry), (const void *)clear_hook,
+         (void **)&clear_original},
+        {resolved[11], update_entry, sizeof(update_entry), sizeof(update_entry), (const void *)update_hook,
+         (void **)&update_original},
+        // Pushes and a compare, 17 bytes, which can run anywhere.
+        {resolved[6], contributors_entry, sizeof(contributors_entry), sizeof(contributors_entry),
+         (const void *)contributors_hook, (void **)&contributors_original}};
+    memcpy(gpu_patches, patches, sizeof(patches));
+    return 1;
 }

@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 source = Path(__file__).resolve().parents[1]
 if len(sys.argv) != 3:
@@ -39,6 +40,8 @@ subprocess.run(['cp', '-c', '-R', str(original_machine), str(machine)], check=Tr
 if os.environ.get('SEAMLESS_SCALE') == '1':
     for key, value in (('DisplayMode', '"scaled"'), ('RetinaEnabled', 'false')):
         subprocess.run(['plutil', '-replace', key, '-json', value, str(machine/'Machine.plist')], check=True)
+# The socket, its log and the proxy's bundle identifier all come from this, so a clone keeping it would share them with a live session.
+subprocess.run(['plutil', '-replace', 'Identifier', '-string', str(uuid.uuid4()).upper(), str(machine/'Machine.plist')], check=True)
 for key in ('SSHEnabled', 'FileSharingEnabled'):
     subprocess.run(['plutil', '-replace', key, '-bool', 'NO', str(machine/'Machine.plist')], check=True)
 print(f'WARNING: "{machine.stem}" is a throwaway clone, and preferences stay shared with the real app.', flush=True)
@@ -69,6 +72,8 @@ env = dict(os.environ, CFFIXED_USER_HOME=str(home), LC_HVDBT='1')
 maker = subprocess.run([str(app/'Contents/MacOS/Light Click'), '--open-vm', str(machine), '--seamless-make-proxy', 'TextEdit'],
                        env=env, capture_output=True, text=True, timeout=1200)
 bundle = next((line for line in maker.stdout.splitlines() if line.endswith('.app')), '')
+if bundle and not Path(bundle).is_relative_to(work):
+    sys.exit(f'The proxy landed outside this clone\'s folder, so nothing here will touch it: {bundle}')
 check('the app made a proxy, and shut the machine down', bool(bundle) and maker.returncode == 0 and not running(str(machine)), maker.stdout[-300:])
 if not bundle:
     print(maker.stderr[-2000:])

@@ -12,6 +12,7 @@
 // its accelerated-surface pointer at 0x88. Local symbols aren't in the shared cache's symbol table, so they come from
 // the CoreGraphics file on disk, and are refused if its UUID isn't the loaded image's.
 #include "seamless-ws-table.h"
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <mach/mach_time.h>
 #include <mach-o/dyld.h>
@@ -104,7 +105,8 @@ static const char *const wanted_mojave[] = {
     "_WSCompositeWindowToDestination",
     "_CGXCopyScreenOpaqueShapeForWindow",
     "_MetalClearRegion",
-    "__ZL23update_display_callbackPvd"};
+    "__ZL23update_display_callbackPvd",
+    "_WSBackdropGetScreenShape"};
 static const struct Build {
     const char *release; // Darwin's, as a prefix.
     const char *suffix, *path; // The image with WindowServer's code, by its name when loaded and on disk.
@@ -155,6 +157,8 @@ static int resolve_symbols(void) {
         note("nothing is known of Darwin %s\n", name_of_system.release);
         return 0;
     }
+    // Already there in WindowServer. In seamless-ws-inject's look first, it isn't.
+    dlopen(build->path, RTLD_LAZY);
     const struct mach_header_64 *loaded = loaded_image();
     if (!loaded) {
         note("no %s image\n", build->suffix);
@@ -481,43 +485,93 @@ __asm__(".text\n"
         "  addq $8, %rsp\n  popq %rsi\n  popq %rdi\n  jmpq *_seamless_layer_continue(%rip)\n");
 extern char seamless_layer_entry[];
 
-// Sends a function's entry to `entry`, and returns where to continue it. The bytes moved have to run anywhere, and be
-// at least the 14 of the jump. Refuses anything but the entry it was told of.
-static void *patch_entry_with(uint8_t *function, const void *entry, const uint8_t *prologue, size_t size) {
-    if (memcmp(function, prologue, size)) {
-        note("refusing to patch %p: its entry isn't the expected one\n", (void *)function);
-        return NULL;
-    }
-    uint8_t *island = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (island == MAP_FAILED)
-        return NULL;
-    const uint8_t jump[] = {0xff, 0x25, 0, 0, 0, 0};
-    memcpy(island, function, size);
-    memcpy(island + size, jump, sizeof(jump));
-    void *back = function + size;
-    memcpy(island + size + sizeof(jump), &back, 8);
-    vm_address_t page = (vm_address_t)function & ~(vm_address_t)4095;
-    // Executable throughout: in a running WindowServer, something may be in these pages. Their threads are stopped, but
-    // one stopped here would fault on resuming if it can't execute.
-    kern_return_t result =
-        vm_protect(mach_task_self(), page, 8192, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE | VM_PROT_COPY);
-    if (result) {
-        note("vm_protect failed: %d\n", result);
-        return NULL;
-    }
-    memcpy(function, jump, sizeof(jump));
-    memcpy(function + 6, &entry, 8);
-    vm_protect(mach_task_self(), page, 8192, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    return island;
-}
+// A function's entry sent to `entry`, keeping where to continue it in *original. The bytes moved have to run anywhere,
+// and be at least the 14 of the jump. `match` of them are compared: what's past that may differ, such as a stack size.
+struct Patch {
+    uint8_t *function;
+    const uint8_t *prologue;
+    size_t match, size;
+    const void *entry;
+    void **original;
+};
+static const uint8_t pushes_prologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
+                                          0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xec};
 // Most entries here: pushes and a stack adjustment.
-static void *patch_entry(uint8_t *function, const void *entry) {
-    static const uint8_t pushes[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
-                                     0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xec};
-    uint8_t prologue[20];
-    memcpy(prologue, pushes, sizeof(pushes));
-    memcpy(prologue + sizeof(pushes), function + sizeof(pushes), 4);
-    return patch_entry_with(function, entry, prologue, sizeof(prologue));
+#define PUSHES_PATCH(symbol, hook, keep)                                                                               \
+    {symbol, pushes_prologue, sizeof(pushes_prologue), 20, (const void *)hook, (void **)&keep}
+
+static int patches_match(const struct Patch *patches, size_t count) {
+    for (size_t i = 0; i < count; i++)
+        if (!patches[i].function || memcmp(patches[i].function, patches[i].prologue, patches[i].match)) {
+            note("refusing: the entry at %p isn't the expected one\n", (void *)patches[i].function);
+            return 0;
+        }
+    return 1;
+}
+
+// All of them or none, and nothing's changed unless everything was checked first. A failure in WindowServer logs the
+// user out, so this errs on the side of doing nothing. Other threads stop while code changes under them, and none may
+// be stopped inside what's being overwritten. Between stopping and resuming them nothing may take a lock they might
+// hold, so no logging and no allocating.
+static int patches_apply(const struct Patch *patches, size_t count) {
+    if (!patches_match(patches, count))
+        return 0;
+    uint8_t *islands = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (islands == MAP_FAILED)
+        return 0;
+    const uint8_t jump[] = {0xff, 0x25, 0, 0, 0, 0}; // jmpq *0(%rip)
+    for (size_t i = 0; i < count; i++) {
+        uint8_t *island = islands + i * 64;
+        void *back = patches[i].function + patches[i].size;
+        memcpy(island, patches[i].function, patches[i].size);
+        memcpy(island + patches[i].size, jump, sizeof(jump));
+        memcpy(island + patches[i].size + sizeof(jump), &back, 8);
+    }
+    thread_act_array_t threads = NULL;
+    mach_msg_type_number_t thread_count = 0;
+    thread_t me = mach_thread_self();
+    if (task_threads(mach_task_self(), &threads, &thread_count))
+        return 0;
+    int clear = 0;
+    for (int attempt = 0; attempt < 200 && !clear; attempt++) {
+        for (mach_msg_type_number_t i = 0; i < thread_count; i++)
+            if (threads[i] != me)
+                thread_suspend(threads[i]);
+        clear = 1;
+        for (mach_msg_type_number_t i = 0; i < thread_count && clear; i++) {
+            x86_thread_state64_t state;
+            mach_msg_type_number_t size = x86_THREAD_STATE64_COUNT;
+            if (threads[i] == me || thread_get_state(threads[i], x86_THREAD_STATE64, (thread_state_t)&state, &size))
+                continue;
+            for (size_t p = 0; p < count && clear; p++)
+                clear = !(state.__rip >= (uint64_t)patches[p].function &&
+                          state.__rip < (uint64_t)patches[p].function + patches[p].size);
+        }
+        if (clear)
+            for (size_t p = 0; p < count && clear; p++) {
+                vm_address_t page = (vm_address_t)patches[p].function & ~(vm_address_t)4095;
+                // Executable throughout: a stopped thread may be in these pages, and would fault on resuming.
+                clear = !vm_protect(mach_task_self(), page, 8192, FALSE,
+                                    VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE | VM_PROT_COPY);
+            }
+        if (clear)
+            for (size_t p = 0; p < count; p++) {
+                memcpy(patches[p].function, jump, sizeof(jump));
+                memcpy(patches[p].function + 6, &patches[p].entry, 8);
+                *patches[p].original = islands + p * 64;
+            }
+        if (clear)
+            for (size_t p = 0; p < count; p++)
+                vm_protect(mach_task_self(), (vm_address_t)patches[p].function & ~(vm_address_t)4095, 8192, FALSE,
+                           VM_PROT_READ | VM_PROT_EXECUTE);
+        for (mach_msg_type_number_t i = 0; i < thread_count; i++)
+            if (threads[i] != me)
+                thread_resume(threads[i]);
+        if (!clear)
+            usleep(1000);
+    }
+    note("%s %zu patches, %u threads stopped\n", clear ? "applied" : "gave up on", count, thread_count);
+    return clear;
 }
 
 // Copies the rows of each wanted window's backing that changed, for windows whose flush seed moved. Runs at most once
@@ -605,8 +659,6 @@ static void publish(void) {
 // redraw_window(state, window), which CGXUpdateDisplay calls for each window. The state already has what placement
 // needs: it offsets everything it draws by +0x70 and +0x74, clips to the region at +0x18, and skips shadows with +0x6b.
 // All of that is for the whole update, so this sets them for one window and puts them back.
-static const uint8_t redraw_prologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-                                          0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0x28, 0x02, 0x00, 0x00};
 static char (*redraw_original)(char *, char *);
 static void *(*region_with_rect)(struct RectResult);
 static void (*region_release_fn)(void *);
@@ -684,34 +736,6 @@ static char redraw_placed(char *state, char *window) {
     return result;
 }
 
-// Replaces the start of redraw_window with a jump here, keeping its first instructions in a page of their own to
-// continue from.
-static void hook_redraw(void *target) {
-    if (memcmp(target, redraw_prologue, sizeof(redraw_prologue))) {
-        note("redraw_window doesn't start as expected; no placement\n");
-        return;
-    }
-    uint8_t *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
-    if (page == MAP_FAILED)
-        return;
-    static const uint8_t jump[] = {0xff, 0x25, 0, 0, 0, 0}; // jmpq *0(%rip)
-    memcpy(page, redraw_prologue, sizeof(redraw_prologue));
-    memcpy(page + sizeof(redraw_prologue), jump, sizeof(jump));
-    uint64_t back = (uint64_t)target + sizeof(redraw_prologue), to = (uint64_t)redraw_placed;
-    memcpy(page + sizeof(redraw_prologue) + sizeof(jump), &back, 8);
-    redraw_original = (char (*)(char *, char *))page;
-    vm_address_t start = (vm_address_t)target & ~(vm_address_t)4095;
-    kern_return_t kr = vm_protect(mach_task_self(), start, 8192, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    if (kr) {
-        note("can't write redraw_window: %d\n", kr);
-        return;
-    }
-    memcpy(target, jump, sizeof(jump));
-    memcpy((uint8_t *)target + sizeof(jump), &to, 8);
-    vm_protect(mach_task_self(), start, 8192, 0, VM_PROT_READ | VM_PROT_EXECUTE);
-    note("redraw_window hooked\n");
-}
-
 #include "seamless-ws-mojave.h"
 
 static time_t next_sample;
@@ -779,6 +803,17 @@ __attribute__((used)) static struct {
     {(const void *)hook_new_array, (const void *)_Znam},
 };
 
+// For seamless-ws-inject, in its own process, before it touches WindowServer: whether this build is known and every
+// entry about to be patched is as expected. The shared cache's code is the same there.
+__attribute__((visibility("default"))) int seamless_preflight(void) {
+    if (!resolve_symbols())
+        return 0;
+    // shortcut: 10.9 can't be injected yet.
+    if (build->full)
+        return 0;
+    return gpu_prepare() && patches_match(gpu_patches, GPU_PATCHES);
+}
+
 // Started before main, while still root: WindowServer drops privileges later, and this keeps the descriptor.
 __attribute__((constructor)) static void start(void) {
     logfd = open("/var/tmp/seamless-ws-probe.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -791,10 +826,6 @@ __attribute__((constructor)) static void start(void) {
         tree_in_gl = !access("/var/tmp/seamless-ws-gl-tree", F_OK);
         note("loaded on %s thread\n", pthread_main_np() ? "the main" : "another");
         note("tree in GL: %d\n", tree_in_gl);
-        if (ready && tree_in_gl && build->full) {
-            seamless_layer_continue = patch_entry(resolved[18], seamless_layer_entry);
-            note("patched: %p\n", seamless_layer_continue);
-        }
         // Loaded into a running WindowServer, by probes/seamless-ws-inject.c: it's sandboxed by now, so the injector
         // has made the table for it.
         int injected = !getenv("DYLD_INSERT_LIBRARIES");
@@ -815,13 +846,16 @@ __attribute__((constructor)) static void start(void) {
         if (fd >= 0)
             close(fd);
         note("table %s\n", table ? "mapped" : "NOT mapped");
-        if (ready && table && !build->full)
-            gpu_install();
-        // Only for trying placement: it rewrites a function WindowServer's update calls, and isn't finished.
+        // The second only for trying placement: it rewrites a function WindowServer's update calls, and isn't finished.
+        if (ready && table && !build->full && gpu_prepare() && patches_apply(gpu_patches, GPU_PATCHES))
+            table->installed_pid = getpid();
         if (ready && table && build->full && (tree_in_gl || !access("/var/tmp/seamless-ws-placement", F_OK))) {
             region_with_rect = (void *(*)(struct RectResult))placement_targets[1];
             region_release_fn = (void (*)(void *))placement_targets[2];
-            hook_redraw(placement_targets[0]);
+            struct Patch patches[] = {PUSHES_PATCH(resolved[18], seamless_layer_entry, seamless_layer_continue),
+                                      PUSHES_PATCH(placement_targets[0], redraw_placed, redraw_original)};
+            if (patches_apply(tree_in_gl ? patches : patches + 1, tree_in_gl ? 2 : 1))
+                table->installed_pid = getpid();
         }
     }
 }
