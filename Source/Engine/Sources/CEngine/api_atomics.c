@@ -5,6 +5,8 @@
 #include "engine_abi.h"
 #include "engine_api.h"
 
+void engine_spin_hint(void) { __asm__ volatile("yield"); }
+
 void engine_ctx_post_vector(void *ctx, uint8_t vector, bool level) {
     EngineCtx *c = ctx;
     uint32_t bit = 1u << (vector & 31);

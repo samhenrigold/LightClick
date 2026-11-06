@@ -376,7 +376,13 @@ public final class Engine {
     private func lockTranslator() {
         if os_unfair_lock_trylock(translatorLock) { return }
         let start = mach_absolute_time()
-        os_unfair_lock_lock(translatorLock)
+        // A translation takes a microsecond or two, and sleeping in the lock costs several times that to wake from.
+        var spins = 0
+        while spins < 2000 && !os_unfair_lock_trylock(translatorLock) {
+            engine_spin_hint()
+            spins += 1
+        }
+        if spins == 2000 { os_unfair_lock_lock(translatorLock) }
         translatorWaits &+= 1
         translatorWaitTicks &+= mach_absolute_time() &- start
     }
