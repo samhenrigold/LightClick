@@ -141,7 +141,7 @@ enum {
     SVC_H_MUL, // mul/imul narrow: x16 a, x17 b, x22 size|signed<<8. x16 low, x17 high
     SVC_H_DIV, // x16 low, x17 high, x22 divisor, x23 size|signed<<8. x16 quotient, x17 remainder
     SVC_H_BITSCAN_UNUSED,
-    SVC_H_SSE, // x16 op id; operands live in v-regs, memory operand already in v30
+    SVC_H_PCMPISTRI, // x16, x17 the first operand, x22, x23 the second, x24 imm8. x16 the index, x22 to x24 flags as data
     SVC_H_RMWFLAGS_UNUSED,
 };
 
