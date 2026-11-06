@@ -90,17 +90,6 @@ static NSView *FindView(NSView *root, Class kind) {
     }
     return nil;
 }
-static NSButton *FindGuestSettings(NSView *root, NSString *pane) {
-    if ([root isKindOfClass:NSButton.class] && [root.identifier isEqual:pane] &&
-        ((NSButton *)root).action == @selector(openGuestSettings:))
-        return (id)root;
-    for (NSView *child in root.subviews) {
-        NSButton *match = FindGuestSettings(child, pane);
-        if (match)
-            return match;
-    }
-    return nil;
-}
 static void CheckDragThumbnail(NSTableCellView *cell, NSString *path) {
     [cell layoutSubtreeIfNeeded];
     NSView *viewport = cell.imageView.superview;
