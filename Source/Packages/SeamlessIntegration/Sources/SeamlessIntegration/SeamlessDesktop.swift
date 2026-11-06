@@ -121,9 +121,16 @@ public final class SeamlessDesktop {
             finish("This Mac isn’t ready yet. Wait for it to finish starting, then try again.")
             return
         }
-        let ran = await guest.run(
-            "/usr/bin/env",
-            ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--port", String(port), "--menu-tool", "/tmp/sg/ig"])
+        var ran = SeamlessGuestRun(exitCode: nil, output: "", failure: nil)
+        // On Mavericks the agent's connection can drop just after setup, under whatever runs next. Nothing's reached the user yet.
+        for attempt in 1...4 {
+            ran = await guest.run(
+                "/usr/bin/env",
+                ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--port", String(port), "--menu-tool", "/tmp/sg/ig"])
+            if stopped || ran.exitCode != nil || control >= 0 || attempt == 4 { break }
+            note("# trying again: \(ran.failure ?? "")")
+            try? await Task.sleep(for: .seconds(3))
+        }
         note("# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")")
         finish(ran.exitCode == 3 ? "This Mac couldn’t reach Light Click. Seamless needs its networking on." : nil, why: "the guest's side ended")
     }
