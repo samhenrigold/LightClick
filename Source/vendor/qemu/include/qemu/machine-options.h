@@ -177,7 +177,7 @@
 #define LC_OPTION_VIM_SEAMLESS_PVG_DIR "VIM_SEAMLESS_PVG_DIR"
 /* VIM_SEAMLESS_PVG_SERVICE (string, default unset): Research, for seamless: Mach service that receives per-window PVG surfaces. */
 #define LC_OPTION_VIM_SEAMLESS_PVG_SERVICE "VIM_SEAMLESS_PVG_SERVICE"
-/* VIM_SEAMLESS_PVG_SKIP (string, default unset): Research, for seamless: WxH of a surface the sender leaves out. */
-#define LC_OPTION_VIM_SEAMLESS_PVG_SKIP "VIM_SEAMLESS_PVG_SKIP"
+/* VIM_SEAMLESS_PVG_SAMPLED (string, default unset): Research, for seamless apps: logs what a guest surface's draws sample, to tell its layers apart. */
+#define LC_OPTION_VIM_SEAMLESS_PVG_SAMPLED "VIM_SEAMLESS_PVG_SAMPLED"
 
 #endif
