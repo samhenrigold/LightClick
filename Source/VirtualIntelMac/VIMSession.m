@@ -1641,6 +1641,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                               session.window);
           if (exitPlan.closeWindow)
               [session.window close];
+          if (!relaunch && VIMCreatingGuestFromArguments()) {
+              // The window would wait for a click on Start. Cleanup above finished an install that was verified.
+              if ([session.machine.configuration[@"InstallState"] isEqual:@"installed"])
+                  exit(0);
+              VIMFailCreateGuest(
+                  [NSString stringWithFormat:@"%@ before the installation finished.", exitPlan.statusText]);
+          }
           // Successful openMachine publishes its own library notification once
           // the replacement owns the session lock. Do not invite background
           // maintenance into the gap between cleanup and that acquisition.
@@ -1666,6 +1673,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
               } else {
                   session.guestStatus.stringValue =
                       failure.localizedDescription ?: @"Restart paused: graphics installation needs recovery.";
+                  VIMFailCreateGuest(session.guestStatus.stringValue);
                   [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
                   if (waitingCompletion)
                       waitingCompletion(
@@ -3223,7 +3231,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
               }
             }];
           };
-          if ([outcome[@"Automatic"] boolValue])
+          if ([outcome[@"Automatic"] boolValue] || VIMCreatingGuestFromArguments())
               restart();
           else {
               [session dismissSetupNotice];
@@ -3483,8 +3491,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                                             }];
         return; // Desktop evidence never authorizes modern Metal patching.
     }
-    if (self.completionGuestReport &&
-        (error || ![VIMMachineModel report:report stillMatchesCompletionReport:self.completionGuestReport]))
+    if (self.completionGuestReport && (error || ![VIMMachineModel report:report
+                                                    stillMatchesCompletionReport:self.completionGuestReport]))
         self.completionGuestReport = nil;
     NSString *message = nil;
     if (error) {
@@ -3812,6 +3820,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                       [session.log
                           writeData:[[NSString stringWithFormat:@"\n[Light Click] Reconciliation: %@\n", message]
                                         dataUsingEncoding:NSUTF8StringEncoding]];
+                      // This boot checks no more, so the run could only wait forever.
+                      if (!verified && session.reconciliationAttempts >= 3)
+                          VIMFailCreateGuest(message);
                       // Console discovery may have completed while this read-only
                       // check held preparing=YES. Resume clipboard provisioning now,
                       // not at the next minute-long desktop status refresh. Do not
@@ -3917,6 +3928,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                               [current.log
                                   writeData:[[NSString stringWithFormat:@"\n[Light Click] Installation: %@\n", result]
                                                 dataUsingEncoding:NSUTF8StringEncoding]];
+                              if (installError)
+                                  VIMFailCreateGuest(result);
                               current.reconciledBoot = nil;
                               if (!installError && current.task.running &&
                                   [outcome[@"Phase"] isEqual:@"awaiting-reboot"] &&
@@ -3964,6 +3977,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                          completion:nil];
               [session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Preparation: %@\n", message]
                                          dataUsingEncoding:NSUTF8StringEncoding]];
+              if (failure)
+                  VIMFailCreateGuest(message);
               // Explicit request runs once. No automatic retry of uncertain writes.
               session.guestTimer = [NSTimer scheduledTimerWithTimeInterval:60
                                                                    repeats:NO
@@ -4071,12 +4086,24 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                  NSData *line = [[NSString stringWithFormat:@"\n[Light Click] QEMU state: %@\n", state]
                      dataUsingEncoding:NSUTF8StringEncoding];
                  [session.log writeData:line];
+                 if ([@[ @"io-error", @"guest-panicked", @"internal-error", @"watchdog" ] containsObject:state])
+                     VIMFailCreateGuest(session.status.stringValue);
                }];
 }
 - (void)offerGraphicsRestart {
     if (self.guestProgress) {
-        self.preparing = YES;
         __weak VIMSession *weakSelf = self;
+        if (VIMCreatingGuestFromArguments()) {
+            // Answers the guest window's Restart button, which a --create-guest run never shows.
+            [self.guestProgress updateMode:@"close"
+                                  fraction:1
+                                   message:@""
+                                completion:^(NSError *closeError) {
+                                  [weakSelf handoffToGraphics];
+                                }];
+            return;
+        }
+        self.preparing = YES;
         [self.guestProgress updateMode:@"restart"
                               fraction:1
                                message:@"Graphics support is installed. Restart your virtual Mac to activate it."
@@ -4124,6 +4151,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [self offerHostGraphicsRestart];
 }
 - (void)offerHostGraphicsRestart {
+    if (VIMCreatingGuestFromArguments()) {
+        [self handoffToGraphics];
+        return;
+    }
     NSAlert *alert = [NSAlert new];
     alert.messageText = @"Restart to finish graphics setup?";
     alert.informativeText = @"Graphics support has been installed. Save your work before restarting this virtual Mac. "
@@ -4151,8 +4182,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     __weak VIMSession *weakSelf = self;
     // Changing emulated display hardware needs a new QEMU process, not an
     // in-guest reboot. Never force termination if macOS cannot shut down.
+    // A --create-guest run has nobody to finish a late shutdown by hand, and an emulated guest can be slow to stop.
     self.handoffTimer =
-        [NSTimer scheduledTimerWithTimeInterval:180
+        [NSTimer scheduledTimerWithTimeInterval:VIMCreatingGuestFromArguments() ? 1800 : 180
                                         repeats:NO
                                           block:^(NSTimer *timer) {
                                             VIMSession *session = weakSelf;
@@ -4161,6 +4193,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                                 session.guestStatus.stringValue =
                                                     @"Shutdown is taking longer than expected. Shut down this Mac, "
                                                     @"then open it again to finish setup.";
+                                                VIMFailCreateGuest(session.guestStatus.stringValue);
                                                 [session refreshGuestStatus];
                                             }
                                           }];
@@ -4176,6 +4209,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                               [session.handoffTimer invalidate];
                               session.guestStatus.stringValue =
                                   @"Automatic shutdown failed. Shut down this Mac, then open it again to finish setup.";
+                              VIMFailCreateGuest(session.guestStatus.stringValue);
                               [session refreshGuestStatus];
                           }
                         }];

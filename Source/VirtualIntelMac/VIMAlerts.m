@@ -10,8 +10,21 @@ void VIMSetInstallerAlertIcon(NSAlert *alert, NSString *guest) {
     objc_setAssociatedObject(alert, &installerIconKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+BOOL VIMCreatingGuestFromArguments(void) {
+    return [NSProcessInfo.processInfo.arguments containsObject:@"--create-guest"];
+}
+void VIMFailCreateGuest(NSString *message) {
+    if (!VIMCreatingGuestFromArguments())
+        return;
+    fprintf(stderr, "create-guest: %s\n", message.UTF8String);
+    exit(1);
+}
+
 void VIMPresentAlert(NSAlert *alert, NSWindow *window, void (^completion)(NSModalResponse)) {
     NSCAssert(NSThread.isMainThread, @"Alerts belong to the main thread");
+    VIMFailCreateGuest(alert.informativeText.length
+                           ? [NSString stringWithFormat:@"%@ %@", alert.messageText, alert.informativeText]
+                           : alert.messageText);
     if (!objc_getAssociatedObject(alert, &installerIconKey))
         VIMSetAppAlertIcon(alert);
     NSWindow *parent = window ?: NSApp.keyWindow ?: NSApp.mainWindow;
