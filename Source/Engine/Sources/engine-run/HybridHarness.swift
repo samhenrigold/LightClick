@@ -369,7 +369,7 @@ final class HybridHarness {
                 }
                 if ProcessInfo.processInfo.environment["ENGINE_TALLY"] == nil { unlink(tallyPath) }
                 FileHandle.standardError.write(
-                    Data("hybrid: \(fallbacks) fallbacks, \(boundaries) boundary stops, \(tr_stats().reused) dead blocks reused, \(tr_stats().ahead) translated ahead\n".utf8))
+                    Data("hybrid: \(fallbacks) fallbacks, \(boundaries) boundary stops, \(tr_stats().reused) dead blocks reused\n".utf8))
                 return Int32(bitPattern: exitCode)
             case ENGINE_RUN_ERROR:
                 FileHandle.standardError.write(

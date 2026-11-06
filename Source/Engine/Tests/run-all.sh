@@ -35,7 +35,7 @@ zsh "$here/diff-i386.sh" 4 | tail -1 | grep -q 'differences: 0$' && echo "pass t
 "$engine" --hybrid "$images/hybrid" > /dev/null && echo "pass hybrid" || { echo "FAIL hybrid"; fail=1; }
 ENGINE_HYBRID_SMP=1 ENGINE_ALARM=120 "$engine" --hybrid "$images/hybrid" > /dev/null && echo "pass hybrid, a second vCPU joining" || { echo "FAIL hybrid, a second vCPU joining"; fail=1; }
 LC_HVDBT_NO_SHARE=1 "$engine" --hybrid "$images/hybrid" > /dev/null && echo "pass hybrid, no sharing" || { echo "FAIL hybrid, no sharing"; fail=1; }
-LC_HVDBT_NO_REUSE=1 LC_HVDBT_NO_AHEAD=1 "$engine" --hybrid "$images/hybrid" > /dev/null && echo "pass hybrid, no reuse or translating ahead" || { echo "FAIL hybrid, no reuse or translating ahead"; fail=1; }
+LC_HVDBT_NO_REUSE=1 "$engine" --hybrid "$images/hybrid" > /dev/null && echo "pass hybrid, no reuse" || { echo "FAIL hybrid, no reuse"; fail=1; }
 
 # 32-bit code in compatibility mode, in its own kernel. The transcript's hash is TCG's: Tests/diff-compat.sh --update writes it, after comparing with QEMU itself.
 compat=$here/x86/compat

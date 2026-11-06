@@ -534,18 +534,6 @@ static bool reuse_dead_block(u32 key, int cpl, u64 rip, TrResult *res) {
     return true;
 }
 
-// Translating what a block goes to next, in the same exit. Only on its page: the monitor protects that page's frame and tracks its mapping for the first block, and
-// nothing else. shortcut: direct successors of the block asked for, not theirs. Deeper needs numbers on how many of these ever run.
-#define AHEAD_MAX 3
-static u64 ahead[AHEAD_MAX];
-static int ahead_count;
-static bool translating_ahead;
-
-static void want_ahead(u64 target, u64 page) {
-    if (!cfg.no_ahead && !translating_ahead && ahead_count < AHEAD_MAX && (target & ~0xfffULL) == page && ((target + 15) & ~0xfffULL) == page)
-        ahead[ahead_count++] = target;
-}
-
 static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     u64 t0 = mach_absolute_time();
     TrResult res = {0};
@@ -573,8 +561,6 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     }
     fetch_lo = ~0ULL;
     fetch_hi = 0;
-    if (!translating_ahead)
-        ahead_count = 0;
     do {
         if (!single && (pc & 0xfff) > 4096 - 15 && frame_unprotected((pc | 0xfff) + 1, &frame)) {
             res.unprotected = frame + 1;
@@ -593,8 +579,6 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
         count++;
         if (in->next > page + 4096 && count > 0) {
             // Crossed into the next page: record it, end here.
-            if (translating_ahead) // the next page's frame and mapping are nobody's to watch yet
-                return res;
             u64 gpa;
             if (fetch_walk(page + 4096, &gpa))
                 res.frames[1] = gpa & ~0xfffULL;
@@ -602,14 +586,6 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
         }
     } while (!single && count < MAX_INSNS && !insn_is_terminator(&list[count - 1]) && (pc & ~0xfffULL) == page);
 
-    if (!single) {
-        for (int i = 0; i < count; i++)
-            if (list[i].op == OP_JCC || list[i].op == OP_JMP)
-                want_ahead(list[i].target, page);
-        Insn *end = &list[count - 1];
-        if (end->op != OP_JMP && end->op != OP_JMPI && end->op != OP_RET && end->op != OP_BAD && end->op != OP_UD && end->op != OP_IRET)
-            want_ahead(end->next, page);
-    }
     u64 gpa0 = 0;
     fetch_walk(rip, &gpa0);
     res.frames[0] = gpa0 & ~0xfffULL;
@@ -1152,27 +1128,10 @@ TrResult tr_translate(int view, uint64_t cr3, int cpl, uint64_t rip, bool single
             return r;
         }
     }
-    ahead_count = 0;
     TrResult r = do_translate(view, cr3, cpl, rip, single);
     if ((key & KEY_DOMAIN) && cpl == 3 && !r.unprotected)
         stats.shared_blocks++;
     r.key = key;
-    if (r.arm && !r.flushed) {
-        int n = ahead_count;
-        u64 targets[AHEAD_MAX];
-        memcpy(targets, ahead, sizeof targets);
-        translating_ahead = true;
-        for (int i = 0; i < n && !tr_needs_flush(); i++) {
-            if (map_find(key, targets[i]))
-                continue;
-            TrResult s = do_translate(view, cr3, cpl, targets[i], false);
-            if (s.arm) {
-                tr_hash_insert(view, targets[i], s.arm); // the block that goes there links to it in the monitor, with no exit
-                stats.ahead++;
-            }
-        }
-        translating_ahead = false;
-    }
     return r;
 }
 
@@ -1194,7 +1153,7 @@ void tr_link(uint64_t site, int kind, uint64_t arm, int key) {
     // A link is forever, so it may only join blocks of one domain: a chain from shared code into one view's code would be wrong in the next.
     HostBlock *from = block_at((u32)(s - cc_base));
     u32 was = *s;
-    if (!from || (int)from->view != key || site == arm || (was & 0xFFE0001Fu) != 0xD4000001u) // a dead block's entry may have come back: that site runs on as it is
+    if (!from || (int)from->view != key || site == arm || (kind != SVC_CALL && (was & 0xFFE0001Fu) != 0xD4000001u)) // a dead block's entry may have come back: that site runs on as it is
         return;
     i64 d = ((i64)arm - (i64)site) >> 2;
     if (!__atomic_compare_exchange_n(s, &was, (kind == SVC_CALL ? 0x94000000u : 0x14000000u) | ((u32)d & 0x3ffffff), false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
