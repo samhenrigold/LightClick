@@ -15,7 +15,7 @@ public enum SessionWire {
         case hello = 1, window = 2, frame = 3, gone = 4
         case pointer = 16, key = 17, focus = 18
         case menu = 48, menuPress = 49, document = 50, quitApp = 51, appGone = 52
-        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58
+        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58, overlay = 59
     }
 
     public struct Window: Equatable, Sendable {
@@ -51,6 +51,7 @@ public enum SessionWire {
         case appState(Data)
         case appGone
         case crop(UInt32)
+        case overlay(UInt32)
     }
 
     public enum Parsed: Equatable, Sendable {
@@ -73,7 +74,7 @@ public enum SessionWire {
         switch kind {
         case .menu, .dragState, .appState, .document:
             guard length > 0, length <= maximumData else { return .bad }
-        case .hello, .gone, .appGone, .crop:
+        case .hello, .gone, .appGone, .crop, .overlay:
             guard length == 4 else { return .bad }
         case .window:
             guard length >= 56, length <= 56 + 2 * maximumText else { return .bad }
@@ -88,6 +89,7 @@ public enum SessionWire {
         case .hello: return .message(.hello(version: u32(bytes, body)), used: used)
         case .gone: return .message(.gone(u32(bytes, body)), used: used)
         case .crop: return .message(.crop(u32(bytes, body)), used: used)
+        case .overlay: return .message(.overlay(u32(bytes, body)), used: used)
         case .appGone: return .message(.appGone, used: used)
         case .menu: return .message(.menu(data(bytes, body, length)), used: used)
         case .dragState: return .message(.dragState(data(bytes, body, length)), used: used)

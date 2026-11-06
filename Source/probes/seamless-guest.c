@@ -31,6 +31,9 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <signal.h>
+#include <poll.h>
+#include <pwd.h>
+#include <libproc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/resource.h>
@@ -1130,7 +1133,10 @@ static CGWindowID open_app(const char *app) {
         fputs(safari ? "<title>Seamless page</title><style>@-webkit-keyframes "
                        "m{to{-webkit-transform:translate3d(400px,0,0)}}"
                        "div{width:80px;height:80px;background:#28c;-webkit-animation:m 2s infinite alternate}</style>"
-                       "<h1>A page in a guest browser</h1><div></div><p>Some text.</p>\n"
+                       "<h1>A page in a guest browser</h1><div id=\"d\"></div><p>Some text.</p>"
+                       "<script>var n=0,t;document.onmousedown=function(){var d=document.getElementById('d');"
+                       "d.style.display='none';document.documentElement.style.background=(n++%2)?'#fff':'#234';"
+                       "clearTimeout(t);t=setTimeout(function(){d.style.display='block'},5000)}</script>\n"
                      : "Seamless window test.\n",
               file);
         fclose(file);
@@ -1416,7 +1422,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
-    int cropping;
+    int cropping, covered; // cropping: the message the host last had, if it's taking this from the display.
     double look_every;
     uint32_t surface_flushes;
     CGWindowID id;
@@ -1522,10 +1528,20 @@ static uint32_t tree_group(CGWindowID id) {
 // A sandboxed app's open and save panels are drawn by a view service inside the app's own sheet, and a password prompt
 // by SecurityAgent, so a session shows those as the app's. shortcut: any service's window, whichever app it's for,
 // until the tree can tell which window a service is serving.
-static int tree_owner_wanted(const char *owner, const char *app) {
+static int tree_owner_is_service(const char *owner) {
     size_t length = strlen(owner);
-    return !strcmp(owner, app) || (session_app && (strstr(owner, ".xpc.") || !strcmp(owner, "SecurityAgent") ||
-                                                   (length > 7 && !strcmp(owner + length - 7, "Service"))));
+    return strstr(owner, ".xpc.") || !strcmp(owner, "SecurityAgent") ||
+           (length > 7 && !strcmp(owner + length - 7, "Service"));
+}
+
+// With several of these running, one per app, a service's windows go to the app in front.
+static int tree_shared;
+static char tree_front_owner[256];
+
+static int tree_owner_wanted(const char *owner, const char *app) {
+    if (!strcmp(owner, app))
+        return 1;
+    return session_app && tree_owner_is_service(owner) && (!tree_shared || !strcmp(tree_front_owner, app));
 }
 
 static int tree_wants(CFDictionaryRef d, const char *app, pid_t pid) {
@@ -1574,6 +1590,16 @@ static int tree_items_from_list(struct TreeItem *items, const char *app, pid_t p
     CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
                                                  kCGNullWindowID);
     int count = 0;
+    tree_front_owner[0] = 0;
+    for (CFIndex i = 0; tree_shared && list && i < CFArrayGetCount(list); i++) {
+        CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
+        char owner[256];
+        text_for(d, kCGWindowOwnerName, owner, sizeof(owner));
+        if (int_for(d, kCGWindowLayer) == 0 && !tree_owner_is_service(owner)) {
+            snprintf(tree_front_owner, sizeof(tree_front_owner), "%s", owner);
+            break;
+        }
+    }
     for (CFIndex i = 0; list && count < TREE_ITEMS && i < CFArrayGetCount(list); i++) {
         CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
         if (tree_wants(d, app, pid))
@@ -1784,19 +1810,19 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             CGRect bounds = item->bounds;
             const char *title = item->title, *owner = item->owner;
             int alpha = item->alpha, layer = item->layer;
-            //             // The host crops a window from the display's own frames if that shows it right: an opaque,
-            //             ordinary window that no
-            // other window in front of it covers. Its shape is a rectangle with the corners the host gives it, and its
-            // shadow is the host's. Anything else, such as a menu, a popover, a sheet or a covered window, keeps its
-            // capture, with real alpha.
+            // The host shows everything from the display's own frames. An opaque, ordinary window has the host's corners
+            // and shadow. One a window in front covers also gets a capture a second, for the part under that window, which
+            // only shows when nothing's over it on the host either, as in Mission Control. Anything else, such as a menu, a
+            // popover or a sheet, gets a capture a second for its alpha.
             int crop = no_pixels && item->layer == 0 && item->title[0] && item->alpha == 0x10000;
-            for (int k = 0; crop && k < i; k++) {
+            int covered = 0;
+            for (int k = 0; crop && !covered && k < i; k++) {
                 const struct TreeItem *front = &items[k];
-                if (front->layer == 0 && front->title[0] && CGRectIntersectsRect(front->bounds, item->bounds) &&
-                    tree_group(front->id) != tree_group(id))
-                    crop = 0;
+                covered = front->layer == 0 && front->title[0] && CGRectIntersectsRect(front->bounds, item->bounds) &&
+                          tree_group(front->id) != tree_group(id);
             }
-            int margin = crop ? 0 : item->margin;
+            // A shared desktop has the guest's shadows off, so there's only the window itself to show, and the host's shadow.
+            int margin = crop || tree_shared ? 0 : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
                 sized = !CGSizeEqualToSize(bounds.size, w->bounds.size) || margin != w->margin;
             uint32_t seed = 0;
@@ -1835,25 +1861,27 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             s->order = order;
             s->alpha = (uint32_t)alpha;
             s->margin = margin;
-            if (no_pixels && !crop && w->cropping) {
-                // Back to captures, starting with a whole one.
-                w->cropping = 0;
-                free(w->previous);
-                w->previous = NULL;
-                stale = 1;
-            }
-            if (crop) {
+            int kind = !no_pixels ? 0 : crop ? SWM_CROP : SWM_OVERLAY;
+            if (kind)
+                stale = (!crop || covered) &&
+                        (fresh || sized || !w->previous || covered != w->covered || tick - w->last_capture >= 1);
+            w->covered = covered;
+            if (kind && !stale) {
                 if (fresh || moved || sized || order != w->order || alpha != w->alpha || strcmp(title, w->title)) {
-                    s->pixel_width = w->pixel_width = (uint32_t)(bounds.size.width * display_scale() + 0.5);
-                    s->pixel_height = w->pixel_height = (uint32_t)(bounds.size.height * display_scale() + 0.5);
+                    s->pixel_width = w->pixel_width = (uint32_t)((bounds.size.width + 2 * margin) * display_scale() + 0.5);
+                    s->pixel_height = w->pixel_height = (uint32_t)((bounds.size.height + 2 * margin) * display_scale() + 0.5);
                     s->group = tree_group(id);
                     if (send_window(s, title, owner, layer))
                         goto done;
                 }
-                if (!w->cropping) {
-                    w->cropping = 1;
+                if (sized) {
+                    free(w->previous);
+                    w->previous = NULL;
+                }
+                if (w->cropping != kind) {
+                    w->cropping = kind;
                     uint8_t message[SWM_HEADER_SIZE + SWM_GONE_SIZE];
-                    if (send_all(s->fd, message, swm_put_u32_message(message, sizeof(message), SWM_CROP, id)))
+                    if (send_all(s->fd, message, swm_put_u32_message(message, sizeof(message), kind, id)))
                         goto done;
                 }
                 if (fresh) {
@@ -1956,6 +1984,12 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 }
                 w->previous = s->previous;
                 s->previous = NULL;
+                if (kind && w->cropping != kind) {
+                    w->cropping = kind;
+                    uint8_t message[SWM_HEADER_SIZE + SWM_GONE_SIZE];
+                    if (send_all(s->fd, message, swm_put_u32_message(message, sizeof(message), kind, id)))
+                        goto done;
+                }
                 if (!seed_moved && !sized) {
                     double next = s->frames_changed != changed_before ? look_every / 2 : look_every * 2;
                     w->look_every = next < 1.0 / 15 ? 1.0 / 15 : next > 1 ? 1 : next;
@@ -2169,6 +2203,264 @@ static int flag(int argc, char **argv, const char *name) {
     return 0;
 }
 
+// A whole desktop as host apps. Says which apps have windows, front first, and runs a `tree` for each one the host asks for. It
+// and they end when the host's connection does. Lines, each a tab-separated list:
+//   to the host:  apps NAME BUNDLE NAME BUNDLE ...  and  described BUNDLE JSON ICON-BASE64
+//   from the host: describe BUNDLE  and  run NAME PORT
+static int leap_send(int fd, const char *text) {
+    for (size_t sent = 0, length = strlen(text); sent < length;) {
+        ssize_t wrote = send(fd, text + sent, length - sent, 0);
+        if (wrote <= 0)
+            return 1;
+        sent += (size_t)wrote;
+    }
+    return 0;
+}
+
+// The first line of a tool's output that starts with `start`, in place.
+static char *leap_line(char *text, char start) {
+    for (char *line = text; line && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL)
+        if (*line == start) {
+            char *end = strchr(line, '\n');
+            if (end)
+                *end = 0;
+            return line;
+        }
+    return "";
+}
+
+static int leap_describe(int fd, const char *menu_tool, char *path) {
+    char *const read_it[] = {(char *)menu_tool, "describe", "--path", path, NULL};
+    char *const icon_of[] = {(char *)menu_tool, "icon", "--path", path, NULL};
+    char *description = run_tool(read_it), *icon = run_tool(icon_of);
+    const char *json = description ? leap_line(description, '{') : "";
+    if (icon && (icon[0] == '#' || strchr(icon, ' ')))
+        icon[0] = 0;
+    if (icon)
+        icon[strcspn(icon, "\r\n")] = 0;
+    int failed = leap_send(fd, "described\t") || leap_send(fd, path) || leap_send(fd, "\t") || leap_send(fd, json) ||
+                 leap_send(fd, "\t") || leap_send(fd, icon ? icon : "") || leap_send(fd, "\n");
+    free(description);
+    free(icon);
+    return failed;
+}
+
+#define LEAP_CHILDREN 64
+static pid_t leap_children[LEAP_CHILDREN];
+
+static void leap_run(const char *self, const char *menu_tool, const char *name, const char *port) {
+    pid_t child = fork();
+    if (child == 0) {
+        char log[PATH_MAX];
+        snprintf(log, sizeof(log), "/tmp/sg/leap-%d.log", getpid());
+        int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            dup2(fd, 1);
+            dup2(fd, 2);
+            close(fd);
+        }
+        execl(self, "seamless-guest", "tree", "--app", name, "--session", "--shared", "--no-pixels", "--menu-tool",
+              menu_tool, "--port", port, "--seconds", "0", (char *)NULL);
+        _exit(127);
+    }
+    for (int i = 0; child > 0 && i < LEAP_CHILDREN; i++)
+        if (!leap_children[i]) {
+            leap_children[i] = child;
+            break;
+        }
+}
+
+static void leap_list(char *out, size_t size) {
+    snprintf(out, size, "apps");
+    size_t used = strlen(out);
+    pid_t seen[64];
+    int seen_count = 0;
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+                                                 kCGNullWindowID);
+    for (CFIndex i = 0; list && i < CFArrayGetCount(list) && seen_count < 64; i++) {
+        CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
+        CGRect bounds = bounds_for(d);
+        pid_t pid = int_for(d, kCGWindowOwnerPID);
+        if (int_for(d, kCGWindowLayer) != 0 || bounds.size.width < 1 || bounds.size.height < 1)
+            continue;
+        int known = 0;
+        for (int k = 0; k < seen_count; k++)
+            known |= seen[k] == pid;
+        if (known)
+            continue;
+        seen[seen_count++] = pid;
+        char path[PROC_PIDPATHINFO_MAXSIZE], owner[256];
+        text_for(d, kCGWindowOwnerName, owner, sizeof(owner));
+        char *end = proc_pidpath(pid, path, sizeof(path)) > 0 ? strstr(path, ".app/Contents/MacOS/") : NULL;
+        if (!end || tree_owner_is_service(owner))
+            continue;
+        end[4] = 0;
+        // What belongs to the system's desktop rather than being an app someone opened.
+        if (!strncmp(path, "/System/Library/CoreServices/", 29) && strcmp(path + 29, "Finder.app") &&
+            strncmp(path + 29, "Applications/", 13))
+            continue;
+        int wrote = snprintf(out + used, size - used, "\t%s\t%s", owner, path);
+        if (wrote < 0 || (size_t)wrote >= size - used)
+            break;
+        used += (size_t)wrote;
+    }
+    if (list)
+        CFRelease(list);
+    if (used + 1 < size)
+        strcpy(out + used, "\n");
+}
+
+// While a desktop's showing as host apps, the guest's Dock mustn't paint over a window it's cropped from, and its shadows mustn't
+// show beside ones the host draws. The Dock's way of hiding is a saved preference, so what puts it back is written first, as a
+// login item that deletes itself, for a guest that stops with no chance to undo it. It stays alive through anything that ends this
+// process: a child that waits for a pipe to close.
+#define LEAP_RESTORE_PLIST "Library/LaunchAgents/com.mac.virtualintelmac.seamless-restore.plist"
+static const char leap_hide_dock[] =
+    "cd; plist=$HOME/" LEAP_RESTORE_PLIST "\n"
+    "if ! [ -f $plist ]; then\n"
+    "  mkdir -p Library/LaunchAgents\n"
+    "  hide=$(defaults read com.apple.dock autohide 2>/dev/null); delay=$(defaults read com.apple.dock autohide-delay 2>/dev/null)\n"
+    "  back='defaults delete com.apple.dock autohide'\n"
+    "  [ -n \"$hide\" ] && back=\"defaults write com.apple.dock autohide -bool $hide\"\n"
+    "  back=\"$back; defaults delete com.apple.dock autohide-delay\"\n"
+    "  [ -n \"$delay\" ] && back=\"$back; defaults write com.apple.dock autohide-delay -float $delay\"\n"
+    "  back=\"$back; /usr/bin/killall Dock; rm -f $plist; launchctl remove com.mac.virtualintelmac.seamless-restore; true\"\n"
+    "  domain=${plist%.plist}\n"
+    "  defaults write $domain Label -string com.mac.virtualintelmac.seamless-restore\n"
+    "  defaults write $domain RunAtLoad -bool true\n"
+    "  defaults write $domain ProgramArguments -array /bin/sh -c \"$back\"\n"
+    "fi\n"
+    "defaults write com.apple.dock autohide -bool true; defaults write com.apple.dock autohide-delay -float 1000; /usr/bin/killall Dock\n";
+static const char leap_show_dock[] =
+    "cd; plist=$HOME/" LEAP_RESTORE_PLIST "; [ -f $plist ] && /bin/sh -c \"$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:2' $plist)\"\n";
+
+static void leap_set_guest_shadows(int off) {
+    typedef int (*SetOptions)(int);
+    typedef int (*GetOptions)(int *);
+    SetOptions set = guest_symbol("CGSSetDebugOptions", "SLSSetDebugOptions");
+    GetOptions get = guest_symbol("CGSGetDebugOptions", "SLSGetDebugOptions");
+    // With no connection to WindowServer yet, Mojave answers that it's an invalid one.
+    int (*connection)(void) = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
+    if (connection)
+        connection();
+    int options = 0;
+    if (get)
+        get(&options);
+    int result = set ? set(off ? options | 0x4000 : options & ~0x4000) : -1;
+    // SkyLight's refuses that as an invalid connection, so perhaps it wants one.
+    if (result == 1002 && connection)
+        result = ((int (*)(int, int))set)(connection(), off ? options | 0x4000 : options & ~0x4000);
+    printf("# guest shadows %s: %d\n", off ? "off" : "on", result);
+    fflush(stdout);
+}
+
+// What the session's launcher leaves in the environment doesn't include this, and the scripts need it.
+static void leap_set_home(void) {
+    struct passwd *user = getpwuid(getuid());
+    if (user)
+        setenv("HOME", user->pw_dir, 1);
+}
+
+static int leap_restore(void) {
+    leap_set_home();
+    printf("# restoring\n");
+    fflush(stdout);
+    leap_set_guest_shadows(0);
+    int dock = system(leap_show_dock);
+    printf("# dock: %d\n", dock);
+    return dock != 0;
+}
+
+static void leap_hide_desktop(void) {
+    int ends[2];
+    if (pipe(ends))
+        return;
+    leap_set_home();
+    leap_set_guest_shadows(1);
+    system(leap_hide_dock);
+    if (fork() == 0) {
+        close(ends[1]);
+        // Not to keep the agent's run open, nor to go when whatever started this cleans up after it.
+        setsid();
+        int out = open("/tmp/seamless-leap-restore.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        dup2(out, 0);
+        dup2(out, 1);
+        dup2(out, 2);
+        printf("# waiting\n");
+        fflush(stdout);
+        signal(SIGHUP, SIG_IGN);
+        signal(SIGTERM, SIG_IGN);
+        char byte;
+        while (read(ends[0], &byte, 1) > 0) {
+        }
+        // As a new program, since a connection to WindowServer doesn't survive a fork.
+        char self[PATH_MAX];
+        uint32_t length = sizeof(self);
+        if (!_NSGetExecutablePath(self, &length))
+            execl(self, "seamless-guest", "leap-restore", (char *)NULL);
+        _exit(1);
+    }
+    close(ends[0]);
+    fcntl(ends[1], F_SETFD, FD_CLOEXEC);
+}
+
+static int leap(const char *host, int port, const char *menu_tool) {
+    char self[PATH_MAX];
+    uint32_t length = sizeof(self);
+    if (_NSGetExecutablePath(self, &length))
+        return 1;
+    int fd = connect_to(host, port);
+    if (fd < 0) {
+        printf("# ERROR can't reach the host: %s\n", strerror(errno));
+        return 3;
+    }
+    leap_hide_desktop();
+    static char input[1 << 16], listed[1 << 14], last[1 << 14];
+    size_t have = 0;
+    double said = 0;
+    for (;;) {
+        struct pollfd ready = {fd, POLLIN, 0};
+        if (poll(&ready, 1, 300) > 0) {
+            ssize_t got = recv(fd, input + have, sizeof(input) - have - 1, 0);
+            if (got <= 0)
+                break;
+            have += (size_t)got;
+            input[have] = 0;
+            char *line = input;
+            for (char *end; (end = strchr(line, '\n')); line = end + 1) {
+                *end = 0;
+                char *first = strchr(line, '\t'), *second = first ? strchr(first + 1, '\t') : NULL;
+                if (first)
+                    *first = 0;
+                if (second)
+                    *second = 0;
+                if (first && !strcmp(line, "describe") && leap_describe(fd, menu_tool, first + 1))
+                    goto done;
+                if (second && !strcmp(line, "run"))
+                    leap_run(self, menu_tool, first + 1, second + 1);
+            }
+            have -= (size_t)(line - input);
+            memmove(input, line, have + 1);
+        }
+        for (int i = 0; i < LEAP_CHILDREN; i++)
+            if (leap_children[i] && waitpid(leap_children[i], NULL, WNOHANG) == leap_children[i])
+                leap_children[i] = 0;
+        leap_list(listed, sizeof(listed));
+        // Again every so often, for an app whose side had trouble and is to start over.
+        if (strcmp(listed, last) || now() - said > 3) {
+            said = now();
+            strcpy(last, listed);
+            if (leap_send(fd, listed))
+                break;
+        }
+    }
+done:
+    for (int i = 0; i < LEAP_CHILDREN; i++)
+        if (leap_children[i])
+            kill(leap_children[i], SIGKILL);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -2323,6 +2615,14 @@ int main(int argc, char **argv) {
         extern int seamless_demo_app_main(void);
         return seamless_demo_app_main();
     }
+    if (!strcmp(command, "leap-restore"))
+        return leap_restore();
+    if (!strcmp(command, "leap")) {
+        if (geteuid() == 0 && !in_session)
+            return run_in_console_session(argc, argv, 1);
+        return leap(option(argc, argv, "--host", "10.0.2.2"), atoi(option(argc, argv, "--port", "7654")),
+                    option(argc, argv, "--menu-tool", ""));
+    }
     if (!strcmp(command, "tree") || !strcmp(command, "program-tree")) {
         // Only ever reads windows, so it's safe on the host; the program form opens an app, so it isn't.
         int demo = !strcmp(command, "program-tree");
@@ -2333,6 +2633,7 @@ int main(int argc, char **argv) {
         // A session lasts as long as the app does, and the rest are runs that mustn't outlive a stuck guest.
         session_app = flag(argc, argv, "--session") ? app : NULL;
         no_pixels = flag(argc, argv, "--no-pixels");
+        tree_shared = flag(argc, argv, "--shared");
         alarm(session_app ? 0 : 600);
         pid_t child = 0, gl_child = 0;
         if (demo) {

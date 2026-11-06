@@ -171,3 +171,17 @@ import Testing
     #expect(encoded.last == 0x0A)
     #expect(try JSONDecoder().decode(ProxyEvent.self, from: encoded) == event)
 }
+
+@Test func uncoveredLeavesWhatsNotUnderACover() {
+    let whole = CGRect(x: 0, y: 0, width: 100, height: 100)
+    #expect(SeamlessSession.uncovered(whole, by: []) == [whole])
+    #expect(SeamlessSession.uncovered(whole, by: [CGRect(x: 200, y: 0, width: 10, height: 10)]) == [whole])
+    #expect(SeamlessSession.uncovered(whole, by: [CGRect(x: -5, y: -5, width: 200, height: 200)]).isEmpty)
+    let covers = [CGRect(x: 10, y: 10, width: 20, height: 20), CGRect(x: 20, y: 20, width: 20, height: 20)]
+    let parts = SeamlessSession.uncovered(whole, by: covers)
+    let area = parts.reduce(0.0) { $0 + $1.width * $1.height }
+    #expect(area == 9300)
+    for (i, a) in parts.enumerated() {
+        for b in parts[(i + 1)...] { #expect(a.intersection(b).isEmpty) }
+    }
+}

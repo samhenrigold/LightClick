@@ -15,6 +15,8 @@ public enum ProxyEvent: Codable, Hashable, Sendable {
     case dragEntered(paths: [String], windowID: Int, x: Double, y: Double)
     case dragMoved(windowID: Int, x: Double, y: Double)
     case dragExited
+    /// The user moved this window on the host, which the guest's doesn't follow. Its new place, down from the top of the primary screen.
+    case surfaceMoved(windowID: Int, x: Double, y: Double)
     case dragDropped(windowID: Int, x: Double, y: Double)
     case pointerLeftWithButtonDown(windowID: Int)
     case promiseRequested(id: Int, destination: String)

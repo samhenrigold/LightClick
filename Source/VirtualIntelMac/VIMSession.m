@@ -231,6 +231,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property NSTask *task;
 @property NSFileHandle *log;
 @property VIMMetalView *displayView;
+@property BOOL agentHeldExclusively;
 @property VIMDisplayConnection *displayConnection;
 @property VIMQMPConnection *control;
 @property VIMGuestAgent *guestAgent;
@@ -454,7 +455,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     // SDL device selection is currently next-start only. Keep it in Sound
     // settings, not among controls that imply a live device change.
     return @[
-        NSToolbarFlexibleSpaceItemIdentifier, @"GuestApps", @"GuestCPU", @"GuestUSB", @"GuestOptical", @"GuestNetwork",
+        NSToolbarFlexibleSpaceItemIdentifier, @"GuestSeamless", @"GuestApps", @"GuestCPU", @"GuestUSB", @"GuestOptical", @"GuestNetwork",
         @"GuestSharing", @"GuestControls", @"GuestSettings"
     ];
 }
@@ -466,6 +467,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     willBeInsertedIntoToolbar:(BOOL)insert {
     NSDictionary *devices = @{
         @"GuestApps" : @[ @"Download Apps…", @"appstore", @"downloadApps:" ],
+        @"GuestSeamless" : @[ @"Seamless", @"macwindow.on.rectangle", @"toggleSeamless:" ],
         @"GuestCPU" : @[ @"CPU & Memory", @"cpu", @"showCPUSettings:" ],
         @"GuestSharing" : @[ @"Shared Folders", @"folder", @"showSharingSettings:" ]
     };
@@ -1513,6 +1515,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         }];
       });
     };
+    [VIMSeamlessHost prepareFor:self];
     if (![self.task launchAndReturnError:error]) {
         [self cleanUp];
         return NO;
@@ -1767,17 +1770,19 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (void)serviceDiagnosticRequest {
     // Explicit development opt-in. Reuse the app-owned serial connection;
     // a second QGA client would steal replies and interrupt guest setup.
-    if (!self.diagnostics || self.state.diagnosticPending)
+    // Something holding the agent for as long as it likes, such as Seamless, doesn't stop what doesn't need it.
+    if (!self.diagnostics || (self.state.diagnosticPending && !self.agentHeldExclusively))
         return;
     NSDictionary *command =
         [self.diagnostics takeRequestWhileAgentBusy:self.state.guestPending || self.preparing ||
-                                                    self.state.bootPolicyPending || self.state.clipboardPending];
+                                                    self.state.bootPolicyPending || self.state.clipboardPending ||
+                                                    self.agentHeldExclusively];
     if (!command)
         return;
     self.state.diagnosticPending = YES;
     void (^finish)(NSDictionary *) = ^(NSDictionary *result) {
       [self.diagnostics writeResult:result];
-      self.state.diagnosticPending = NO;
+      self.state.diagnosticPending = self.agentHeldExclusively;
       // Resume provisioning deferred while this command owned the agent.
       // In particular, an explicit clipboard-on request must not wait for
       // the next minute-long status refresh after releasing that ownership.
@@ -1988,6 +1993,19 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     }
     if ([command[@"Action"] isEqual:@"display-frames"]) {
         finish(@{@"Arrived" : @(self.displayView.arrivedFrames), @"Distinct" : @(self.displayView.differentFrames)});
+        return;
+    }
+    if ([command[@"Action"] isEqual:@"seamless-state"]) {
+        finish(@{@"Active" : @([VIMSeamlessHost isActiveFor:self]), @"WindowVisible" : @(self.window.isVisible)});
+        return;
+    }
+    if ([command[@"Action"] isEqual:@"seamless-toggle"]) {
+        [self toggleSeamless:nil];
+        finish(@{@"Active" : @([VIMSeamlessHost isActiveFor:self])});
+        return;
+    }
+    if ([command[@"Action"] isEqual:@"test-click"]) {
+        finish(@{@"At" : @(self.displayView.testClick)});
         return;
     }
     if ([command[@"Action"] isEqual:@"display-request"]) {
@@ -4090,10 +4108,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         self.state.bootPolicyPending || self.state.clipboardPending)
         return nil;
     self.state.diagnosticPending = YES;
+    self.agentHeldExclusively = YES;
     return self.guestAgent;
 }
 - (void)endExclusiveGuestAgentUse {
     self.state.diagnosticPending = NO;
+    self.agentHeldExclusively = NO;
     [self updateClipboardForBoot:self.state.usernameBoot];
 }
 - (void)setFrameObserver:(void (^)(IOSurfaceRef, const void *, NSUInteger, NSUInteger, NSUInteger))observer {
@@ -4101,6 +4121,37 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 }
 - (NSUInteger)distinctFrames {
     return self.displayView.differentFrames;
+}
+- (IBAction)toggleSeamless:(id)sender {
+    if (!self.task.running) {
+        NSBeep();
+        return;
+    }
+    [VIMSeamlessHost toggleFor:self];
+}
+- (NSPoint)seamlessGuestOffset {
+    NSRect frame = [self.displayView convertRect:self.displayView.presentationFrame toView:nil];
+    NSRect screen = [self.window convertRectToScreen:frame];
+    CGFloat primary = NSScreen.screens.firstObject.frame.size.height;
+    return NSMakePoint(NSMinX(screen), primary - NSMaxY(screen));
+}
+- (void)setSeamlessWindowHidden:(BOOL)hidden {
+    if (hidden) {
+        [self.displayView releaseInputCapture];
+        [self.window orderOut:nil];
+    } else {
+        [self.window orderFront:nil];
+        if (!NSProcessInfo.processInfo.environment[@"LC_SEAMLESS_QUIET"]) {
+            [NSApp activateIgnoringOtherApps:YES];
+            [self.window makeKeyAndOrderFront:nil];
+        }
+    }
+}
+- (void)noteSeamlessChanged {
+    for (NSToolbarItem *item in self.window.toolbar.items)
+        if ([item.itemIdentifier isEqual:@"GuestSeamless"])
+            item.label = item.toolTip = [VIMSeamlessHost isActiveFor:self] ? @"Leave Seamless" : @"Seamless";
+    [NSNotificationCenter.defaultCenter postNotificationName:NSMenuDidChangeItemNotification object:nil];
 }
 - (IBAction)makeDockApp:(id)sender {
     [VIMSeamlessHost makeProxyFor:self];

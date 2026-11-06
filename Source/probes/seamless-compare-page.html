@@ -1,0 +1,6 @@
+<!-- Animated. A click hides what moves and flips the background; five quiet seconds and it moves again. -->
+<title>Seamless page</title><style>@-webkit-keyframes m{to{-webkit-transform:translate3d(400px,0,0)}}
+div{width:80px;height:80px;background:#28c;-webkit-animation:m 2s infinite alternate}</style>
+<h1>A page in a guest browser</h1><div id="d"></div><p>Some text.</p>
+<script>var n=0,t;document.onmousedown=function(){var d=document.getElementById('d');d.style.display='none';
+document.documentElement.style.background=(n++%2)?'#fff':'#234';clearTimeout(t);t=setTimeout(function(){d.style.display='block'},5000)}</script>

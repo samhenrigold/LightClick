@@ -373,6 +373,7 @@
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    [VIMSeamlessHost leaveAll];
     if (self.quitConfirmationPending)
         return NSTerminateCancel;
     if (VIMNewMachineWindow.isCreating) {
@@ -494,6 +495,9 @@
     self.activatedAt = NSProcessInfo.processInfo.systemUptime;
 }
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)visible {
+    // Light Click's own tile is one way back from Seamless, since its window with the button is what's gone.
+    if ([VIMSeamlessHost leaveAll])
+        return NO;
     // A Dock click that only brings the app forward keeps the user's existing
     // windows; a click while already frontmost (or with no window) opens the
     // library. The reopen event can arrive just before or just after
