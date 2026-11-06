@@ -519,12 +519,12 @@ static void *copy_region_hook(void *update) {
 enum {
     image_show_at = 0xdcdc4,
     x_log_at = 0xe9bad,
+    gradient_show_at = 0x20154a,
     surface_show_at = 0x1d95e0,
     image_retain_iosurface_at = 0xddb0c,
     copy_region_stub = 0x2696f8 // In SkyLight.
 };
 static void *(*image_retain_iosurface)(void *);
-static void *(*surface_lookup)(uint32_t);
 static int (*surface_lock)(void *, uint32_t, void *), (*surface_unlock)(void *, uint32_t, void *);
 static size_t (*surface_width)(void *), (*surface_height)(void *), (*surface_row)(void *);
 static void *(*surface_base)(void *);
@@ -571,20 +571,33 @@ static void image_show_hook(void *image, unsigned a, unsigned b) {
 static void (*surface_show_original)(void *, unsigned, unsigned);
 static void surface_show_hook(void *object, unsigned a, unsigned b) {
     if (census_printing) {
-        const char *inner = *(const char **)((char *)object + 0x80);
-        void *surface = inner ? surface_lookup(*(const uint32_t *)(inner + 0x10)) : NULL;
-        census_blob(object, *(uint32_t *)((char *)object + 0x1c), surface);
-        if (surface)
-            cf_release(surface);
+        census_blob(object, *(uint32_t *)((char *)object + 0x1c), *(void **)((char *)object + 0x80));
     }
     surface_show_original(object, a, b);
+}
+
+// A gradient's show leaves out its colors. The layer keeps its gradient at +0x40, with its count at +0x10, its
+// locations at +0x18 and its colors at +0x20, as Gradient::set_colors reads.
+static void (*gradient_show_original)(void *, unsigned, unsigned);
+static void gradient_show_hook(char *layer, unsigned a, unsigned b) {
+    const char *gradient = census_printing ? *(const char **)(layer + 0x40) : NULL;
+    size_t count = gradient ? *(const size_t *)(gradient + 0x10) : 0;
+    const float *colors = gradient ? *(const float *const *)(gradient + 0x20) : NULL;
+    const float *locations = gradient ? *(const float *const *)(gradient + 0x18) : NULL;
+    if (colors && count && count <= 64) {
+        census_log(0, "(gradient-colors");
+        for (size_t i = 0; i < count; i++)
+            census_log(0, " %g %g %g %g %g", locations ? locations[i] : (count > 1 ? (double)i / (count - 1) : 0),
+                       colors[i * 4], colors[i * 4 + 1], colors[i * 4 + 2], colors[i * 4 + 3]);
+        census_log(0, ")");
+    }
+    gradient_show_original(layer, a, b);
 }
 
 static void gpu_census_install(void) {
     print_trees = dlsym(RTLD_DEFAULT, "CARenderUpdatePrintTrees");
     copy_region_original = dlsym(RTLD_DEFAULT, "CARenderUpdateCopyRegion");
     set_message_function = dlsym(RTLD_DEFAULT, "CASetMessageFunction");
-    surface_lookup = dlsym(RTLD_DEFAULT, "IOSurfaceLookup");
     surface_lock = dlsym(RTLD_DEFAULT, "IOSurfaceLock");
     surface_unlock = dlsym(RTLD_DEFAULT, "IOSurfaceUnlock");
     surface_width = dlsym(RTLD_DEFAULT, "IOSurfaceGetWidth");
@@ -603,9 +616,9 @@ static void gpu_census_install(void) {
                                           0x53, 0x48, 0x81, 0xec, 0xd8, 0x00, 0x00, 0x00};
     static const uint8_t surface_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
                                             0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0x38, 0x01, 0x00, 0x00};
-    if (!print_trees || !copy_region_original || !set_message_function || !surface_lookup || !surface_lock ||
-        !surface_unlock || !surface_width || !surface_height || !surface_row || !surface_base || !quartz ||
-        stub[0] != 0xff || stub[1] != 0x25) {
+    if (!print_trees || !copy_region_original || !set_message_function || !surface_lock || !surface_unlock ||
+        !surface_width || !surface_height || !surface_row || !surface_base || !quartz || stub[0] != 0xff ||
+        stub[1] != 0x25) {
         note("no census\n");
         return;
     }
@@ -616,7 +629,15 @@ static void gpu_census_install(void) {
                               {(uint8_t *)quartz + surface_show_at, surface_entry, sizeof(surface_entry),
                                sizeof(surface_entry), (const void *)surface_show_hook,
                                (void **)&surface_show_original}};
-    if (!patches_apply(patches, 2)) {
+    static const uint8_t gradient_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
+                                             0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x40};
+    struct Patch gradient = {(uint8_t *)quartz + gradient_show_at,
+                             gradient_entry,
+                             sizeof(gradient_entry),
+                             sizeof(gradient_entry),
+                             (const void *)gradient_show_hook,
+                             (void **)&gradient_show_original};
+    if (!patches_apply(patches, 2) || !patches_apply(&gradient, 1)) {
         note("no census of contents\n");
         return;
     }

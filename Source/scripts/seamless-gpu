@@ -75,6 +75,10 @@ def main():
             if box.is_dir():
                 report = request(work, {'Action': 'status-probe'}, 60).get('Report') or {}
                 if report.get('DesktopRunning'):
+                    # What these runs ask of a guest doesn't need its network, and it can cost someone's data.
+                    if not os.environ.get('SEAMLESS_GPU_KEEP_NETWORK'):
+                        request(work, {'Executable': '/bin/sh', 'Arguments': [
+                            '-c', 'for i in $(/sbin/ifconfig -l); do case $i in en*) /sbin/ifconfig $i down;; esac; done']}, 60)
                     print('desktop')
                     return
             time.sleep(3)
