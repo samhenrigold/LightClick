@@ -17,8 +17,8 @@
 // region leaves that out: a covered window that changes costs a composite of the covered part each frame.
 //
 // A surface's size says which window it is, as there's no other channel to the host. The low 8 bits of its width are
-// the ID's, and of its height 0xA0 and the ID's top 4 bits. Past the window it's transparent. After a composite, the
-// same composite of one point into a small surface with 0xB0 in place of 0xA0 follows on the same queue, and tells the
+// the ID's, and of its height 0xA0 and the ID's top 4 bits. Past the window it's transparent. After a composite, a
+// clear of one point in a small surface with 0xB0 in place of 0xA0 follows on the same queue, and tells the
 // host's helper that the last is finished. A window with materials has a third, 0xC0, of its whole composite without
 // its shadow, when drawn whole: there, any alpha at all is the window's real shape, with its material's corners, a
 // popover's arrow and the like, as a material comes out clear but for an alpha of 1. The host masks its materials with
@@ -67,7 +67,7 @@ struct GPUWindow {
 static struct GPUWindow *gpu_windows;
 static uint32_t gpu_damaged[256];
 static unsigned gpu_damaged_count;
-static int gpu_busy;
+static int gpu_busy, gpu_marking;
 static void (*contributors_original)(void *, void *);
 static struct RectResult (*window_rect)(void *);
 static void *gpu_contributors[64];
@@ -106,6 +106,8 @@ static void clear_hook(void *metal, void *region, float alpha) {
 }
 
 static char generate_layers_hook(char *state, char *window) {
+    if (gpu_marking) // No layers, so all it draws is its clear, which is all that's wanted of it.
+        return 0;
     if (!table || !table->gpu_mode || gpu_busy) // Inside a composite it does what it always does.
 
         return generate_layers_original(state, window);
@@ -341,15 +343,28 @@ static void gpu_compose_one(uint32_t id) {
         // As CaptureSurfaceMetal::Populate(CGXWindow*, region), with the destination the whole surface and the clip
         // only what changed.
         void *clip = shape, *both = NULL;
+        // A shadow changes when a window's activation does, and only then does its size. A composite that's only part
+        // of a window would clear what it touches of the shadow and not draw it again, so it stays within the window.
+        if (memcmp(w->content, (float[]){(float)bounds.x, (float)bounds.y, (float)bounds.width, (float)bounds.height},
+                   sizeof(w->content)))
+            w->whole = 2;
         if (w->whole > 0)
             w->whole--;
         else if (w->pending && w->previous && (both = region_union(w->pending, w->previous))) {
-            clip = both;
             void *more = w->covered ? region_union(both, w->covered) : NULL;
             if (more) {
                 region_free(both);
-                clip = both = more;
+                both = more;
             }
+            void *own = capture_shape(window, 0);
+            void *within = own ? region_intersection(both, own) : NULL;
+            if (own)
+                region_free(own);
+            if (within) {
+                region_free(both);
+                both = within;
+            }
+            clip = both;
         }
         if (clip == shape)
             table->gpu_whole_composites++;
@@ -375,7 +390,9 @@ static void gpu_compose_one(uint32_t id) {
         struct RectResult point = {bounds.x, bounds.y, 1, 1};
         void *one = region_from_rect(point);
         if (w->marker && one) {
+            gpu_marking = 1;
             gpu_composite(window, w->marker, &bounds, one, 1);
+            gpu_marking = 0;
             region_free(one);
         }
         // Their release is as _XHWCaptureWindowListToIOSurface's.
