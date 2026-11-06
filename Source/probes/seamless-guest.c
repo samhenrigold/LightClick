@@ -22,8 +22,11 @@
 #include <ApplicationServices/ApplicationServices.h>
 #include <IOKit/IOKitLib.h>
 #include <arpa/inet.h>
+#include <bsm/audit.h>
 #include <copyfile.h>
+#include <servers/bootstrap.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <mach-o/dyld.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -39,7 +42,9 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <limits.h>
+#include <sys/mman.h>
 #include "seamless-slots.h"
+#include "seamless-ws-table.h"
 #include "../tools/guest-display-modes.h"
 
 static double now(void) {
@@ -71,6 +76,14 @@ static CGRect bounds_for(CFDictionaryRef d) {
     if (v)
         CGRectMakeWithDictionaryRepresentation((CFDictionaryRef)v, &r);
     return r;
+}
+
+static CFIndex visible_windows(void) {
+    CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+    CFIndex count = windows ? CFArrayGetCount(windows) : -1;
+    if (windows)
+        CFRelease(windows);
+    return count;
 }
 
 static int list_windows(void) {
@@ -462,9 +475,11 @@ static int stream(struct Stream *s, double fps, double run_seconds) {
         }
         // Sleep to the next tick, waking at once for input, which is what keeps clicks responsive.
         for (;;) {
+            // At least one look per tick: a capture longer than a tick would otherwise starve input entirely.
             double left = tick + 1 / fps - now();
-            if (left <= 0)
-                break;
+            int last_look = left <= 0;
+            if (last_look)
+                left = 0;
             if (s->fd < 0) {
                 usleep((useconds_t)(left * 1e6));
                 break;
@@ -476,6 +491,8 @@ static int stream(struct Stream *s, double fps, double run_seconds) {
             int ready = select(s->fd + 1, &reads, NULL, NULL, &timeout);
             if (ready > 0 && drain_input(s))
                 return 0;
+            if (last_look && ready <= 0)
+                break;
         }
     }
 }
@@ -531,7 +548,7 @@ static int snapshot(CGWindowID window, char *title, size_t size, CGRect *bounds)
 }
 
 // The whole of phase 1 with nobody in the guest. The viewer's test input proves itself: a click on the zoom button
-// changes the window's bounds, and a typed key marks the document edited in its title.
+// changes the window's bounds. A typed key shows in the pixels: 10.9 doesn't put "Edited" in the window list's title.
 static int program(const char *app, const char *host, int port, double fps, double seconds) {
     CGWindowID window = open_app(app);
     if (!window)
@@ -568,7 +585,6 @@ static int program(const char *app, const char *host, int port, double fps, doub
     printf("pointer_events %u count\n", s.pointer_events);
     printf("key_events %u count\n", s.key_events);
     printf("click_changed_bounds %d bool\n", alive && !CGRectEqualToRect(before, after));
-    printf("key_changed_title %d bool\n", alive && strcmp(title_before, title_after));
     printf("# title after: \"%s\"\n", title_after);
     return s.fd < 0 ? 3 : 0;
 }
@@ -776,8 +792,9 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 // its guest position, whether or not something covers it. This uses only WindowServer's client interface, so it needs
 // no hook; seamless-apps-design.md says what a hook adds. It's the source a hook would replace.
 #define TREE_MAX_WINDOWS 64
-// Comfortably wider than a 10.9 window shadow, so the capture rectangle holds all of it and its position is known.
-#define TREE_SHADOW_MARGIN 48
+// Wider than an active 10.9 window shadow, which 48 points clipped [measured], so the capture rectangle holds all of it
+// and its position is known.
+#define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
     CGWindowID id;
@@ -790,7 +807,67 @@ struct TreeWindow {
     double last_capture;
     int seen, announced;
     pid_t pid;
+    uint32_t hook_sequence;
+    uint8_t *hook_rows; // The last backing read from the hook, to find which rows changed.
+    uint32_t hook_width, hook_height;
+    unsigned captures;
 };
+
+static struct SWSTable *tree_table;
+static uint64_t hook_frames, hook_rows_copied, hook_match_good, hook_match_total, hook_seed_skips;
+static double hook_seconds;
+
+// An opaque pixel's color should agree between a capture and the backing store, if the hook reads what it thinks it
+// reads: right window, right row order, right scale. Sampled, as a check on the whole approach.
+static void hook_compare(const uint8_t *pixels, uint32_t width, uint32_t origin, const struct SWSEntry *e,
+                         const uint8_t *backing) {
+    for (uint32_t y = 2; y < e->height; y += 7)
+        for (uint32_t x = 2; x < e->width; x += 11) {
+            const uint8_t *b = backing + ((size_t)y * e->width + x) * 4;
+            if (b[3] != 255 && !e->opaque)
+                continue;
+            const uint8_t *p = pixels + ((size_t)(y + origin) * width + x + origin) * 4;
+            hook_match_total++;
+            hook_match_good += abs(b[0] - p[0]) < 12 && abs(b[1] - p[1]) < 12 && abs(b[2] - p[2]) < 12;
+        }
+}
+
+// Lays the backing's changed rows over the last frame, keeping what's under its clear corners, which is the shadow.
+// Returns a new frame, or NULL if nothing visible changed.
+static uint8_t *hook_overlay(struct TreeWindow *w, const struct SWSEntry *e, uint32_t origin) {
+    const uint8_t *backing = tree_table->arena + e->offset;
+    size_t row = (size_t)e->width * 4, size = row * e->height;
+    if (!w->hook_rows || w->hook_width != e->width || w->hook_height != e->height) {
+        free(w->hook_rows);
+        w->hook_rows = calloc(1, size);
+        w->hook_width = e->width;
+        w->hook_height = e->height;
+        if (!w->hook_rows)
+            return NULL;
+    }
+    uint8_t *pixels = NULL;
+    size_t stride = (size_t)w->pixel_width * 4;
+    for (uint32_t y = 0; y < e->height; y++) {
+        const uint8_t *from = backing + y * row;
+        if (!memcmp(from, w->hook_rows + y * row, row))
+            continue;
+        if (!pixels) {
+            pixels = malloc(stride * w->pixel_height);
+            if (!pixels)
+                return NULL;
+            memcpy(pixels, w->previous, stride * w->pixel_height);
+        }
+        memcpy(w->hook_rows + y * row, from, row);
+        hook_rows_copied++;
+        uint8_t *to = pixels + (size_t)(y + origin) * stride + (size_t)origin * 4;
+        for (uint32_t x = 0; x < e->width; x++, from += 4, to += 4)
+            if (from[3] == 255 || e->opaque) {
+                memcpy(to, from, 3);
+                to[3] = 255;
+            }
+    }
+    return pixels;
+}
 
 static int (*tree_connection)(void);
 static int (*tree_flush_seed)(int, CGWindowID, uint32_t *);
@@ -818,18 +895,22 @@ static uint32_t tree_group(CGWindowID id) {
     return lowest;
 }
 
-static int tree_wants(CFDictionaryRef d, const char *app) {
+static int tree_wants(CFDictionaryRef d, const char *app, pid_t pid) {
     char owner[256];
     text_for(d, kCGWindowOwnerName, owner, sizeof(owner));
     CGRect bounds = bounds_for(d);
     if (bounds.size.width < 1 || bounds.size.height < 1 || int_for(d, kCGWindowLayer) < 0)
         return 0;
+    if (pid > 0)
+        return int_for(d, kCGWindowOwnerPID) == pid;
     if (app)
         return !strcmp(owner, app);
     return strcmp(owner, "Window Server") && strcmp(owner, "Dock") && strcmp(owner, "SystemUIServer");
 }
 
-static int stream_tree(struct Stream *s, const char *app, double fps, double seconds) {
+// With `pid`, only that process's windows. The clock starts at the first window, since an app can take a long time to
+// start under emulation, and a run that sees none says what it did see.
+static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps, double seconds) {
     tree_connection = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
     tree_flush_seed = guest_symbol("CGSGetWindowFlushSeed", "SLSGetWindowFlushSeed");
     tree_associated = guest_symbol("CGSCopyAssociatedWindows", "SLSCopyAssociatedWindows");
@@ -837,10 +918,20 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
     struct TreeWindow windows[TREE_MAX_WINDOWS];
     memset(windows, 0, sizeof(windows));
     unsigned skipped = 0, roster = 0, seed_answers = 0;
+    double first_window = 0;
     double started = now();
     for (;;) {
         double tick = now();
-        if (seconds > 0 && tick - started > seconds)
+        if (!roster && tick - started > 180) {
+            puts("# ERROR no matching window in 180 s. Everything on screen:");
+            list_windows();
+            if (pid > 0) {
+                int status = 0;
+                printf("# the app %s\n", waitpid(pid, &status, WNOHANG) == pid ? "has exited" : "is still running");
+            }
+            break;
+        }
+        if (seconds > 0 && roster && tick - first_window > seconds)
             break;
         CFArrayRef list = CGWindowListCopyWindowInfo(
             kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
@@ -849,7 +940,7 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
         uint32_t order = 0;
         for (CFIndex i = 0; list && i < CFArrayGetCount(list); i++) {
             CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
-            if (!tree_wants(d, app))
+            if (!tree_wants(d, app, pid))
                 continue;
             CGWindowID id = (CGWindowID)int_for(d, kCGWindowNumber);
             struct TreeWindow *w = NULL;
@@ -881,6 +972,13 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
             seed_answers += have_seed;
             // A seed doesn't cover GL or video surfaces in a window, so look anyway once a second.
             int stale = !have_seed || seed != w->seed || sized || fresh || !w->previous || tick - w->last_capture > 1;
+            struct SWSEntry *entry = tree_table ? &tree_table->slots[w - windows] : NULL;
+            if (entry) {
+                entry->id = id;
+                // A capture for the shadow and anything the backing doesn't hold, like GL. Otherwise, only the hook.
+                if (entry->present && !entry->accelerated && entry->width && !fresh && !sized && w->previous)
+                    stale = tick - w->last_capture > 5;
+            }
             s->window = id;
             s->pid = w->pid;
             s->bounds = bounds;
@@ -889,6 +987,28 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
             s->margin = TREE_SHADOW_MARGIN;
             if (!stale) {
                 skipped++;
+                uint32_t scale = bounds.size.width > 0
+                                     ? (uint32_t)(w->pixel_width / (bounds.size.width + 2 * TREE_SHADOW_MARGIN) + 0.5)
+                                     : 0;
+                if (entry && scale && entry->sequence != w->hook_sequence &&
+                    entry->width == bounds.size.width * scale && entry->height == bounds.size.height * scale) {
+                    w->hook_sequence = entry->sequence;
+                    double before = now();
+                    uint8_t *pixels = hook_overlay(w, entry, TREE_SHADOW_MARGIN * scale);
+                    hook_seconds += now() - before;
+                    if (pixels) {
+                        hook_frames++;
+                        s->pixel_width = w->pixel_width;
+                        s->pixel_height = w->pixel_height;
+                        s->previous = w->previous;
+                        if (send_changes(s, pixels, w->pixel_width, w->pixel_height)) {
+                            w->previous = NULL;
+                            goto done;
+                        }
+                        w->previous = s->previous;
+                        s->previous = NULL;
+                    }
+                }
             } else {
                 CGRect rect = CGRectInset(bounds, -TREE_SHADOW_MARGIN, -TREE_SHADOW_MARGIN);
                 double before = now();
@@ -903,6 +1023,7 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
                 s->capture_worst = spent > s->capture_worst ? spent : s->capture_worst;
                 s->captures++;
                 w->last_capture = tick;
+                w->captures++;
                 w->seed = seed;
                 if (!pixels) {
                     order++;
@@ -924,6 +1045,21 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
                     }
                     w->announced = 1;
                 }
+                if (entry && entry->present && !entry->accelerated && entry->width) {
+                    uint32_t scale = (uint32_t)(width / (bounds.size.width + 2 * TREE_SHADOW_MARGIN) + 0.5);
+                    if (entry->width == bounds.size.width * scale && entry->height == bounds.size.height * scale) {
+                        hook_compare(pixels, width, TREE_SHADOW_MARGIN * scale, entry,
+                                     tree_table->arena + entry->offset);
+                        w->hook_sequence = entry->sequence;
+                        free(w->hook_rows);
+                        w->hook_rows = malloc((size_t)entry->width * entry->height * 4);
+                        if (w->hook_rows)
+                            memcpy(w->hook_rows, tree_table->arena + entry->offset,
+                                   (size_t)entry->width * entry->height * 4);
+                        w->hook_width = entry->width;
+                        w->hook_height = entry->height;
+                    }
+                }
                 s->previous = w->previous;
                 if (send_changes(s, pixels, width, height)) {
                     w->previous = NULL;
@@ -932,6 +1068,8 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
                 w->previous = s->previous;
                 s->previous = NULL;
                 if (fresh) {
+                    if (!roster)
+                        first_window = tick;
                     roster++;
                     printf("# window %u layer %d %s \"%s\" %gx%g group %u at %.1f s\n", id, layer, owner, title,
                            bounds.size.width, bounds.size.height, s->group, tick - started);
@@ -963,13 +1101,20 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
                 swm_put_u32_message(gone, sizeof(gone), SWM_GONE, windows[i].id);
                 if (send_all(s->fd, gone, sizeof(gone)))
                     goto done;
+                if (tree_table)
+                    hook_seed_skips += tree_table->slots[i].seed_skips;
                 free(windows[i].previous);
+                free(windows[i].hook_rows);
                 memset(&windows[i], 0, sizeof(windows[i]));
+                if (tree_table)
+                    memset(&tree_table->slots[i], 0, sizeof(tree_table->slots[i]));
             }
         for (;;) {
+            // At least one look per tick: a capture longer than a tick would otherwise starve input entirely.
             double left = tick + 1 / fps - now();
-            if (left <= 0)
-                break;
+            int last_look = left <= 0;
+            if (last_look)
+                left = 0;
             if (s->fd < 0) {
                 usleep((useconds_t)(left * 1e6));
                 break;
@@ -978,11 +1123,25 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
             FD_ZERO(&reads);
             FD_SET(s->fd, &reads);
             struct timeval timeout = {(time_t)left, (int)((left - (time_t)left) * 1e6)};
-            if (select(s->fd + 1, &reads, NULL, NULL, &timeout) > 0 && drain_input(s))
+            int ready = select(s->fd + 1, &reads, NULL, NULL, &timeout);
+            if (ready > 0 && drain_input(s))
                 goto done;
+            if (last_look && ready <= 0)
+                break;
         }
     }
 done:;
+    for (int i = 0; tree_table && i < TREE_MAX_WINDOWS && i < SWS_SLOTS; i++) {
+        const struct SWSEntry *e = &tree_table->slots[i];
+        hook_seed_skips += e->seed_skips;
+        // Anything that isn't "backing" here is being captured instead, and is what the hook has left to do.
+        if (e->id)
+            printf("# window %u: %s, backing %ux%u, %u changes, captures %u, on %s\n", e->id,
+                   !e->present      ? "no backing"
+                   : e->accelerated ? "accelerated"
+                                    : "backing",
+                   e->width, e->height, e->sequence, windows[i].captures, windows[i].title);
+    }
     double elapsed = now() - started;
     printf("connected %d bool\n", s->fd >= 0);
     printf("windows_seen %u count\n", roster);
@@ -994,6 +1153,18 @@ done:;
     printf("frames_sent_rate %.1f /s\n", s->frames_changed / elapsed);
     printf("sent %.2f MB/s\n", s->bytes_sent / elapsed / 1e6);
     printf("capture_share %.0f %%\n", s->capture_seconds / elapsed * 100);
+    if (tree_table) {
+        printf("hook_frames %llu count\n", hook_frames);
+        printf("hook_frames_rate %.1f /s\n", hook_frames / elapsed);
+        printf("hook_rows_applied %llu count\n", hook_rows_copied);
+        printf("hook_tool_share %.1f %%\n", hook_seconds / elapsed * 100);
+        printf("hook_matches_capture %.1f %% of %llu samples\n",
+               hook_match_total ? 100.0 * hook_match_good / hook_match_total : 0, hook_match_total);
+        printf("hook_passes %llu count\n", tree_table->passes);
+        printf("hook_seed_skips %llu count\n", hook_seed_skips);
+        printf("hook_windowserver_time %.2f s\n",
+               (double)tree_table->ticks_spent * tree_table->ticks_numer / tree_table->ticks_denom / 1e9);
+    }
     return 0;
 }
 
@@ -1016,6 +1187,28 @@ int main(int argc, char **argv) {
     const char *command = argc >= 2 ? argv[1] : "";
     int in_session = flag(argc, argv, "--in-session");
     const char *app = option(argc, argv, "--app", "TextEdit");
+    if (!strcmp(command, "diag")) {
+        printf("# uid %d euid %d\n", getuid(), geteuid());
+        CFDictionaryRef session = CGSessionCopyCurrentDictionary();
+        printf("# session dictionary %s\n", session ? "present" : "NULL");
+        if (session)
+            CFRelease(session);
+        mach_port_t port = MACH_PORT_NULL;
+        kern_return_t active = bootstrap_look_up(bootstrap_port, "com.apple.windowserver.active", &port);
+        kern_return_t server = bootstrap_look_up(bootstrap_port, "com.apple.windowserver", &port);
+        printf("# look_up active %d, server %d\n", active, server);
+        auditinfo_addr_t audit;
+        memset(&audit, 0, sizeof(audit));
+        getaudit_addr(&audit, sizeof(audit));
+        printf("# audit session %d\n", audit.ai_asid);
+        printf("# windows visible %ld\n", (long)visible_windows());
+        int (*main_connection)(void) = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
+        CGRect bounds = CGDisplayBounds(CGMainDisplayID());
+        printf("# connection %d, display %u, %gx%g\n", main_connection ? main_connection() : -1, CGMainDisplayID(),
+               bounds.size.width, bounds.size.height);
+        list_windows();
+        return 0;
+    }
     if (!strcmp(command, "list"))
         return list_windows();
     if (!strcmp(command, "demo-app")) {
@@ -1039,7 +1232,6 @@ int main(int argc, char **argv) {
                 execl(self, "seamless-guest", "demo-app", (char *)NULL);
                 _exit(127);
             }
-            sleep(3);
         }
         struct Stream s;
         memset(&s, 0, sizeof(s));
@@ -1051,8 +1243,19 @@ int main(int argc, char **argv) {
             swm_put_u32_message(hello, sizeof(hello), SWM_HELLO, SWM_VERSION);
             send_all(s.fd, hello, sizeof(hello));
         }
-        const char *target = flag(argc, argv, "--all") ? NULL : demo ? "seamless-guest" : app;
-        int result = stream_tree(&s, target, atof(option(argc, argv, "--fps", "30")),
+        const char *target = flag(argc, argv, "--all") ? NULL : app;
+        if (flag(argc, argv, "--hook")) {
+            int fd = open(SWS_PATH, O_RDWR);
+            void *mapped =
+                fd >= 0 ? mmap(NULL, sizeof(struct SWSTable), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+            if (mapped != MAP_FAILED && ((struct SWSTable *)mapped)->magic == SWS_MAGIC) {
+                tree_table = mapped;
+                memset(tree_table->slots, 0, sizeof(tree_table->slots));
+                tree_table->arena_used = 0;
+            } else
+                printf("# ERROR no hook table: %s\n", strerror(errno));
+        }
+        int result = stream_tree(&s, target, demo ? child : 0, atof(option(argc, argv, "--fps", "30")),
                                  atof(option(argc, argv, "--seconds", "20")));
         if (child > 0)
             kill(child, SIGTERM);

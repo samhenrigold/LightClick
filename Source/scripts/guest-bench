@@ -203,5 +203,5 @@ finally:
     listing = subprocess.run(['defaults', 'read', 'gold.samhenri.LightClick'], capture_output=True, text=True).stdout
     for line in listing.splitlines():
         key = line.strip().split(' = ')[0].strip('"')
-        if str(work) in key:
+        if str(work) in key and line.startswith('    "'):  # Keys nested under one already deleted are gone with it.
             subprocess.run(['defaults', 'delete', 'gold.samhenri.LightClick', key], check=False)
