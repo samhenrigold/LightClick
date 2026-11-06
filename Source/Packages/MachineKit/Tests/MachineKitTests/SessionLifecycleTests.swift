@@ -367,3 +367,29 @@ private let exitCases = [
         #expect(!wrong.automatic)
     }
 }
+
+@Suite struct SessionRunStateTests {
+    @Test func labels() {
+        #expect(SessionRunState.label(for: "running") == "Running")
+        #expect(SessionRunState.label(for: "watchdog") == "Paused: guest watchdog expired")
+        #expect(SessionRunState.label(for: "colo") == "Guest state: colo")
+    }
+
+    @Test(arguments: ["paused", "suspended", "shutdown", "io-error", "guest-panicked", "internal-error", "watchdog"])
+    func halted(_ state: String) {
+        #expect(SessionRunState.isHalted(state))
+    }
+
+    @Test func aRunningOrUnknownGuestIsNotHalted() {
+        #expect(!SessionRunState.isHalted("running"))
+        #expect(!SessionRunState.isHalted("prelaunch"))
+        #expect(!SessionRunState.isHalted(nil))
+        #expect(!SessionRunState.isFailure("paused"))
+    }
+
+    @Test func aSleepingOrStoppedGuestDarkensTheDisplay() {
+        #expect(SessionRunState.isDisplayAsleep("suspended"))
+        #expect(SessionRunState.isDisplayAsleep("shutdown"))
+        #expect(!SessionRunState.isDisplayAsleep("paused"))
+    }
+}

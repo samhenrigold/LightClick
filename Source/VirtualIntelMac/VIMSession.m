@@ -368,10 +368,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     BOOL setup = self.machine.configuration[@"InstallerMedia"] != nil ||
                  [self.machine.configuration[@"InstallState"] isEqual:@"patching"] ||
                  [self.machine.configuration[@"InstallState"] isEqual:@"host-populated"];
-    BOOL halted =
-        [@[ @"paused", @"suspended", @"shutdown", @"io-error", @"guest-panicked", @"internal-error", @"watchdog" ]
-            containsObject:self.lastRunState ?: @""];
-    BOOL active = self.task.running && !halted &&
+    BOOL active = self.task.running && ![VIMSessionRunState isHalted:self.lastRunState] &&
                   (self.preparing || self.preparationRequested || self.installationRequested ||
                    (setup && !self.completionGuestReport));
     if (active && !self.sleepActivity)
@@ -4012,22 +4009,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                  session.lastRunState = state;
                  [session updateInstallationActivity];
                  [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
-                 session.displayView.displaySleeping = [@[ @"suspended", @"shutdown" ] containsObject:state];
+                 session.displayView.displaySleeping = [VIMSessionRunState isDisplayAsleep:state];
                  session.statePanel.hidden = YES;
                  session.stateAction.hidden = YES;
-                 NSDictionary *labels = @{
-                     @"running" : @"Running",
-                     @"paused" : @"Paused",
-                     @"io-error" : @"Paused: a disk operation failed",
-                     @"guest-panicked" : @"The guest reported a kernel panic",
-                     @"internal-error" : @"Stopped: an internal emulator error",
-                     @"shutdown" : @"Guest shut down",
-                     @"suspended" : @"Sleeping",
-                     @"prelaunch" : @"Starting…",
-                     @"watchdog" : @"Paused: guest watchdog expired"
-                 };
-                 session.status.stringValue = labels[state] ?: [NSString stringWithFormat:@"Guest state: %@", state];
-                 if ([@[ @"io-error", @"guest-panicked", @"internal-error", @"watchdog" ] containsObject:state]) {
+                 session.status.stringValue = [VIMSessionRunState labelFor:state];
+                 BOOL failed = [VIMSessionRunState isFailure:state];
+                 if (failed) {
                      session.displayView.displaySleeping = YES;
                      session.statePanel.hidden = NO;
                      session.stateLabel.stringValue = [session.status.stringValue
@@ -4036,7 +4023,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                  NSData *line = [[NSString stringWithFormat:@"\n[Light Click] QEMU state: %@\n", state]
                      dataUsingEncoding:NSUTF8StringEncoding];
                  [session.log writeData:line];
-                 if ([@[ @"io-error", @"guest-panicked", @"internal-error", @"watchdog" ] containsObject:state])
+                 if (failed)
                      VIMFailCreateGuest(session.status.stringValue);
                }];
 }

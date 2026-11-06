@@ -188,3 +188,40 @@ public final class SessionExitPlan: NSObject, Sendable {
         self.recentGuestReboots = recentGuestReboots
     }
 }
+
+/// What QEMU's `query-status` answer means for the window. An unknown state is shown by name and counts as nothing else.
+@objc(VIMSessionRunState)
+public final class SessionRunState: NSObject {
+    @objc(labelFor:)
+    public class func label(for state: String) -> String {
+        switch state {
+        case "running": "Running"
+        case "paused": "Paused"
+        case "io-error": "Paused: a disk operation failed"
+        case "guest-panicked": "The guest reported a kernel panic"
+        case "internal-error": "Stopped: an internal emulator error"
+        case "shutdown": "Guest shut down"
+        case "suspended": "Sleeping"
+        case "prelaunch": "Starting…"
+        case "watchdog": "Paused: guest watchdog expired"
+        default: "Guest state: \(state)"
+        }
+    }
+
+    /// The guest can't go on, and the window says so.
+    @objc(isFailure:)
+    public class func isFailure(_ state: String?) -> Bool {
+        ["io-error", "guest-panicked", "internal-error", "watchdog"].contains(state)
+    }
+
+    @objc(isDisplayAsleep:)
+    public class func isDisplayAsleep(_ state: String?) -> Bool {
+        ["suspended", "shutdown"].contains(state)
+    }
+
+    /// The guest isn't running, so nothing in it needs the host kept awake.
+    @objc(isHalted:)
+    public class func isHalted(_ state: String?) -> Bool {
+        isFailure(state) || isDisplayAsleep(state) || state == "paused"
+    }
+}
