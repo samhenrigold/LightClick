@@ -374,11 +374,66 @@ Boots with the `sti` shadow fixed, except where noted:
 | Mojave, 2000 s | control connection ended at 1149 s, guest still running | no output | not read |
 | Mojave, 2000 s | ran out | 7288, 0 | 2822, 56, 101 |
 
-So three of six long Mojave boots ended early, each differently, and none of the three is explained. Before the `sti` fix, 5 of 8 Mojave boots wedged within minutes.
+Three of six long Mojave boots ended early. The user stopped some of the long soaks themselves, because of the load on their laptop, so these can't be read as engine failures: the QEMU exit and the lost connection probably, the reset possibly. Before the `sti` fix, 5 of 8 Mojave boots wedged within minutes, which is an engine failure, seen in the event ring.
 
-Launches held steady through two of the completed Mojave boots, and on Mavericks. In the third they and memory pressure slowed 2 to 3 times, with host calls about 8 times slower than in a short boot. Inferred, not shown: load on the host, as the others didn't repeat it.
+A guest reset did happen in a normal short boot, 15.7 s after hand-off, with one vCPU parked in `cpu_signal_handler`. QEMU's log of it gave a reset on vCPU 2, but its register dump is the last fallback's, not the moment's, and NVRAM has no panic text. QEMU now looks for panic text in RAM at a reset. Cause unknown.
 
-Not worked out: Chess on Mojave won't quit when asked and once got no window in 60 s, and Keynote '09 sits at a floating chooser it won't quit from. Neither was tried under TCG.
+**Memory.** RSS and `phys_footprint` of 17 to 18 GB with an 8 GB guest are mostly counting: a test VM touching 2 GB the host had touched raised both, in step, and left host free memory alone. vmmap's regions came to 8.6 to 9.4 GB from 300 s to 1300 s, of which guest RAM is 7.7 GB, in a boot where only about 170 MB was malloc. TCG, with no stage 2, shows 9.1 GB in both counts. No memory kill was in the host's log.
+
+Launches held steady through the two later completed Mojave boots, in a further 1519 s boot that finished cleanly, and on Mavericks. In the third they and memory pressure slowed 2 to 3 times, with host calls about 8 times slower than in a short boot. Inferred, not shown: load on the host, as the others didn't repeat it.
+
+A TCG baseline, same probe and 1380 s on Mojave and 300 s on Mavericks, one boot of each: no early end, no wrong result, Chess killed every time, and Keynote killed every time. So those two are the guest's. Launches there ran at 4 to 7 s against the engine's 1 to 2 s, under the same load.
+
+### Against Rosetta
+
+`lc-bench` in a clone at 4 vCPUs, on a host under load, against the same binary under Rosetta on the host, speed relative to Rosetta. One run each.
+
+| Test | Mojave | Mavericks |
+|---|---|---|
+| alu | 0.96 | 1.10 |
+| branchy | 1.02 | 1.15 |
+| largecode_warm | 1.02 | 1.13 |
+| sse_float | 0.98 | 0.98 |
+| sse_int_shuffle | 0.68 | 0.70 |
+| chase_16k | 0.81 | 0.97 |
+| chase_512m | 0.68 | 0.68 |
+| memcpy | 0.55 | 0.56 |
+| syscall | 0.33 | 0.83 |
+| pagefault | 0.20 | 0.42 |
+| ctxsw | 0.19 | 0.44 |
+| fork_wait | 0.65 | 1.59 |
+| largecode_cold | 0.07 | 0.08 |
+
+Hot code is at parity, so code generation isn't where a launch goes. What's slow is crossing into the kernel, faults, and code seen for the first time. Rosetta's kernel is the host's, so those rows also compare kernels. Mojave's crossings cost about twice Mavericks' or more: it changes page tables at each. Its kernel reads `IA32_ARCH_CAPABILITIES` only in what look like its MDS paths, so this search found no way to tell it not to.
+
+Making every flag live, `LC_HVDBT_ALL_FLAGS=1`, costs `alu` 5%, `branchy` 2%, and adds 4% to the code, with no visible effect on launches in one boot of each. In a launch profile no hot function stands out: `cache_fill` is 75 of 916 user samples. So no code generation work was done.
+
+`pcmpistri` and `moffs`, alternating, two Mavericks boots of each: 108,000 fallbacks and 3.5 s on TCG gone per seven-app run. Warm launches other than Keynote 6% faster (3.16 to 2.96 s summed), cold unchanged. Keynote 8% slower in those boots, which is inside the 1.13 to 1.41 s it has moved between other boots.
+
+### What limits exec past 2 vCPUs
+
+`lc-scale`'s `exec_per_s`, N=1, 2, 4 at 4 vCPUs, with a kernel profile in the guest and the tally's counters over each. Niced clones, and a host with a load of 6 to 20 from other work, so these move by a quarter from run to run.
+
+Mojave ran down past 2: 69, 126, 101. At N=4 the first vCPU took 750,000 page table stores a second, all vCPUs together spent 1.5 cores waiting for the monitor lock, and the kernel's `memset` was the top function. Dropping tables of address spaces nobody is in didn't change it. What did was roots: they have no flood limit, so a reused root frame being cleared takes one trap per slot, and with 256 views a dead process's root stays tracked. A view whose root's user half goes to zero with nobody in it is now dropped.
+
+| Mojave, alternating | N=1 | N=2 | N=4 | stores/s at N=4 |
+|---|---|---|---|---|
+| before | 69, 63 | 113, 91 | 115, 99 | 754,000, 634,000 |
+| after | 98, 71 | 178, 142 | 194, 104 | 82,000, 43,000 |
+
+Four later boots of the same code: 84 to 103, 140 to 173, 163 to 202. `memset` went from 4,620 samples to 91. Mavericks had no such traps and is unchanged within noise: 102, 146 to 182, 176 to 230 after, 102 to 104, 170 to 176, 156 to 192 before.
+
+What's left at N=4 is mostly still the monitor lock: about 1.1 cores waiting on Mojave and 1 on Mavericks. On Mojave at 190 exec/s that is about 6 of the 11 ms of CPU an exec costs beyond N=1. Over a whole boot, Mavericks: 17.5 s holding it for table stores, 5.8 s for faults, 1.4 s after translating, 1.7 s switching views. Translation itself is 15 to 30% of a core, and waiting for its lock is small.
+
+Tried and dropped: doing a table store's TLB invalidates after letting go of the lock. The time held for table stores stayed at 14 to 16 s and rates didn't move, so it's the number of stores, at about a microsecond each, and not the invalidates. A second kernel pin for the crossing between a process's tables and the kernel's is in, with no clean measurement.
+
+Not tried, and the next things to try: not taking the lock for a store to a slot no shadow holds, which needs fills to look again; or filling the shadow at the store, so that a new page costs one trip rather than two.
+
+### mmap_touch again
+
+At N=4 it waits only 10% of a core for the monitor lock on Mavericks and 35% on Mojave, with about two trapped stores per page. So the guest's own spinlock, stretched by those traps, is what's left, as above. A lower flood limit, 16 writes rather than 64, was the cheapest thing to try, as `munmap` writes 64 slots with no walk between. Alternating, two boots each at N=4: Mavericks 813, 596 against 412, 650 Kpages/s; Mojave 416, 470 against 414, 487; stores per page on Mavericks down from about 1.6 to 2 to about 1.2 to 1.5. No clear gain under this load, so it stays at 64.
+
+Tables out of sync with the guest until the next flush, as KVM does it, would remove most of these traps. That is a large change to how shadows stay correct, and the guest's `invlpg` and CR3 writes would stop being no-ops. No figure for what it would save: the tally has the time a store holds the lock, not the whole trap.
 
 ### A fast hidden start: resuming a snapshot under the engine
 
