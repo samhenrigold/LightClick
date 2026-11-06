@@ -257,6 +257,12 @@ static id preserving_render_encoder(id self, SEL cmd, MTLRenderPassDescriptor *p
         uint32_t width = (uint32_t)target.width, height = (uint32_t)target.height;
         uint32_t tag = height & 0xf0, window = (width & 0xff) | (height & 0x0f) << 8;
         if (surface && width > 256 && height > 256) {
+            /* The guest's GPU keeps what it doesn't draw on with "don't care". This one doesn't, and a composite is only
+             * part of a window. */
+            if ((tag == 0xa0 || tag == 0xc0) && pass.colorAttachments[0].loadAction == MTLLoadActionDontCare) {
+                adjusted = [pass copy];
+                adjusted.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            }
             if (tag == 0xa0) {
                 /* What the guest gave it, for telling whether a value set there can name a window. */
                 static uint32_t told[64];

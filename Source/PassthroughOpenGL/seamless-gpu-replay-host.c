@@ -16,7 +16,7 @@
 #include <math.h>
 #include <servers/bootstrap.h>
 #define SG_LAYER_MAGIC 11184809.0f
-#define SG_LAYER_FIELDS 9
+#define SG_LAYER_FIELDS 10
 #define SG_MARGIN_POINTS 96 // As probes/seamless-viewer.m found: an active window's shadow fits in this.
 #define SG_BUFFERS 3
 #define SG_FRAME_MESSAGE 0x53474652
@@ -29,7 +29,7 @@ struct SGFrameMessage {
 };
 struct SGTreeEntry {
     uint32_t id;
-    int level, margin;
+    int level, margin, whole;
     float x, y, width, height; // Pixels, on the primary drawable.
 };
 struct SGWindow {
@@ -38,6 +38,7 @@ struct SGWindow {
     IOSurfaceRef surface[SG_BUFFERS];
     GLuint texture[SG_BUFFERS], framebuffer[SG_BUFFERS];
     int front, back, drawn, dirty;
+    int cleared; // In this frame.
     int pending;
     GLsync pending_sync;
     uint64_t frames, sent, drops, draws;
@@ -80,9 +81,14 @@ static void SGToken(float value) {
     sg_display_off = f[8] != 0;
     // One scale for the display: a window with no backing says 1 whatever the display is.
     sg_scale = fmaxf(sg_scale, f[7] / 16);
-    sg_layer = (struct SGTreeEntry){
-        (uint32_t)f[0],  (int)f[1] - 1,  (int)(f[6] * sg_scale), (f[2] - 16384) * sg_scale, (f[3] - 16384) * sg_scale,
-        f[4] * sg_scale, f[5] * sg_scale};
+    sg_layer = (struct SGTreeEntry){(uint32_t)f[0],
+                                    (int)f[1] - 1,
+                                    (int)(f[6] * sg_scale),
+                                    f[9] != 0,
+                                    (f[2] - 16384) * sg_scale,
+                                    (f[3] - 16384) * sg_scale,
+                                    f[4] * sg_scale,
+                                    f[5] * sg_scale};
     ++sg_marks;
 }
 
@@ -268,6 +274,24 @@ static struct SGWindow *SGRedirect(struct DGHostContext *c, struct SGSaved *save
         glGetIntegerv(GL_SCISSOR_BOX, saved->scissor);
         glScissor(saved->scissor[0] - w->x, saved->scissor[1] - w->y, saved->scissor[2], saved->scissor[3]);
     }
+    // What's behind it on the display is drawn first, and here what's behind is the last frame, which a shadow would
+    // build up on. So a window drawn whole starts clear, and one drawn in part has no shadow.
+    if (t->whole && !w->cleared) {
+        w->cleared = 1;
+        GLfloat color[4];
+        GLboolean mask[4];
+        glGetFloatv(GL_COLOR_CLEAR_VALUE, color);
+        glGetBooleanv(GL_COLOR_WRITEMASK, mask);
+        glClearColor(0, 0, 0, 0);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        if (saved->scissor_on)
+            glDisable(GL_SCISSOR_TEST);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (saved->scissor_on)
+            glEnable(GL_SCISSOR_TEST);
+        glColorMask(mask[0], mask[1], mask[2], mask[3]);
+        glClearColor(color[0], color[1], color[2], color[3]);
+    }
     return w;
 }
 static void SGRestore(struct SGWindow *w, const struct SGSaved *saved) {
@@ -383,6 +407,7 @@ static void SGEndFrame(void) {
             w->pending_sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
             w->pending = 1;
             w->dirty = 0;
+            w->cleared = 0;
             w->drawn = 1;
             w->front = w->back;
             ++w->frames;

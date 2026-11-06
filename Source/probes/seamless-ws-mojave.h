@@ -59,6 +59,7 @@ struct GPUWindow {
     int next;
     void *pending, *previous; // What's changed since the last frame, and what changed in it. Null means all of it.
     void *covered; // What's in front of it, which the update says nothing of.
+    uint64_t settles_at; // Ticks.
     int whole; // Everything's to be drawn, on both surfaces, on the next two.
     uint32_t frames;
     float content[4]; // What the host's surface holds, in points.
@@ -170,8 +171,19 @@ static char generate_layers_hook(char *state, char *window) {
     }
     if (shape)
         region_free(shape);
-    if (fresh || asked || touched) {
+    // One that's just opened was mid-effect, with its shadow missing and parts of it not drawn, when it was drawn
+    // whole. So it's drawn whole again a second later, whatever else is happening.
+    uint64_t now = mach_absolute_time(), second = 1000000000ull * table->ticks_denom / table->ticks_numer;
+    struct GPUWindow *known_window = gpu_window(id);
+    int settling = known_window->settles_at && now >= known_window->settles_at;
+    if (settling)
+        known_window->settles_at = 0;
+    if (fresh)
+        known_window->settles_at = now + second;
+    if (fresh || asked || touched || settling) {
         struct GPUWindow *w = gpu_window(id);
+        if (settling)
+            w->whole = 2;
         if (fresh || !touched)
             w->whole = 2; // An app drawing where the display won't show it says nothing of where.
         if (touched) {
@@ -343,8 +355,9 @@ static void gpu_compose_one(uint32_t id) {
         // As CaptureSurfaceMetal::Populate(CGXWindow*, region), with the destination the whole surface and the clip
         // only what changed.
         void *clip = shape, *both = NULL;
-        // A shadow changes when a window's activation does, and only then does its size. A composite that's only part
-        // of a window would clear what it touches of the shadow and not draw it again, so it stays within the window.
+        if (table->gpu_mode == 2) // For telling what drawing only part of a window costs and breaks.
+            w->whole = 2;
+        // A shadow changes when a window's activation does, which only its size says.
         if (memcmp(w->content, (float[]){(float)bounds.x, (float)bounds.y, (float)bounds.width, (float)bounds.height},
                    sizeof(w->content)))
             w->whole = 2;
@@ -355,14 +368,6 @@ static void gpu_compose_one(uint32_t id) {
             if (more) {
                 region_free(both);
                 both = more;
-            }
-            void *own = capture_shape(window, 0);
-            void *within = own ? region_intersection(both, own) : NULL;
-            if (own)
-                region_free(own);
-            if (within) {
-                region_free(both);
-                both = within;
             }
             clip = both;
         }
