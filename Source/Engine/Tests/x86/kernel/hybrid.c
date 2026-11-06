@@ -1276,6 +1276,19 @@ static void test_calls_link(void) {
     CHECK(best_direct < 50);
 }
 
+// An IPI: the monitor answers for ICR, in the page the harness calls the APIC's, and only the send reaches the host.
+static void test_icr(void) {
+    volatile u32 *apic = (volatile u32 *)PHYS(0xD0000000ULL);
+    apic[0x310 / 4] = 0x03000000;
+    CHECK(apic[0x310 / 4] == 0x03000000);
+    command(21); // nothing yet
+    apic[0x300 / 4] = 0x000040DD;
+    CHECK(apic[0x300 / 4] == 0x000040DD);
+    command(22); // the harness has it, once
+    apic[0x300 / 4 + 1] = 5; // the page's other registers are the device's
+    CHECK(apic[0x320 / 4] == (u32)(0xD0000320ULL * 3));
+}
+
 // An interrupt raised just after a hlt ends it, polled in the monitor or through TCG if the host is slow, and the handler
 // returns past the hlt.
 static void test_hlt_poll(void) {
@@ -1902,6 +1915,7 @@ void kmain(void) {
     test_hlt_poll();
     test_reuse(root);
     test_calls_link();
+    test_icr();
     test_second_vcpu(root);
     test_process_log(root);
     test_shared_region(root);

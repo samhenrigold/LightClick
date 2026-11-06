@@ -1196,14 +1196,19 @@ void tr_hash_insert(int view, uint64_t rip, uint64_t arm) {
         stats.hash_refills++;
     }
     u32 h = crc32c64(rip) & (HASH_ENTRIES - 1);
+    u32 tombstone = ~0u;
     for (u32 n = 0; n < HASH_ENTRIES; n++, h = (h + 1) & (HASH_ENTRIES - 1)) {
         u64 key = t[h * 2];
         if (key == rip) {
             t[h * 2 + 1] = arm;
             return;
         }
-        if (key == 0 || key == 1) {
-            if (key == 0)
+        if (key == 1 && tombstone == ~0u)
+            tombstone = h; // not yet: rip may be further on, and two entries for it would outlive a kill
+        if (key == 0) {
+            if (tombstone != ~0u)
+                h = tombstone;
+            else
                 hash_slots_used[view]++;
             t[h * 2 + 1] = arm;
             __sync_synchronize();

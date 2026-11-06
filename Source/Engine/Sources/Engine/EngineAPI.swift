@@ -270,6 +270,9 @@ extension Engine {
         s.apic_irr = c.pointee.apic_irr
         s.apic_isr = c.pointee.apic_isr
         s.apic_tmr = c.pointee.apic_tmr
+        s.hybrid_apic_page = c.pointee.hybrid_apic_page
+        s.hybrid_icr_lo = c.pointee.apic_icr_lo
+        s.hybrid_icr_hi = c.pointee.apic_icr_hi
         s.compat = c.pointee.compat
         s.seg_bad = c.pointee.seg_bad
         s.ldt_base = c.pointee.ldt_base
@@ -313,6 +316,9 @@ extension Engine {
         c.pointee.ldtr = s.ldtr
         c.pointee.cpl = s.cpl
         c.pointee.mxcsr = s.mxcsr & 0xFFC0
+        c.pointee.hybrid_apic_page = s.hybrid_apic_page
+        c.pointee.apic_icr_lo = s.hybrid_icr_lo
+        c.pointee.apic_icr_hi = s.hybrid_icr_hi
         c.pointee.resume_mxcsr = s.mxcsr
         writeXMM(from: s)
         c.pointee.mm = s.mm

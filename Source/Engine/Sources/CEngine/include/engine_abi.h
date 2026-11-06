@@ -261,7 +261,7 @@ typedef struct {
     uint64_t kernel_view_tag;
 
     // Virtual local APIC. The host sets bits in apic_host_irr atomically from any thread and raises the IRQ line.
-    uint64_t apic_base;
+    uint64_t apic_base, hybrid_apic_page;
     uint32_t apic_enabled, apic_id, apic_tpr, apic_ldr, apic_dfr, apic_svr, apic_icr_lo, apic_icr_hi;
     uint32_t apic_lvt_timer, apic_lvt[5], apic_tmict, apic_tdcr, apic_timer_shift, stop_requested;
     uint32_t apic_irr[8], apic_isr[8], apic_tmr[8], apic_host_irr[8], apic_host_level[8];

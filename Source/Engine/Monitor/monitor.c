@@ -1640,7 +1640,19 @@ static void handle_data_abort(bool lower) {
             stop(STOP_UNSUPPORTED, rip_here(c->elr), 15, far, esr); // part of it is on another page
         u64 val = a.rt == 31 ? 0 : c->x[a.rt];
         u64 r = 0;
-        if (vapic_owns(w.gpa)) {
+        u64 reg = (w.gpa & ~0xfffULL) == c->hybrid_apic_page && a.bytes == 4 ? w.gpa & 0xfff : 0;
+        if (reg == 0x300 || reg == 0x310) { // the kernel reads both and writes both for each IPI, and only the last write needs QEMU
+            if (a.load)
+                r = reg == 0x300 ? c->apic_icr_lo : c->apic_icr_hi;
+            else if (reg == 0x310)
+                c->apic_icr_hi = (u32)val;
+            else {
+                c->apic_icr_lo = (u32)val & ~0x1000u; // delivery status always idle
+                c->req_a[0] = (u64)c->apic_icr_hi << 32 | (u32)val;
+                hostcall(HC_APIC_ICR);
+            }
+            c->stat_mmio_vm++;
+        } else if (vapic_owns(w.gpa)) {
             if (a.load)
                 r = vapic_read((u32)(w.gpa & 0xfff));
             else

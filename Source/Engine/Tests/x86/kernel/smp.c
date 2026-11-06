@@ -945,10 +945,13 @@ static void test_smc(u32 me) {
         for (u64 r = 1; r <= rounds; r++) {
             *slot = frames[r & (TAGS - 1)] | P | W;
             invlpg(code3);
-            u32 want = acks + ncpus - 1;
+            u32 was[MAX_CPUS]; // each vCPU's own count: a total would pass on an extra one from one vCPU, with another yet to see the IPI
+            for (u32 i = 1; i < ncpus; i++)
+                was[i] = __atomic_load_n(&percpu[i].ipi_count, __ATOMIC_ACQUIRE);
             send_ipi_others(V_IPI);
-            while (acks != want)
-                pause();
+            for (u32 i = 1; i < ncpus; i++)
+                while (__atomic_load_n(&percpu[i].ipi_count, __ATOMIC_ACQUIRE) == was[i])
+                    pause();
             sd_gen = r;
             spin(100);
         }
@@ -960,8 +963,14 @@ static void test_smc(u32 me) {
             u32 got = ((CodeFn)code3)();
             calls++;
             u64 now = sd_gen;
-            if (now - g < TAGS / 4 && ((got - g) & (TAGS - 1)) >= TAGS / 2) // from before the acknowledged shootdown g
+            if (now - g < TAGS / 4 && ((got - g) & (TAGS - 1)) >= TAGS / 2) { // from before the acknowledged shootdown g
+                if (!stale) {
+                    say("  first stale: generation ", g, "");
+                    say("    and ran the code of ", got, "");
+                    say("    with the generation now ", now, "");
+                }
                 stale++;
+            }
         }
         say("  code page remapped, shootdown done, stale results: ", stale, "");
         say("    of calls: ", calls, "");

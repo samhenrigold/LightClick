@@ -286,6 +286,9 @@ static bool hvdbt_has_interrupt(void *opaque)
     CPUState *cs = opaque;
     bool hard;
 
+    if (!cpu_test_interrupt(cs, CPU_INTERRUPT_POLL | CPU_INTERRUPT_HARD | OTHER_INTERRUPTS)) { /* most kicks: not worth waiting for the BQL to learn it */
+        return false;
+    }
     bql_lock();
     if (cpu_test_interrupt(cs, CPU_INTERRUPT_POLL)) { /* what the IO-APIC raises from another thread, as x86_cpu_exec_interrupt handles it */
         cpu_reset_interrupt(cs, CPU_INTERRUPT_POLL);
@@ -321,8 +324,19 @@ static void hvdbt_apic_eoi(void *opaque, uint8_t vector)
 {
 }
 
+/* The write to the low word, with the high word from the monitor's copy: see hybrid_icr_hi. */
 static void hvdbt_apic_icr(void *opaque, uint64_t icr)
 {
+    CPUState *cs = opaque;
+    APICCommonState *apic = X86_CPU(cs)->apic_state;
+
+    bql_lock();
+    apic->icr[1] = icr >> 32;
+    hvdbt_name_device(apic->apicbase & MSR_IA32_APICBASE_BASE);
+    uint32_t low = icr;
+    address_space_write(&address_space_memory, (apic->apicbase & MSR_IA32_APICBASE_BASE) + 0x300, MEMTXATTRS_UNSPECIFIED, &low, 4);
+    hvdbt_after_device(opaque);
+    bql_unlock();
 }
 
 /* ---- State ---- */
@@ -400,6 +414,13 @@ static void hvdbt_put_state(CPUState *cs)
 
     engine_get_state(HV(cs)->engine, &s);
     memcpy(s.gpr, env->regs, sizeof s.gpr);
+    {
+        APICCommonState *apic = X86_CPU(cs)->apic_state;
+        bool mapped = apic && (apic->apicbase & MSR_IA32_APICBASE_ENABLE) && !(apic->apicbase & MSR_IA32_APICBASE_EXTD);
+        s.hybrid_apic_page = mapped ? apic->apicbase & MSR_IA32_APICBASE_BASE : 0;
+        s.hybrid_icr_lo = apic ? apic->icr[0] : 0;
+        s.hybrid_icr_hi = apic ? apic->icr[1] : 0;
+    }
     s.rip = env->eip;
     s.rflags = env->eflags; /* cpu_exec_exit made it whole */
     s.cr0 = env->cr[0];
@@ -473,6 +494,10 @@ static void hvdbt_get_state(CPUState *cs)
 
     engine_get_state(HV(cs)->engine, &s);
     memcpy(env->regs, s.gpr, sizeof s.gpr);
+    if (X86_CPU(cs)->apic_state) { /* TCG may be the one to read them next, or to finish an IPI begun here */
+        X86_CPU(cs)->apic_state->icr[0] = s.hybrid_icr_lo;
+        X86_CPU(cs)->apic_state->icr[1] = s.hybrid_icr_hi;
+    }
     env->eip = s.rip;
     env->eflags = s.rflags; /* cpu_exec_enter splits it again */
     env->cr[0] = s.cr0;
