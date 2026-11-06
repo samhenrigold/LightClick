@@ -10,6 +10,7 @@ A CASE is one quoted string, a name and then switches:
     'smp2-desktop cpus=2 desktop=300 seconds=330'
     'smp2-no-share cpus=2 desktop=300 LC_HVDBT_NO_SHARE=1'
     'stress cpus=4 program=/path/to/x86-program expect="PASSED: 0 failures"'
+    'gpu program=Build/bench/gpu-bench expect="# failures 0"'     (see probes/gpu-bench.m)
 
     cpus=N      CPUCount in the clone (default: the machine's)
     runs=N      boots of this case (default 1)
