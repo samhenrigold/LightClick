@@ -51,8 +51,10 @@ typedef struct {
     u64 smc_held; // frame + 1: this vCPU's one-off store to a code frame hasn't run yet, so nobody may protect that frame again
     bool shadow_stepping; // stepping the instruction in sti's shadow: an interrupt arriving before its first word has run must not end the shadow
     bool tracked_new; // a fill just started protecting a guest table, so what it read of that table may predate the protection
-    u32 pin[2]; // view index + 1 of the current address space, by CPL 0 or 3. Eviction leaves these alone, so a CPL change needs no lock
+    u32 pin[3]; // view index + 1 of the current address space, by CPL 0 or 3, then the CPL 0 one before: a kernel with its own page tables crosses between two at every syscall. Eviction leaves these alone, so none of those crossings needs the lock
     u32 xfl;
+    u32 lock_site;
+    u64 lock_from;
     u8 fx_area[512] __attribute__((aligned(16))); // the x87 save formats, one at a time
 } MonCpu;
 _Static_assert(sizeof(MonCpu) <= CTX_SLOT / 2, "the rest of the slot is the stack");
@@ -86,17 +88,27 @@ static inline void hostcall(u64 code);
 static inline void mon_lock(void) {
     if (!smp || me->lock_depth++)
         return;
+    u64 waiting_from = 0;
     for (u32 spins = 1;; spins++) {
-        if (!__atomic_load_n(&mon_lock_word, __ATOMIC_RELAXED) && !__atomic_exchange_n(&mon_lock_word, 1, __ATOMIC_ACQUIRE))
+        if (!__atomic_load_n(&mon_lock_word, __ATOMIC_RELAXED) && !__atomic_exchange_n(&mon_lock_word, 1, __ATOMIC_ACQUIRE)) {
+            if (waiting_from)
+                __atomic_fetch_add(&c0->stat_mon_wait, RSR(cntvct_el0) - waiting_from, __ATOMIC_RELAXED); // all vCPUs' time, for the tally
+            me->lock_from = RSR(cntvct_el0);
+            me->lock_site = 0;
             return;
+        }
+        if (!waiting_from)
+            waiting_from = RSR(cntvct_el0);
         __asm__ volatile("yield");
         if (!(spins & 0x3FFF)) // a long wait: the holder's thread may have lost its core, and with more vCPUs than free cores, spinning here is what keeps it off
             hostcall(HC_YIELD);
     }
 }
 static inline void mon_unlock(void) {
-    if (smp && me->lock_depth && !--me->lock_depth)
+    if (smp && me->lock_depth && !--me->lock_depth) {
+        __atomic_fetch_add(&c0->stat_mon_hold[me->lock_site], RSR(cntvct_el0) - me->lock_from, __ATOMIC_RELAXED);
         __atomic_store_n(&mon_lock_word, 0, __ATOMIC_RELEASE);
+    }
 }
 // The shadow pool and its lists go wrong silently without the lock, and show up much later as a loop that nothing can report.
 #define LOCK_REQUIRED() \
@@ -600,11 +612,13 @@ static inline u32 view_asid(u32 v);
 static bool view_pinned(u32 idx) {
     for (u32 cpu = 0; cpu < c0->vcpu_count; cpu++) {
         MonCpu *m = (MonCpu *)(PRIV_VA + OFF_MON_CPU + cpu * CTX_SLOT);
-        if (m->pin[0] == idx + 1 || m->pin[1] == idx + 1)
+        if (m->pin[0] == idx + 1 || m->pin[1] == idx + 1 || m->pin[2] == idx + 1)
             return true;
     }
     return false;
 }
+
+static void view_drop(u32 best);
 
 static u32 view_evict(void) {
     u32 best = MAX_VIEWS;
@@ -613,6 +627,11 @@ static u32 view_evict(void) {
             best = i;
     if (best == MAX_VIEWS)
         return best;
+    view_drop(best);
+    return best;
+}
+
+static void view_drop(u32 best) {
     View *v = &views[best];
     c->stat_view_evictions++;
     // Code marks need no invalidation one by one: the host drops all the view's own blocks together.
@@ -626,7 +645,6 @@ static u32 view_evict(void) {
     v->valid = 0;
     if (smp)
         reset_all_return_stacks();
-    return best;
 }
 
 // zap_why, for the tally: what the next zaps are for
@@ -699,11 +717,25 @@ static View *view_find(u64 cr3_key, u32 cpl) {
         if (p->cr3 == cr3_key && p->cpl == cpl)
             return p;
     }
-    mon_lock();
-    if (*pin) { // out of this CPL's old address space. The other CPL's pin moves when that CPL next comes through
-        static u64 unpin_stamp;
-        views[*pin - 1].last_used = ++unpin_stamp;
+    bool kernel = (cpl & 3) != 3;
+    if (kernel && me->pin[2]) {
+        u32 before = me->pin[2];
+        View *p = &views[before - 1];
+        if (p->cr3 == cr3_key && p->cpl == cpl) {
+            me->pin[2] = *pin;
+            *pin = before;
+            return p;
+        }
     }
+    mon_lock();
+    me->lock_site = 1;
+    u32 *leaving = kernel ? &me->pin[2] : pin; // out of this CPL's old address space. The other CPL's pin moves when that CPL next comes through
+    if (*leaving) {
+        static u64 unpin_stamp;
+        views[*leaving - 1].last_used = ++unpin_stamp;
+    }
+    if (kernel)
+        me->pin[2] = *pin;
     View *v = view_find_locked(cr3_key, cpl);
     *pin = (u32)(v - views) + 1;
     mon_unlock();
@@ -1043,6 +1075,7 @@ again:;
     if (c->hybrid && !is_ram(w.gpa))
         stop(STOP_FALLBACK, rip, FB_FETCH_NOT_RAM, w.gpa, 0);
     mon_lock();
+    me->lock_site = 2;
     int shared = single ? -1 : shared_row(&w, v, rip);
     mon_unlock();
     c->req_a[0] = c->view;
@@ -1070,6 +1103,7 @@ again:;
     if (single)
         return c->req_r[0]; // runs once and stays unregistered: nothing to protect, and its page must stay writable
     mon_lock();
+    me->lock_site = 3;
     // A vCPU writing a code frame gets to finish first. Otherwise another calling into that frame translates and protects it again before the one-off store runs, and the
     // store faults for ever. It lets go at its next monitor entry, one instruction away, so this is short and needs nothing from here.
     for (u32 cpu = 0; smp && cpu < c0->vcpu_count; cpu++) {
@@ -1261,7 +1295,9 @@ static void pt_slot_changed(u64 gpa_slot) {
         ShadowDesc *d = &desc[it - 1];
         u64 *t = pool_page(it - 1);
         next = d->next_mirror;
-        if (d->level < 3 && d->parent && ++d->writes > PT_FLOOD_WRITES) {
+        // A user table of an address space no vCPU is in: it is being torn down or its frame reused, and every store would trap. It refills if that address space ever runs.
+        bool nobody_home = d->view != c->view && d->va_base >> 47 == 0 && !view_pinned(d->view);
+        if (d->level < 3 && d->parent && (++d->writes > PT_FLOOD_WRITES || nobody_home)) {
             u64 *parent = d->parent;
             ShadowDesc pd = desc[pool_index(parent)];
             u32 view = d->view;
@@ -1277,6 +1313,15 @@ static void pt_slot_changed(u64 gpa_slot) {
         }
         if (d->level == 3) {
             View *v = &views[d->view];
+            // The user half of a root going to zero with nobody in it: the address space is gone and its frame is being cleared, one trap per slot. It rebuilds if it was not gone.
+            if (nobody_home && i < 256 && !*(u64 *)RAM((u64)fr << 12 | (u64)i << 3) && !v->keeper) {
+                view_drop(d->view);
+                zap_why = KILL_PT_LEAF;
+                next = mirror_head[fr];
+                if (!next)
+                    page_info[fr] &= ~PI_PT;
+                continue;
+            }
             u64 *r = (i < 256) ? (u64 *)v->root0 : (u64 *)v->root1;
             if (i == ((PRIV_VA >> 39) & 0x1ff) || i == ((RAM_ALIAS_VA >> 39) & 0x1ff))
                 continue;
@@ -1698,6 +1743,7 @@ static void handle_data_abort(bool lower) {
         return;
     }
     mon_lock();
+    me->lock_site = 4;
     pool_reclaim();
     if (smp) { // The walk above took no lock, so nothing kept the entry from changing since. Under the lock every page-table store waits for this fill.
         w = x86_walk(c->cr3, far, access, true);
@@ -1731,6 +1777,7 @@ static void handle_data_abort(bool lower) {
         c->stat_pt_stale++;
     }
     if (write && (pi & PI_PT)) {
+        me->lock_site = 5;
         if (in_rep_stub(c->elr)) { // 32 bytes at a time is more slots than the one-step path below resyncs: on with the plain loop, one element per store
             c->elr = c->x[R_LR];
             mon_unlock();

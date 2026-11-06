@@ -149,6 +149,14 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         case .removeSurface(let id):
             surfaces.removeValue(forKey: id)?.window.close()
             dropViews.removeValue(forKey: id)
+        case .minimizeSurface(let id, let minimized):
+            guard let window = surfaces[id]?.window, window.isMiniaturized != minimized else { break }
+            guestMinimizing.insert(id)
+            if minimized {
+                window.miniaturize(nil)
+            } else {
+                window.deminiaturize(nil)
+            }
         case .testInput: testInput()
         }
     }
@@ -203,6 +211,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         /// Set for a window with a title bar in its pixels. Told when a drag of it on the host has ended.
         var movedByUser: (() -> Void)?
         private(set) var isBeingDragged = false
+        /// Around the guest's window, for its shadow.
+        var margin = 0.0
         override var canBecomeKey: Bool { true }
         override var canBecomeMain: Bool { true }
         override func sendEvent(_ event: NSEvent) {
@@ -240,7 +250,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         /// or a toolbar's blank space, still drags in the guest, within its display, until there's a hit test for it from the guest.
         private func isInTitleBar(_ event: NSEvent) -> Bool {
             let place = event.locationInWindow
-            return frame.height - place.y <= 22 && place.x >= 70 && place.x <= frame.width - 28
+            let fromTop = frame.height - margin - place.y
+            return fromTop >= 0 && fromTop <= 22 && place.x >= margin + 70 && place.x <= frame.width - margin - 28
         }
     }
 
@@ -253,6 +264,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     }
 
     private var surfaces: [Int: Surface] = [:]
+    /// Windows whose trip to or from the host's Dock started in the guest, so the guest needn't be told.
+    private var guestMinimizing: Set<Int> = []
     private var clickSignal: DispatchSourceSignal?
     private var moveSignal: DispatchSourceSignal?
 
@@ -278,7 +291,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         if !dragging { SeamlessInputViewSetGuestOffset(surface.input, offset) }
         setEventShape(of: window, margin: margin, size: frame.size)
         // A window with a title bar in its pixels moves on the host. What's in its layer doesn't care where it is.
-        (window as? SurfaceWindow)?.movedByUser = margin == 0 && level == 0 && !title.isEmpty ? { [weak self] in
+        (window as? SurfaceWindow)?.margin = margin
+        (window as? SurfaceWindow)?.movedByUser = level == 0 && !title.isEmpty ? { [weak self] in
             self?.surfaceMoved(id)
         } : nil
         var updated = surface
@@ -288,6 +302,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         let frontToBack = surfaces.values.sorted { $0.order < $1.order }
         let quiet = ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil
         for other in frontToBack.reversed() {
+            // Ordering one front would bring it back from the Dock.
+            if other.window.isMiniaturized { continue }
             // A measurement's windows stay behind what whoever's at the Mac is using, where their pointer can't reach them.
             if quiet { other.window.orderBack(nil) } else { other.window.orderFront(nil) }
         }
@@ -305,14 +321,66 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         send(.surfaceMoved(windowID: id, x: frame.minX, y: primary - frame.maxY))
     }
 
-    /// Each SIGUSR2 moves the front window by a screen's worth of the way as a host drag would, for a test with no pointer to drag.
+    /// A test means the app's main window, not whatever small one is in front of it.
+    private static func area(_ surface: Surface) -> Double { surface.window.frame.width * surface.window.frame.height }
+
+    private var testCommandPath: String {
+        (ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] ?? "") + ".command"
+    }
+
+    /// Drags the guest window's bottom right corner in, in steps, through the input view, as a live resize.
+    private func testResize(_ surface: Surface) {
+        let window = surface.window
+        let margin = (window as? SurfaceWindow)?.margin ?? 0
+        let start = NSPoint(x: window.frame.width - margin - 3, y: margin + 3)
+        func event(_ type: NSEvent.EventType, _ at: NSPoint) -> NSEvent? {
+            NSEvent.mouseEvent(
+                with: type, location: at, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+        }
+        if let down = event(.leftMouseDown, start) { surface.input.mouseDown(with: down) }
+        for step in 1...30 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(step) * 0.05) {
+                let place = NSPoint(x: start.x - Double(step) * 6, y: start.y + Double(step) * 4)
+                if step < 30, let drag = event(.leftMouseDragged, place) { surface.input.mouseDragged(with: drag) }
+                if step == 30, let up = event(.leftMouseUp, place) { surface.input.mouseUp(with: up) }
+            }
+        }
+    }
+
+    /// Each SIGUSR2 is, by LC_SEAMLESS_CLICK_LOG's .command file, a live resize, or else moving the front window to the corner of
+    /// its screen as a host drag would, for a test with no pointer to drag.
     private func armTestMoves() {
         guard ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil else { return }
         signal(SIGUSR2, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
         source.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, let front = self.surfaces.min(by: { $0.value.order < $1.value.order }) else { return }
+                guard let self, let front = self.surfaces.max(by: { Self.area($0.value) < Self.area($1.value) }) else { return }
+                let command = (try? String(contentsOfFile: self.testCommandPath, encoding: .utf8)) ?? ""
+                if command.hasPrefix("host-minimize") {
+                    front.value.window.miniaturize(nil)
+                    return
+                }
+                if command.hasPrefix("host-restore") {
+                    front.value.window.deminiaturize(nil)
+                    return
+                }
+                if command.hasPrefix("guest-minimize") {
+                    // Command-M, to the guest, as the key.
+                    if let key = NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                        windowNumber: front.value.window.windowNumber, context: nil, characters: "m",
+                        charactersIgnoringModifiers: "m", isARepeat: false, keyCode: 46)
+                    {
+                        SeamlessInputViewForwardKeyEquivalent(front.value.input, key)
+                    }
+                    return
+                }
+                if command.hasPrefix("resize") {
+                    self.testResize(front.value)
+                    return
+                }
                 let screen = front.value.window.screen?.visibleFrame ?? .zero
                 front.value.window.setFrameOrigin(NSPoint(x: screen.maxX - front.value.window.frame.width, y: screen.minY))
                 self.surfaceMoved(front.key)
@@ -342,7 +410,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     /// Real NSEvents through the real input view, from the window's middle. It doesn't exercise WindowServer's delivery,
     /// but it needs no permission and doesn't touch the host's pointer.
     private func testClick() {
-        guard let surface = surfaces.values.min(by: { $0.order < $1.order }) else { return }
+        guard let surface = surfaces.values.max(by: { Self.area($0) < Self.area($1) }) else { return }
         let window = surface.window
         let place = NSPoint(x: window.frame.width / 2, y: window.frame.height / 2)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
@@ -360,7 +428,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     }
 
     private func testInput() {
-        guard let surface = surfaces.values.min(by: { $0.order < $1.order }) else { return }
+        guard let surface = surfaces.values.max(by: { Self.area($0) < Self.area($1) }) else { return }
         let window = surface.window
         testClick()
         // A real scroll event through the trackpad's path. The other gestures can't be made without a trackpad.
@@ -383,7 +451,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     }
 
     private func makeSurface(id: Int, frame: NSRect) -> Surface {
-        let window = SurfaceWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        let window = SurfaceWindow(contentRect: frame, styleMask: [.borderless, .miniaturizable], backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
@@ -403,6 +471,18 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         drop.autoresizingMask = [.width, .height]
         input.addSubview(drop)
         window.observer = drop
+        for (name, minimized) in [
+            (NSWindow.didMiniaturizeNotification, true), (NSWindow.didDeminiaturizeNotification, false)
+        ] {
+            NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if self.guestMinimizing.remove(id) == nil {
+                        self.send(.surfaceMinimized(windowID: id, minimized: minimized))
+                    }
+                }
+            }
+        }
         dropViews[id] = drop
         return Surface(window: window, host: host, input: input, order: 0)
     }

@@ -5,11 +5,12 @@
 //
 //     xcrun clang -fobjc-arc -O2 -framework AppKit -framework QuartzCore -framework CoreImage -framework IOSurface \
 //         probes/seamless-gpu-viewer.m -o Build/seamless/seamless-gpu-viewer
-//     seamless-gpu-viewer SERVICE SECONDS PNG_PREFIX [--no-windows] [--materials ROWS_FILE]
+//     seamless-gpu-viewer SERVICE SECONDS PNG_PREFIX [--no-windows] [--materials ROWS_FILE [--host-shadow]]
 //
 // With --materials, each window has the host's own material behind its surface, where ROWS_FILE (seamless-guest gpu
 // --rows, rewritten as it changes) says, and a plain window behind it all that changes color. Each color's result is
-// read from the screen by window ID, with what's below that window.
+// read from the screen by window ID, with what's below that window. --host-shadow has the host draw each window's
+// shadow from its surface's alpha, for a surface with none.
 #import <AppKit/AppKit.h>
 #import <IOSurface/IOSurface.h>
 #import <CoreImage/CoreImage.h>
@@ -30,8 +31,9 @@ struct SGFrameMessage {
 @interface Seen : NSObject
 @property NSWindow *window;
 @property CALayer *layer;
-@property NSWindow *behind;
 @property NSMutableArray<NSVisualEffectView *> *materials;
+@property NSImage *shape;
+@property uint64_t shapes;
 @property NSString *materialKey;
 @property uint32_t width, height, lastSent;
 @property int x, y;
@@ -45,7 +47,9 @@ struct SGFrameMessage {
 static NSMutableDictionary<NSNumber *, Seen *> *seen;
 static BOOL noWindows;
 static NSString *prefix, *materialsFile;
-static NSDictionary *contentRows; // Window ID to its surface's origin, in guest points.
+static NSWindow *backdropWindow;
+static BOOL hostShadow;
+static uint32_t frontmost;
 
 // PVG's surfaces say 1 byte an element, with a row as long as their width, for pixels of 4 bytes. Their size is right.
 static size_t true_row(IOSurfaceRef surface) {
@@ -69,13 +73,45 @@ static uint64_t rows_hash(IOSurfaceRef surface) {
     return hash;
 }
 
+// Any alpha is the window's: see seamless-ws-mojave.h.
+static NSImage *shape_of(IOSurfaceRef surface) {
+    size_t width = IOSurfaceGetWidth(surface), height = IOSurfaceGetHeight(surface), row = true_row(surface);
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
+                                                                    pixelsWide:(NSInteger)width
+                                                                    pixelsHigh:(NSInteger)height
+                                                                 bitsPerSample:8
+                                                               samplesPerPixel:4
+                                                                      hasAlpha:YES
+                                                                      isPlanar:NO
+                                                                colorSpaceName:NSDeviceRGBColorSpace
+                                                                   bytesPerRow:(NSInteger)width * 4
+                                                                  bitsPerPixel:32];
+    if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL))
+        return nil;
+    const uint8_t *base = IOSurfaceGetBaseAddress(surface);
+    uint8_t *to = rep.bitmapData;
+    for (size_t y = 0; y < height; y++)
+        for (size_t x = 0; x < width; x++)
+            to[(y * width + x) * 4 + 3] = base[y * row + x * 4 + 3] ? 255 : 0;
+    IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+    NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(width / 2.0, height / 2.0)];
+    [image addRepresentation:rep];
+    return image;
+}
+
 static void show(uint32_t windowID, IOSurfaceRef surface, uint32_t width, uint32_t height, int x, int y,
                  uint32_t sent) {
-    NSNumber *key = @(windowID);
+    NSNumber *key = @(windowID & 0xffff);
     Seen *s = seen[key];
     if (!s) {
         s = [Seen new];
         seen[key] = s;
+    }
+    if (windowID & 0x10000) {
+        s.shape = shape_of(surface);
+        s.shapes++;
+        s.materialKey = nil;
+        return;
     }
     if (s.lastSent && sent != s.lastSent + 1)
         s.gaps += sent - s.lastSent - 1;
@@ -106,20 +142,13 @@ static void show(uint32_t windowID, IOSurfaceRef surface, uint32_t width, uint32
             s.layer = top.layer;
             s.layer.contentsGravity = kCAGravityResize;
             s.layer.contentsScale = 2;
-            if (materialsFile) {
-                s.behind = [[NSWindow alloc] initWithContentRect:frame
-                                                       styleMask:NSWindowStyleMaskBorderless
-                                                         backing:NSBackingStoreBuffered
-                                                           defer:NO];
-                s.behind.level = kCGDesktopWindowLevel;
-                s.behind.ignoresMouseEvents = YES;
-                s.behind.backgroundColor = NSColor.redColor;
-                s.behind.collectionBehavior = s.window.collectionBehavior;
-                [s.behind orderBack:nil];
-                [s.window orderWindow:NSWindowAbove relativeTo:s.behind.windowNumber];
-            }
-            [s.window orderWindow:NSWindowAbove relativeTo:s.behind.windowNumber];
+            s.window.hasShadow = hostShadow;
+            [s.window orderFront:nil];
         }
+        if (hostShadow)
+            dispatch_async(dispatch_get_main_queue(), ^{
+              [s.window invalidateShadow];
+            });
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         s.layer.contents = (__bridge id)surface;
@@ -169,14 +198,34 @@ static void apply_materials(void) {
             origins[@(id)] = @[ @(x), @(y) ];
         else if (sscanf(line.UTF8String,
                         "backdrop id %u order %u material %u active %u blend %u rect %f,%f %fx%f saturation %f", &id,
-                        &order, &material, &active, &blend, &x, &y, &w, &h, &s) == 10 &&
-                 active) {
+                        &order, &material, &active, &blend, &x, &y, &w, &h, &s) == 10) {
             if (!byWindow[@(id)])
                 byWindow[@(id)] = [NSMutableArray new];
-            [byWindow[@(id)] addObject:@[ @(order), @(material), @(x), @(y), @(w), @(h) ]];
+            [byWindow[@(id)] addObject:@[ @(order), @(material), @(x), @(y), @(w), @(h), @(active) ]];
         }
     }
-    contentRows = origins;
+    // In the guest's layout and order: rows are front first, so back to front here.
+    NSMutableArray<NSNumber *> *order = [NSMutableArray new];
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        unsigned n = 0, id = 0;
+        if (sscanf(line.UTF8String, "row %u id %u", &n, &id) == 2 && seen[@(id)].window)
+            [order insertObject:@(id) atIndex:0];
+    }
+    CGFloat screenHeight = NSScreen.screens[0].frame.size.height;
+    if (order.count)
+        frontmost = order.lastObject.unsignedIntValue;
+    for (NSNumber *key in seen)
+        if (![order containsObject:key])
+            [seen[key].window orderOut:nil];
+    for (NSNumber *key in order) {
+        Seen *s = seen[key];
+        NSArray *origin = origins[key];
+        [s.window
+            setFrame:NSMakeRect([origin[0] floatValue], screenHeight - [origin[1] floatValue] - 25 - s.height / 2.0,
+                                s.width / 2.0, s.height / 2.0)
+             display:NO];
+        [s.window orderFront:nil];
+    }
     for (NSNumber *key in seen) {
         Seen *s = seen[key];
         NSArray *rows = byWindow[key];
@@ -191,16 +240,21 @@ static void apply_materials(void) {
         CGFloat ox = [origin[0] floatValue], oy = [origin[1] floatValue];
         NSRect bounds = s.window.contentView.bounds;
         NSView *top = s.window.contentView.subviews.lastObject;
-        for (int order = 0; order < 16; order++) {
+        // One view for each material, a selection over the sidebar it's in. 26 is what a vibrant text or icon cuts out
+        // of the material under it, and needs nothing of the host's.
+        for (int pass = 0; pass < 32; pass++) {
+            int material = pass == 31 ? 19 : pass == 19 ? -1 : pass;
             NSMutableArray *rects = [NSMutableArray new];
-            int material = -1;
+            int active = 0;
             for (NSArray *row in rows)
-                if ([row[0] intValue] == order) {
-                    material = [row[1] intValue];
+                if ([row[1] intValue] == material && material != 26) {
+                    active |= [row[6] intValue];
                     [rects addObject:row];
                 }
             if (!rects.count)
                 continue;
+            // The menu bar's materials come out with no alpha at all, and it's a rectangle anyway.
+            NSImage *shape = material == 21 || material == 25 ? nil : s.shape;
             NSImage *mask = [NSImage imageWithSize:bounds.size
                                            flipped:YES
                                     drawingHandler:^BOOL(NSRect dst) {
@@ -208,13 +262,20 @@ static void apply_materials(void) {
                                       for (NSArray *row in rects)
                                           NSRectFill(NSMakeRect([row[2] floatValue] - ox, [row[3] floatValue] - oy,
                                                                 [row[4] floatValue], [row[5] floatValue]));
+                                      if (shape)
+                                          [shape drawInRect:NSMakeRect(0, 0, shape.size.width, shape.size.height)
+                                                    fromRect:NSZeroRect
+                                                   operation:NSCompositingOperationDestinationIn
+                                                    fraction:1
+                                              respectFlipped:YES
+                                                       hints:nil];
                                       return YES;
                                     }];
             NSVisualEffectView *view = [[NSVisualEffectView alloc] initWithFrame:bounds];
             view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
             view.material = host_material(material);
             view.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-            view.state = NSVisualEffectStateActive;
+            view.state = active ? NSVisualEffectStateActive : NSVisualEffectStateInactive;
             view.maskImage = mask;
             // The first drawn is the furthest back, and the last is under the surface.
             [s.window.contentView addSubview:view positioned:NSWindowBelow relativeTo:top];
@@ -223,27 +284,21 @@ static void apply_materials(void) {
     }
 }
 
-// What's on the screen at this window and below it: that the host's material samples what's really there.
-static void read_with_below(Seen *s, uint32_t id, NSString *name) {
+// What's on the screen at this window and below it, which at the desktop's level is only this tool's windows and the
+// wallpaper: that the host's material samples what's really there.
+static void read_with_below(uint32_t window, CGRect rect, NSString *path) {
     typedef CGImageRef (*Create)(CGRect, CGWindowListOption, CGWindowID, CGWindowImageOption);
     Create create = (Create)dlsym(RTLD_DEFAULT, "CGWindowListCreateImage");
-    if (!create) {
-        printf("no CGWindowListCreateImage\n");
-        return;
-    }
-    NSRect f = s.window.frame;
-    CGFloat height = NSScreen.screens[0].frame.size.height;
-    CGRect rect = CGRectMake(f.origin.x, height - f.origin.y - f.size.height, f.size.width, f.size.height);
-    CGImageRef image = create(rect, kCGWindowListOptionIncludingWindow | kCGWindowListOptionOnScreenBelowWindow,
-                              (CGWindowID)s.window.windowNumber, kCGWindowImageBestResolution);
+    CGImageRef image = create
+                           ? create(rect, kCGWindowListOptionIncludingWindow | kCGWindowListOptionOnScreenBelowWindow,
+                                    window, kCGWindowImageBestResolution)
+                           : NULL;
     if (!image) {
-        printf("no image for window %u\n", id);
+        printf("no image for window %u\n", window);
         return;
     }
     NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:image];
-    [[rep representationUsingType:NSBitmapImageFileTypePNG
-                       properties:@{}] writeToFile:[NSString stringWithFormat:@"%@-%u-below-%@.png", prefix, id, name]
-                                        atomically:YES];
+    [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES];
     CGImageRelease(image);
 }
 
@@ -348,6 +403,7 @@ int main(int argc, char **argv) {
         noWindows = argc > 4 && !strcmp(argv[4], "--no-windows");
         if (argc > 5 && !strcmp(argv[4], "--materials"))
             materialsFile = @(argv[5]);
+        hostShadow = argc > 6 && !strcmp(argv[6], "--host-shadow");
         seen = [NSMutableDictionary new];
         mach_port_t port = MACH_PORT_NULL;
         mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
@@ -392,6 +448,17 @@ int main(int argc, char **argv) {
                                               }];
             // Stepped by a file's appearing, so a run can read each color when it's ready.
             __block int step = 0;
+            backdropWindow = [[NSWindow alloc]
+                initWithContentRect:NSMakeRect(0, NSScreen.screens[0].frame.size.height - 777, 1152, 752)
+                          styleMask:NSWindowStyleMaskBorderless
+                            backing:NSBackingStoreBuffered
+                              defer:NO];
+            backdropWindow.level = kCGDesktopWindowLevel;
+            backdropWindow.ignoresMouseEvents = YES;
+            backdropWindow.backgroundColor = NSColor.redColor;
+            backdropWindow.collectionBehavior =
+                NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorTransient;
+            [backdropWindow orderBack:nil];
             NSArray *colors = @[ NSColor.redColor, NSColor.blueColor, NSColor.greenColor, NSColor.blackColor ];
             NSArray *names = @[ @"red", @"blue", @"green", @"black" ];
             [NSTimer
@@ -403,12 +470,15 @@ int main(int argc, char **argv) {
                                            if (![NSFileManager.defaultManager
                                                    fileExistsAtPath:[materialsFile stringByAppendingString:@".go"]])
                                                return;
-                                           for (NSNumber *key in seen)
-                                               read_with_below(seen[key], key.unsignedIntValue, names[step]);
+                                           [NSFileManager.defaultManager
+                                               removeItemAtPath:[materialsFile stringByAppendingString:@".go"]
+                                                          error:NULL];
+                                           read_with_below(
+                                               seen[@(frontmost)].window.windowNumber, CGRectMake(0, 25, 1152, 752),
+                                               [NSString stringWithFormat:@"%@-scene-%@.png", prefix, names[step]]);
                                            step++;
                                            if (step < (int)colors.count)
-                                               for (NSNumber *key in seen)
-                                                   seen[key].behind.backgroundColor = colors[step];
+                                               backdropWindow.backgroundColor = colors[step];
                                            printf("step %d\n", step);
                                            fflush(stdout);
                                          }];

@@ -72,8 +72,10 @@ static const char *const wanted[] = {
     "_gl_composite_layer",
     "_CGRegionCreateWithRect",
     "_CGRegionRelease",
+    "_WSArenaAlloc",
+    "_CGRegionCreateCopy",
 };
-static void *resolved[21];
+static void *resolved[23];
 static void *(*session_data)(void);
 static void **(*server_gl)(void);
 static void *placement_targets[3];
@@ -397,20 +399,23 @@ static struct {
     char *window;
 } layer_owner[LAYER_SLOTS];
 static char *building_window, *marked_window;
+static pthread_t building_thread;
 static int layers_used;
+
+static char *whole_windows[64]; // Those being drawn whole in this update, which the host starts clear.
+static unsigned whole_count;
 
 static void forget_layers(void) {
     memset(layer_owner, 0, sizeof(layer_owner));
     layers_used = 0;
+    whole_count = 0;
 }
-void *_Znam(unsigned long);
 static void *hook_new_array(unsigned long size) {
-    // What libc++'s does, without calling it: on 10.14 a call from here comes back here, as dyld coalesces the weak
-    // name.
+    // What libc++'s does.
     void *memory = malloc(size ? size : 1);
     if (!memory)
         abort();
-    if (building_window && pthread_equal(pthread_self(), main_thread)) {
+    if (building_window && pthread_equal(pthread_self(), building_thread)) {
         size_t slot = ((uintptr_t)memory >> 4) % LAYER_SLOTS;
         for (int tries = 0; tries < 16; tries++, slot = (slot + 1) % LAYER_SLOTS)
             if (!layer_owner[slot].layer) {
@@ -427,6 +432,7 @@ __attribute__((used)) void seamless_redraw_window(void *state, char *window) {
         forget_layers();
     marked_window = (char *)-1; // Nothing marked yet, so the first layer is told, even with no owner.
     building_window = window;
+    building_thread = pthread_self();
 }
 __attribute__((used)) void seamless_composite_layer(const void *layer) {
     building_window = 0;
@@ -450,7 +456,7 @@ __attribute__((used)) void seamless_composite_layer(const void *layer) {
             note("layer %p has no known window\n", layer);
     }
     marked_window = owner;
-    float tokens[9] = {11184809.0f};
+    float tokens[11] = {11184809.0f};
     const uint8_t *state = owner ? *(const uint8_t **)(owner + 0xe0) : NULL;
     if (state) {
         struct RectResult rect = window_screen_rect(owner);
@@ -470,9 +476,13 @@ __attribute__((used)) void seamless_composite_layer(const void *layer) {
         tokens[6] = (float)(int)rect.height;
         tokens[7] = (float)margin;
         tokens[8] = *(const float *)(owner + 0x100) * 16;
+        tokens[9] = table && table->gpu_mode ? 1 : 0;
+        for (unsigned i = 0; i < whole_count; i++)
+            if (whole_windows[i] == owner)
+                tokens[10] = 1;
     }
     void (*pass_through)(void *, float) = (void (*)(void *, float))gl[1 + 190];
-    for (int i = 0; i < 9; i++)
+    for (int i = 0; i < 11; i++)
         pass_through(gl[0], tokens[i]);
     static unsigned told;
     if (told++ % 3000 == 0)
@@ -662,6 +672,7 @@ static void publish(void) {
 static char (*redraw_original)(char *, char *);
 static void *(*region_with_rect)(struct RectResult);
 static void (*region_release_fn)(void *);
+static void *(*region_copy)(void *);
 
 // When the host needs all of a window: once its bounds have held for a second, since one that opened by an effect
 // wasn't drawn whole at its final size. With gpu_mode 2, every time, which times a full redraw, and draws a covered
@@ -674,6 +685,7 @@ static int whole_window_due(uint32_t id, char *window) {
         int done;
         uint64_t stable_since;
         struct RectResult rect;
+        uint32_t shadow;
     } seen[256];
     unsigned i = 0;
     while (i < 256 && seen[i].id && seen[i].id != id)
@@ -682,6 +694,14 @@ static int whole_window_due(uint32_t id, char *window) {
         return 0;
     uint64_t now = mach_absolute_time();
     struct RectResult rect = window_screen_rect(window);
+    uint32_t key = 2166136261u;
+    for (int b = 0x134; b < 0x148; b++)
+        key = (key ^ (uint8_t)window[b]) * 16777619u;
+    if (seen[i].id == id && key != seen[i].shadow) {
+        seen[i].shadow = key;
+        return 1;
+    }
+    seen[i].shadow = key;
     if (seen[i].id != id || memcmp(&rect, &seen[i].rect, sizeof(rect))) {
         seen[i].id = id;
         seen[i].rect = rect;
@@ -704,16 +724,36 @@ static char redraw_placed(char *state, char *window) {
     for (int i = 0; id && table && i < SWS_PLACEMENTS; i++)
         if (table->placements[i].id == id)
             placement = (const struct SWSPlacement *)&table->placements[i];
-    if (!placement && tree_in_gl && id && whole_window_due(id, window)) {
-        void *saved_clip = *(void **)(state + 0x18);
-        struct RectResult everywhere = {0, 0, 16384, 16384};
-        void *whole = region_with_rect(everywhere);
-        *(void **)(state + 0x18) = whole;
-        char drew = redraw_original(state, window);
-        *(void **)(state + 0x18) = saved_clip;
-        region_release_fn(whole);
-        table->gpu_composites++;
-        return drew;
+    if (!placement && tree_in_gl && id) {
+        // With the display off, each window gets all of what changed, as nothing's in front of it on a surface of its
+        // own, and every window behind is drawn too: nothing stops at an opaque one.
+        int off = table->gpu_mode != 0;
+        static uint32_t last_mode;
+        static uint64_t refresh_until;
+        uint64_t now = mach_absolute_time();
+        if (last_mode && !off)
+            refresh_until =
+                now + 300000000ull * table->ticks_denom / table->ticks_numer; // All of it back on the display.
+        last_mode = table->gpu_mode;
+        int whole = whole_window_due(id, window) || now < refresh_until;
+        if (off || whole) {
+            uint8_t saved_shadow = *(uint8_t *)(state + 0x6b);
+            void *saved_clip = *(void **)(state + 0x18);
+            struct RectResult everywhere = {0, 0, 16384, 16384};
+            void *clip = whole ? region_with_rect(everywhere) : region_copy(saved_clip);
+            *(void **)(state + 0x18) = clip;
+            if (!whole)
+                *(uint8_t *)(state + 0x6b) = 1;
+            else if (whole_count < 64)
+                whole_windows[whole_count++] = window;
+            char drew = redraw_original(state, window);
+            *(void **)(state + 0x18) = saved_clip;
+            *(uint8_t *)(state + 0x6b) = saved_shadow;
+            region_release_fn(clip);
+            if (whole)
+                table->gpu_composites++;
+            return off ? 0 : drew;
+        }
     }
     if (!placement)
         return redraw_original(state, window);
@@ -737,6 +777,39 @@ static char redraw_placed(char *state, char *window) {
 }
 
 #include "seamless-ws-mojave.h"
+
+#define MAVERICKS_PATCHES 2
+static struct Patch mavericks_patches[MAVERICKS_PATCHES];
+static void **new_array_pointer;
+
+// _WSArenaAlloc, which builds a layer, calls new[] through a stub right after a 12-byte start, and its pointer can
+// change at any moment, with no thread stopped.
+static int mavericks_prepare(void) {
+    static const uint8_t arena_start[] = {0x55, 0x48, 0x89, 0xe5, 0x53, 0x50, 0x48, 0x89, 0xfb, 0x48, 0x89, 0xf7, 0xe8};
+    const uint8_t *arena = resolved[21];
+    if (!arena || memcmp(arena, arena_start, sizeof(arena_start))) {
+        note("refusing: _WSArenaAlloc isn't the expected one\n");
+        return 0;
+    }
+    int32_t to_stub;
+    memcpy(&to_stub, arena + 13, 4);
+    const uint8_t *stub = arena + 17 + to_stub;
+    if (stub[0] != 0xff || stub[1] != 0x25) {
+        note("refusing: new[]'s stub isn't the expected one\n");
+        return 0;
+    }
+    int32_t to_pointer;
+    memcpy(&to_pointer, stub + 2, 4);
+    new_array_pointer = (void **)(stub + 6 + to_pointer);
+    region_with_rect = (void *(*)(struct RectResult))placement_targets[1];
+    region_release_fn = (void (*)(void *))placement_targets[2];
+    region_copy = resolved[22];
+    const struct Patch patches[MAVERICKS_PATCHES] = {
+        PUSHES_PATCH(resolved[18], seamless_layer_entry, seamless_layer_continue),
+        PUSHES_PATCH(placement_targets[0], redraw_placed, redraw_original)};
+    memcpy(mavericks_patches, patches, sizeof(patches));
+    return 1;
+}
 
 static time_t next_sample;
 static int ready, in_sample, reached;
@@ -800,7 +873,6 @@ __attribute__((used)) static struct {
 } interposers[] __attribute__((section("__DATA,__interpose"))) = {
     {(const void *)hook_msg, (const void *)mach_msg},
     {(const void *)hook_overwrite, (const void *)mach_msg_overwrite},
-    {(const void *)hook_new_array, (const void *)_Znam},
 };
 
 // For seamless-ws-inject, in its own process, before it touches WindowServer: whether this build is known and every
@@ -808,9 +880,8 @@ __attribute__((used)) static struct {
 __attribute__((visibility("default"))) int seamless_preflight(void) {
     if (!resolve_symbols())
         return 0;
-    // shortcut: 10.9 can't be injected yet.
     if (build->full)
-        return 0;
+        return mavericks_prepare() && patches_match(mavericks_patches, MAVERICKS_PATCHES);
     return gpu_prepare() && patches_match(gpu_patches, GPU_PATCHES);
 }
 
@@ -823,12 +894,12 @@ __attribute__((constructor)) static void start(void) {
     // Only WindowServer: launchd's environment can reach other programs on this clone.
     if (!strcmp(getprogname(), "WindowServer")) {
         ready = resolve_symbols();
-        tree_in_gl = !access("/var/tmp/seamless-ws-gl-tree", F_OK);
+        // Loaded into a running WindowServer, by probes/seamless-ws-inject.c: nobody's there to ask for less.
+        int injected = !getenv("DYLD_INSERT_LIBRARIES");
+        tree_in_gl = injected || !access("/var/tmp/seamless-ws-gl-tree", F_OK);
         note("loaded on %s thread\n", pthread_main_np() ? "the main" : "another");
         note("tree in GL: %d\n", tree_in_gl);
-        // Loaded into a running WindowServer, by probes/seamless-ws-inject.c: it's sandboxed by now, so the injector
-        // has made the table for it.
-        int injected = !getenv("DYLD_INSERT_LIBRARIES");
+        // It's sandboxed by now, so the injector has made the table for it.
         if (!injected)
             unlink(SWS_PATH);
         int fd = open(SWS_PATH, injected ? O_RDWR : O_RDWR | O_CREAT, 0666);
@@ -847,15 +918,16 @@ __attribute__((constructor)) static void start(void) {
             close(fd);
         note("table %s\n", table ? "mapped" : "NOT mapped");
         // The second only for trying placement: it rewrites a function WindowServer's update calls, and isn't finished.
-        if (ready && table && !build->full && gpu_prepare() && patches_apply(gpu_patches, GPU_PATCHES))
+        if (ready && table && !build->full && gpu_prepare() && patches_apply(gpu_patches, GPU_PATCHES)) {
+            gpu_census_install();
             table->installed_pid = getpid();
-        if (ready && table && build->full && (tree_in_gl || !access("/var/tmp/seamless-ws-placement", F_OK))) {
-            region_with_rect = (void *(*)(struct RectResult))placement_targets[1];
-            region_release_fn = (void (*)(void *))placement_targets[2];
-            struct Patch patches[] = {PUSHES_PATCH(resolved[18], seamless_layer_entry, seamless_layer_continue),
-                                      PUSHES_PATCH(placement_targets[0], redraw_placed, redraw_original)};
-            if (patches_apply(tree_in_gl ? patches : patches + 1, tree_in_gl ? 2 : 1))
-                table->installed_pid = getpid();
+        }
+        if (ready && table && build->full && (tree_in_gl || !access("/var/tmp/seamless-ws-placement", F_OK)) &&
+            mavericks_prepare() &&
+            patches_apply(tree_in_gl ? mavericks_patches : mavericks_patches + 1, tree_in_gl ? 2 : 1)) {
+            if (tree_in_gl)
+                __atomic_store_n(new_array_pointer, (void *)hook_new_array, __ATOMIC_SEQ_CST);
+            table->installed_pid = getpid();
         }
     }
 }

@@ -98,21 +98,37 @@ int main(int argc, char **argv) {
         fprintf(stderr, "task_for_pid(%d): %s\n", pid, mach_error_string(kr));
         return 1;
     }
-    enum { stack_size = 64 * 1024, page_size = 16 * 1024 };
+    enum { stack_size = 64 * 1024, page_size = 32 * 1024 };
     mach_vm_address_t code = 0, stack = 0;
     if (mach_vm_allocate(task, &code, page_size, VM_FLAGS_ANYWHERE) ||
         mach_vm_allocate(task, &stack, stack_size, VM_FLAGS_ANYWHERE))
         return 1;
+    // Before 10.12 there's no asking from a bare thread, so it borrows some zeroed memory as a thread's own first.
     void *create = dlsym(RTLD_DEFAULT, "pthread_create_from_mach_thread"),
-         *open_library = dlsym(RTLD_DEFAULT, "dlopen");
-    if (!create || !open_library)
-        return 1;
+         *open_library = dlsym(RTLD_DEFAULT, "dlopen"), *set_self = NULL;
+    if (!create) {
+        create = dlsym(RTLD_DEFAULT, "pthread_create");
+        set_self = dlsym(RTLD_DEFAULT, "_pthread_set_self");
+        if (!set_self)
+            create = NULL;
+    }
+    if (!create || !open_library) {
+        fprintf(stderr, "can't make a thread there\n");
+        return 4;
+    }
     uint8_t image[page_size] = {0};
-    // Data: the path at +0x800, the pthread_t at +0xf00, then the real thread's start at +0x100.
+    // Data: the path at +0x800, the pthread_t at +0xf00, then the real thread's start at +0x100, and the borrowed
+    // thread's memory from +0x1000.
     strncpy((char *)image + 0x800, argv[1], 0x600);
     uint8_t *p = image;
     static const uint8_t align[] = {0x48, 0x83, 0xec, 0x08}; // subq $8, %rsp
     p = put_bytes(p, align, sizeof(align));
+    static const uint8_t call_set_self[] = {0xff, 0xd0}; // callq *%rax
+    if (set_self) {
+        p = load_constant(p, 0x48, 0xbf, code + 0x1000);
+        p = load_constant(p, 0x48, 0xb8, (uint64_t)set_self);
+        p = put_bytes(p, call_set_self, sizeof(call_set_self));
+    }
     p = load_constant(p, 0x48, 0xbf, code + 0xf00); // rdi: the pthread_t
     static const uint8_t no_attributes[] = {0x31, 0xf6}; // xorl %esi, %esi
     p = put_bytes(p, no_attributes, sizeof(no_attributes));
