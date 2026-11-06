@@ -164,7 +164,7 @@ import Testing
     }
 
     @Test(arguments: [
-        \GuestSessionState.guestPending, \.preparing, \.shutdownRequested
+        \GuestSessionState.guestPending, \.preparing, \.shuttingDown
     ])
     func workInProgressStartsNothing(flag: WritableKeyPath<GuestSessionState, Bool> & Sendable) {
         #expect(step { $0[keyPath: flag] = true } == .busy)
@@ -264,10 +264,10 @@ import Testing
 
     @Test func theNativeDisplayCheckWaitsForStoppingAndPreparing() {
         #expect(policy().mayCheckNativeDisplay)
-        #expect(!policy { $0.shutdownRequested = true }.mayCheckNativeDisplay)
+        #expect(!policy { $0.shuttingDown = true }.mayCheckNativeDisplay)
         #expect(!policy { $0.preparing = true }.mayCheckNativeDisplay)
         #expect(!policy { $0.preparationRequested = true }.mayCheckNativeDisplay)
-        #expect(!policy { $0.relaunchForGraphics = true }.mayCheckNativeDisplay)
+        #expect(!policy { $0.handingOff = true }.mayCheckNativeDisplay)
     }
 
     @Test func modernSetupAdvancesOnlyOutsideItsOwnReplay() {
@@ -288,12 +288,12 @@ import Testing
         #expect(
             !policy {
                 setup(&$0)
-                $0.shutdownRequested = true
+                $0.shuttingDown = true
             }.mayAdvanceModernSetup)
         #expect(
             !policy {
                 setup(&$0)
-                $0.relaunchForGraphics = true
+                $0.handingOff = true
             }.mayAdvanceModernSetup)
     }
 
@@ -520,7 +520,7 @@ import Testing
 
     @Test(arguments: [
         \GuestSessionState.displayPolicyRestartRequired, \.preparing, \.preparationRequested, \.repairRequested,
-        \.guestPending, \.clipboardPending, \.bootPolicyPending, \.displayModePending, \.shutdownRequested
+        \.guestPending, \.clipboardPending, \.bootPolicyPending, \.displayModePending, \.shuttingDown
     ])
     func otherWorkHoldsTheDisplayMode(flag: WritableKeyPath<GuestSessionState, Bool> & Sendable) {
         #expect(!selects { $0[keyPath: flag] = true })
@@ -563,5 +563,17 @@ import Testing
         #expect(Bridge.consoleUsername(statOutput: "501 someone\n", expectedUID: 501) == "someone")
         #expect(Bridge.consoleUsername(statOutput: nil, expectedUID: 501) == nil)
         #expect(Bridge.consoleUsername(statOutput: "4294967294 nobody", expectedUID: -2) == "nobody")
+    }
+}
+
+extension GuestSessionState {
+    /// The two phases the status decisions look at, settable so that they fit in with the other flags here.
+    fileprivate var shuttingDown: Bool {
+        get { shutdownRequested }
+        set { lifecycle.phase = newValue ? .shuttingDown(.requested) : .running }
+    }
+    fileprivate var handingOff: Bool {
+        get { relaunchForGraphics }
+        set { lifecycle.phase = newValue ? .handoff : .running }
     }
 }

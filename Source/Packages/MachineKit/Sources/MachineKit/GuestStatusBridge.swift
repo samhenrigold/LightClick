@@ -17,14 +17,7 @@ public final class GuestSessionStateBridge: NSObject {
         get { state.running }
         set { state.running = newValue }
     }
-    public var shutdownRequested: Bool {
-        get { state.shutdownRequested }
-        set { state.shutdownRequested = newValue }
-    }
-    public var relaunchForGraphics: Bool {
-        get { state.relaunchForGraphics }
-        set { state.relaunchForGraphics = newValue }
-    }
+    public var shutdownRequested: Bool { state.shutdownRequested }
     public var developmentSetupDeferred: Bool {
         get { state.developmentSetupDeferred }
         set { state.developmentSetupDeferred = newValue }
@@ -151,6 +144,24 @@ public final class GuestSessionStateBridge: NSObject {
     }
 
     public var nextRefreshStep: GuestRefreshStep { state.nextRefreshStep }
+    public var mayHandOff: Bool { state.mayHandOff }
+    public var mayRequestShutdown: Bool { state.mayRequestShutdown }
+    public var mayShutDownForQuit: Bool { state.mayShutDownForQuit }
+    public var mayForceReset: Bool { state.mayForceReset }
+    public var mayStartGraphicsAction: Bool { state.mayStartGraphicsAction }
+    public var graphicsActionsEnabled: Bool { state.graphicsActionsEnabled }
+    public var lifecycleDescription: String { state.lifecycle.phase.description }
+
+    @objc(applyEvent:)
+    public func apply(_ event: SessionEvent) {
+        state.lifecycle = state.lifecycle.applying(event)
+    }
+
+    @objc(exitPlanWithExited:terminationStatus:recentGuestReboots:)
+    public func exitPlan(exited: Bool, terminationStatus: Int32, recentGuestReboots: [Date]?) -> SessionExitPlan {
+        state.lifecycle.exitPlan(
+            exited: exited, terminationStatus: terminationStatus, recentGuestReboots: recentGuestReboots ?? [])
+    }
 
     @objc(sleepPolicyArgumentsWithNativeIdleGuard:)
     public func sleepPolicyArguments(nativeIdleGuard: Bool) -> [String]? {
@@ -198,6 +209,15 @@ public final class GuestStatusPolicyBridge: NSObject {
     public var mayBeginPreparation: Bool { policy.mayBeginPreparation }
     public var needsDesktopServices: Bool { policy.needsDesktopServices }
     public var refreshInterval: TimeInterval { policy.refreshInterval }
+
+    @objc(followUpAfterInstallation:requiresInstallerDisplay:)
+    public func followUpAfterInstallation(outcome: Any?, requiresInstallerDisplay: Bool) -> InstallationFollowUp {
+        let values = outcome as? [String: Any]
+        return policy.followUpAfterInstallation(
+            outcomePhase: values?["Phase"] as? String,
+            rebootRequired: values?["RebootRequired"] as? Bool ?? false,
+            requiresInstallerDisplay: requiresInstallerDisplay)
+    }
 
     @objc(guestAddressesReplacing:macAddress:isUsable:)
     public func guestAddresses(

@@ -21,8 +21,7 @@ public enum GuestRefreshStep: Int, Sendable {
 public struct GuestSessionState: Sendable {
     public var guest: Guest?
     public var running = false
-    public var shutdownRequested = false
-    public var relaunchForGraphics = false
+    public var lifecycle = SessionLifecycle()
     public var developmentSetupDeferred = false
 
     public var preparing = false
@@ -65,6 +64,17 @@ public struct GuestSessionState: Sendable {
     public var reconciliationAttempts = 0
 
     public init() {}
+
+    public var shutdownRequested: Bool { lifecycle.shutdownRequested }
+    public var relaunchForGraphics: Bool { lifecycle.handingOff }
+
+    public var mayHandOff: Bool { running && lifecycle.acceptsHandoff }
+    public var mayRequestShutdown: Bool { running && !shutdownRequested && !preparing }
+    /// The app is quitting, and a session that's mid-setup or mid-handoff gets to finish.
+    public var mayShutDownForQuit: Bool { running && !preparing && !relaunchForGraphics }
+    public var mayForceReset: Bool { running && !lifecycle.resetRequested }
+    public var mayStartGraphicsAction: Bool { running && !preparing && !preparationRequested && !relaunchForGraphics }
+    public var graphicsActionsEnabled: Bool { mayStartGraphicsAction && !guestPending }
 
     public var nextRefreshStep: GuestRefreshStep {
         if guestPending || preparing || shutdownRequested || !running { return .busy }
