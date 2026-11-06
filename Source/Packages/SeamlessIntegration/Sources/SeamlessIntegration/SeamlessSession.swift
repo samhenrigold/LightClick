@@ -60,6 +60,7 @@ public final class SeamlessSession {
     private var proxy: LineSocket?
     private var proxyPID: Int32 = 0
     private var guestDescriptor: Int32 = -1
+    private var everConnected = false
     private var port: UInt16 = 0
     private var guestOffset: NSPoint?
     private var lastMenu: [GuestMenuItem]?
@@ -98,12 +99,25 @@ public final class SeamlessSession {
     // MARK: The guest's side
 
     private func drive() async {
+        // A guest can restart itself early in a boot, which ends the agent's connection under whatever was running. Nothing
+        // has reached the user yet, so that only means starting over.
+        for attempt in 1...3 {
+            guard let ran = await runInGuest() else { return }
+            note("# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")")
+            if ran.exitCode != nil || everConnected || attempt == 3 { break }
+            note("# trying again")
+        }
+        proxy?.send(SessionCommand.terminate)
+        finished()
+    }
+
+    private func runInGuest() async -> SeamlessGuestRun? {
         let started = CFAbsoluteTimeGetCurrent()
         // The agent isn't there until well into the boot, and answers with an error until it is.
         while await guest.run("/usr/bin/uname", ["-r"]).exitCode != 0 {
             if CFAbsoluteTimeGetCurrent() - started > 900 {
                 fail("no answer from the guest")
-                return
+                return nil
             }
             try? await Task.sleep(for: .seconds(5))
         }
@@ -111,22 +125,16 @@ public final class SeamlessSession {
             let menuTool = await guest.stage(configuration.tools.appending(path: "seamless-integration-guest"))
         else {
             fail("couldn't put the programs in the guest")
-            return
+            return nil
         }
         _ = await guest.run("/bin/sh", ["-c", Self.setupScript, "sh", tool, menuTool])
         note("# running \(configuration.guestApp) in the guest")
         var arguments = [
-            "SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "tree", "--app", configuration.guestApp, "--open", "--session",
-            "--hook",
+            "SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "tree", "--app", configuration.guestApp, "--open", "--session", "--hook",
             "--menu-tool", "/tmp/sg/ig", "--port", String(port), "--seconds", "0"
         ]
         if test != nil { arguments.append("--test-badge") }
-        let ran = await guest.run("/usr/bin/env", arguments)
-        note(
-            "# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")"
-        )
-        proxy?.send(SessionCommand.terminate)
-        finished()
+        return await guest.run("/usr/bin/env", arguments)
     }
 
     private func fail(_ why: String) {
@@ -194,6 +202,7 @@ public final class SeamlessSession {
 
     private func guestConnected(_ descriptor: Int32) {
         guestDescriptor = descriptor
+        everConnected = true
         let waiting = documentsWaiting
         documentsWaiting = []
         for path in waiting { sendDocument(path, flags: 0) }

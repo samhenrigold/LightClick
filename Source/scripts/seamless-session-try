@@ -59,7 +59,7 @@ def running(pattern):
 
 
 check('no machine is running this clone before making the proxy', not running(str(machine)))
-env = dict(os.environ, CFFIXED_USER_HOME=str(home))
+env = dict(os.environ, CFFIXED_USER_HOME=str(home), LC_HVDBT='1')
 maker = subprocess.run([str(app/'Contents/MacOS/Light Click'), '--open-vm', str(machine), '--seamless-make-proxy', 'TextEdit'],
                        env=env, capture_output=True, text=True, timeout=1200)
 bundle = next((line for line in maker.stdout.splitlines() if line.endswith('.app')), '')

@@ -11,6 +11,31 @@ without Hopper (`nm`, `otool`). No other OS version was inspected. All guest num
 Labels: **[measured]** by a probe here. **[read]** seen in code or a binary. **[source]** public documentation or code, linked.
 **[inferred]** reasoned, untested. **[memory]** recalled, unchecked; verify before relying on it.
 
+## Try it on your Mac
+
+A normal build has this now. **Use a clone: making a Dock app changes the machine.** It adds a library to its WindowServer, in `/System/Library/LaunchDaemons/com.apple.WindowServer.plist`. Mavericks is what's been tested, and nothing yet has been seen on a display.
+
+1. Build, from `Source`:
+
+        Engine/build.sh release
+        LC_HVDBT_ENGINE=$PWD/Engine VIM_CODESIGN_IDENTITY=<sha1> Build/venv/bin/python3 scripts/build-app --jobs 10 \
+            --configuration Release --output "$PWD/Build/Products/try/Light Click.app"
+
+2. Quit any Light Click that's running this machine. Make the clone, with its own identity, so its Dock app is separate:
+
+        cd ~/Library/Application\ Support/Virtual\ Intel\ Mac/Machines
+        cp -c -R Mavericks.vintelmac "Mavericks Try.vintelmac"
+        plutil -replace Identifier -string $(uuidgen) "Mavericks Try.vintelmac/Machine.plist"
+
+3. Open the app from step 1, then **File > Open Virtual Mac…** and choose `Mavericks Try.vintelmac`. Wait for its desktop.
+4. **Actions > Make Dock App…**, choose TextEdit, then **Make App**. Finder shows it in `~/Applications/Light Click`. Drag it to the Dock if you like.
+5. Shut the clone down from **Actions > Shut Down** and quit Light Click. A session can't start while another instance has the machine open.
+6. Click the Dock app. It bounces while the clone boots, about a minute, with no VM window. Or drop a `.txt` on it.
+
+Look for: the real shadow and the sheet on quitting; whether the machine's window flashes as it starts; Cmd-Tab and Mission Control; the menu bar; pinch and scroll; dragging a file in and out; the sharpness and frame rate of Safari if you make a Dock app for it too. To see 1x, use **View > Retina Resolution > Scaled** in the clone before step 5, and compare. It defaults to 2x. Quitting the app shuts the clone down.
+
+Its log is `$TMPDIR/lc-<first 8 of the Identifier, lowercase>.log`. To remove it, delete the app from `~/Applications/Light Click`, and delete the clone.
+
 ## Measured on a Mavericks clone
 
 `scripts/seamless-try hook <app> <machine>` boots one clone, loads the hook, and runs the same demo twice in that boot. Each window arrives
@@ -67,7 +92,7 @@ Proxy quits now answer `.terminateCancel` and quit on the session's word. `.term
 
 But the host's half of both drags was stood in for, with nobody at the Mac and no pointer to move: these events came from the session as the proxy would report them, not from a real `NSDraggingSession`. The proxy's view for them is now an overlay that refuses mouse hits, which nothing has tested against a real drag. The badge test's source is a helper, not TextEdit. Pinch, rotate, swipe and force click have the same route as the scroll but can't be made without a trackpad.
 
-Not from a real Dock click: that needs someone at the Mac. The session itself is still `probes/seamless-viewer.m`, moved in, not rewritten. The composed views are made from window pixels with the display asleep, as above; **nobody has seen this on a display**, including whether the machine's window flashes before it's cleared, which it can for up to 0.25 s. AppKit calls the machine's windows ordered out, while WindowServer still lists them as on screen with the display asleep, at alpha 0, so they're cleared as well.
+Not from a real Dock click: that needs someone at the Mac. Since then this has moved into the app: `SeamlessSession` in the `SeamlessIntegration` package replaces `seamless-viewer` for a session, talking to the machine's agent directly, not through the diagnostics channel; `build-app` adds what it needs to `Contents/Resources/Seamless`, and **Actions > Make Dock App…** makes the proxy and installs the hook, which takes effect at the guest's next start. A session runs by capture until then. `seamless-viewer` stays for the probes in `seamless-try`. The session itself is still `probes/seamless-viewer.m`, moved in, not rewritten. The composed views are made from window pixels with the display asleep, as above; **nobody has seen this on a display**, including whether the machine's window flashes before it's cleared, which it can for up to 0.25 s. AppKit calls the machine's windows ordered out, while WindowServer still lists them as on screen with the display asleep, at alpha 0, so they're cleared as well.
 
 ### Per-window composite: tried, and not worth having yet
 
@@ -118,7 +143,14 @@ So Safari goes up 4.6 times with both, and past that WindowServer has room to sp
 
 The columns aren't only the engine. `CGSGetWindowFlushSeed` doesn't move for a CSS animation here: in the TCG run, 475 of 497 looks were skipped by it while the page changed. So the tool now looks faster for 2 s whenever its once-a-second look finds a change the seed missed, which is what the engine column ran with. It costs an idle-looking TextEdit 11.9 captures/s, probably for its caret, and an animation starts up to a second late. What would replace it is a composite in the server: `WSCompositeWindowToDestination` into an IOSurface, or a client request that says a CA context changed. Both unbuilt, and given Mavericks' result for the first, measure before building.
 
-Mojave's window, popovers and sessions from a proxy haven't been run, nor a 1x display there.
+**A composite in the server, bounded, not built.** `CGSHWCaptureWindowList` is the path through `WSCompositeWindowToDestination`, by a disassembly of `CaptureSurfaceMetal::Populate`, so its time is a fair stand-in for one, on Mojave on the engine at 2x:
+
+| 12 of them on a still window: ms to get it, then ms to read its pixels | Safari 2480x1418 | TextEdit 1310x854 |
+| --- | --- | --- |
+| `CGWindowListCreateImage`, no framing | 0.6, 55.2 | 6.0, 31.0 |
+| `CGSHWCaptureWindowList` | 16.7, 57.0 | 43.1, 27.8 |
+
+So the composite is about a quarter of Safari's cost, and getting the pixels out is the rest, which an in-server composite would still have to do unless they reach the host without a copy. I didn't call `WSCompositeWindowToDestination` itself: this says it isn't where the time goes, and the transport is the place to look next.
 
 What was wrong before these worked: `launchctl bsexec` only moves the bootstrap port, and prints "bsexec failed: Inappropriate ioctl for device" on 10.9. WindowServer finds a
 client's GUI session from its **audit session**, so a tool started by the guest agent stayed in the system's: the connection and display calls worked, but the window list and session
@@ -129,7 +161,8 @@ dictionary came back empty. `probes/seamless-session-join.h` now joins Finder's 
 - The composed images are made by the viewer from each host window's exact pixels, not read from the screen, because the host's display was asleep and `screencapture` failed. Nobody has yet
   looked at these as real windows on a display, with the real Dock, Mission Control or menu bar.
 - The hook delivers backing-store contents and the tree. Shadows, GL, text views with overlay scrollers and whole CA-backed windows such as Safari's still come from a capture, at about 4 frames/s for an animated Safari. See "Per-window composite" for why a composite in the server wasn't the answer.
-- The machine still has a window and a library window, cleared and ordered out; a session has no microphone, since Core Audio can stop answering QEMU's open of it and hang the boot: `AudioQueueStart` returned `268451843`, which is `MACH_RCV_TIMED_OUT`, so `coreaudiod` not answering, and later a boot sat in `AudioQueueDispose` on the same device; and the app's `--guest-diagnostics-root` channel, a developer path, is what a session runs the guest through. A session is packaged by `scripts/seamless-package` after a build, not by `build-app`, and no menu in the app makes a proxy yet: `SeamlessMakeProxy` does. It's only been run with a binary built from this branch placed in a recent app, not a full `build-app` of the branch.
+- The machine still has a window and a library window, cleared and ordered out; and a session has no microphone, since Core Audio can stop answering QEMU's open of it and hang the boot: `AudioQueueStart` returned `268451843`, which is `MACH_RCV_TIMED_OUT`, so `coreaudiod` not answering, and later a boot sat in `AudioQueueDispose` on the same device.
+- The proxy's own copy isn't signed for distribution, and nothing here has been through notarization. A session can't start while another instance of the app has the machine open, and what that looks like has not been run.
 - A document is copied into the guest and copied back when its modification date changes: plain files only, with the host's copy losing if both change. Second launches, reopening, Cancel at the prompt, a guest crash during a session and quitting before the guest is up weren't run. A lost session quits the proxy.
 - Only 10.9 has a working hook; see the Mojave section. A hook already in a guest isn't replaced by a newer one.
 - Pixels go over TCP through slirp. Nothing is zero-copy yet.
