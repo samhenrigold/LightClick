@@ -49,6 +49,7 @@ public final class SeamlessSession {
         let context: NSObject
         let layer: CALayer
         var image: CGImage?
+        var cropped = false
         init(window: SessionWire.Window, context: NSObject, layer: CALayer) {
             self.window = window
             self.context = context
@@ -73,7 +74,7 @@ public final class SeamlessSession {
     private var documentsWaiting: [String] = []
     private var guestDragFiles: [String] = []
     private var logHandle: FileHandle?
-        public var test: SeamlessSessionTest?
+    public var test: SeamlessSessionTest?
     /// Crop each window from the frames windowed mode shows, rather than capture it. Set before `start`.
     public var usesDisplayFrames = false
     /// For measuring: quit the guest app this long after its first window.
@@ -82,7 +83,8 @@ public final class SeamlessSession {
     private var copies: [IOSurfaceRef] = []
     private var copyIndex = 0
     private var arrived = 0
-    private var measuring: (started: CFAbsoluteTime, arrived: Int)?
+    private var measuring: (started: CFAbsoluteTime, arrived: Int, distinct: Int)?
+    public var distinctFrames: (() -> Int)?
     private var testStarted = false
 
     public init(configuration: Configuration, guest: any SeamlessGuest, finished: @escaping () -> Void) {
@@ -161,7 +163,7 @@ public final class SeamlessSession {
             "--hook",
             "--menu-tool", "/tmp/sg/ig", "--port", String(port), "--seconds", "0"
         ]
-                if test != nil { arguments.append("--test-badge") }
+        if test != nil { arguments.append("--test-badge") }
         if usesDisplayFrames { arguments.append("--no-pixels") }
         return await guest.run("/usr/bin/env", arguments)
     }
@@ -321,11 +323,23 @@ public final class SeamlessSession {
         case .frame(let frame):
             guard let surface = surfaces[frame.window], let image else { return }
             surface.image = image
+            surface.cropped = false
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             surface.layer.contents = image
+            surface.layer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+            surface.layer.cornerRadius = 0
             CATransaction.commit()
             CATransaction.flush()
+        case .crop(let id):
+            surfaces[id]?.cropped = true
+            if let surface = surfaces[id], let frame {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                crop(surface, from: frame)
+                CATransaction.commit()
+                CATransaction.flush()
+            }
         case .gone(let id):
             surfaces[id] = nil
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
@@ -366,20 +380,26 @@ public final class SeamlessSession {
             surface = made
             surfaces[window.id] = made
         }
-                surface.window = window
+        surface.window = window
         tellProxy(surface)
         if let stopAfter, measuring == nil {
-            measuring = (CFAbsoluteTimeGetCurrent(), arrived)
+            measuring = (CFAbsoluteTimeGetCurrent(), arrived, distinctFrames?() ?? 0)
             // Past the window's opening, then over the same time windowed mode was measured for.
             DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter - 22) {
-                MainActor.assumeIsolated { self.measuring = (CFAbsoluteTimeGetCurrent(), self.arrived) }
+                MainActor.assumeIsolated {
+                    self.measuring = (CFAbsoluteTimeGetCurrent(), self.arrived, self.distinctFrames?() ?? 0)
+                }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter) {
                 MainActor.assumeIsolated {
                     if let measuring = self.measuring {
                         let seconds = CFAbsoluteTimeGetCurrent() - measuring.started
+                        let distinct = Double((self.distinctFrames?() ?? 0) - measuring.distinct)
                         self.note(
-                            String(format: "# frames: %.1f/s over %.0f s", Double(self.arrived - measuring.arrived) / seconds, seconds))
+                            String(
+                                format: "# frames: %.1f/s, %.1f distinct, over %.0f s",
+                                Double(self.arrived - measuring.arrived) / seconds,
+                                distinct / seconds, seconds))
                     }
                     self.handle(.quit)
                 }
@@ -435,8 +455,8 @@ public final class SeamlessSession {
         let y = primary - (Double(window.y) - side + offset.y) - height
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-                surface.layer.frame = CGRect(x: 0, y: 0, width: width, height: height)
-        if let frame { crop(surface, from: frame) }
+        surface.layer.frame = CGRect(x: 0, y: 0, width: width, height: height)
+        if let frame, surface.cropped { crop(surface, from: frame) }
         CATransaction.commit()
         CATransaction.flush()
         proxy?.send(
@@ -453,12 +473,13 @@ public final class SeamlessSession {
     /// One frame of the guest's display, as windowed mode gets it. Everything shows the same surface, each through its own crop.
     public func frameArrived(surface: IOSurfaceRef?, bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) {
         arrived += 1
-        guard usesDisplayFrames, let current = surface ?? copy(bytes, width: width, height: height, stride: stride) else { return }
+        guard usesDisplayFrames, let current = surface ?? copy(bytes, width: width, height: height, stride: stride)
+        else { return }
         frame = (current, width, height)
         guard !surfaces.isEmpty else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        for surface in surfaces.values { crop(surface, from: (current, width, height)) }
+        for surface in surfaces.values where surface.cropped { crop(surface, from: (current, width, height)) }
         CATransaction.commit()
         CATransaction.flush()
     }
@@ -466,11 +487,17 @@ public final class SeamlessSession {
     private func crop(_ surface: Surface, from frame: (surface: IOSurfaceRef, width: Int, height: Int)) {
         let window = surface.window
         let scale = window.width > 0 ? Double(window.pixelWidth) / Double(window.width) : 1
-        let fullWidth = Double(frame.width), fullHeight = Double(frame.height)
+        let fullWidth = Double(frame.width)
+        let fullHeight = Double(frame.height)
         surface.layer.contents = frame.surface
+        // contentsRect counts up from the bottom of the surface, and guest windows down from the top of the display.
         surface.layer.contentsRect = CGRect(
-            x: Double(window.x) * scale / fullWidth, y: Double(window.y) * scale / fullHeight,
+            x: Double(window.x) * scale / fullWidth,
+            y: (fullHeight - (Double(window.y) + Double(window.height)) * scale) / fullHeight,
             width: Double(window.width) * scale / fullWidth, height: Double(window.height) * scale / fullHeight)
+        // shortcut: the same corners all round, where a window's own differ a little, until they're read from its shape.
+        surface.layer.cornerRadius = 5
+        surface.layer.masksToBounds = true
         // A surface a producer has drawn into again is the same object, which on its own wouldn't refresh.
         surface.layer.perform(NSSelectorFromString("setContentsChanged"))
     }

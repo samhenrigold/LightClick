@@ -16,6 +16,7 @@ import sys
 import time
 
 source = Path(__file__).resolve().parents[1]
+os.environ['VIM_COUNT_DISTINCT_FRAMES'] = '1'
 original_app, original_machine = Path(sys.argv[1]), Path(sys.argv[2])
 results = source/'Build/seamless'
 results.mkdir(parents=True, exist_ok=True)
@@ -25,7 +26,7 @@ windowed = subprocess.run([str(source/'scripts/guest-bench'), str(original_app),
                            str(source/'probes/seamless-driver.py'), '--driver-arg', 'windowed', '--env', 'LC_HVDBT=1'],
                           capture_output=True, text=True)
 print(windowed.stdout[-800:], windowed.stderr[-300:], flush=True)
-match = re.search(r'windowed_frames ([0-9.]+)', windowed.stdout)
+match = re.search(r'windowed_distinct ([0-9.]+)', windowed.stdout)
 windowed_rate = float(match.group(1)) if match else 0
 shutil.rmtree(source/f'Build/bench/seamless-compare-{tag}', ignore_errors=True)
 
@@ -61,17 +62,12 @@ def session(label, extra):
     page.write_text('<title>Seamless page</title><style>@-webkit-keyframes m{to{-webkit-transform:translate3d(400px,0,0)}}'
                     'div{width:80px;height:80px;background:#28c;-webkit-animation:m 2s infinite alternate}</style>'
                     '<h1>A page in a guest browser</h1><div></div><p>Some text.</p>\n')
-    subprocess.run(['/usr/bin/open', '-g', '--env', f'CFFIXED_USER_HOME={home}', '--env', 'LC_SEAMLESS_QUIET=1', '--env', 'LC_SEAMLESS_STOP_AFTER=45',
+    subprocess.run(['/usr/bin/open', '-g', '--env', f'CFFIXED_USER_HOME={home}', '--env', 'LC_SEAMLESS_QUIET=1', '--env', 'VIM_COUNT_DISTINCT_FRAMES=1', '--env', 'LC_SEAMLESS_STOP_AFTER=45',
                     *[item for pair in extra for item in ('--env', pair)], '-a', bundle, str(page)], check=True)
-    shot = False
     deadline = time.time()+900
     said = ''
     while time.time() < deadline:
         said = log.read_text(errors='replace') if log.exists() else ''
-        if not shot and '# window ' not in said and running(f'{bundle}/Contents/MacOS/SeamlessProxy') and 'running Safari' in said:
-            pass
-        if '# frames:' in said and not shot:
-            shot = True
         if 'guest\'s side ended' in said:
             break
         # While it's showing: this app's windows only, never the whole screen.
@@ -90,12 +86,12 @@ def session(label, extra):
         time.sleep(5)
     for row in running(str(machine))+running(f'{bundle}/'):
         os.kill(int(row.split()[0]), 9)
-    rate = re.search(r'# frames: ([0-9.]+)/s', said)
+    rate = re.search(r'# frames: [0-9.]+/s, ([0-9.]+) distinct', said)
     return float(rate.group(1)) if rate else 0, said
 
 
 frames_rate, said = session('frames', [])
-print(f'windowed {windowed_rate:.1f} frames/s; seamless, cropping those frames, {frames_rate:.1f}', flush=True)
+print(f'distinct frames/s: windowed {windowed_rate:.1f}; seamless, cropping those frames, {frames_rate:.1f}', flush=True)
 subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', bundle])
 shutil.rmtree(work, ignore_errors=True)
 if frames_rate < windowed_rate * 0.9 or windowed_rate <= 0:

@@ -343,11 +343,13 @@ def windowed(seconds):
     guest = stage(guest_tool)
     print(run(guest, ['open-app', '--app', 'Safari'])[0], flush=True)
     time.sleep(15)
-    first = request({'Action': 'display-frames'}, 60).get('Arrived', 0)
+        first = request({'Action': 'display-frames'}, 60)
     started = time.time()
     time.sleep(seconds)
-    last = request({'Action': 'display-frames'}, 60).get('Arrived', 0)
-    print(f'windowed_frames {(last - first) / (time.time() - started):.1f} /s', flush=True)
+    last = request({'Action': 'display-frames'}, 60)
+    spent = time.time() - started
+    print(f'windowed_frames {(last.get("Arrived", 0) - first.get("Arrived", 0)) / spent:.1f} /s', flush=True)
+    print(f'windowed_distinct {(last.get("Distinct", 0) - first.get("Distinct", 0)) / spent:.1f} /s', flush=True)
 
 
 def capture_bench():

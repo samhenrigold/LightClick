@@ -1416,6 +1416,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
+    int cropping;
     double look_every;
     uint32_t surface_flushes;
     CGWindowID id;
@@ -1695,7 +1696,9 @@ static int no_pixels;
 
 static double display_scale(void) {
     CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
-    double scale = mode && CGDisplayModeGetWidth(mode) ? (double)CGDisplayModeGetPixelWidth(mode) / CGDisplayModeGetWidth(mode) : 1;
+    double scale = mode && CGDisplayModeGetWidth(mode)
+                       ? (double)CGDisplayModeGetPixelWidth(mode) / CGDisplayModeGetWidth(mode)
+                       : 1;
     if (mode)
         CGDisplayModeRelease(mode);
     return scale;
@@ -1781,8 +1784,19 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             CGRect bounds = item->bounds;
             const char *title = item->title, *owner = item->owner;
             int alpha = item->alpha, layer = item->layer;
-                        // With no pixels, only where windows are: the host crops them from the display's own frames, without a margin.
-            int margin = no_pixels ? 0 : item->margin;
+            //             // The host crops a window from the display's own frames if that shows it right: an opaque,
+            //             ordinary window that no
+            // other window in front of it covers. Its shape is a rectangle with the corners the host gives it, and its
+            // shadow is the host's. Anything else, such as a menu, a popover, a sheet or a covered window, keeps its
+            // capture, with real alpha.
+            int crop = no_pixels && item->layer == 0 && item->title[0] && item->alpha == 0x10000;
+            for (int k = 0; crop && k < i; k++) {
+                const struct TreeItem *front = &items[k];
+                if (front->layer == 0 && front->title[0] && CGRectIntersectsRect(front->bounds, item->bounds) &&
+                    tree_group(front->id) != tree_group(id))
+                    crop = 0;
+            }
+            int margin = crop ? 0 : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
                 sized = !CGSizeEqualToSize(bounds.size, w->bounds.size) || margin != w->margin;
             uint32_t seed = 0;
@@ -1820,13 +1834,26 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             s->bounds = bounds;
             s->order = order;
             s->alpha = (uint32_t)alpha;
-                        s->margin = margin;
-            if (no_pixels) {
+            s->margin = margin;
+            if (no_pixels && !crop && w->cropping) {
+                // Back to captures, starting with a whole one.
+                w->cropping = 0;
+                free(w->previous);
+                w->previous = NULL;
+                stale = 1;
+            }
+            if (crop) {
                 if (fresh || moved || sized || order != w->order || alpha != w->alpha || strcmp(title, w->title)) {
                     s->pixel_width = w->pixel_width = (uint32_t)(bounds.size.width * display_scale() + 0.5);
                     s->pixel_height = w->pixel_height = (uint32_t)(bounds.size.height * display_scale() + 0.5);
                     s->group = tree_group(id);
                     if (send_window(s, title, owner, layer))
+                        goto done;
+                }
+                if (!w->cropping) {
+                    w->cropping = 1;
+                    uint8_t message[SWM_HEADER_SIZE + SWM_GONE_SIZE];
+                    if (send_all(s->fd, message, swm_put_u32_message(message, sizeof(message), SWM_CROP, id)))
                         goto done;
                 }
                 if (fresh) {
@@ -2217,7 +2244,7 @@ int main(int argc, char **argv) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
         // A session lasts as long as the app does, and the rest are runs that mustn't outlive a stuck guest.
-                session_app = flag(argc, argv, "--session") ? app : NULL;
+        session_app = flag(argc, argv, "--session") ? app : NULL;
         no_pixels = flag(argc, argv, "--no-pixels");
         alarm(session_app ? 0 : 600);
         pid_t child = 0, gl_child = 0;

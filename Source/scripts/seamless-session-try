@@ -93,7 +93,7 @@ def session(name, cancel=False):
     screenshot = results/f'seamless-session-{name}.png'
     arguments = '\n'.join([str(dragged), str(marker), str(dragged_out), str(screenshot), 'cancel' if cancel else 'save'])
     check('no machine is running this clone before the proxy opens', not running(str(machine)))
-    subprocess.run(['/usr/bin/open', '--env', f'CFFIXED_USER_HOME={home}', '--env', f'LC_SEAMLESS_TEST={arguments}', '-a', bundle, str(document)], check=True)
+    subprocess.run(['/usr/bin/open', '-g', '--env', f'CFFIXED_USER_HOME={home}', '--env', f'LC_SEAMLESS_TEST={arguments}', '--env', 'LC_SEAMLESS_QUIET=1', '-a', bundle, str(document)], check=True)
     print('# opened the proxy with a document', flush=True)
     launch_checked = False
     deadline = time.time()+1500
@@ -175,7 +175,7 @@ log = Path(str(socket_path)+'.log')
 log.unlink(missing_ok=True)
 marker = work/'x.txt'
 marker.write_text('x')
-subprocess.run(['/usr/bin/open', '--env', f'CFFIXED_USER_HOME={home}', '--env', 'LC_SEAMLESS_TEST=a\nb\nc\nd\ne', bundle], check=True)
+subprocess.run(['/usr/bin/open', '-g', '--env', f'CFFIXED_USER_HOME={home}', '--env', 'LC_SEAMLESS_TEST=a\nb\nc\nd\ne', bundle], check=True)
 gone = False
 for _ in range(36):
     time.sleep(5)

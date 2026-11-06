@@ -48,6 +48,8 @@
 @property BOOL measurePresentation;
 @property NSUInteger presentedFrames;
 @property(readwrite) NSUInteger arrivedFrames;
+@property(readwrite) NSUInteger distinctFrames;
+@property uint64_t lastFrameHash;
 @property NSUInteger skippedPresentations;
 @property NSUInteger reorderedPresentations;
 @property CFTimeInterval firstPresentedAt;
@@ -1181,11 +1183,26 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
     self.presentationLayer.minificationFilter = filter;
     [CATransaction commit];
 }
+- (void)countDistinctBytes:(const void *)bytes height:(NSUInteger)height stride:(NSUInteger)stride {
+    if (!getenv("VIM_COUNT_DISTINCT_FRAMES"))
+        return;
+    uint64_t hash = 14695981039346656037ULL;
+    for (NSUInteger y = 0; y < height; y += 8) {
+        const uint64_t *row = (const uint64_t *)((const uint8_t *)bytes + y * stride);
+        for (NSUInteger x = 0; x < stride / 8; x++)
+            hash = (hash ^ row[x]) * 1099511628211ULL;
+    }
+    if (hash != self.lastFrameHash)
+        self.distinctFrames++;
+    self.lastFrameHash = hash;
+}
 - (void)presentWidth:(NSUInteger)width
               height:(NSUInteger)height
               stride:(NSUInteger)stride
-                    completion:(void (^)(BOOL))completion {
+          completion:(void (^)(BOOL))completion {
     self.arrivedFrames++;
+    if (self.frameBuffer && stride >= width * 4 && stride * height <= self.frameBuffer.length)
+        [self countDistinctBytes:self.frameBuffer.contents height:height stride:stride];
     if (self.frameObserver && self.frameBuffer && stride >= width * 4 && stride * height <= self.frameBuffer.length)
         self.frameObserver(NULL, self.frameBuffer.contents, width, height, stride);
     [self presentWidth:width height:height stride:stride sourceTexture:nil completion:completion];
@@ -1193,9 +1210,16 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
 - (void)presentSurface:(IOSurfaceRef)surface
                  width:(NSUInteger)width
                 height:(NSUInteger)height
-                        completion:(void (^)(BOOL))completion {
+            completion:(void (^)(BOOL))completion {
     NSAssert(NSThread.isMainThread, @"Presentation is main-thread owned");
     self.arrivedFrames++;
+    if (surface && getenv("VIM_COUNT_DISTINCT_FRAMES")) {
+        IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL);
+        [self countDistinctBytes:IOSurfaceGetBaseAddress(surface)
+                          height:height
+                          stride:IOSurfaceGetBytesPerRow(surface)];
+        IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+    }
     if (self.frameObserver && surface)
         self.frameObserver(surface, NULL, width, height, IOSurfaceGetBytesPerRow(surface));
     if (!surface || width < 320 || height < 200 || width > 8192 || height > 8192 ||

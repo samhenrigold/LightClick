@@ -44,6 +44,7 @@ enum SWMType {
     SWM_DRAG_STATE = 55, // Guest to host: the guest's drag pasteboard, as JSON.
     SWM_DRAG_SEND = 56, // Host to guest: a document id, then a guest path: send that file back under that id.
     SWM_APP_STATE = 57, // Guest to host: JSON with the app's badge, and whether it wants attention.
+    SWM_CROP = 58, // Guest to host: show this window from the display's own frames, until a frame comes for it.
 };
 enum SWMPointerKind { SWM_MOVE = 0, SWM_DOWN = 1, SWM_UP = 2, SWM_DRAG = 3 };
 
@@ -358,6 +359,7 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
         case SWM_APP_GONE:
         case SWM_DRAG_CANCEL:
         case SWM_DRAG_QUERY:
+        case SWM_CROP:
             fixed = SWM_GONE_SIZE;
             break;
         case SWM_POINTER:
@@ -402,6 +404,7 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
             break;
         case SWM_GONE:
         case SWM_FOCUS:
+        case SWM_CROP:
             m->u.window_id = swm_r32(p);
             break;
         case SWM_MODIFIERS:
