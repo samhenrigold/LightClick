@@ -33,6 +33,8 @@ public protocol SeamlessPixelSource: AnyObject {
     /// `window` is the guest's window number. The surface holds it with real alpha, from `surfaceOrigin` on the guest's display,
     /// and can be bigger than it.
     func surface(forWindow window: UInt32) -> IOSurfaceRef?
+    /// Where it starts on the guest's display, if the surface itself says. Otherwise the guest's tool does.
+    func surfaceOrigin(forWindow window: UInt32) -> (x: Int32, y: Int32)?
 }
 
 /// One guest app as a host app. Listens for its proxy and for the tool it starts in the guest, shows each of the guest's
@@ -605,7 +607,7 @@ public final class SeamlessSession {
         let layer = surface.layer
         if let own = pixelSource?.surface(forWindow: window.id) {
             // Until the guest says, at its window's place, which is right but for any shadow: with the display off, this is all there is.
-            let origin = surface.surfaceOrigin ?? (window.x, window.y)
+            let origin = pixelSource?.surfaceOrigin(forWindow: window.id) ?? surface.surfaceOrigin ?? (window.x, window.y)
             setPieces(of: surface, to: [], from: own, place: place, height: whole.height)
             layer.mask = nil
             layer.contents = nil
