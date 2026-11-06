@@ -50,8 +50,11 @@ public final class SeamlessDesktop {
     private var front: String?
     private var copies = FrameCopies()
     private let logHandle: FileHandle?
+    private let began = CFAbsoluteTimeGetCurrent()
+    private var saidFirstWindow = false
     private let environment = ProcessInfo.processInfo.environment
     private static var staged: Set<String> = []
+    private static var described: [String: GuestApp] = [:]
     private static var preparing: [String: Task<Bool, Never>] = [:]
 
     public static let leaveTitle = "Show in Light Click Window"
@@ -64,7 +67,17 @@ public final class SeamlessDesktop {
         logHandle = try? FileHandle(forWritingTo: configuration.log)
     }
 
-    private func note(_ text: String) { logHandle?.write(Data((text + "\n").utf8)) }
+    private func note(_ text: String) {
+        logHandle?.write(Data(String(format: "%.2f %@\n", CFAbsoluteTimeGetCurrent() - began, text).utf8))
+    }
+
+    public weak var pixelSource: (any SeamlessPixelSource)? {
+        didSet { for session in sessions.values { session.pixelSource = pixelSource } }
+    }
+
+    public func windowPixelsChanged(_ id: UInt32) {
+        for session in sessions.values { session.windowPixelsChanged(id) }
+    }
 
     public var windowCount: Int { sessions.values.reduce(0) { $0 + $1.windowCount } }
 
@@ -101,9 +114,8 @@ public final class SeamlessDesktop {
     // MARK: The guest's side
 
     private func runInGuest() async {
-        let began = CFAbsoluteTimeGetCurrent()
         let ready = await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path)
-        note(String(format: "# tools in the guest after %.1f s", CFAbsoluteTimeGetCurrent() - began))
+        note("# tools in the guest")
         if stopped { return }
         guard ready else {
             finish("This Mac isn’t ready yet. Wait for it to finish starting, then try again.")
@@ -195,9 +207,15 @@ public final class SeamlessDesktop {
             // Each after that is a name and its bundle, front first.
             let apps = stride(from: 1, to: fields.count - 1, by: 2).map { (name: fields[$0], path: fields[$0 + 1]) }
             for app in apps where sessions[app.path] == nil && !describing.contains(app.path) {
+                note("# apps says \(app.name)")
                 describing.insert(app.path)
                 names[app.path] = app.name
-                tell("describe\t\(app.path)")
+                // Reading an app starts programs in the guest, which is slow. It's the same app next time.
+                if let known = Self.described[app.path] {
+                    Task { await open(known, icon: nil) }
+                } else {
+                    tell("describe\t\(app.path)")
+                }
             }
             if let first = apps.first?.path, first != front {
                 front = first
@@ -213,6 +231,8 @@ public final class SeamlessDesktop {
                 describing.remove(path)
                 return
             }
+            note("# described \(path)")
+            Self.described[path] = app
             Task { await open(app, icon: icon) }
         default:
             break
@@ -278,8 +298,13 @@ public final class SeamlessDesktop {
         session.usesDisplayFrames = true
         session.guestOffset = configuration.guestOffset
         session.leaveTitle = Self.leaveTitle
+        session.pixelSource = pixelSource
         session.onWindowsChanged = { [weak self] in
             guard let self else { return }
+            if !self.saidFirstWindow, self.windowCount > 0 {
+                self.saidFirstWindow = true
+                self.note("# first window")
+            }
             self.windowsChanged?(self.windowCount)
         }
         session.onLeave = { [weak self] in self?.finish() }
@@ -296,6 +321,7 @@ public final class SeamlessDesktop {
         session.onGuestGone = { [weak self] in self?.closeApp(app.guestPath) }
         sessions[app.guestPath] = session
         session.start()
+        note("# running \(name)")
         tell("run\t\(name)\t\(session.guestPort)")
         if front == app.guestPath { activateFront() }
         let open = NSWorkspace.OpenConfiguration()

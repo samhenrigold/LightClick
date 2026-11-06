@@ -199,7 +199,7 @@ final class SeamlessHost: NSObject {
                 savedBundles: home.appending(path: "Applications/Light Click"),
                 machine: .init(identifier: identifier, name: name, path: path),
                 log: FileManager.default.temporaryDirectory.appending(path: "lc-seamless-\(identifier.prefix(8)).log"),
-                guestOffset: NSPoint(x: origin.x, y: origin.y)),
+                guestOffset: NSPoint(x: origin.x.rounded(), y: origin.y.rounded())),
             guest: AgentGuest(machinePath: path))
         desktops[path] = desktop
         session.noteSeamlessChanged()
