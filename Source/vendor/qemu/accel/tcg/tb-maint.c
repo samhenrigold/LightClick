@@ -998,6 +998,23 @@ TranslationBlock *tb_link_page(TranslationBlock *tb)
 
     tb_record(tb);
 
+    /*
+     * Translation read the code before tb_record protected its pages, and a
+     * store in between reached no invalidation: a vCPU whose TLB entry was
+     * still clean stored directly, and one in notdirty_write had already
+     * invalidated.  Such a TB would outlive the store until the next one.
+     * Don't publish it.  This thread may run it once, as it may any TB
+     * invalidated just after linking, since its fetch began before the store.
+     * CF_INVALID and the flush keep it out of chains and jump caches.
+     */
+    if (unlikely(translator_code_changed(tb))) {
+        tb_remove(tb);
+        qatomic_set(&tb->cflags, tb->cflags | CF_INVALID);
+        tb_jmp_cache_inval_tb(tb);
+        tb_unlock_pages(tb);
+        return tb;
+    }
+
     /* add in the hash table */
     h = tb_hash_func(tb_page_addr0(tb), (tb->cflags & CF_PCREL ? 0 : tb->pc),
                      tb->flags, tb->cs_base, tb->cflags);

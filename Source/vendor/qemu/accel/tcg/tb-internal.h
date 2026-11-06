@@ -49,6 +49,8 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t ram_addr,
                                    unsigned size, uintptr_t retaddr);
 #endif /* CONFIG_SOFTMMU */
 
+bool translator_code_changed(const TranslationBlock *tb);
+
 bool tb_invalidate_phys_page_unwind(CPUState *cpu, tb_page_addr_t addr,
                                     uintptr_t pc);
 
