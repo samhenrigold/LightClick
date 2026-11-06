@@ -125,7 +125,7 @@ final class SeamlessHost: NSObject {
         session.test = SeamlessSessionTest(environment: environment["LC_SEAMLESS_TEST"])
         session.usesDisplayFrames = environment["LC_SEAMLESS_CAPTURE"] == nil
         session.stopAfter = environment["LC_SEAMLESS_STOP_AFTER"].flatMap(Double.init)
-        session.distinctFrames = { VIMSession.running(forMachinePath: machine)?.distinctFrames ?? 0 }
+        session.distinctFrames = { Int(VIMSession.running(forMachinePath: machine)?.distinctFrames ?? 0) }
         observeFrames(machine: machine, session: session)
         self.session = session
         session.start()
