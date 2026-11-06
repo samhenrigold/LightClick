@@ -1389,7 +1389,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     // Core Audio can stop answering QEMU's open of the microphone, and of the failed queue's close, which stops a boot nobody
     // can see. shortcut: a seamless session has no microphone, until QEMU opens it when the guest does.
     BOOL seamless = [NSProcessInfo.processInfo.arguments containsObject:@"--seamless-session"];
-    // Without a grant, opening the microphone waits on a TCC answer before the guest can start. Settings asks for it.
+    // Don't touch the microphone until it's been granted, so a boot never involves it. Settings asks for it.
     BOOL microphoneAllowed = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] ==
                              AVAuthorizationStatusAuthorized;
     launch.audioInputSelection = seamless || !microphoneAllowed ? @"disabled" : VIMAudioSelection(config, YES);
