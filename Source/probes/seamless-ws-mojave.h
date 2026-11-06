@@ -75,6 +75,7 @@ static void *gpu_contributors[64];
 static unsigned gpu_contributor_count;
 static unsigned gpu_order;
 static void *gpu_front; // The windows before this one in the update.
+static void *gpu_front_shown; // The same, leaving out those nobody will show.
 static void contributors_hook(void *connection, void *session) {
     unsigned i = 0;
     while (i < gpu_contributor_count && gpu_contributors[i] != connection)
@@ -145,6 +146,27 @@ static char generate_layers_hook(char *state, char *window) {
     for (uint32_t i = 0; i < table->gpu_skip_count && i < 64; i++)
         if (table->gpu_skip[i] == id)
             return 0;
+    // shortcut: a partial composite of a window with a shown window in front lost a CA surface, a scroller's, with its
+    // alpha 0, and all of it being drawn doesn't. Why isn't known. The Dock doesn't count, or a window over it would
+    // always be whole. Windows going to host layers don't come here.
+    void *shown_shape = capture_shape(window, 0);
+    int under_shown = 0;
+    if (shown_shape) {
+        void *both = gpu_front_shown ? region_intersection(gpu_front_shown, shown_shape) : NULL;
+        if (both) {
+            under_shown = !region_is_empty(both);
+            region_free(both);
+        }
+        void *grown = gpu_front_shown ? region_union(gpu_front_shown, shown_shape) : NULL;
+        if (grown) {
+            region_free(gpu_front_shown);
+            region_free(shown_shape);
+            gpu_front_shown = grown;
+        } else if (!gpu_front_shown)
+            gpu_front_shown = shown_shape;
+        else
+            region_free(shown_shape);
+    }
     // shortcut: a row per window seen, by search. A real session keeps these in the window's own record.
     static struct {
         uint32_t id;
@@ -184,6 +206,8 @@ static char generate_layers_hook(char *state, char *window) {
         struct GPUWindow *w = gpu_window(id);
         if (settling)
             w->whole = 2;
+        if (under_shown && !w->whole)
+            w->whole = 1;
         if (fresh || !touched)
             w->whole = 2; // An app drawing where the display won't show it says nothing of where.
         if (touched) {
@@ -441,6 +465,9 @@ static void gpu_compose_damaged(void) {
         if (gpu_front)
             region_free(gpu_front);
         gpu_front = NULL;
+        if (gpu_front_shown)
+            region_free(gpu_front_shown);
+        gpu_front_shown = NULL;
     }
     if (!gpu_damaged_count)
         return;
