@@ -670,8 +670,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                 if (!session.networkStarting)
                                     return;
                                 session.networkStarting = NO;
-                                if (!failure && [session launch:&failure])
+                                if (!failure && [session launch:&failure]) {
+                                    [session recordOpened:cleanupError];
                                     return;
+                                }
                                 [session cleanUp];
                                 [session showStoppedScreen];
                                 if (failure)
@@ -689,18 +691,22 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         session.window.windowController = session;
         session.window.delegate = session;
     }
-    if (cleanupError) {
-        session.guestStatus.stringValue =
-            [NSString stringWithFormat:@"Installer cleanup pending: %@", cleanupError.localizedDescription];
-        [session logNote:@"Cleanup retry: %@", cleanupError.localizedDescription];
-    }
     sessions[key] = session;
+    [session recordOpened:cleanupError];
+    return YES;
+}
+/// A session has started, whichever way it got there.
+- (void)recordOpened:(NSError *)cleanupError {
+    if (cleanupError) {
+        self.guestStatus.stringValue =
+            [NSString stringWithFormat:@"Installer cleanup pending: %@", cleanupError.localizedDescription];
+        [self logNote:@"Cleanup retry: %@", cleanupError.localizedDescription];
+    }
     NSMutableDictionary *opened = [[NSUserDefaults.standardUserDefaults dictionaryForKey:@"VIMLastOpened"] mutableCopy]
                                       ?: [NSMutableDictionary dictionary];
-    opened[SessionKey(machine)] = NSDate.date;
+    opened[SessionKey(self.machine)] = NSDate.date;
     [NSUserDefaults.standardUserDefaults setObject:opened forKey:@"VIMLastOpened"];
     [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
-    return YES;
 }
 + (BOOL)hasRunningMachines {
     for (VIMSession *session in sessions.allValues)
