@@ -163,10 +163,115 @@ static int sdl_to_audfmt(int sdlfmt, AudioFormat *fmt, bool *big_endian)
     return 0;
 }
 
+/*
+ * Light Click: when coreaudiod doesn't answer, SDL_OpenAudioDevice can wait
+ * forever, and QEMU opens voices during device setup, so the VM never starts.
+ * Open on a thread and give up on it after a while; it cleans up if it ever
+ * finishes. Devices open paused, so a late one never calls back into a voice.
+ */
+#define SDL_OPEN_TIMEOUT_SECONDS 5
+
+typedef struct SDLOpenRequest {
+    const char *device;
+    int rec;
+    SDL_AudioSpec req, obt;
+    SDL_AudioDeviceID devid;
+    char error[256];
+    bool done, abandoned;
+    pthread_mutex_t lock;
+    pthread_cond_t finished;
+} SDLOpenRequest;
+
+static void sdl_open_request_free(SDLOpenRequest *open)
+{
+    pthread_cond_destroy(&open->finished);
+    pthread_mutex_destroy(&open->lock);
+    g_free(open);
+}
+
+static void *sdl_open_thread(void *opaque)
+{
+    SDLOpenRequest *open = opaque;
+    SDL_AudioDeviceID devid = SDL_OpenAudioDevice(open->device, open->rec,
+                                                  &open->req, &open->obt, 0);
+
+    pthread_mutex_lock(&open->lock);
+    bool abandoned = open->abandoned;
+    open->devid = devid;
+    open->done = true;
+    if (!devid) {
+        g_strlcpy(open->error, SDL_GetError(), sizeof(open->error));
+    }
+    pthread_cond_signal(&open->finished);
+    pthread_mutex_unlock(&open->lock);
+
+    if (abandoned) {
+        if (devid) {
+            SDL_CloseAudioDevice(devid);
+        }
+        sdl_open_request_free(open);
+    }
+    return NULL;
+}
+
+/* Returns 0 with the reason in error, within the timeout. */
+static SDL_AudioDeviceID sdl_open_bounded(const char *device, int rec,
+                                          SDL_AudioSpec *req, SDL_AudioSpec *obt,
+                                          const char **error)
+{
+    SDLOpenRequest *open = g_new0(SDLOpenRequest, 1);
+    struct timespec deadline;
+    pthread_t thread;
+    SDL_AudioDeviceID devid = 0;
+    static char reason[256];
+
+    open->device = device;
+    open->rec = rec;
+    open->req = *req;
+    pthread_mutex_init(&open->lock, NULL);
+    pthread_cond_init(&open->finished, NULL);
+    if (pthread_create(&thread, NULL, sdl_open_thread, open)) {
+        sdl_open_request_free(open);
+        *error = "could not start a thread";
+        return 0;
+    }
+    pthread_detach(thread);
+
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += SDL_OPEN_TIMEOUT_SECONDS;
+    pthread_mutex_lock(&open->lock);
+    while (!open->done &&
+           pthread_cond_timedwait(&open->finished, &open->lock, &deadline) == 0) {
+    }
+    bool done = open->done;
+    open->abandoned = !done;
+    pthread_mutex_unlock(&open->lock);
+    if (!done) {
+        *error = "Core Audio didn't answer";
+        return 0;
+    }
+    devid = open->devid;
+    if (devid) {
+        *obt = open->obt;
+    } else {
+        g_strlcpy(reason, open->error, sizeof(reason));
+        *error = reason;
+    }
+    sdl_open_request_free(open);
+    return devid;
+}
+
 static SDL_AudioDeviceID sdl_open(SDL_AudioSpec *req, SDL_AudioSpec *obt,
                                   int rec)
 {
+    /* QEMU retries a failed voice. Stay silent in that direction until the next launch. */
+    static bool failed[2];
+    const char *open_error = NULL;
     SDL_AudioDeviceID devid;
+
+    if (failed[!!rec]) {
+        return 0;
+    }
 #ifndef _WIN32
     int err;
     sigset_t new, old;
@@ -189,11 +294,12 @@ static SDL_AudioDeviceID sdl_open(SDL_AudioSpec *req, SDL_AudioSpec *obt,
      * an unavailable named device must fail instead of changing microphones. */
     const char *selected = getenv(rec ? "VIM_AUDIO_INPUT_DEVICE" :
                                       "VIM_AUDIO_OUTPUT_DEVICE");
-    devid = SDL_OpenAudioDevice(selected && *selected ? selected : NULL,
-                               rec, req, obt, 0);
+    devid = sdl_open_bounded(selected && *selected ? selected : NULL,
+                             rec, req, obt, &open_error);
     if (!devid) {
+        failed[!!rec] = true;
         error_report("SDL_OpenAudioDevice for %s failed: %s",
-                   rec ? "recording" : "playback", SDL_GetError());
+                   rec ? "recording" : "playback", open_error);
     }
 
 #ifndef _WIN32
@@ -462,20 +568,9 @@ static int sdl_init_in(HWVoiceIn *hw, audsettings *as)
     req.callback = sdl_callback_in;
     req.userdata = sdl;
 
-    /*
-     * Light Click: QEMU retries a failed voice, and after Core Audio refuses a
-     * queue, reopening it can wait forever, which stops the VM from booting.
-     * Run without a microphone until the next launch instead.
-     */
-    static bool input_failed;
-    if (input_failed) {
-        return -1;
-    }
-
     sdl->dev = dev;
     sdl->devid = sdl_open(&req, &obt, 1);
     if (!sdl->devid) {
-        input_failed = true;
         return -1;
     }
 
