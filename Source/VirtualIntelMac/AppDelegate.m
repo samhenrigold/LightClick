@@ -10,7 +10,6 @@
 #import "VIMAlerts.h"
 #import "VIMMenuController.h"
 #import "VIMDiagnostics.h"
-#import "VIMSeamlessSession.h"
 #import "VIMUSBClient.h"
 #import "VIMNetworkClient.h"
 #include <sys/sysctl.h>
@@ -85,7 +84,7 @@
 }
 
 - (void)applicationWillFinishLaunching:(NSNotification *)aNotification {
-    [VIMSeamlessSession prepareIfRequested];
+    [VIMSeamlessHost prepareIfRequested];
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
     // Let AppKit resolve the compiled Icon Composer asset, including the
@@ -341,7 +340,7 @@
                 nil);
         openIndex++;
     }
-    [VIMSeamlessSession startIfRequested:^{
+    [VIMSeamlessHost startIfRequested:^{
       [self waitForShutdown];
     }];
     int translated = 0;

@@ -1,0 +1,17 @@
+#!/bin/zsh
+# Builds what a seamless session needs into OUTPUT_DIRECTORY: the programs for the guest, and the proxy every generated app
+# copies. scripts/build-app runs this for the app's Resources/Seamless.
+set -euo pipefail
+source_root=${0:A:h:h}
+output=${1:?Usage: build-seamless-session OUTPUT_DIRECTORY}
+mkdir -p "$output"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+"$source_root/scripts/build-seamless-probes" "$work" >/dev/null
+"$source_root/scripts/build-seamless-integration" "$work" >/dev/null
+swift build -c release --package-path "$source_root/Packages/SeamlessIntegration" \
+  --scratch-path "$source_root/Build/seamless-integration-universal" --arch arm64 --arch x86_64 --product SeamlessProxy >&2
+cp "$source_root/Build/seamless-integration-universal/apple/Products/Release/SeamlessProxy" "$output/SeamlessProxy"
+for program in seamless-guest seamless-ws-hook.dylib seamless-integration-guest; do
+  cp "$work/$program" "$output/"
+done

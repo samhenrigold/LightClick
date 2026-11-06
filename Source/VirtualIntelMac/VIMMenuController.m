@@ -245,6 +245,9 @@
     NSMenuItem *apps = [self add:@"Download Apps…" action:@selector(downloadApps:) key:@"" to:actions target:session];
     apps.image = VIMAppsSymbolImage();
     apps.enabled = session != nil;
+    NSMenuItem *dockApp = [self add:@"Make Dock App…" action:@selector(makeDockApp:) key:@"" to:actions target:session];
+    dockApp.image = [NSImage imageWithSystemSymbolName:@"dock.rectangle" accessibilityDescription:nil];
+    dockApp.enabled = session != nil;
     [actions addItem:NSMenuItem.separatorItem];
     NSMenuItem *configure = [self add:@"Configure…"
                                action:@selector(configureMachine:)

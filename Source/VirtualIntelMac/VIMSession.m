@@ -1386,12 +1386,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     launch.researchCPUModel = options.researchCPUModel;
     launch.systemDiskInterface = options.systemDiskInterface;
     launch.audioOutputSelection = VIMAudioSelection(config, NO);
-    // Core Audio can stop answering QEMU's open of the microphone, and of the failed queue's close, which stops a boot nobody
-    // can see. shortcut: a seamless session has no microphone, until QEMU opens it when the guest does.
+    // Core Audio can stop answering QEMU's open of the microphone, and of the failed queue's close, which stops a boot
+    // nobody can see. shortcut: a seamless session has no microphone, until QEMU opens it when the guest does.
     BOOL seamless = [NSProcessInfo.processInfo.arguments containsObject:@"--seamless-session"];
     // Without a grant, opening the microphone waits on a TCC answer before the guest can start. Settings asks for it.
-    BOOL microphoneAllowed = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] ==
-                             AVAuthorizationStatusAuthorized;
+    BOOL microphoneAllowed =
+        [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] == AVAuthorizationStatusAuthorized;
     launch.audioInputSelection = seamless || !microphoneAllowed ? @"disabled" : VIMAudioSelection(config, YES);
     launch.audioOutputRate = (NSInteger)VIMHostOutputSampleRate(VIMAudioSelection(config, NO));
     launch.audioInputRate = (NSInteger)VIMHostInputSampleRate(launch.audioInputSelection);
@@ -4070,6 +4070,30 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 }
 - (void)showNetworkSettings:(id)sender {
     [VIMMachineSettings showForMachine:self.machine section:@"Hardware" category:@"Network" window:self.window];
+}
++ (VIMSession *)runningSessionForMachinePath:(NSString *)path {
+    for (VIMSession *session in sessions.allValues)
+        if (session.task.running &&
+            [session.machine.URL.URLByResolvingSymlinksInPath.path isEqual:path.stringByResolvingSymlinksInPath])
+            return session;
+    return nil;
+}
+- (NSString *)machinePath {
+    return self.machine.URL.path;
+}
+- (id)beginExclusiveGuestAgentUse {
+    if (self.state.diagnosticPending || !self.guestAgent || self.state.guestPending || self.preparing ||
+        self.state.bootPolicyPending || self.state.clipboardPending)
+        return nil;
+    self.state.diagnosticPending = YES;
+    return self.guestAgent;
+}
+- (void)endExclusiveGuestAgentUse {
+    self.state.diagnosticPending = NO;
+    [self updateClipboardForBoot:self.state.usernameBoot];
+}
+- (IBAction)makeDockApp:(id)sender {
+    [VIMSeamlessHost makeProxyFor:self];
 }
 - (BOOL)guestAgentFree {
     return self.guestSessionState.guestAgentFree;

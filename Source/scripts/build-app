@@ -326,6 +326,8 @@ else:
                     deployment_target.check_weak_libsystem_imports(path)
             except RuntimeError as error:
                 sys.exit(f'Package refused: {error}')
+    # After the checks above, which are for what ships with every guest: these are built for 10.9 and up, on purpose.
+    subprocess.run([str(source/'scripts/build-seamless-session'), str(args.output/'Contents/Resources/Seamless')], check=True)
     # After the checks above, which need to see each guest binary.
     subprocess.run([sys.executable,str(source/'scripts/pack-guest-files.py'),'--app',str(args.output),
                     '--signing-identity',args.signing_identity],check=True)
