@@ -809,7 +809,8 @@ static NSData *lastMenu;
         static BOOL pressed;
         if (testMenuPath && !pressed) {
             pressed = YES;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            // After the proxy's click and key, so the effect can be told from theirs.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
               [self pressMenu:testMenuPath];
             });
         }
