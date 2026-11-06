@@ -43,6 +43,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (IBAction)configureMachine:(id)sender;
 - (IBAction)startAgain:(id)sender;
 - (IBAction)shutdown:(id)sender;
+/// The running session of the machine at this path, for what starts a guest app from a proxy.
++ (nullable VIMSession *)runningSessionForMachinePath:(NSString *)path NS_SWIFT_NAME(running(forMachinePath:));
+/// The agent, if it's free, held off from the session's own setup until `endExclusiveGuestAgentUse`.
+- (nullable id)beginExclusiveGuestAgentUse;
+@property(readonly) NSString *machinePath;
+- (void)endExclusiveGuestAgentUse;
+- (IBAction)makeDockApp:(nullable id)sender;
 - (IBAction)forceStop:(id)sender;
 - (IBAction)showInstallationGuide:(id)sender;
 - (IBAction)showSessionDetails:(id)sender;

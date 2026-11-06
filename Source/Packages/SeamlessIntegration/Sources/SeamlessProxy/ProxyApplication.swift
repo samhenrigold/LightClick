@@ -69,15 +69,15 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         didAskToBoot = true
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.arguments = [
-            "--open-vm", machine, "--guest-diagnostics-root", socketPath + ".channel", "--seamless-session", socketPath,
-            "--seamless-app", URL(fileURLWithPath: guestPath).deletingPathExtension().lastPathComponent
+            "--open-vm", machine, "--seamless-session", socketPath, "--seamless-app",
+            URL(fileURLWithPath: guestPath).deletingPathExtension().lastPathComponent
         ]
         configuration.activates = false
         configuration.createsNewApplicationInstance = true
-        // A test's private home has to reach the app, and what it wants of the session.
+        // Sessions run on the engine, if this app's QEMU has it, and a test's private home has to reach the app.
         configuration.environment = ProcessInfo.processInfo.environment.filter {
-            ["CFFIXED_USER_HOME", "LC_SEAMLESS_VIEWER_ARGS"].contains($0.key)
-        }
+            ["CFFIXED_USER_HOME", "LC_SEAMLESS_TEST"].contains($0.key)
+        }.merging(["LC_HVDBT": "1"]) { current, _ in current }
         NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, error in
             guard let error else { return }
             DispatchQueue.main.async {

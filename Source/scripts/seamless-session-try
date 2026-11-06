@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """One guest app as a host app, from nothing running to nothing left, in throwaway clones of the app and machine.
 
-    VIM_CODESIGN_IDENTITY=<sha1> scripts/seamless-session-try <app> <machine.vintelmac>
+    scripts/seamless-session-try <app built by build-app> <machine.vintelmac>
 
-Generates a TextEdit proxy and opens it with a document, as LaunchServices would for a Dock tile or a drop, with no VM
+Has the app make a TextEdit proxy from the running clone, the same way as Actions > Make Dock App…, which installs the hook
+and shuts the clone down. Then opens the proxy with a document, as LaunchServices would for a Dock tile or a drop, with no VM
 running. The proxy starts the app with no window, the app starts the session, the guest boots, and the document opens. The
 session then types into the document and a new one, asks the proxy to quit, answers the save prompt that brings, and the
-machine shuts down. Prints PASS or FAIL per step. Composed images of the guest's windows, which are made from their exact
-pixels and not read from the screen, are in Build/seamless/seamless-session-screen-*.png.
+machine shuts down. Prints PASS or FAIL per step. The composed image at the prompt, made from the windows' exact pixels and
+not read from the screen, is Build/seamless/seamless-session-prompt.png.
 """
 import json
 import os
@@ -33,14 +34,14 @@ library.mkdir(parents=True)
 machine = library/f'Clone of {original_machine.name}'
 subprocess.run(['cp', '-c', '-R', str(original_machine), str(machine)], check=True)
 (machine/'State/PendingConfiguration.plist').unlink(missing_ok=True)
-# What the machine runs with counts as much as the session: scripts/seamless-try's numbers are on this.
-subprocess.run(['plutil', '-replace', 'ExecutionEngine', '-string', os.environ.get('SEAMLESS_ENGINE', 'on'), str(machine/'Machine.plist')], check=True)
+if os.environ.get('SEAMLESS_SCALE') == '1':
+    for key, value in (('DisplayMode', '"scaled"'), ('RetinaEnabled', 'false')):
+        subprocess.run(['plutil', '-replace', key, '-json', value, str(machine/'Machine.plist')], check=True)
 for key in ('SSHEnabled', 'FileSharingEnabled'):
     subprocess.run(['plutil', '-replace', key, '-bool', 'NO', str(machine/'Machine.plist')], check=True)
 print(f'WARNING: "{machine.stem}" is a throwaway clone, and preferences stay shared with the real app.', flush=True)
 app = work/original_app.name
 subprocess.run(['cp', '-c', '-R', str(original_app), str(app)], check=True)
-subprocess.run([str(source/'scripts/seamless-package'), str(app)], check=True)
 identifier = plistlib.loads((machine/'Machine.plist').read_bytes())['Identifier']
 
 failures = 0
@@ -57,33 +58,32 @@ def running(pattern):
     return [row.strip() for row in rows if pattern in row and 'seamless-session-try' not in row]
 
 
-# The per-user temporary folder, since anyone can make a socket in /tmp, and the socket's path has a short limit.
-folder = Path(tempfile.gettempdir())/f'lc-{identifier[:8].lower()}'
-shutil.rmtree(folder, ignore_errors=True)
-folder.mkdir(mode=0o700)
-socket_path = folder/'s'
-catalog = work/'apps.json'
-catalog.write_text(json.dumps([{'bundleIdentifier': 'com.apple.TextEdit', 'name': 'TextEdit', 'guestPath': '/Applications/TextEdit.app',
-                                'documentTypes': [{'name': 'Text', 'extensions': ['txt'], 'contentTypes': ['public.plain-text'], 'osTypes': []}],
-                                'urlSchemes': []}]))
-bundle = subprocess.run([str(app/'Contents/Resources/Seamless/SeamlessMakeProxy'), 'write', str(catalog), 'TextEdit', identifier, 'Mavericks',
-                         str(machine), str(work/'proxies'), str(app/'Contents/Resources/Seamless/SeamlessProxy'), str(socket_path), '',
-                         str(app)], capture_output=True, text=True, check=True).stdout.strip()
+check('no machine is running this clone before making the proxy', not running(str(machine)))
+env = dict(os.environ, CFFIXED_USER_HOME=str(home), LC_HVDBT='1')
+maker = subprocess.run([str(app/'Contents/MacOS/Light Click'), '--open-vm', str(machine), '--seamless-make-proxy', 'TextEdit'],
+                       env=env, capture_output=True, text=True, timeout=1200)
+bundle = next((line for line in maker.stdout.splitlines() if line.endswith('.app')), '')
+check('the app made a proxy, and shut the machine down', bool(bundle) and maker.returncode == 0 and not running(str(machine)), maker.stdout[-300:])
+if not bundle:
+    print(maker.stderr[-2000:])
+    sys.exit(1)
+info = plistlib.loads((Path(bundle)/'Contents/Info.plist').read_bytes())
+socket_path = Path(info['LCSessionSocket'])
+Path(str(socket_path)+'.log').unlink(missing_ok=True)  # Or the last run's would look like this one's.
 bundle_id = plistlib.loads((Path(bundle)/'Contents/Info.plist').read_bytes())['CFBundleIdentifier']
 document = work/'A note from the host.txt'
 document.write_text('Written on the host.\n')
 before = document.read_bytes()
-for old in results.glob('seamless-session-*.png'):
-    old.unlink()
+results.mkdir(parents=True, exist_ok=True)
 
 check('no machine is running this clone before the proxy opens', not running(str(machine)))
 dragged = work/'Dragged from the host.txt'
 dragged.write_text('Dragged in.\n')
 dragged_out = work/'dragged-out'
 dragged_out.mkdir()
-arguments = '\n'.join(['--test-session', '--test-drag', str(dragged), str(dragged_out), '--png', str(results/'seamless-session-window'),
-                       '--screenshots', str(results/'seamless-session-screen')])
-subprocess.run(['/usr/bin/open', '--env', f'CFFIXED_USER_HOME={home}', '--env', f'LC_SEAMLESS_VIEWER_ARGS={arguments}', '-a', bundle, str(document)], check=True)
+screenshot = results/'seamless-session-prompt.png'
+arguments = '\n'.join([str(dragged), str(dragged_out), str(screenshot)])
+subprocess.run(['/usr/bin/open', '--env', f'CFFIXED_USER_HOME={home}', '--env', f'LC_SEAMLESS_TEST={arguments}', '-a', bundle, str(document)], check=True)
 print('# opened the proxy with a document; the guest boots now, which takes some minutes, more on a first session', flush=True)
 
 log = Path(str(socket_path)+'.log')
@@ -112,17 +112,17 @@ while time.time() < deadline:
     time.sleep(5)
 print('== Session log\n'+said[-6000:], flush=True)
 time.sleep(5)
-check('the guest app was seen', 'menu with' in said)
+check('the guest app was seen', '# window ' in said)
 check('the document reached the guest', 'sent ' in said and str(document.name) in said)
 check('the save prompt came up as its own window', '# test: at the prompt' in said, next((line for line in said.splitlines() if 'at the prompt' in line), ''))
 check('the guest app exited after that', '# the guest app has exited' in said)
 after = document.read_bytes()
 check('the saved document came back to the host', after != before, repr(after[:80]))
-check('a guest drop was taken', 'drag_ended' in said or 'drag helper is ready' in said, next((line for line in said.splitlines() if 'drag_' in line), ''))
+check('a guest drop was taken', 'drag_ended' in said, next((line for line in said.splitlines() if 'drag_' in line), ''))
 came_out = dragged_out/dragged.name
 check('a guest drag came out as a promised file', came_out.exists() and came_out.read_bytes() == dragged.read_bytes())
-check('the app\'s badge reached the proxy', '"badge":"7"' in said, next((line for line in said.splitlines() if 'app state {' in line), ''))
-check('its request for attention did too', '"attention":true' in said)
+check('the app\'s badge reached the proxy', 'badge "7"' in said, next((line for line in said.splitlines() if 'app state' in line), ''))
+check('its request for attention did too', 'attention true' in said)
 check('a scroll came through the input view', ' 0 gesture' not in said and ' gesture' in said, next((line for line in said.splitlines() if line.startswith('input ')), ''))
 check('the proxy has quit', not running(f'{bundle}/Contents/MacOS/SeamlessProxy'))
 for _ in range(36):
@@ -131,7 +131,9 @@ for _ in range(36):
     time.sleep(5)
 left = running(str(machine))
 check('the machine has shut down, and its app has gone', not left, '; '.join(left)[:400])
-removed = subprocess.run([str(app/'Contents/Resources/Seamless/SeamlessMakeProxy'), 'remove', bundle], capture_output=True, text=True)
+lsregister = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
+removed = subprocess.run([lsregister, '-u', bundle], capture_output=True, text=True)
+shutil.rmtree(bundle)
 registered = subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-dump'],
                             capture_output=True, text=True).stdout
 check('the proxy is unregistered and deleted', removed.returncode == 0 and not Path(bundle).exists() and bundle not in registered, removed.stdout[:200])

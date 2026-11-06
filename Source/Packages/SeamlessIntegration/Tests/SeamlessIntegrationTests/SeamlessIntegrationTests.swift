@@ -17,6 +17,42 @@ import Testing
     #expect(try decode(#"{"terminate":{}}"#) == .terminate)
 }
 
+/// What a guest sends comes in here, so what it lies about has to stop here.
+@Test func sessionWireRefusesWhatDoesntAddUp() throws {
+    func parsed(_ data: Data) -> SessionWire.Parsed { data.withUnsafeBytes { SessionWire.parse($0) } }
+    func frame(width: UInt32, height: UInt32, x: UInt32 = 0, full: UInt32 = 4, pixels: Int) -> Data {
+        var body = Data()
+        for value in [7, 1, full, full, x, 0, width, height] as [UInt32] {
+            withUnsafeBytes(of: value.littleEndian) { body.append(contentsOf: $0) }
+        }
+        body.append(Data(count: pixels))
+        var out = SessionWire.header(.hello, length: body.count)
+        out[4] = 3  // A frame.
+        return out + body
+    }
+    let good = frame(width: 2, height: 2, pixels: 16)
+    guard case .message(.frame(let decoded), let used) = parsed(good) else {
+        Issue.record("A good frame didn't parse")
+        return
+    }
+    #expect(used == good.count && decoded.window == 7 && decoded.pixelOffset == 44)
+    #expect(parsed(frame(width: 3, height: 2, x: 2, pixels: 24)) == .bad)  // Past the window's edge.
+    #expect(parsed(frame(width: 2, height: 2, pixels: 15)) == .bad)  // Not the size it says.
+    #expect(parsed(good.prefix(20)) == .needMore(size: good.count))
+    #expect(parsed(Data([1, 2, 3, 4, 5])) == .bad)
+    #expect(parsed(SessionWire.value(.quitApp)) == .bad)  // Only ever host to guest.
+
+    let pieces = SessionWire.documentPieces(
+        id: 3, name: "a", flags: SessionWire.dragFlag, contents: Data(count: SessionWire.documentPiece + 1))
+    #expect(pieces.count == 2)
+    guard case .message(.document(let last), _) = parsed(pieces[1]) else {
+        Issue.record("A document piece didn't parse")
+        return
+    }
+    #expect(last.id == 3 && last.isLast && last.flags == SessionWire.dragFlag && last.payload.count == 1)
+    #expect(parsed(SessionWire.value(.appGone)) == .message(.appGone, used: 16))
+}
+
 @Test func guestNameCannotEscapeTheFolder() {
     #expect(!hostFileName(for: "../../etc/passwd").contains("/"))
     #expect(hostFileName(for: "..") == "Untitled")

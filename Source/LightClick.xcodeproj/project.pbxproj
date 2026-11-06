@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		EA155B22309C391300B82F7C /* GuestControl in Frameworks */ = {isa = PBXBuildFile; productRef = EA155B21309C391300B82F7C /* GuestControl */; };
 		EA155B25309C391300B82F7C /* InstallerKit in Frameworks */ = {isa = PBXBuildFile; productRef = EA155B24309C391300B82F7C /* InstallerKit */; };
+		EA155C12309C391300B82F7C /* SeamlessIntegration in Frameworks */ = {isa = PBXBuildFile; productRef = EA155C11309C391300B82F7C /* SeamlessIntegration */; };
 		EA155B28309C391300B82F7C /* MachineKit in Frameworks */ = {isa = PBXBuildFile; productRef = EA155B27309C391300B82F7C /* MachineKit */; };
 /* End PBXBuildFile section */
 
@@ -36,6 +37,7 @@
 				EA155B22309C391300B82F7C /* GuestControl in Frameworks */,
 				EA155B25309C391300B82F7C /* InstallerKit in Frameworks */,
 				EA155B28309C391300B82F7C /* MachineKit in Frameworks */,
+				EA155C12309C391300B82F7C /* SeamlessIntegration in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -93,6 +95,7 @@
 				EA155B21309C391300B82F7C /* GuestControl */,
 				EA155B24309C391300B82F7C /* InstallerKit */,
 				EA155B27309C391300B82F7C /* MachineKit */,
+				EA155C11309C391300B82F7C /* SeamlessIntegration */,
 			);
 			productName = "Light Click";
 			productReference = 048FCBA1307E95CF00AECB5D /* Light Click.app */;
@@ -125,6 +128,7 @@
 				EA155B20309C391300B82F7C /* XCLocalSwiftPackageReference "Packages/GuestControl" */,
 				EA155B23309C391300B82F7C /* XCLocalSwiftPackageReference "Packages/InstallerKit" */,
 				EA155B26309C391300B82F7C /* XCLocalSwiftPackageReference "Packages/MachineKit" */,
+				EA155C10309C391300B82F7C /* XCLocalSwiftPackageReference "Packages/SeamlessIntegration" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 048FCBA2307E95CF00AECB5D /* Products */;
@@ -232,6 +236,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/InstallerKit;
 		};
+		EA155C10309C391300B82F7C /* XCLocalSwiftPackageReference "Packages/SeamlessIntegration" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/SeamlessIntegration;
+		};
 		EA155B26309C391300B82F7C /* XCLocalSwiftPackageReference "Packages/MachineKit" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/MachineKit;
@@ -246,6 +254,10 @@
 		EA155B24309C391300B82F7C /* InstallerKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = InstallerKit;
+		};
+		EA155C11309C391300B82F7C /* SeamlessIntegration */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SeamlessIntegration;
 		};
 		EA155B27309C391300B82F7C /* MachineKit */ = {
 			isa = XCSwiftPackageProductDependency;

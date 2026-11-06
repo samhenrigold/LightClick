@@ -10,7 +10,6 @@
 #import "VIMAlerts.h"
 #import "VIMMenuController.h"
 #import "VIMDiagnostics.h"
-#import "VIMSeamlessSession.h"
 #import "VIMUSBClient.h"
 #import "VIMNetworkClient.h"
 #include <sys/sysctl.h>
@@ -85,7 +84,7 @@
 }
 
 - (void)applicationWillFinishLaunching:(NSNotification *)aNotification {
-    [VIMSeamlessSession prepareIfRequested];
+    [VIMSeamlessHost prepareIfRequested];
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
     // Let AppKit resolve the compiled Icon Composer asset, including the
@@ -341,7 +340,7 @@
                 nil);
         openIndex++;
     }
-    [VIMSeamlessSession startIfRequested:^{
+    [VIMSeamlessHost startIfRequested:^{
       [self waitForShutdown];
     }];
     int translated = 0;
@@ -424,29 +423,36 @@
     [VIMSession requestShutdownAll];
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:60];
     __weak typeof(self) weakSelf = self;
-    self.quitTimer =
-        [NSTimer scheduledTimerWithTimeInterval:1
-                                        repeats:YES
-                                          block:^(NSTimer *timer) {
-                                            if (!VIMSession.hasRunningMachines) {
-                                                [timer invalidate];
-                                                weakSelf.quitTimer = nil;
-                                                [NSApp terminate:nil];
-                                                return;
-                                            }
-                                            if (deadline.timeIntervalSinceNow > 0)
-                                                return;
-                                            [timer invalidate];
-                                            weakSelf.quitTimer = nil;
-                                            NSAlert *alert = [NSAlert new];
-                                            alert.messageText = @"Your virtual Mac is still shutting down";
-                                            alert.informativeText =
-                                                @"The app will stay open so you can check the virtual Mac’s window. If "
-                                                @"guest tools are unavailable, choose Shut Down from its Apple menu. "
-                                                @"Use Force Stop only if it is unresponsive.";
-                                            [alert addButtonWithTitle:@"Keep App Open"];
-                                            VIMPresentAlert(alert, nil, nil);
-                                          }];
+    self.quitTimer = [NSTimer
+        scheduledTimerWithTimeInterval:1
+                               repeats:YES
+                                 block:^(NSTimer *timer) {
+                                   if (!VIMSession.hasRunningMachines) {
+                                       [timer invalidate];
+                                       weakSelf.quitTimer = nil;
+                                       [NSApp terminate:nil];
+                                       return;
+                                   }
+                                   if (deadline.timeIntervalSinceNow > 0)
+                                       return;
+                                   [timer invalidate];
+                                   weakSelf.quitTimer = nil;
+                                   // Nobody can see this app in a session, so it mustn't stay to ask.
+                                   if ([NSProcessInfo.processInfo.arguments containsObject:@"--seamless-session"] ||
+                                       [NSProcessInfo.processInfo.arguments containsObject:@"--seamless-make-proxy"]) {
+                                       weakSelf.quitApproved = YES;
+                                       [NSApp terminate:nil];
+                                       return;
+                                   }
+                                   NSAlert *alert = [NSAlert new];
+                                   alert.messageText = @"Your virtual Mac is still shutting down";
+                                   alert.informativeText =
+                                       @"The app will stay open so you can check the virtual Mac’s window. If "
+                                       @"guest tools are unavailable, choose Shut Down from its Apple menu. "
+                                       @"Use Force Stop only if it is unresponsive.";
+                                   [alert addButtonWithTitle:@"Keep App Open"];
+                                   VIMPresentAlert(alert, nil, nil);
+                                 }];
     [NSRunLoop.mainRunLoop addTimer:self.quitTimer forMode:NSRunLoopCommonModes];
 }
 
