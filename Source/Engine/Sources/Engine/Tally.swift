@@ -296,7 +296,8 @@ public final class Tally: @unchecked Sendable {
             String(c.stat_pt_writes_zap),
             String(c.stat_cr3), String(t.blocks), String(t.insns),
             String(format: "%.1f", seconds(t.translate_ns) * 1000),
-            String(c.stat_mmio), String(fallbacks), String(c.stat_irq), samples.last ?? "-"
+            String(c.stat_mmio), String(fallbacks), String(c.stat_irq), String(format: "%.1f", seconds(c.stat_mon_wait) * 1000),
+            String(format: "%.1f", seconds(engine.translatorWaitTicks) * 1000), samples.last ?? "-"
         ]
         timeline.append(row.joined(separator: "\t"))
         lock.unlock()
@@ -356,6 +357,8 @@ public final class Tally: @unchecked Sendable {
         o += "cold blocks          " + perSecond(t.blocks) + "\n"
         o += "cold x86 insns       " + perSecond(t.insns) + "\n"
         o += "cold ARM words       " + perSecond(t.words) + "\n"
+        let holds = withUnsafeBytes(of: c.stat_mon_hold) { Array($0.bindMemory(to: UInt64.self)) }
+        o += String(format: "monitor lock waited %.2f s; held, s: other %.2f, view switch %.2f, before translating %.2f, after %.2f, fault %.2f, table store %.2f\n", seconds(c.stat_mon_wait), seconds(holds[0]), seconds(holds[1]), seconds(holds[2]), seconds(holds[3]), seconds(holds[4]), seconds(holds[5]))
         let opInsns = withUnsafeBytes(of: t.op_insns) { Array($0.bindMemory(to: UInt64.self)) }
         let opWords = withUnsafeBytes(of: t.op_words) { Array($0.bindMemory(to: UInt64.self)) }
         o += "  words after the last instruction of blocks: \(t.exit_words)\n  by OP_ number in tr_internal.h, ranked by words: op, insns, words, words per insn\n"
@@ -480,7 +483,7 @@ public final class Tally: @unchecked Sendable {
             "\n== rip samples: seconds, where, rip. One a second, oldest first; a tcg rip is only as fresh as the last TB exit ==\n"
             + samples.joined(separator: "\n") + "\n"
         o +=
-            "\n== timeline: seconds, pt stores, pt table drops, cr3, blocks, insns, translate ms, mmio, fallbacks, irqs, rip ==\n"
+            "\n== timeline: seconds, pt stores, pt table drops, cr3, blocks, insns, translate ms, mmio, fallbacks, irqs, all vCPUs' ms waiting for the monitor lock, this vCPU's for the translator's, rip ==\n"
         o += timeline.joined(separator: "\n") + "\n"
         lock.unlock()
         try? Data(o.utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
