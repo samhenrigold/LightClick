@@ -1,5 +1,21 @@
 import Foundation
 
+/// A rectangle of a guest window that a material shows through, in points from the window's top left. `material` is WindowServer's.
+public struct GuestMaterial: Codable, Hashable, Sendable {
+    public var material: Int
+    public var active: Bool
+    public var x, y, width, height: Double
+
+    public init(material: Int, active: Bool, x: Double, y: Double, width: Double, height: Double) {
+        self.material = material
+        self.active = active
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+}
+
 /// What a proxy tells the session process.
 public enum ProxyEvent: Codable, Hashable, Sendable {
     case hello(guestIdentifier: String, guestPath: String, pid: Int32)
@@ -38,6 +54,7 @@ public enum ProxyEvent: Codable, Hashable, Sendable {
 public enum SessionCommand: Codable, Hashable, Sendable {
     case setMenuBar([GuestMenuItem])
     case minimizeSurface(id: Int, minimized: Bool)
+    case setMaterials(id: Int, [GuestMaterial])
     case setDockMenu([GuestMenuItem])
     case setBadge(String?)
     case requestAttention(critical: Bool)

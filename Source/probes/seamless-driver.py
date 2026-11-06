@@ -399,7 +399,7 @@ def desktop():
     # The Seamless button, on a running machine: press, the apps' windows appear and the machine's goes, a click reaches one, press,
     # and the machine's window is back.
     guest = stage(guest_tool)
-    for app in ('TextEdit', 'Safari'):
+    for app in ('Notes', 'TextEdit', 'Safari') if version_is_mojave() else ('TextEdit', 'Safari'):
         run(guest, ['open-app', '--app', app])
     time.sleep(12)
     listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
@@ -561,6 +561,9 @@ def desktop():
         os.kill(safari, signal.SIGUSR2)
         time.sleep(3)
         check('and returns', on_screen())
+        for row in proxy_windows():
+            if 'Notes' in row:
+                subprocess.run(['screencapture', '-x', '-o', '-l', re.search(r'id=(\d+)', row).group(1), str(results/f'{tag}-materials.png')])
         frame = capture(f'{tag}-desktop-frame.png')
         print('guest frame', frame, flush=True)
     pressed = time.time()

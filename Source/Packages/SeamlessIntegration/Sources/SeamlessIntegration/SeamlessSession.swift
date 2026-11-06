@@ -74,6 +74,7 @@ public final class SeamlessSession {
         var surfaceOrigin: (x: Int32, y: Int32)?
         var ownSurfaceLayer: CALayer?
         var guestCovers: [CGRect]?
+        var materials: [GuestMaterial] = []
         init(window: SessionWire.Window, context: NSObject, layer: CALayer) {
             self.window = window
             self.context = context
@@ -411,6 +412,9 @@ public final class SeamlessSession {
         case .covers(let id, let rects):
             surfaces[id]?.guestCovers = rects
             if let surface = surfaces[id] { showCrops(of: [surface]) }
+        case .materials(let id, let rows):
+            surfaces[id]?.materials = rows
+            proxy?.send(SessionCommand.setMaterials(id: Int(id), rows))
         case .minimized(let id, let minimized):
             note("# window \(id) \(minimized ? "minimized" : "back")")
             proxy?.send(SessionCommand.minimizeSurface(id: Int(id), minimized: minimized))
@@ -758,7 +762,12 @@ public final class SeamlessSession {
         }
         socket.start()
         proxy = socket
-        for surface in surfaces.values { tellProxy(surface) }
+        for surface in surfaces.values {
+            tellProxy(surface)
+            if !surface.materials.isEmpty {
+                socket.send(SessionCommand.setMaterials(id: Int(surface.window.id), surface.materials))
+            }
+        }
         if let lastMenu { socket.send(SessionCommand.setMenuBar(lastMenu)) }
         if let leaveTitle { socket.send(SessionCommand.setDockMenu([GuestMenuItem(title: leaveTitle)])) }
         if activateWhenConnected {

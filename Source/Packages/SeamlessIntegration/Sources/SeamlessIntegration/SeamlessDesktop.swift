@@ -186,9 +186,16 @@ public final class SeamlessDesktop {
     private static let injectScript = """
         case "$(/usr/bin/sw_vers -buildVersion)" in 18G103|$1) ;; *) exit 3;; esac
         [ -x /tmp/sg/ws-inject ] && [ -f /tmp/sg/hook.dylib ] || exit 3
-        /usr/bin/grep -q seamless-ws-hook /System/Library/LaunchDaemons/com.apple.WindowServer.plist && exit 3
-        pid=$(/usr/bin/pgrep -x WindowServer); [ -n "$pid" ] || exit 3
+        # Earlier builds loaded it through WindowServer's launchd job. That one's in this WindowServer, and patching twice isn't safe, so
+        # the entry goes now and windows have their surfaces from the guest's next start.
         boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed 's/.*sec = \\([0-9]*\\).*/\\1/')
+        plist=/System/Library/LaunchDaemons/com.apple.WindowServer.plist
+        if /usr/bin/grep -q seamless-ws-hook $plist; then
+            /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables:DYLD_INSERT_LIBRARIES" $plist
+            echo "$boot" > /var/tmp/seamless-ws-plist-removed
+        fi
+        [ "$(/bin/cat /var/tmp/seamless-ws-plist-removed 2>/dev/null)" = "$boot" ] && exit 3
+        pid=$(/usr/bin/pgrep -x WindowServer); [ -n "$pid" ] || exit 3
         marker=/var/tmp/seamless-ws-press
         said=$(/bin/cat $marker 2>/dev/null)
         [ "$said" = "$boot $pid ok" ] && exit 0

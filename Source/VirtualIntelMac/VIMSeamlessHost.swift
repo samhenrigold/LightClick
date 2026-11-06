@@ -313,7 +313,12 @@ final class SeamlessHost: NSObject {
             session.setFrameObserver(nil)
             session.setSeamlessWindowHidden(false)
             session.noteSeamlessChanged()
-            if let failure { Self.failed(failure) }
+            // On its window, since an app-modal one stops everything else in this app, every other machine's window included.
+            if let failure, let window = session.window {
+                let alert = NSAlert()
+                alert.messageText = failure
+                alert.beginSheetModal(for: window)
+            }
         }
         session.setFrameObserver { [weak desktop] surface, bytes, width, height, stride in
             MainActor.assumeIsolated {
@@ -328,7 +333,7 @@ final class SeamlessHost: NSObject {
             while let desktop, desktops[path] === desktop {
                 if VIMSession.running(forMachinePath: path) == nil {
                     desktop.finish(why: "the machine stopped")
-                } else if !windowHidden.contains(path), CFAbsoluteTimeGetCurrent() - started > 45 {
+                } else if !windowHidden.contains(path), CFAbsoluteTimeGetCurrent() - started > 150 {
                     desktop.finish("There are no windows in this Mac to show. Log in and open an app, then try again.")
                 }
                 try? await Task.sleep(for: .seconds(1))
@@ -358,7 +363,7 @@ final class SeamlessHost: NSObject {
             alert.messageText = "Make a Dock App"
             alert.informativeText =
                 "Choose an app in this Mac. It gets its own icon, which starts this Mac with no window when you open it, and "
-                + "shuts it down when you quit. This installs a helper in this Mac's WindowServer, used from its next start."
+                + "shuts it down when you quit."
             let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 26))
             popup.addItems(withTitles: apps.map(\.name))
             alert.accessoryView = popup
@@ -410,7 +415,6 @@ final class SeamlessHost: NSObject {
     }
 
     private static func make(_ app: GuestApp, guest: AgentGuest, machinePath: String) async -> String? {
-        await installHook(guest)
         guard let machine = try? VIMMachine.load(URL(fileURLWithPath: machinePath)),
             let identifier = machine.configuration["Identifier"] as? String
         else { return nil }
@@ -435,21 +439,5 @@ final class SeamlessHost: NSObject {
             guestIcon: iconFile,
             hostApp: Bundle.main.bundlePath)
         return written?.path
-    }
-
-    /// Through the agent, like the app's other guest setup. WindowServer's job takes it at the guest's next start, and until
-    /// then a session runs by capture. Only 10.9 has a hook that does anything yet.
-    private static func installHook(_ guest: AgentGuest) async {
-        let release = await guest.run("/usr/bin/uname", ["-r"]).output
-        guard release.hasPrefix("13."), let hook = await guest.stage(tools.appending(path: "seamless-ws-hook.dylib"))
-        else { return }
-        let plist = "/System/Library/LaunchDaemons/com.apple.WindowServer.plist"
-        let install =
-            "set -e; cp \"$1\" /var/tmp/seamless-ws-hook.dylib; chmod 755 /var/tmp/seamless-ws-hook.dylib; "
-            + "/usr/bin/grep -q seamless-ws-hook \(plist) && exit 0; "
-            + "/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables dict\" \(plist) || true; "
-            + "/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string "
-            + "/var/tmp/seamless-ws-hook.dylib\" \(plist); /usr/bin/plutil -lint \(plist)"
-        _ = await guest.run("/bin/sh", ["-c", install, "sh", hook])
     }
 }

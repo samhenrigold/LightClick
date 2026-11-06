@@ -147,8 +147,13 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                 id: id, contextID: contextID, frame: NSRect(x: x, y: y, width: width, height: height), margin: margin,
                 level: level, alpha: alpha, order: order, title: title, offset: NSPoint(x: offsetX, y: offsetY))
         case .removeSurface(let id):
+            materials[id] = nil
+            materialViews[id] = nil
             surfaces.removeValue(forKey: id)?.window.close()
             dropViews.removeValue(forKey: id)
+        case .setMaterials(let id, let rows):
+            materials[id] = rows
+            applyMaterials(id)
         case .minimizeSurface(let id, let minimized):
             guard let window = surfaces[id]?.window, window.isMiniaturized != minimized else { break }
             guestMinimizing.insert(id)
@@ -266,6 +271,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     private var surfaces: [Int: Surface] = [:]
     /// Windows whose trip to or from the host's Dock started in the guest, so the guest needn't be told.
     private var guestMinimizing: Set<Int> = []
+    private var materials: [Int: [GuestMaterial]] = [:]
+    private var materialViews: [Int: [NSView]] = [:]
     private var clickSignal: DispatchSourceSignal?
     private var moveSignal: DispatchSourceSignal?
 
@@ -295,10 +302,12 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         (window as? SurfaceWindow)?.movedByUser = level == 0 && !title.isEmpty ? { [weak self] in
             self?.surfaceMoved(id)
         } : nil
+        let isNewSurface = surfaces[id] == nil
         var updated = surface
         updated.order = order
         if !dragging { updated.offset = offset }
         surfaces[id] = updated
+        if isNewSurface, materials[id] != nil { applyMaterials(id) }
         let frontToBack = surfaces.values.sorted { $0.order < $1.order }
         let quiet = ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil
         for other in frontToBack.reversed() {
@@ -319,6 +328,60 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         guard let surface = surfaces[id], let primary = NSScreen.screens.first?.frame.height else { return }
         let frame = surface.window.frame
         send(.surfaceMoved(windowID: id, x: frame.minX, y: primary - frame.maxY))
+    }
+
+    /// Takes no events: what's under it is the guest's.
+    private final class MaterialView: NSVisualEffectView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    /// What a guest window's translucent parts show, from the host's desktop. The surface is clear there.
+    /// One view for each material, behind the surface, with a selection over the sidebar it's in.
+    private func applyMaterials(_ id: Int) {
+        guard let surface = surfaces[id] else { return }
+        materialViews.removeValue(forKey: id)?.forEach { $0.removeFromSuperview() }
+        let margin = (surface.window as? SurfaceWindow)?.margin ?? 0
+        let bounds = surface.input.bounds
+        // 26 is what vibrant text or an icon cuts out of the material under it, and needs nothing of the host's.
+        let rows = (materials[id] ?? []).filter { $0.material != 26 }
+        let kinds = Set(rows.map(\.material)).sorted { ($0 == 19 ? 1 : 0, $0) < ($1 == 19 ? 1 : 0, $1) }
+        var views: [NSView] = []
+        for kind in kinds {
+            let parts = rows.filter { $0.material == kind }
+            let mask = NSImage(size: bounds.size, flipped: true) { _ in
+                // shortcut: the same corners all round, not the guest window's shape, which its shape frames have, until a guest
+                // window's corners show past them. The menu bar's materials are rectangles.
+                if kind != 21 && kind != 25 {
+                    NSBezierPath(roundedRect: bounds.insetBy(dx: margin, dy: margin), xRadius: 5, yRadius: 5).addClip()
+                }
+                NSColor.black.set()
+                for part in parts {
+                    NSRect(x: part.x + margin, y: part.y + margin, width: part.width, height: part.height).fill()
+                }
+                return true
+            }
+            let view = MaterialView(frame: bounds)
+            view.autoresizingMask = [.width, .height]
+            view.blendingMode = .behindWindow
+            // shortcut: light appearance, and these choices are provisional, until materials are compared against the guest's own.
+            view.material =
+                switch kind {
+                case 3: .menu
+                case 4: .sheet
+                case 5: .sidebar
+                case 19: .selection
+                case 21, 25: .titlebar
+                default: .windowBackground
+                }
+            view.state = parts.contains(where: \.active) ? .active : .inactive
+            view.maskImage = mask
+            surface.input.addSubview(view, positioned: .below, relativeTo: nil)
+            views.append(view)
+        }
+        materialViews[id] = views
+        // A sublayer added by hand, which subviews' layers would otherwise go over.
+        surface.host.removeFromSuperlayer()
+        surface.input.layer?.addSublayer(surface.host)
     }
 
     /// A test means the app's main window, not whatever small one is in front of it.

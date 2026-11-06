@@ -1433,6 +1433,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
+    uint32_t materials_hash;
     int minimized;
     int surface_x, surface_y, has_surface, cover_count;
     uint32_t covers_hash;
@@ -1851,6 +1852,33 @@ static int tree_send_minimized(struct Stream *s, CGWindowID id, int minimized) {
     return send_all(s->fd, message, sizeof(message));
 }
 
+// What the hook says shows through this window, when that changes.
+static int tree_send_materials(struct Stream *s, struct TreeWindow *w, const struct TreeItem *item) {
+    enum { MOST = 32 };
+    uint8_t message[SWM_HEADER_SIZE + 8 + MOST * 24];
+    uint32_t n = 0, hash = 2166136261u;
+    for (uint32_t i = 0; i < tree_gpu_table->gpu_backdrop_count && i < SWS_BACKDROPS && n < MOST; i++) {
+        const volatile struct SWSBackdrop *b = &tree_gpu_table->gpu_backdrops[i];
+        if (b->id != item->id)
+            continue;
+        int32_t row[6] = {(int32_t)b->material, (int32_t)b->active, (int32_t)(b->x - (float)item->bounds.origin.x),
+                          (int32_t)(b->y - (float)item->bounds.origin.y), (int32_t)b->width, (int32_t)b->height};
+        for (int k = 0; k < 6; k++) {
+            swm_w32(message + SWM_HEADER_SIZE + 8 + n * 24 + (uint32_t)k * 4, (uint32_t)row[k]);
+            hash = (hash ^ (uint32_t)row[k]) * 16777619u;
+        }
+        n++;
+    }
+    if (hash == w->materials_hash)
+        return 0;
+    w->materials_hash = hash;
+    uint32_t size = 8 + n * 24;
+    swm_header(message, SWM_MATERIALS, size);
+    swm_w32(message + SWM_HEADER_SIZE, item->id);
+    swm_w32(message + SWM_HEADER_SIZE + 4, n);
+    return send_all(s->fd, message, SWM_HEADER_SIZE + size);
+}
+
 static int tree_surface_has_shadow(CGWindowID id) {
     for (uint32_t i = 0; i < tree_gpu_table->gpu_row_count && i < SWS_TREE; i++) {
         const struct SWSGPURow *row = &tree_gpu_table->gpu_rows[i];
@@ -2002,6 +2030,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             s->margin = margin;
             int kind = !no_pixels ? 0 : crop ? SWM_CROP : SWM_OVERLAY;
             if (own_surface && tree_send_surface_origin(s, w, id))
+                goto done;
+            if (own_surface && tree_send_materials(s, w, item))
                 goto done;
             // With several apps, what's in front can be anyone's, which only the guest knows.
             if (tree_shared && crop && !own_surface) {
