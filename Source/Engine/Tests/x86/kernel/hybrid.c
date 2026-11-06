@@ -1289,6 +1289,21 @@ static void test_icr(void) {
     CHECK(apic[0x320 / 4] == (u32)(0xD0000320ULL * 3));
 }
 
+// A machine reset or a snapshot load: RAM changes unseen, the engine is told to forget, and what runs next is what is there.
+static void test_forget_all(u64 root) {
+    u64 code = frame(), va = TEST_VA + 0x40600000;
+    put_function(code, 5);
+    *pte_of(root, va) = code | PRESENT_RW;
+    __asm__ volatile("invlpg (%0)" : : "r"(va));
+    u32 (*f)(void) = (u32 (*)(void))va;
+    CHECK(f() == 5);
+    MAILBOX[1] = code + 1; // the function's mov $value, %eax
+    MAILBOX[2] = 6;
+    u64 rbx = 0;
+    __asm__ volatile("mov $30, %%r13\n mov $5, %%r14\n .byte 0x66, 0x0F, 0x38, 0x41, 0xC1\n" : "=b"(rbx) : : "r13", "r14", "xmm0");
+    CHECK(f() == 6);
+}
+
 // An interrupt raised just after a hlt ends it, polled in the monitor or through TCG if the host is slow, and the handler
 // returns past the hlt.
 static void test_hlt_poll(void) {
@@ -1916,6 +1931,7 @@ void kmain(void) {
     test_reuse(root);
     test_calls_link();
     test_icr();
+    test_forget_all(root);
     test_second_vcpu(root);
     test_process_log(root);
     test_shared_region(root);

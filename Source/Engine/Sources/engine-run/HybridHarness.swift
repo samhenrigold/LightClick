@@ -146,6 +146,9 @@ final class HybridHarness {
     func playTCG(_ s: inout EngineX86State) {
         switch s.gpr.13 {
         case 1: s.gpr.3 = 0x1234
+        case 30:  // RAM changes with nothing told, as a snapshot load does it, and the engine is told to forget
+            host(mailbox(1)).storeBytes(of: UInt8(truncatingIfNeeded: mailbox(2)), as: UInt8.self)
+            engine_forget_all(handle)
         case 2: s.cr0 &= ~8
         case 3:
             s.rip = s.gpr.11

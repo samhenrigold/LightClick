@@ -14,6 +14,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+// guest-bench's --program passes no arguments, so a build can pick one test, for a tally of just it: -DSCALE_ONLY='"exec_per_s"' -DSCALE_SECONDS=10.
+#ifndef SCALE_SECONDS
+#define SCALE_SECONDS 2
+#endif
 #define MAX_THREADS 8 // both ends of four pairs
 #define CHASE_NODES (1u << 20) // of 64 bytes each
 
@@ -274,9 +278,9 @@ static double run(const Test *test, int n, double seconds) {
 
 int main(int argc, char **argv) {
     const char *given = argc > 1 ? argv[1] : getenv("LC_SCALE_SECONDS");
-    double seconds = given ? atof(given) : 2;
+    double seconds = given ? atof(given) : SCALE_SECONDS;
     if (seconds <= 0)
-        seconds = 2;
+        seconds = SCALE_SECONDS;
     int cpus = 0;
     size_t size = sizeof cpus;
     sysctlbyname("hw.ncpu", &cpus, &size, NULL, 0);
@@ -284,6 +288,10 @@ int main(int argc, char **argv) {
     chase_build();
     static const int counts[] = {1, 2, 4};
     for (size_t t = 0; t < sizeof tests / sizeof *tests; t++) {
+#ifdef SCALE_ONLY
+        if (strcmp(tests[t].name, SCALE_ONLY))
+            continue;
+#endif
         double one = 0;
         for (int c = 0; c < 3; c++) {
             double rate = run(&tests[t], counts[c], seconds);

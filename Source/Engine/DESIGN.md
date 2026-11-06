@@ -291,6 +291,26 @@ The first is built, and `LC_HVDBT_NO_REUSE=1` turns it off.
 
 Build the disk cache if the app launch measurement shows translation is more than about 20% of a first launch after these. Below that, it is a large change to every emitter for a few percent.
 
+### A fast hidden start: resuming a snapshot under the engine
+
+The goal is a guest that is at its desktop 1 to 2 s after the app asks, with no boot, for seamless apps. Nothing here has been run. What the code says, and what has to be found out:
+
+**What the engine would have to save: nothing.** Whenever a vCPU is off the engine, all its state is in `CPUX86State`: `hvdbt_get_state` copies registers, x87, MXCSR and the ICR copy back, the APIC is QEMU's, and the TSC is `cpu_get_tsc` with QEMU's offset. `vm_stop` kicks each vCPU, which stops at a boundary. So QEMU's migration stream sees a TCG machine. Shadow tables, views, blocks, the code cache, `page_info`, rmap and lookup tables are all derived, and RAM is QEMU's, mapped into the VM.
+
+**Two ways to resume.**
+1. A new process with `-incoming` or `-loadvm`. No engine exists yet, so loading has nothing to tell it. The first high-half TB miss makes one as at a boot's hand-off, the others join, and a vCPU in user mode stays on TCG until it next enters the kernel. Device mappings come from the listener at creation. This is what a hidden start wants, and needs no engine change that the code shows.
+2. `loadvm` in a running process, which also covers reset. RAM changes behind the engine, so it must forget everything. `hvdbt_reset` does this, as below.
+
+**Getting to 1 to 2 s is not the engine's problem first.** These are the unknowns, largest first:
+- **Device state outside QEMU.** `PassthroughOpenGL` logs contexts from early in a boot, and they live in the host. Nothing here has looked at whether that device can save or recreate them, and a guest whose GL contexts vanish may not recover. The rest: virtio-serial and COM2 chardev peers reconnecting, `virtio-sound` with `x-apple-reconfigure`, USB, and `-drive ...,snapshot=on` media. Any migration blocker will name itself when a save is tried.
+- **RAM.** Reading 8 GB eagerly takes seconds, at a guess 3. Loading in time needs RAM mapped from the saved file, faulted on demand. The guest's RAM is the `pvg-ram` backend, imported as shared anonymous memory (`Shared anonymous RAM import ... regions=3` in session logs), which may have to stay anonymous. Whether `hv_vm_map` takes a private file mapping, and what faulting costs, is unmeasured.
+- **Disk.** It must match the RAM: an APFS clone taken at the save, as `scripts/boot-clone` makes.
+- **Clocks.** The TSC continues from the save, so the guest's wall clock is wrong until something corrects it. The guest agent can.
+
+**Cold code again.** Every resume starts with an empty code cache, since nothing translated survives. That is the case for the disk cache, in "Cold code" above, that a boot's numbers did not make: a boot translates 1.6M blocks in about 40 s, at most 6 to 12% of it, but a resumed desktop's first second could be mostly translating. Measure before building: the blocks and translate ms of the first 5 s after a resume.
+
+**First experiment**, needing no code: on a booted hybrid guest, QMP `migrate` to `file:` and then a new process with `-incoming`, watching for blockers. Then the same with TCG alone, to separate what is the engine's.
+
 ## Multi-vCPU
 
 One vCPU is the largest gap to a usable guest. This is the design, what it costs, and how far it is built. **Measured** means on this machine by `Tests/smp-probe/run.sh` (EL1 code in a VM set up as the engine sets one up, EnTSO on) or `engine-run --smp 2|4 .build/images/smp` (the engine itself, `Tests/x86/kernel/smp.c`), under other work at load 5 to 8, so 10-20% between runs. Everything else is labelled.

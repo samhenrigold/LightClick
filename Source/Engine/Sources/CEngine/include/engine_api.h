@@ -104,6 +104,8 @@ void engine_mark_device(EngineHandle *engine, uint64_t gpa, uint64_t bytes);
 EngineRunResult engine_run(EngineHandle *engine);
 const char *engine_error_text(EngineHandle *engine);
 // Only valid while stopped after ENGINE_RUN_BOUNDARY or before the first run.
+// With every vCPU off the engine: RAM may have changed behind it, on a machine reset or a snapshot load. Drops all that derives from it.
+void engine_forget_all(EngineHandle *engine);
 void engine_get_state(EngineHandle *engine, EngineX86State *out);
 void engine_set_state(EngineHandle *engine, const EngineX86State *in);
 
