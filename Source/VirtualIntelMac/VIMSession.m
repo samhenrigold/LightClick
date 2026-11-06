@@ -252,6 +252,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @end
 @interface VIMSession () <NSWindowDelegate, NSMenuItemValidation, NSMenuDelegate, NSToolbarDelegate>
 @property VIMMachine *machine;
+@property(readonly) VIMGuestSessionState *state;
 @property NSTask *task;
 @property NSFileHandle *log;
 @property VIMMetalView *displayView;
@@ -287,8 +288,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property(nonatomic) BOOL preparationRequested;
 @property(nonatomic) BOOL installationRequested;
 @property BOOL automaticInstallation;
-@property BOOL relaunchForGraphics;
-@property BOOL relaunchForGuestReboot;
 @property NSArray<NSDate *> *recentGuestReboots;
 @property NSTimer *handoffTimer;
 @property NSString *reconciledBoot;
@@ -343,15 +342,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property BOOL runStateQueryFailed;
 @property NSString *lastRunState;
 @property BOOL wakePending;
-@property BOOL shutdownRequested;
-@property BOOL forceResetRequested;
 @property VIMModernSetup *modernSetup;
 @property BOOL modernSetupReportActive;
 @property NSTimer *controlRetryTimer;
 @property VIMUSBClient *usbClient;
 - (void)ensureUSBClient;
 @property BOOL usbOperationPending;
-@property BOOL closeAfterShutdown;
 @property int machineLock;
 @property NSStackView *statePanel;
 @property NSTextField *stateLabel;
@@ -384,6 +380,14 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                                       }
                                                   }
                                                 }];
+}
+- (void)applyLifecycleEvent:(VIMSessionEvent)event {
+    NSString *before = self.state.lifecycleDescription;
+    [self.state applyEvent:event];
+    if (![before isEqual:self.state.lifecycleDescription])
+        [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Session: %@ -> %@\n", before,
+                                                        self.state.lifecycleDescription]
+                                dataUsingEncoding:NSUTF8StringEncoding]];
 }
 - (void)updateInstallationActivity {
     BOOL setup = self.machine.configuration[@"InstallerMedia"] != nil ||
@@ -419,6 +423,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (instancetype)initWithWindow:(NSWindow *)window {
     if ((self = [super initWithWindow:window])) {
         _machineLock = -1;
+        _state = [VIMGuestSessionState new];
         [NSNotificationCenter.defaultCenter addObserver:self
                                                selector:@selector(refreshUSBToolbar:)
                                                    name:@"VIMHostUSBChanged"
@@ -929,10 +934,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             [session showStoppedScreen];
         }
         if (session.task.running) {
-            session.forceResetRequested = NO;
-            session.relaunchForGraphics = NO;
-            session.relaunchForGuestReboot = NO;
-            session.shutdownRequested = YES;
+            [session applyLifecycleEvent:VIMSessionEventForceStopRequested];
             [session.task terminate];
         }
     }
@@ -952,7 +954,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             [session showStoppedScreen];
         }
     for (VIMSession *session in sessions.allValues)
-        if (session.task.running && !session.preparing && !session.relaunchForGraphics)
+        if (session.guestSessionState.mayShutDownForQuit)
             [session shutdown:self];
 }
 + (BOOL)installMachineAfterHostCheck:(VIMMachine *)machine error:(NSError **)error {
@@ -1238,9 +1240,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           session.displayView.displaySleeping = NO;
       } else if ([kind isEqual:@"SUSPEND"] || [kind isEqual:@"SHUTDOWN"]) {
           if ([kind isEqual:@"SHUTDOWN"] &&
-              [@[ @"guest-reset", @"host-qmp-system-reset" ] containsObject:event[@"data"][@"reason"] ?: @""] &&
-              !session.shutdownRequested && !session.closeAfterShutdown)
-              session.relaunchForGuestReboot = YES;
+              [@[ @"guest-reset", @"host-qmp-system-reset" ] containsObject:event[@"data"][@"reason"] ?: @""])
+              [session applyLifecycleEvent:VIMSessionEventGuestRebootExpected];
           session.displayView.displaySleeping = YES;
           session.statePanel.hidden = YES;
           if ([kind isEqual:@"SUSPEND"]) {
@@ -1300,7 +1301,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                                            control:self.control];
         self.openGLSetup.showProgress = ^(BOOL automatic, BOOL automaticLogin) {
           VIMSession *session = weakSelf;
-          if (session.task.running && !session.shutdownRequested)
+          if (session.task.running && !session.state.shutdownRequested)
               [session showSetupNoticeAutomatic:automatic automaticLogin:automaticLogin restarting:NO];
         };
     } else {
@@ -1311,7 +1312,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         self.modernSetup.showAccountProgress = ^(BOOL automaticLogin) {
           VIMSession *session = weakSelf;
           // Retries after a failure stay quiet: the notice would otherwise flash on every one.
-          if (!session.task.running || session.shutdownRequested || session.presentedSetupFailures.count)
+          if (!session.task.running || session.state.shutdownRequested || session.presentedSetupFailures.count)
               return;
           [session showSetupNoticeAutomatic:YES automaticLogin:automaticLogin restarting:NO];
         };
@@ -1327,8 +1328,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                       : VIMGuestFileURL(@"GuestTools/guest-status").path;
     self.guestStatusTool = [NSData dataWithContentsOfFile:statusTool];
     NSDictionary *config = self.machine.configuration;
-    self.shutdownRequested = NO;
-    self.closeAfterShutdown = NO;
+    [self applyLifecycleEvent:VIMSessionEventLaunchStarted];
     BOOL classicInstaller = self.machine.preMetalGuest && [config[@"InstallerMedia"] length] > 0 &&
                             [config[@"InstallState"] isEqual:@"installing"];
     self.displayMode =
@@ -1607,17 +1607,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         if (!session || session.task != task)
             return;
         [session.control drainLifecycleEventsAfterExitWithCompletion:^{
-          SessionExitInput *exitInput = [SessionExitInput new];
-          exitInput.relaunchForGuestReboot = session.relaunchForGuestReboot;
-          exitInput.relaunchForGraphics = session.relaunchForGraphics;
-          exitInput.forceResetRequested = session.forceResetRequested;
-          exitInput.shutdownRequested = session.shutdownRequested;
-          exitInput.closeAfterShutdown = session.closeAfterShutdown;
-          exitInput.exited = task.terminationReason == NSTaskTerminationReasonExit;
-          exitInput.terminationStatus = task.terminationStatus;
-          exitInput.recentGuestReboots = session.recentGuestReboots ?: @[];
-          exitInput.now = NSDate.date;
-          SessionExitPlan *exitPlan = [[SessionExitPlan alloc] initWithInput:exitInput];
+          SessionExitPlan *exitPlan =
+              [session.state exitPlanWithExited:task.terminationReason == NSTaskTerminationReasonExit
+                              terminationStatus:task.terminationStatus
+                             recentGuestReboots:session.recentGuestReboots];
           BOOL relaunch = exitPlan.relaunch;
           session.status.stringValue = exitPlan.statusText;
           session.displayView.displaySleeping = YES;
@@ -1625,9 +1618,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           session.statePanel.hidden = NO;
           session.stateAction.hidden = NO;
           session.recentGuestReboots = exitPlan.recentGuestReboots;
-          session.forceResetRequested = NO;
-          session.relaunchForGraphics = NO;
-          session.relaunchForGuestReboot = NO;
           NSURL *waitingURL = relaunch ? session.pendingHostConnectionURL : nil;
           void (^waitingCompletion)(NSError *) = relaunch ? session.pendingHostConnectionCompletion : nil;
           if (relaunch) {
@@ -1690,6 +1680,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         [self cleanUp];
         return NO;
     }
+    [self applyLifecycleEvent:VIMSessionEventEmulatorStarted];
     if (openGLInprocess) {
         rendererPID = [NSString stringWithFormat:@"%d", self.task.processIdentifier];
         if (!VIMPrepareOpenGLSurfaceEndpoint(self.displayConnection, self.task.processIdentifier, self.runtimeDirectory,
@@ -2409,7 +2400,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             return;
         }
         [self shutdown:self];
-        finish(@{@"Requested" : @(self.shutdownRequested)});
+        finish(@{@"Requested" : @(self.state.shutdownRequested)});
         return;
     }
     if ([command[@"Action"] isEqual:@"resume-setup"]) {
@@ -2938,11 +2929,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                         }];
 }
 - (VIMGuestSessionState *)guestSessionState {
-    VIMGuestSessionState *state = [VIMGuestSessionState new];
+    VIMGuestSessionState *state = self.state;
     state.guest = self.machine.guest;
     state.running = self.task.running;
-    state.shutdownRequested = self.shutdownRequested;
-    state.relaunchForGraphics = self.relaunchForGraphics;
     state.developmentSetupDeferred = self.developmentSetupDeferred;
     state.preparing = self.preparing;
     state.preparationRequested = self.preparationRequested;
@@ -3204,7 +3193,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       if (!session)
           return;
       session.guestPending = NO;
-      if (!session.task.running || session.shutdownRequested)
+      if (!session.task.running || session.state.shutdownRequested)
           return;
       if (error) {
           [session dismissSetupNotice];
@@ -3232,7 +3221,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           VIMPresentAlert(alert, session.window, ^(NSModalResponse response) {
             NSString *value = response == NSAlertFirstButtonReturn ? password.stringValue : nil;
             password.stringValue = @"";
-            if (!value || !session.task.running || session.shutdownRequested)
+            if (!value || !session.task.running || session.state.shutdownRequested)
                 return;
             NSError *failure = nil;
             if (![session.openGLSetup providePassword:value error:&failure]) {
@@ -3264,7 +3253,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           if (session.openGLRestartAttempted)
               return;
           void (^restart)(void) = ^{
-            if (!session.task.running || session.shutdownRequested)
+            if (!session.task.running || session.state.shutdownRequested)
                 return;
             NSError *failure = nil;
             if (![session.machine prepareOpenGLRestartWithReport:outcome[@"Report"] error:&failure]) {
@@ -3273,7 +3262,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                 return;
             }
             session.openGLRestartAttempted = YES;
-            session.relaunchForGuestReboot = YES;
+            [session applyLifecycleEvent:VIMSessionEventGuestRebootExpected];
             [session updateInstallationActivity];
             session.guestStatus.stringValue = @"Finishing setup — restarting this Mac…";
             if (![outcome[@"ExistingGuestUpdate"] boolValue]) {
@@ -3412,7 +3401,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 }
 - (BOOL)prepareMavericksSMBForBoot:(NSString *)boot {
     if (![self.machine.guest isEqual:@"mavericks"] || [self.mavericksSMBCheckedBoot isEqual:boot] ||
-        self.shutdownRequested)
+        self.state.shutdownRequested)
         return NO;
     self.mavericksSMBCheckedBoot = boot;
     NSURL *tool = VIMGuestFileURL(@"OpenGLGuests/mavericks/mavericks-smb-compat");
@@ -3505,6 +3494,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             desktop ? [NSString stringWithFormat:@"%@ %@", VIMOperatingSystemName(self.machine.guest),
                                                  report[@"ProductVersion"] ?: @""]
                     : @"Waiting for guest desktop services…";
+        if (desktop)
+            [self applyLifecycleEvent:VIMSessionEventDesktopReached];
         if (desktop && boot.length) {
             if ([self prepareMavericksSMBForBoot:boot])
                 return;
@@ -4022,6 +4013,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     }
     __weak VIMSession *weakSelf = self;
     if (policy().needsDesktopServices) {
+        [self applyLifecycleEvent:VIMSessionEventDesktopReached];
         [self updateClipboardForBoot:boot];
         [self restoreDisplaySelectionForBoot:boot];
     }
@@ -4195,12 +4187,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                   }];
 }
 - (void)handoffToGraphics {
-    // A late installation/status callback must not override an explicit user
-    // shutdown/close or revive an emulator that has already stopped.
-    if (self.shutdownRequested || self.closeAfterShutdown || !self.task.running)
+    if (!self.guestSessionState.mayHandOff)
         return;
     self.automaticInstallation = NO;
-    self.relaunchForGraphics = YES;
+    [self applyLifecycleEvent:VIMSessionEventHandoffRequested];
     self.guestStatus.stringValue = @"Graphics support installed — restarting this Mac…";
     __weak VIMSession *weakSelf = self;
     // Changing emulated display hardware needs a new QEMU process, not an
@@ -4211,7 +4201,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                         repeats:NO
                                           block:^(NSTimer *timer) {
                                             VIMSession *session = weakSelf;
-                                            session.relaunchForGraphics = NO;
+                                            [session applyLifecycleEvent:VIMSessionEventHandoffCancelled];
                                             if (session.task.running) {
                                                 session.guestStatus.stringValue =
                                                     @"Shutdown is taking longer than expected. Shut down this Mac, "
@@ -4228,7 +4218,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                           // definite command failure cancels the handoff immediately.
                           VIMSession *session = weakSelf;
                           if (session.task.running && !error && result && ![result[@"exitcode"] isEqual:@0]) {
-                              session.relaunchForGraphics = NO;
+                              [session applyLifecycleEvent:VIMSessionEventHandoffCancelled];
                               [session.handoffTimer invalidate];
                               session.guestStatus.stringValue =
                                   @"Automatic shutdown failed. Shut down this Mac, then open it again to finish setup.";
@@ -4243,13 +4233,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return !self.task.running;
     }
     if (item.action == @selector(resetMachine:))
-        return self.task.running && !self.forceResetRequested;
+        return self.guestSessionState.mayForceReset;
     if (item.action == @selector(sendForceQuitKey:) || item.action == @selector(takeScreenshot:))
         return self.task.running && !self.preparing;
     if ([@[ @"undo:", @"cut:", @"copy:", @"paste:", @"selectAll:" ] containsObject:NSStringFromSelector(item.action)])
         return self.task.running;
     if (item.action == @selector(shutdown:))
-        return self.task.running && self.shutdownButton.enabled && !self.preparing && !self.shutdownRequested;
+        return self.guestSessionState.mayRequestShutdown && self.shutdownButton.enabled;
     if (item.action == @selector(forceStop:))
         return self.task.running;
     if (item.action == @selector(toggleUSBDevice:))
@@ -4275,8 +4265,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     }
     if (item.action == @selector(showGuestDiagnostics:))
         return YES;
-    BOOL idle = self.task.running && !self.preparing && !self.preparationRequested && !self.guestPending &&
-                !self.relaunchForGraphics;
+    BOOL idle = self.guestSessionState.graphicsActionsEnabled;
     BOOL recorded = [NSFileManager.defaultManager
         fileExistsAtPath:[self.machine.URL URLByAppendingPathComponent:@"State/GuestInstallation.plist"].path];
     if (item.action == @selector(checkGraphicsSetup:))
@@ -4731,15 +4720,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [self sendShortcut:sender.representedObject];
 }
 - (void)resetMachine:(id)sender {
-    if (!self.task.running || self.forceResetRequested)
+    if (!self.guestSessionState.mayForceReset)
         return;
     void (^reset)(void) = ^{
-      if (!self.task.running || self.forceResetRequested)
+      if (!self.guestSessionState.mayForceReset)
           return;
-      self.forceResetRequested = YES;
-      self.shutdownRequested = NO;
-      self.closeAfterShutdown = NO;
-      self.relaunchForGraphics = NO;
+      [self applyLifecycleEvent:VIMSessionEventResetRequested];
       [self.displayView releasePressedKeys];
       self.displayView.displaySleeping = YES;
       NSTask *ownedTask = self.task;
@@ -5797,7 +5783,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                     if (result == NSAlertFirstButtonReturn)
                         [self.window orderOut:nil];
                     else if (result == NSAlertSecondButtonReturn) {
-                        self.closeAfterShutdown = YES;
+                        [self applyLifecycleEvent:VIMSessionEventCloseRequested];
                         [self shutdown:self];
                     }
                   }];
@@ -5807,13 +5793,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [NSWorkspace.sharedWorkspace openURL:[self.machine.URL URLByAppendingPathComponent:@"State"]];
 }
 - (IBAction)checkGraphicsSetup:(id)sender {
-    if (!self.task.running || self.preparing || self.preparationRequested || self.relaunchForGraphics)
+    if (!self.guestSessionState.mayStartGraphicsAction)
         return;
     self.reconciledBoot = nil;
     [self refreshGuestStatus];
 }
 - (IBAction)finishGraphicsSetup:(id)sender {
-    if (!self.task.running || self.preparing || self.preparationRequested || self.relaunchForGraphics)
+    if (!self.guestSessionState.mayStartGraphicsAction)
         return;
     NSURL *journal = [self.machine.URL URLByAppendingPathComponent:@"State/GuestInstallation.plist"];
     BOOL repair = [NSFileManager.defaultManager fileExistsAtPath:journal.path];
@@ -5847,11 +5833,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                   }];
 }
 - (void)shutdown:(id)sender {
-    if (!self.task.running || self.shutdownRequested || self.preparing)
+    if (!self.guestSessionState.mayRequestShutdown)
         return;
-    self.relaunchForGraphics = NO;
-    self.forceResetRequested = NO;
-    self.shutdownRequested = YES;
+    [self applyLifecycleEvent:VIMSessionEventShutdownRequested];
     self.shutdownButton.enabled = NO;
     [self.displayView releasePressedKeys];
     self.guestStatus.stringValue = @"Asking macOS to shut down…";
@@ -5860,7 +5844,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         if (!self.task.running)
             return;
         if (connectionError) {
-            self.shutdownRequested = NO;
+            [self applyLifecycleEvent:VIMSessionEventShutdownFailed];
             self.shutdownButton.enabled = YES;
             // The agent can disappear before QMP reports guest shutdown. A
             // transport error is not proof that tools are missing, and a
@@ -5891,7 +5875,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                     arguments:@{}
                    completion:^(id result, NSError *error) {
                      if (error) {
-                         self.shutdownRequested = NO;
+                         [self applyLifecycleEvent:VIMSessionEventShutdownFailed];
                          self.shutdownButton.enabled = YES;
                          VIMPresentError(error, self.window);
                          return;
@@ -5907,10 +5891,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     void (^stop)(void) = ^{
       if (!self.task.running)
           return;
-      self.forceResetRequested = NO;
-      self.relaunchForGraphics = NO;
-      self.relaunchForGuestReboot = NO;
-      self.shutdownRequested = YES;
+      [self applyLifecycleEvent:VIMSessionEventForceStopRequested];
       [self.task terminate];
     };
     if (VIMSkipsDevelopmentPowerConfirmation()) {
@@ -5930,6 +5911,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                   }];
 }
 - (void)cleanUp {
+    [self applyLifecycleEvent:VIMSessionEventEmulatorStopped];
     self.previewSetupNotice = NO;
     [self dismissSetupNotice];
     void (^waitingCompletion)(NSError *) = self.pendingHostConnectionCompletion;
