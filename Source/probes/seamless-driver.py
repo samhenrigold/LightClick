@@ -481,6 +481,7 @@ def desktop():
         found = re.search(r'bounds=(-?[\d.]+),(-?[\d.]+)', row)
         return (float(found.group(1)), float(found.group(2))) if found else None
     if safari and window:
+        (results/f'{tag}-clicks.txt.command').write_text('move')
         before = place(window)
         os.kill(safari, signal.SIGUSR2)
         time.sleep(2)

@@ -15,7 +15,7 @@ public enum SessionWire {
         case hello = 1, window = 2, frame = 3, gone = 4
         case pointer = 16, key = 17, focus = 18
         case menu = 48, menuPress = 49, document = 50, quitApp = 51, appGone = 52
-        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58, overlay = 59, surfaceOrigin = 60
+        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58, overlay = 59, surfaceOrigin = 60, covers = 61
     }
 
     public struct Window: Equatable, Sendable {
@@ -53,6 +53,7 @@ public enum SessionWire {
         case crop(UInt32)
         case overlay(UInt32)
         case surfaceOrigin(UInt32, x: Int32, y: Int32)
+        case covers(UInt32, [CGRect])
     }
 
     public enum Parsed: Equatable, Sendable {
@@ -79,6 +80,8 @@ public enum SessionWire {
             guard length == 4 else { return .bad }
         case .surfaceOrigin:
             guard length == 12 else { return .bad }
+        case .covers:
+            guard length >= 8, length <= 8 + 32 * 16, (length - 8) % 16 == 0 else { return .bad }
         case .window:
             guard length >= 56, length <= 56 + 2 * maximumText else { return .bad }
         case .frame:
@@ -93,6 +96,15 @@ public enum SessionWire {
         case .gone: return .message(.gone(u32(bytes, body)), used: used)
         case .crop: return .message(.crop(u32(bytes, body)), used: used)
         case .overlay: return .message(.overlay(u32(bytes, body)), used: used)
+        case .covers:
+            let rects = (0..<(length - 8) / 16).map { index -> CGRect in
+                func value(_ field: Int) -> Double {
+                    Double(Int32(bitPattern: u32(bytes, body + 8 + index * 16 + field * 4)))
+                }
+                return CGRect(x: value(0), y: value(1), width: value(2), height: value(3))
+            }
+            guard Int(u32(bytes, body + 4)) == rects.count else { return .bad }
+            return .message(.covers(u32(bytes, body), rects), used: used)
         case .surfaceOrigin:
             return .message(
                 .surfaceOrigin(

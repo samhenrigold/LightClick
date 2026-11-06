@@ -1422,7 +1422,8 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
-    int surface_x, surface_y, has_surface;
+    int surface_x, surface_y, has_surface, cover_count;
+    uint32_t covers_hash;
     int cropping, covered; // cropping: the message the host last had, if it's taking this from the display.
     double look_every;
     uint32_t surface_flushes;
@@ -1587,6 +1588,16 @@ static int tree_item_from_dictionary(CFDictionaryRef d, struct TreeItem *item) {
     return 1;
 }
 
+// Everything on screen, front first, for what covers what across apps.
+#define TREE_ALL 256
+static struct TreeAll {
+    CGWindowID id;
+    int layer;
+    CGRect bounds;
+    char owner[64];
+} tree_all[TREE_ALL];
+static int tree_all_count;
+
 static int tree_items_from_list(struct TreeItem *items, const char *app, pid_t pid) {
     CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
                                                  kCGNullWindowID);
@@ -1600,6 +1611,15 @@ static int tree_items_from_list(struct TreeItem *items, const char *app, pid_t p
             snprintf(tree_front_owner, sizeof(tree_front_owner), "%s", owner);
             break;
         }
+    }
+    tree_all_count = 0;
+    for (CFIndex i = 0; tree_shared && list && tree_all_count < TREE_ALL && i < CFArrayGetCount(list); i++) {
+        CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
+        struct TreeAll *all = &tree_all[tree_all_count++];
+        all->id = (CGWindowID)int_for(d, kCGWindowNumber);
+        all->layer = int_for(d, kCGWindowLayer);
+        all->bounds = bounds_for(d);
+        text_for(d, kCGWindowOwnerName, all->owner, sizeof(all->owner));
     }
     for (CFIndex i = 0; list && count < TREE_ITEMS && i < CFArrayGetCount(list); i++) {
         CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
@@ -1755,6 +1775,42 @@ static int tree_send_surface_origin(struct Stream *s, struct TreeWindow *w, CGWi
     return 0;
 }
 
+// Says what's in front of this window, of any app, when that changes, so the host never shows it as this window's, and returns how
+// many there are. Its own sheets and menus don't count: they're in the same place on the host. Nor does the cursor or menu bar.
+static int tree_send_covers(struct Stream *s, struct TreeWindow *w, const struct TreeItem *item, int *count) {
+    enum { MOST = 32 };
+    int32_t rects[MOST * 4];
+    int n = 0;
+    uint32_t hash = 2166136261u, group = tree_group(item->id);
+    for (int i = 0; i < tree_all_count && tree_all[i].id != item->id && n < MOST; i++) {
+        const struct TreeAll *front = &tree_all[i];
+        if (front->layer < 0 || !strcmp(front->owner, "Window Server") ||
+            !CGRectIntersectsRect(front->bounds, item->bounds) || tree_group(front->id) == group)
+            continue;
+        if (!strcmp(front->owner, item->owner) && front->layer != 0)
+            continue;
+        int32_t rect[4] = {(int32_t)front->bounds.origin.x, (int32_t)front->bounds.origin.y,
+                           (int32_t)front->bounds.size.width, (int32_t)front->bounds.size.height};
+        memcpy(&rects[n * 4], rect, sizeof(rect));
+        n++;
+        for (int k = 0; k < 4; k++)
+            hash = (hash ^ (uint32_t)rect[k]) * 16777619u;
+    }
+    *count = n;
+    if (hash == w->covers_hash && n == w->cover_count)
+        return 0;
+    w->covers_hash = hash;
+    w->cover_count = n;
+    uint8_t message[SWM_HEADER_SIZE + 8 + MOST * 16];
+    uint32_t size = 8 + (uint32_t)n * 16;
+    swm_header(message, SWM_COVERS, size);
+    swm_w32(message + SWM_HEADER_SIZE, item->id);
+    swm_w32(message + SWM_HEADER_SIZE + 4, (uint32_t)n);
+    for (int i = 0; i < n * 4; i++)
+        swm_w32(message + SWM_HEADER_SIZE + 8 + i * 4, (uint32_t)rects[i]);
+    return send_all(s->fd, message, SWM_HEADER_SIZE + size);
+}
+
 static int tree_surface_has_shadow(CGWindowID id) {
     for (uint32_t i = 0; i < tree_gpu_table->gpu_row_count && i < SWS_TREE; i++) {
         const struct SWSGPURow *row = &tree_gpu_table->gpu_rows[i];
@@ -1900,6 +1956,13 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             int kind = !no_pixels ? 0 : crop ? SWM_CROP : SWM_OVERLAY;
             if (own_surface && tree_send_surface_origin(s, w, id))
                 goto done;
+            // With several apps, what's in front can be anyone's, which only the guest knows.
+            if (tree_shared && crop && !own_surface) {
+                int covering = 0;
+                if (tree_send_covers(s, w, item, &covering))
+                    goto done;
+                covered = covering > 0;
+            }
             if (kind)
                 stale = (!crop || covered) &&
                         (fresh || sized || !w->previous || covered != w->covered || tick - w->last_capture >= 1);

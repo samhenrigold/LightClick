@@ -40,6 +40,8 @@ static void (*region_free)(void *);
 static void *(*device_rgb)(void);
 
 struct GPUWindow {
+    float x, y, width, height; // Of the last composite, for the table's rows.
+    uint32_t frames;
     uint32_t id;
     int width, height; // Of the surface.
     void *surfaces[2];
@@ -164,6 +166,13 @@ static char generate_layers_hook(char *state, char *window) {
         row->window_y = (float)rect.y;
         row->window_width = (float)rect.width;
         row->window_height = (float)rect.height;
+        // Whichever window had this row before, and this window may be in another row now.
+        const struct GPUWindow *known = gpu_window(id);
+        row->x = known->x;
+        row->y = known->y;
+        row->width = known->width;
+        row->height = known->height;
+        row->frames = known->frames;
     }
     return 0;
 }
@@ -256,6 +265,11 @@ static void gpu_compose_one(uint32_t id) {
         w->previous = w->pending;
         w->pending = NULL;
         table->gpu_composites++;
+        w->x = (float)bounds.x;
+        w->y = (float)bounds.y;
+        w->width = (float)bounds.width;
+        w->height = (float)bounds.height;
+        w->frames++;
         for (unsigned i = 0; i < table->gpu_row_count; i++)
             if (table->gpu_rows[i].id == id) {
                 struct SWSGPURow *row = &table->gpu_rows[i];

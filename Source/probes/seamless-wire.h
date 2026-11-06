@@ -45,6 +45,7 @@ enum SWMType {
     SWM_DRAG_SEND = 56, // Host to guest: a document id, then a guest path: send that file back under that id.
     SWM_APP_STATE = 57, // Guest to host: JSON with the app's badge, and whether it wants attention.
     SWM_CROP = 58, // Guest to host: show this window from the display's own frames. A frame for it is what shows where it's covered.
+    SWM_COVERS = 61, // Guest to host: what's in front of a window on the display: its id, a count, then x, y, width, height of each.
     SWM_SURFACE_ORIGIN = 60, // Guest to host: a window's own surface starts here on the display, in points: window id, x, y.
     SWM_OVERLAY = 59, // Guest to host: the same, with its frames' alpha as the shape: a menu, a popover, a sheet.
 };

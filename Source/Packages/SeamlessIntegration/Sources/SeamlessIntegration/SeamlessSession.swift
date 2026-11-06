@@ -69,6 +69,7 @@ public final class SeamlessSession {
         /// Where its own surface starts on the guest's display, with its shadow, once the guest has said.
         var surfaceOrigin: (x: Int32, y: Int32)?
         var ownSurfaceLayer: CALayer?
+        var guestCovers: [CGRect]?
         init(window: SessionWire.Window, context: NSObject, layer: CALayer) {
             self.window = window
             self.context = context
@@ -398,6 +399,9 @@ public final class SeamlessSession {
             surface.cropped = true
             if case .overlay = message { surface.overlay = true } else { surface.overlay = false }
             showCrops(of: [surface])
+        case .covers(let id, let rects):
+            surfaces[id]?.guestCovers = rects
+            if let surface = surfaces[id] { showCrops(of: [surface]) }
         case .surfaceOrigin(let id, let x, let y):
             surfaces[id]?.surfaceOrigin = (x, y)
             if let surface = surfaces[id] { showCrops(of: [surface]) }
@@ -590,7 +594,9 @@ public final class SeamlessSession {
                 width: part.width * scale / fullWidth, height: part.height * scale / fullHeight)
         }
         let layer = surface.layer
-        if let own = pixelSource?.surface(forWindow: window.id), let origin = surface.surfaceOrigin {
+        if let own = pixelSource?.surface(forWindow: window.id) {
+            // Until the guest says, at its window's place, which is right but for any shadow: with the display off, this is all there is.
+            let origin = surface.surfaceOrigin ?? (window.x, window.y)
             setPieces(of: surface, to: [], from: own, place: place, height: whole.height)
             layer.mask = nil
             layer.contents = nil
@@ -619,9 +625,12 @@ public final class SeamlessSession {
         let filter: CALayerContentsFilter = scale == (NSScreen.main?.backingScaleFactor ?? 0) ? .nearest : .linear
         layer.magnificationFilter = filter
         layer.minificationFilter = filter
-        let covers = surfaces.values.filter {
+        // In this window's terms. When the guest says, it's every app's; otherwise a session only knows its own app's windows.
+        let covers = (surface.guestCovers ?? surfaces.values.filter {
             $0.window.order < window.order && $0.window.level == 0 && !$0.window.title.isEmpty && $0.window.group != window.group
-        }.map { CGRect(x: Double($0.window.x - window.x), y: Double($0.window.y - window.y), width: Double($0.window.width), height: Double($0.window.height)) }
+        }.map {
+            CGRect(x: Double($0.window.x), y: Double($0.window.y), width: Double($0.window.width), height: Double($0.window.height))
+        }).map { $0.offsetBy(dx: side - Double(window.x), dy: side - Double(window.y)) }
         let visible = surface.overlay ? [whole] : SeamlessSession.uncovered(whole, by: covers)
         if visible == [whole] {
             layer.contents = frame.surface
