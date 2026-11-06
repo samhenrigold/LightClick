@@ -18,6 +18,8 @@ A CASE is one quoted string, a name and then switches:
     desktop=N   fail unless the guest agent reports the desktop within N seconds (default 300 with program=)
     program=P   stage this local x86 program in the guest and run it; a nonzero exit fails the boot
     expect=T    fail unless the program's stdout contains T
+    reboots=N   after the program, expect the guest to restart N times, each reaching the desktop again. The app starts
+                a new QEMU for a guest reboot, so the program must start one and exit 0, as in '(sleep 4; reboot) &'
     KEY=VALUE   an upper-case word is an environment variable for the app and QEMU; it overrides --env
 
 Every boot gets its own work directory, an APFS clone titled "Clone of <machine>", and a private home through
@@ -126,6 +128,7 @@ class Case:
     runs: int = 1
     seconds: int | None = None
     desktop: int | None = None
+    reboots: int = 0
     program: Path | None = None
     expect: str | None = None
     env: dict = field(default_factory=dict)
@@ -140,7 +143,7 @@ def parse_case(text, shared_env=()):
         key, equals, value = word.partition('=')
         if not equals:
             raise ValueError(f'{case.name}: expected KEY=VALUE, got {word!r}')
-        if key in ('cpus', 'runs', 'seconds', 'desktop'):
+        if key in ('cpus', 'runs', 'seconds', 'desktop', 'reboots'):
             if not value.isdigit():
                 raise ValueError(f'{case.name}: {key} needs a number')
             setattr(case, key, int(value))
@@ -252,6 +255,7 @@ class Boot:
         self.qemu = None
         self.qemu_exited = self.app_exited = False
         self.desktop_seconds = self.desktop_missing = self.program_failure = None
+        self.expecting_reboot = False
         self.started = None
         self.next_capture = 0
         self.capture_warned = False
@@ -297,6 +301,10 @@ class Boot:
             self.app_exited = True
             raise EndBoot
         if self.qemu is not None and not self.alive(self.qemu, table):
+            if self.expecting_reboot and '"guest-reset"' in (self.read(self.session_log) or ''):
+                self.expecting_reboot = False
+                self.qemu = None
+                return
             self.qemu_exited = True
             time.sleep(2)  # the app logs QEMU's last lifecycle events after it exits
             raise EndBoot
@@ -366,6 +374,20 @@ class Boot:
             time.sleep(1)
         self.desktop_missing = f'no desktop after {self.case.desktop}s: {last}'
         return False
+
+    def wait_for_reboot(self):
+        while self.expecting_reboot:
+            self.tick()
+            time.sleep(1)
+        (self.machine/'State/GuestStatus.plist').unlink(missing_ok=True)  # the last boot's desktop
+        while self.qemu is None:
+            self.tick()
+            time.sleep(1)
+        self.started = time.monotonic()
+        if self.wait_for_desktop():
+            say(f'NOTE {self.label} back at the desktop {self.desktop_seconds}s after a reboot')
+        else:
+            raise EndBoot
 
     def run_program(self):
         shutil.copyfile(self.case.program, self.channel/'Transfer.bin')
@@ -482,7 +504,11 @@ class Boot:
                     # The app filters some variables, such as PVG_*: a comparison row would be testing nothing.
                     raise RuntimeError(f'{key}={value} did not reach QEMU')
             if self.case.desktop is not None and self.wait_for_desktop() and self.case.program:
+                self.expecting_reboot = self.case.reboots > 0
                 self.run_program()
+                for left in range(self.case.reboots, 0, -1):
+                    self.wait_for_reboot()
+                    self.expecting_reboot = left > 1
             self.pause(max(0, self.started+self.case.seconds-time.monotonic()))
         except EndBoot:
             pass
