@@ -17,28 +17,60 @@
 #include "apple-gfx-oop-wire.h"
 #include "apple-gfx-app-wire.h"
 #include "apple-gfx-oop-timing.h"
+#include "apple-gfx-shadow-ram.h"
 void apple_gfx_legacy_shadow_install(void);
 typedef struct {
     AppleGFXOOPRAMWire wire;
     uint8_t *host;
 } HelperRAM;
+/* One per 4 KB of task space: 0 is not RAM, else (region + 1) << 32 | page. */
+#define HELPER_BACKING_READ_ONLY (UINT64_C(1) << 63)
 struct PGTask_s {
     mach_vm_address_t address;
     uint64_t length;
     pthread_mutex_t lock;
+    uint64_t *backing;
+    PGTask_t *next;
 };
-static void *helper_resolve(HelperRAM *ram, uint32_t count,
-                            uint64_t address, uint64_t length)
+static PGTask_t *helper_tasks;
+static pthread_mutex_t helper_tasks_lock = PTHREAD_MUTEX_INITIALIZER;
+static int64_t helper_region(HelperRAM *ram, uint32_t count, uint64_t address, uint64_t length)
 {
     for (uint32_t i = 0; i < count; i++) {
         AppleGFXOOPRAMWire r = ram[i].wire;
         if (address < r.guest) { continue; }
         uint64_t offset = address - r.guest;
-        if (offset < r.length && length <= r.length - offset) {
-            return ram[i].host + offset;
-        }
+        if (offset < r.length && length <= r.length - offset) { return i; }
     }
-    return NULL;
+    return -1;
+}
+static void *helper_resolve(HelperRAM *ram, uint32_t count,
+                            uint64_t address, uint64_t length)
+{
+    int64_t i = helper_region(ram, count, address, length);
+    return i < 0 ? NULL : ram[i].host + (address - ram[i].wire.guest);
+}
+static bool helper_shadow_lookup(const void *address, uint64_t pages, AppleGFXShadowPage *out)
+{
+    mach_vm_address_t start = (mach_vm_address_t)address;
+    bool found = false;
+    pthread_mutex_lock(&helper_tasks_lock);
+    for (PGTask_t *task = helper_tasks; task; task = task->next) {
+        if (start < task->address || start - task->address >= task->length) { continue; }
+        uint64_t first = (start - task->address) / 4096;
+        if ((start & 4095) || !task->backing || pages > task->length / 4096 - first) { break; }
+        found = true;
+        pthread_mutex_lock(&task->lock);
+        for (uint64_t i = 0; i < pages && found; i++) {
+            uint64_t entry = task->backing[first + i];
+            found = entry && !(entry & HELPER_BACKING_READ_ONLY);
+            out[i] = (AppleGFXShadowPage){(uint32_t)(entry >> 32) - 1, (uint32_t)entry};
+        }
+        pthread_mutex_unlock(&task->lock);
+        break;
+    }
+    pthread_mutex_unlock(&helper_tasks_lock);
+    return found;
 }
 static PGTask_t *helper_task_create(uint64_t length, void **base)
 {
@@ -51,8 +83,40 @@ static PGTask_t *helper_task_create(uint64_t length, void **base)
     }
     task->length = length;
     pthread_mutex_init(&task->lock, NULL);
+    task->backing = calloc(length / 4096, sizeof(*task->backing));
+    pthread_mutex_lock(&helper_tasks_lock);
+    task->next = helper_tasks;
+    helper_tasks = task;
+    pthread_mutex_unlock(&helper_tasks_lock);
     *base = (void *)task->address;
     return task;
+}
+/* VIM_PVG_TIMING: how fragmented is mapped guest memory? Metal imports a range
+ * no-copy only if every internal join lands on a host 16K page boundary on both
+ * sides (host-shadow-import-rules.m), so bad_joins bounds what a shadow must do.
+ * Joins between separate map calls are not seen. Metal's actual verdict is the
+ * zero_copy/shadow count in "PVG shadow". */
+static bool helper_timing;
+static void helper_map_stats(const PGPhysicalMemoryRange_t *ranges, uint32_t count)
+{
+    static uint64_t calls, listed, bytes, bad_joins, reported;
+    uint64_t call_bytes = 0, call_bad = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        call_bytes += ranges[i].physicalLength;
+        uint64_t end = i ? ranges[i - 1].physicalAddress + ranges[i - 1].physicalLength : 0;
+        if (i && end != ranges[i].physicalAddress &&
+            ((end | ranges[i].physicalAddress) & 16383)) { call_bad++; }
+    }
+    __atomic_fetch_add(&calls, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&listed, count, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&bytes, call_bytes, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&bad_joins, call_bad, __ATOMIC_RELAXED);
+    uint64_t now = apple_gfx_oop_now(), last = __atomic_load_n(&reported, __ATOMIC_RELAXED);
+    if (now - last >= 5000000000ULL &&
+        __atomic_compare_exchange_n(&reported, &last, now, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        fprintf(stderr, "PVG map calls=%llu ranges=%llu bytes=%llu bad_joins=%llu\n",
+                calls, listed, bytes, bad_joins);
+    }
 }
 static bool helper_task_map(PGTask_t *task, uint64_t offset, bool read_only,
                             PGPhysicalMemoryRange_t *ranges, uint32_t count,
@@ -69,6 +133,7 @@ static bool helper_task_map(PGTask_t *task, uint64_t offset, bool read_only,
             !helper_resolve(ram, ram_count, address, length)) { return false; }
         total += length;
     }
+    if (helper_timing) { helper_map_stats(ranges, count); }
     pthread_mutex_lock(&task->lock);
     for (uint32_t i = 0; i < count; i++) {
         mach_vm_address_t target = task->address + offset;
@@ -85,6 +150,14 @@ static bool helper_task_map(PGTask_t *task, uint64_t offset, bool read_only,
             /* Never continue serving a device with a partially changed task. */
             fprintf(stderr, "PVG helper mapping failed: %d\n", kr);
             _exit(30);
+        }
+        if (task->backing) {
+            uint64_t region = helper_region(ram, ram_count, ranges[i].physicalAddress, length);
+            uint64_t page = (ranges[i].physicalAddress - ram[region].wire.guest) / 4096;
+            for (uint64_t n = 0; n < length / 4096; n++) {
+                task->backing[offset / 4096 + n] = (region + 1) << 32 | (page + n) |
+                    (read_only ? HELPER_BACKING_READ_ONLY : 0);
+            }
         }
         offset += length;
     }
@@ -158,6 +231,12 @@ static int helper_main(int argc, char **argv)
             close(r->inherited_fd);
             if (ram[i].host == MAP_FAILED) { return 4; }
         }
+        AppleGFXShadowRegion *shadow_regions = calloc(hello.count, sizeof(*shadow_regions));
+        if (!shadow_regions) { return 2; }
+        for (uint32_t i = 0; i < hello.count; i++) {
+            shadow_regions[i] = (AppleGFXShadowRegion){ram[i].host, ram[i].wire.length, ram[i].wire.file_offset};
+        }
+        apple_gfx_legacy_shadow_set_ram(shadow_regions, hello.count, helper_shadow_lookup);
         void *image = dlopen(argv[2], RTLD_NOW | RTLD_LOCAL);
         if (!image) { fprintf(stderr, "PVG helper: %s\n", dlerror()); return 5; }
         if (!getenv("PVG_LEGACY_SHADOW")) setenv("PVG_LEGACY_SHADOW", "1", 1);
@@ -184,8 +263,14 @@ static int helper_main(int argc, char **argv)
         };
         desc.destroyTask = ^(PGTask_t *task) {
             if (!task) { return; }
+            pthread_mutex_lock(&helper_tasks_lock);
+            for (PGTask_t **link = &helper_tasks; *link; link = &(*link)->next) {
+                if (*link == task) { *link = task->next; break; }
+            }
+            pthread_mutex_unlock(&helper_tasks_lock);
             mach_vm_deallocate(mach_task_self(), task->address, task->length);
             pthread_mutex_destroy(&task->lock);
+            free(task->backing);
             free(task);
         };
         desc.mapMemory = ^bool(PGTask_t *task, uint32_t count, uint64_t off,
@@ -199,6 +284,7 @@ static int helper_main(int argc, char **argv)
             mach_vm_address_t target = task->address + off;
             kern_return_t kr = mach_vm_allocate(mach_task_self(), &target, len,
                                                VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+            if (task->backing) { memset(&task->backing[off / 4096], 0, len / 4096 * sizeof(*task->backing)); }
             pthread_mutex_unlock(&task->lock);
             return kr == KERN_SUCCESS;
         };
@@ -235,7 +321,9 @@ static int helper_main(int argc, char **argv)
         __block BOOL power_sleeping = NO;
         __block BOOL frame_busy = NO;
         __block BOOL frame_dirty = NO;
-        BOOL timing = getenv("PVG_OOP_TIMING") != NULL;
+        /* The app's launch plan strips PVG_*, so it can only set the VIM_ name. */
+        BOOL timing = getenv("PVG_OOP_TIMING") != NULL || getenv("VIM_PVG_TIMING") != NULL;
+        helper_timing = getenv("VIM_PVG_TIMING") != NULL;
         __block AppleGFXOOPTiming render_time = {}, ack_time = {};
         __block uint64_t frame_sent = 0;
         __block id<PGDisplay> display = nil;
@@ -458,6 +546,10 @@ static int helper_main(int argc, char **argv)
                     if (message.operation == APPLE_GFX_APP_ACK && !message.width && !message.height) {
                         dispatch_async(frames, ^{
                             if (!frame_busy || message.sequence != app_sequence) { _exit(49); }
+                            if (timing && frame_sent) {
+                                apple_gfx_oop_timing(&ack_time, "helper-frame-to-ack", frame_sent);
+                                frame_sent = 0;
+                            }
                             frame_busy = NO;
                             if (frame_dirty) { frame_dirty = NO; display_desc.newFrameEventHandler(); }
                         });
@@ -491,6 +583,14 @@ static int helper_main(int argc, char **argv)
             if (request.magic != APPLE_GFX_OOP_MAGIC || request.reserved ||
                 request.status || request.sequence <= last_sequence) { return 33; }
             last_sequence = request.sequence;
+            if (request.operation == APPLE_GFX_OOP_WRITE_POSTED) {
+                /* There is no reply to carry an error, so fail closed. QEMU only
+                 * posts 4-byte aligned writes inside the MMIO region. */
+                if ((request.offset & 3) || request.offset >= desc.mmioLength ||
+                    request.value > UINT32_MAX) { _exit(51); }
+                [device mmioWriteAtOffset:request.offset value:(uint32_t)request.value];
+                continue;
+            }
             if (request.operation == APPLE_GFX_OOP_FRAME_ACK) {
                 if (app_channel >= 0) { continue; }
                 dispatch_async(frames, ^{

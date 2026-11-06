@@ -42,6 +42,11 @@ static IMP apple_gfx_paging_native_blit;
     }
     return blit;
 }
+- (BOOL)respondsToSelector:(SEL)selector
+{
+    return [super respondsToSelector:selector] ||
+        (!ended && [[self forwardingTargetForSelector:selector] respondsToSelector:selector]);
+}
 - (void)performTransfer:(void (^)(id<MTLCommandBuffer>))transfer
 {
     if (ended || !transfer) {

@@ -8,6 +8,13 @@ Clones the app and machine with APFS under Build/bench/<tag>, so the real librar
 wrapper replaces the clone's QEMU so experiments can set environment variables and extra QEMU arguments
 that the app wouldn't pass. Writes Build/bench/<tag>.txt, and the guest's stderr to Build/bench/<tag>.stderr. The
 clone's window is titled "Clone of <machine>"; anything changed in it is lost.
+
+--program runs an x86 program as root. For a GPU workload use probes/gpu-bench.m (its header has the build line), which
+re-enters the console user's session itself, on any guest from Mavericks up:
+
+    scripts/guest-bench <app> <machine> gpu-on --program Build/bench/gpu-bench
+    scripts/guest-bench <app> <machine> gpu-off --program Build/bench/gpu-bench --env VIM_PVG_SLAB=0
+    scripts/lc-bench-compare Build/bench/gpu-off.txt Build/bench/gpu-on.txt
 """
 import argparse
 import json

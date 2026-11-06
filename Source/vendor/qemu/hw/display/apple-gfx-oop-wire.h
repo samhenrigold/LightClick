@@ -36,6 +36,7 @@ enum {
     APPLE_GFX_OOP_CURSOR_STATE = 7,
     APPLE_GFX_OOP_CURSOR_GLYPH = 8,
     APPLE_GFX_OOP_SET_MODE = 9,
+    APPLE_GFX_OOP_WRITE_POSTED = 10, /* A write with no reply; applied in stream order. */
 };
 /* Glyph event: offset packs width/height, value packs hotspot x/y.
  * Followed by width*height native little-endian ARGB32 pixels. */
