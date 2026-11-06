@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 static int logfd = -1;
+static pthread_t main_thread;
 static void note(const char *format, ...) {
     char line[1024];
     va_list arguments;
@@ -63,9 +64,13 @@ static const char *const wanted[] = {"_CGXWindowByID",
                                      "_CGXWindowArrayEnumeratorNext",
                                      "_WSWindowGetScreenRect",
                                      "_CGXGetShadowMarginForWindow",
-                                     "_CGXGetCurrentSessionWindowData"};
-static void *resolved[16];
+                                     "_CGXGetCurrentSessionWindowData",
+                                     "_CGXGLGetContext",
+                                     "_redraw_window",
+                                     "_gl_composite_layer"};
+static void *resolved[19];
 static void *(*session_data)(void);
+static void **(*server_gl)(void);
 struct RectResult {
     double x, y, width, height;
 };
@@ -187,7 +192,9 @@ static int resolve_symbols(void) {
                 // The file's __TEXT starts at 0, so a text symbol's value is its offset from the header. Text keeps
                 // its layout in the shared cache.
                 resolved[w] = (char *)loaded + symbols[i].n_value;
-                if (memcmp(resolved[w], (const char *)header + symbols[i].n_value, 16)) {
+                // Only up to its first RIP-relative load for this one: the shared cache moves its data.
+                size_t compared = !strcmp(name, "_CGXGLGetContext") ? 7 : 12;
+                if (memcmp(resolved[w], (const char *)header + symbols[i].n_value, compared)) {
                     note("%s isn't the same code on disk and in memory; refusing\n", name);
                     return 0;
                 }
@@ -219,6 +226,7 @@ static int resolve_symbols(void) {
     window_screen_rect = resolved[13];
     shadow_margin = resolved[14];
     session_data = resolved[15];
+    server_gl = resolved[16];
     note("symbols resolved: CGXWindowByID at %p\n", (void *)window_by_id);
     return 1;
 }
@@ -350,6 +358,131 @@ static void walk_windows(void) {
     table->tree_generation++;
 }
 
+static int tree_in_gl;
+static uint64_t marks, unmarked;
+
+// For a host that draws each window on its own GPU (PassthroughOpenGL/seamless-gpu-replay-host.c), which window each layer
+// of a composite belongs to. redraw_window builds a window's layers, all allocated with new[], and gl_composite_layer later
+// draws them, so a layer is known by its address. Before each one's draws goes that window's ID and bounds, as glPassThrough
+// tokens in WindowServer's own GL stream: a no-op in GL, and in order with its draws. Whole numbers below 2^24, which a
+// float holds exactly. Only with /var/tmp/seamless-ws-gl-tree present. Their entries are patched, as both are local symbols.
+#define LAYER_SLOTS 8192
+static struct {
+    const void *layer;
+    char *window;
+} layer_owner[LAYER_SLOTS];
+static char *building_window, *marked_window;
+static int layers_used;
+
+static void forget_layers(void) {
+    memset(layer_owner, 0, sizeof(layer_owner));
+    layers_used = 0;
+}
+void *_Znam(unsigned long);
+static void *hook_new_array(unsigned long size) {
+    void *memory = _Znam(size);
+    if (building_window && pthread_equal(pthread_self(), main_thread)) {
+        size_t slot = ((uintptr_t)memory >> 4) % LAYER_SLOTS;
+        for (int tries = 0; tries < 16; tries++, slot = (slot + 1) % LAYER_SLOTS)
+            if (!layer_owner[slot].layer) {
+                layer_owner[slot].layer = memory;
+                layer_owner[slot].window = building_window;
+                break;
+            }
+    }
+    return memory;
+}
+__attribute__((used)) void seamless_redraw_window(void *state, char *window) {
+    (void)state;
+    if (layers_used)
+        forget_layers();
+    marked_window = NULL;
+    building_window = window;
+}
+__attribute__((used)) void seamless_composite_layer(const void *layer) {
+    building_window = 0;
+    layers_used = 1;
+    char *owner = NULL;
+    size_t slot = ((uintptr_t)layer >> 4) % LAYER_SLOTS;
+    for (int tries = 0; tries < 16; tries++, slot = (slot + 1) % LAYER_SLOTS)
+        if (layer_owner[slot].layer == layer) {
+            owner = layer_owner[slot].window;
+            break;
+        }
+    owner ? marks++ : unmarked++;
+    // CoreGraphics calls GL through its own context record, as CGLMacro does: the renderer first, then the dispatch table,
+    // whose slots are the wire's opcodes. glDeleteTextures, slot 59, at +0x1e0 in _CGXGLDeleteTexture shows it.
+    void **gl = server_gl();
+    if (!gl || owner == marked_window)
+        return;
+    marked_window = owner;
+    float tokens[9] = {11184809.0f};
+    const uint8_t *state = owner ? *(const uint8_t **)(owner + 0xe0) : NULL;
+    if (state) {
+        struct RectResult rect = window_screen_rect(owner);
+        int side[4] = {0, 0, 0, 0};
+        uint32_t margin = 0;
+        if (window_has_shadow(owner)) {
+            shadow_margin(owner, &side[0], &side[1], &side[2], &side[3]);
+            for (int i = 0; i < 4; i++)
+                margin = (uint32_t)abs(side[i]) > margin ? (uint32_t)abs(side[i]) : margin;
+        }
+        int32_t level = *(const int32_t *)(state + 0x10);
+        tokens[1] = (float)*(const uint32_t *)state;
+        tokens[2] = level < 0 ? 0 : (float)(level > 100000 ? 100001 : level + 1);
+        tokens[3] = (float)(16384 + (int)rect.x);
+        tokens[4] = (float)(16384 + (int)rect.y);
+        tokens[5] = (float)(int)rect.width;
+        tokens[6] = (float)(int)rect.height;
+        tokens[7] = (float)margin;
+        tokens[8] = *(const float *)(owner + 0x100) * 16;
+    }
+    void (*pass_through)(void *, float) = (void (*)(void *, float))gl[1 + 190];
+    for (int i = 0; i < 9; i++)
+        pass_through(gl[0], tokens[i]);
+    static unsigned told;
+    if (told++ % 3000 == 0)
+        note("layers marked %llu, unknown %llu\n", marks, unmarked);
+}
+void *seamless_redraw_continue, *seamless_layer_continue;
+__asm__(".text\n"
+        "_seamless_redraw_entry:\n"
+        "  pushq %rdi\n  pushq %rsi\n  subq $8, %rsp\n  callq _seamless_redraw_window\n"
+        "  addq $8, %rsp\n  popq %rsi\n  popq %rdi\n  jmpq *_seamless_redraw_continue(%rip)\n"
+        "_seamless_layer_entry:\n"
+        "  pushq %rdi\n  pushq %rsi\n  subq $8, %rsp\n  callq _seamless_composite_layer\n"
+        "  addq $8, %rsp\n  popq %rsi\n  popq %rdi\n  jmpq *_seamless_layer_continue(%rip)\n");
+extern char seamless_redraw_entry[], seamless_layer_entry[];
+
+// Sends a function's entry to `entry`, and returns where to continue it. Both functions start with the same 20 bytes of
+// pushes and a stack adjustment, which can run anywhere. Refuses anything else.
+static void *patch_entry(uint8_t *function, const void *entry) {
+    static const uint8_t prologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
+                                       0x41, 0x54, 0x53, 0x48, 0x81, 0xec};
+    if (memcmp(function, prologue, sizeof(prologue))) {
+        note("refusing to patch %p: its entry isn't the expected one\n", (void *)function);
+        return NULL;
+    }
+    uint8_t *island = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (island == MAP_FAILED)
+        return NULL;
+    const uint8_t jump[] = {0xff, 0x25, 0, 0, 0, 0};
+    memcpy(island, function, 20);
+    memcpy(island + 20, jump, sizeof(jump));
+    void *back = function + 20;
+    memcpy(island + 26, &back, 8);
+    vm_address_t page = (vm_address_t)function & ~(vm_address_t)4095;
+    kern_return_t result = vm_protect(mach_task_self(), page, 8192, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (result) {
+        note("vm_protect failed: %d\n", result);
+        return NULL;
+    }
+    memcpy(function, jump, sizeof(jump));
+    memcpy(function + 6, &entry, 8);
+    vm_protect(mach_task_self(), page, 8192, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    return island;
+}
+
 // Copies the rows of each wanted window's backing that changed, for windows whose flush seed moved. Runs at most once
 // per 8 ms of WindowServer's main thread, between requests, where its structures are consistent.
 static void publish(void) {
@@ -432,7 +565,6 @@ static void publish(void) {
     table->ticks_spent += mach_absolute_time() - now;
 }
 
-static pthread_t main_thread;
 static time_t next_sample;
 static int ready, in_sample, reached;
 
@@ -494,6 +626,7 @@ __attribute__((used)) static struct {
 } interposers[] __attribute__((section("__DATA,__interpose"))) = {
     {(const void *)hook_msg, (const void *)mach_msg},
     {(const void *)hook_overwrite, (const void *)mach_msg_overwrite},
+    {(const void *)hook_new_array, (const void *)_Znam},
 };
 
 // Started before main, while still root: WindowServer drops privileges later, and this keeps the descriptor.
@@ -505,6 +638,13 @@ __attribute__((constructor)) static void start(void) {
     // Only WindowServer: launchd's environment can reach other programs on this clone.
     if (!strcmp(getprogname(), "WindowServer")) {
         ready = resolve_symbols();
+        tree_in_gl = !access("/var/tmp/seamless-ws-gl-tree", F_OK);
+        note("tree in GL: %d\n", tree_in_gl);
+        if (ready && tree_in_gl && build->full) {
+            seamless_redraw_continue = patch_entry(resolved[17], seamless_redraw_entry);
+            seamless_layer_continue = patch_entry(resolved[18], seamless_layer_entry);
+            note("patched: %p %p\n", seamless_redraw_continue, seamless_layer_continue);
+        }
         unlink(SWS_PATH);
         int fd = open(SWS_PATH, O_RDWR | O_CREAT, 0666);
         if (fd >= 0 && !fchmod(fd, 0666) && !ftruncate(fd, sizeof(struct SWSTable))) {

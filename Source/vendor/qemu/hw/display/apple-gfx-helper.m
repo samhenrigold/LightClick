@@ -19,6 +19,7 @@
 #include "apple-gfx-oop-timing.h"
 #include "apple-gfx-shadow-ram.h"
 void apple_gfx_legacy_shadow_install(void);
+void apple_gfx_seamless_frame(void);
 typedef struct {
     AppleGFXOOPRAMWire wire;
     uint8_t *host;
@@ -479,6 +480,7 @@ static int helper_main(int argc, char **argv)
                 if (!texture) { _exit(38); }
             }
             frame_busy = YES;
+            apple_gfx_seamless_frame();
             uint32_t width = frame_width, height = frame_height;
             uint32_t frame_power_epoch = power_epoch;
             size_t stride = ((size_t)width * 4 + 255) & ~(size_t)255;

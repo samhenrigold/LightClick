@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Talk to a clone booted with scripts/boot-clone, for the host-GPU seamless probes. Results are for reading by hand.
+
+    scripts/seamless-gpu prepare <machine> <copy>           An APFS copy, with its own identity and forwarded ports off.
+    scripts/seamless-gpu boot <app> <copy> <work> [K=V ...] boot-clone, with the agent's diagnostics channel on.
+    scripts/seamless-gpu desktop <work> [SECONDS]           Waits for the guest's desktop.
+    scripts/seamless-gpu run <work> <executable> [args...]  Runs a program in the guest as root.
+    scripts/seamless-gpu stage <work> <file>                Copies a file into the guest, and prints where.
+    scripts/seamless-gpu capture <work> <png>               The app's whole guest frame.
+    scripts/seamless-gpu stop <work>                        Stops what boot started, by the PIDs it printed.
+
+The window is titled "Clone of <copy's name>", and anything changed in it is lost. Only the copy is ever booted, and
+boot-clone clones that.
+"""
+import json
+import os
+from pathlib import Path
+import plistlib
+import signal
+import subprocess
+import sys
+import time
+import uuid
+
+root = Path(__file__).resolve().parents[1]
+
+
+def channel(work):
+    state = json.loads((Path(str(work)+'.state')).read_text())
+    return Path(state['channel']), state
+
+
+def request(work, command, timeout=300):
+    box, state = channel(work)
+    (box/'Result.json').unlink(missing_ok=True)
+    temporary = box/'Request.tmp'
+    temporary.write_text(json.dumps(command))
+    temporary.rename(box/'Request.json')
+    deadline = time.time()+timeout
+    while time.time() < deadline:
+        if (box/'Result.json').exists():
+            return json.loads((box/'Result.json').read_text())
+        time.sleep(0.5)
+    raise SystemExit(f'Timed out: {command}')
+
+
+def main():
+    verb, *rest = sys.argv[1:]
+    if verb == 'prepare':
+        machine, copy = rest
+        subprocess.run(['cp', '-c', '-R', machine, copy], check=True)
+        settings = str(Path(copy)/'Machine.plist')
+        for key, kind, value in (('SSHEnabled', '-bool', 'NO'), ('FileSharingEnabled', '-bool', 'NO'),
+                                 ('NetworkMode', '-string', 'shared'), ('Identifier', '-string', str(uuid.uuid4()).upper())):
+            subprocess.run(['plutil', '-replace', key, kind, value, settings], check=True)
+    elif verb == 'boot':
+        app, copy, work, *env = rest
+        identifier = plistlib.loads((Path(copy)/'Machine.plist').read_bytes())['Identifier'].upper()
+        diagnostics = Path(work+'.diagnostics')
+        subprocess.run(['rm', '-rf', str(diagnostics)], check=True)
+        diagnostics.mkdir(mode=0o700, parents=True)
+        environment = dict(os.environ, BOOT_CLONE_ALLOW_RUNNING='1', SDL_AUDIODRIVER='dummy',
+                           **dict(item.split('=', 1) for item in env))
+        output = subprocess.check_output([str(root/'scripts/boot-clone'), app, copy, work, '--guest-diagnostics-root',
+                                          str(diagnostics)], env=environment, text=True)
+        print(output, end='')
+        words = output.split()
+        Path(work+'.state').write_text(json.dumps({'channel': str(diagnostics/identifier), 'app': int(words[1]),
+                                                   'qemu': int(words[3])}))
+    elif verb == 'desktop':
+        work, *seconds = rest
+        deadline = time.time()+(int(seconds[0]) if seconds else 300)
+        while time.time() < deadline:
+            box, _ = channel(work)
+            if box.is_dir():
+                report = request(work, {'Action': 'status-probe'}, 60).get('Report') or {}
+                if report.get('DesktopRunning'):
+                    print('desktop')
+                    return
+            time.sleep(3)
+        raise SystemExit('no desktop')
+    elif verb == 'run':
+        work, executable, *arguments = rest
+        result = request(work, {'Executable': executable, 'Arguments': arguments}, 900)
+        sys.stdout.write(result.get('Stdout') or '')
+        problem = result.get('Stderr') or result.get('Error')
+        if problem:
+            sys.stderr.write(str(problem)+'\n')
+        sys.exit(result.get('ExitCode') or 0)
+    elif verb == 'stage':
+        work, file = rest
+        box, _ = channel(work)
+        (box/'Transfer.bin').write_bytes(Path(file).read_bytes())
+        staged = request(work, {'Action': 'stage-probe'}, 900)
+        if 'Error' in staged:
+            raise SystemExit(str(staged))
+        path = staged['Transfer']['Directory']+'/Transfer.bin'
+        request(work, {'Executable': '/bin/chmod', 'Arguments': ['0755', path]}, 120)
+        print(path)
+    elif verb == 'capture':
+        work, target = rest
+        box, _ = channel(work)
+        if not request(work, {'Action': 'capture'}, 180).get('Captured'):
+            raise SystemExit('no capture')
+        (box/'Frame.png').rename(target)
+    elif verb == 'stop':
+        work, = rest
+        _, state = channel(work)
+        for pid in (state['qemu'], state['app']):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        time.sleep(6)
+        for pid in (state['qemu'], state['app']):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    else:
+        raise SystemExit(__doc__)
+
+
+main()

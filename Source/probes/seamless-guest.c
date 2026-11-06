@@ -2007,6 +2007,31 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(command, "list"))
         return list_windows();
+    if (!strcmp(command, "hw-loop")) {
+        // A composite of one window by WindowServer, on the GPU, as fast as it'll go, with its pixels never read here.
+        if (geteuid() == 0 && !in_session)
+            return run_in_console_session(argc, argv, 1);
+        if (flag(argc, argv, "--open") && !open_app(app))
+            return 1;
+        sleep(5);
+        CGWindowID window = find_window(app);
+        int (*connection)(void) = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
+        CFArrayRef (*hw)(int, const CGWindowID *, int, uint32_t) =
+            guest_symbol("CGSHWCaptureWindowList", "SLSHWCaptureWindowList");
+        if (!window || !connection || !hw)
+            return 1;
+        double seconds = atof(option(argc, argv, "--seconds", "20")), started = now();
+        unsigned made = 0;
+        while (now() - started < seconds) {
+            CFArrayRef images = hw(connection(), &window, 1, 0x1);
+            if (images)
+                CFRelease(images);
+            made++;
+        }
+        printf("hw_loop %u composites, %.1f/s, %.1f ms each\n", made, made / (now() - started),
+               (now() - started) * 1000 / made);
+        return 0;
+    }
     if (!strcmp(command, "capture-bench")) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);

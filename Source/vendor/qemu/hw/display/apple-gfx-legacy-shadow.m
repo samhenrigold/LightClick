@@ -6,6 +6,7 @@
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <IOSurface/IOSurface.h>
 #include <os/lock.h>
 #include <stdint.h>
 #include <string.h>
@@ -75,9 +76,45 @@ static id capture_library_data(id self, SEL cmd, dispatch_data_t data, NSError *
     if (repaired) dispatch_release(repaired);
     return library;
 }
+/* Research, off unless VIM_SEAMLESS_PVG_DIR is set: what the guest renders to, as the host sees it. Each second, a line
+ * per render target in <dir>/passes.txt, and how many frames the display asked to show. */
+static const char *seamless_pvg_dir;
+static uint64_t seamless_frames;
+void apple_gfx_seamless_frame(void) { __atomic_fetch_add(&seamless_frames, 1, __ATOMIC_RELAXED); }
+static void seamless_note_pass(MTLRenderPassDescriptor *pass)
+{
+    static NSMutableDictionary *counts;
+    static uint64_t next, last_frames;
+    static FILE *file;
+    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    id<MTLTexture> t = pass.colorAttachments[0].texture;
+    if (!t) return;
+    os_unfair_lock_lock(&lock);
+    if (!counts) {
+        counts = [NSMutableDictionary new];
+        file = fopen([NSString stringWithFormat:@"%s/passes.txt", seamless_pvg_dir].UTF8String, "w");
+    }
+    NSString *key = [NSString stringWithFormat:@"%lux%lu fmt=%lu storage=%lu surface=%u load=%lu store=%lu label=%@ cls=%s",
+        (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, (unsigned long)t.storageMode,
+        t.iosurface ? IOSurfaceGetID(t.iosurface) : 0, (unsigned long)pass.colorAttachments[0].loadAction,
+        (unsigned long)pass.colorAttachments[0].storeAction, t.label, object_getClassName(t)];
+    counts[key] = @([counts[key] unsignedLongLongValue] + 1);
+    uint64_t now = apple_gfx_oop_now();
+    if (now >= next && file) {
+        uint64_t frames = __atomic_load_n(&seamless_frames, __ATOMIC_RELAXED);
+        fprintf(file, "-- %llu ms frames=%llu (+%llu)\n", now / 1000000, frames, frames - last_frames);
+        last_frames = frames;
+        for (NSString *name in counts) fprintf(file, "%s n=%llu\n", name.UTF8String, [counts[name] unsignedLongLongValue]);
+        fflush(file);
+        [counts removeAllObjects];
+        next = now + 1000000000ull;
+    }
+    os_unfair_lock_unlock(&lock);
+}
 static id preserving_render_encoder(id self, SEL cmd, MTLRenderPassDescriptor *pass)
 {
     MTLRenderPassDescriptor *adjusted = nil;
+    if (seamless_pvg_dir && guest_render_depth) seamless_note_pass(pass);
     if (guest_render_depth) {
         for (NSUInteger i = 0; i < 8; i++) {
             MTLRenderPassColorAttachmentDescriptor *a = pass.colorAttachments[i];
@@ -816,6 +853,7 @@ void apple_gfx_legacy_shadow_install(void)
 {
     Class task = NSClassFromString(@"PGLocalTask");
     Class shared = NSClassFromString(@"PGSharedBufferResource");
+    seamless_pvg_dir = getenv("VIM_SEAMLESS_PVG_DIR");
     if (!getenv("PVG_LEGACY_SHADOW")) return;
     shadow_timing = getenv("VIM_PVG_TIMING") != NULL;
     if (getenv("PVG_CAPTURE_LIBRARIES") || (PVGHostRepairLibrary && getenv("PVG_HOST_AIR_LLVM"))) {

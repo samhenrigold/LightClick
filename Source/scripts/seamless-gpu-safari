@@ -1,0 +1,49 @@
+#!/bin/zsh
+# One Safari measurement, in one boot, for PassthroughOpenGL/seamless-gpu-replay-host.c. Prints the rates over SECONDS.
+#
+#     scripts/seamless-gpu-safari <app> <copy with the hook> <results> replay|windowed [SECONDS]
+#
+# windowed boots with the same hook, reporting only how often the guest's display is published and presented. The test
+# window is at desktop level, behind every other window, and takes no clicks.
+set -eu
+root=${0:A:h:h}
+app=$1 copy=$2 results=$3 mode=$4 seconds=${5:-30}
+gpu=$root/scripts/seamless-gpu
+work=$results/work
+rm -rf "$results"
+mkdir -p "$results"
+env=(LC_HVDBT=1 LC_SEAMLESS_GPU_DIR=$results)
+viewer=
+if [[ $mode == replay ]]; then
+    service=gold.samhenri.seamless-gpu.$$
+    env+=(LC_SEAMLESS_GPU_REPLAY=1 LC_SEAMLESS_GPU_SERVICE=$service)
+    "$root/Build/seamless/seamless-gpu-viewer" $service $((seconds + 400)) "$results/window" >"$results/viewer.txt" 2>&1 &
+    viewer=$!
+fi
+"$gpu" boot "$app" "$copy" "$work" $env
+trap '"$gpu" stop "$work"' EXIT
+"$gpu" desktop "$work" 400
+tool=$("$gpu" stage "$work" "$root/Build/seamless/seamless-guest")
+"$gpu" run "$work" "$tool" open-app --app Safari || true
+sleep 20
+qemu=$(python3 -c "import json;print(json.load(open('$work.state'))['qemu'])")
+cpu() { ps -o time= -p "$1" | awk -F'[:.]' '{print $1*60+$2+$3/100}' }
+guest() { "$gpu" run "$work" /bin/ps -axco time,command 2>/dev/null | awk '$2=="WindowServer"||$2=="com.apple.WebKit.WebContent"||$2=="Safari"{print $2,$1}' | tr '\n' ' ' }
+tail -1 "$results/rates.txt" >"$results/rates-begin.txt"
+q0=$(cpu $qemu); g0=$(guest); v0=0; [[ -z $viewer ]] || v0=$(cpu $viewer)
+t0=$(date +%s)
+sleep $seconds
+t1=$(date +%s)
+q1=$(cpu $qemu); g1=$(guest); v1=0; [[ -z $viewer ]] || v1=$(cpu $viewer)
+tail -1 "$results/rates.txt" >"$results/rates-end.txt"
+print "seconds $((t1 - t0)) qemu_cpu_percent $(( (q1 - q0) * 100 / (t1 - t0) )) viewer_cpu_percent $(( (v1 - v0) * 100 / (t1 - t0) ))"
+print "guest before: $g0"
+print "guest after:  $g1"
+print "rates begin: $(cat "$results/rates-begin.txt")"
+print "rates end:   $(cat "$results/rates-end.txt")"
+"$gpu" capture "$work" "$results/frame.png" || true
+if [[ -n $viewer ]]; then
+    kill $viewer
+    wait $viewer || true
+    tail -12 "$results/viewer.txt"
+fi
