@@ -1400,6 +1400,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.task.standardError = self.log;
     [self logNote:@"Memory ordering: normal runtime barriers"];
     [self logNote:@"%@ runtime: %@", root.length ? @"Development override" : @"Bundled", qemu];
+    if (options.researchCPUModel)
+        [self logNote:@"Research CPU comparison: %@", options.researchCPUModel];
+    if (options.systemDiskInterface)
+        [self logNote:@"Development system disk interface: %@", options.systemDiskInterface];
     self.task.terminationHandler = ^(NSTask *task) {
       dispatch_async(dispatch_get_main_queue(), ^{
         VIMSession *session = weakSelf;
