@@ -729,42 +729,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       [session refreshGuestStatus];
       completion(error);
     };
-    [session.guestAgent connectWithCompletion:^(NSError *error) {
-      if (error) {
-          finish(error);
-          return;
-      }
-      [session.guestAgent
-          runExecutable:@"/usr/sbin/systemsetup"
-              arguments:@[ @"-setremotelogin", @"on" ]
-                timeout:30
-             completion:^(NSDictionary *result, NSError *failure) {
-               if (failure || ![result[@"exitcode"] isEqual:@0]) {
-                   finish(failure
-                              ?: VIMSessionError(@"macOS could not enable Remote Login automatically. In the virtual "
-                                                 @"Mac, open System Preferences → Sharing and select Remote Login."));
-                   return;
-               }
-               // systemsetup can print an authorization failure yet exit zero.
-               // Confirm the actual setting rather than trusting its exit code.
-               [session.guestAgent
-                   runExecutable:@"/usr/sbin/systemsetup"
-                       arguments:@[ @"-getremotelogin" ]
-                         timeout:15
-                      completion:^(NSDictionary *check, NSError *checkError) {
-                        NSString *text = [[NSString alloc] initWithData:check[@"stdout"] ?: NSData.data
-                                                               encoding:NSUTF8StringEncoding];
-                        BOOL enabled = [check[@"exitcode"] isEqual:@0] && text.length &&
-                                       [text rangeOfString:@"Remote Login: On"].location != NSNotFound;
-                        finish(checkError
-                                   ?: (!enabled
-                                           ? VIMSessionError(
-                                                 @"Remote Login is still off. Enable it in the virtual Mac’s System "
-                                                 @"Preferences → Sharing; macOS may require your approval there.")
-                                           : nil));
-                      }];
-             }];
-    }];
+    [session.guestAgent enableRemoteLoginWithCompletion:finish];
 }
 + (NSString *)statusForMachine:(VIMMachine *)machine {
     VIMSession *session = sessions[SessionKey(machine)];
@@ -2806,44 +2771,14 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (void)retireOpenGLSetupDiscWithReport:(NSDictionary *)report {
     if (!self.openGLSetupMediaAttached)
         return;
-    // Only the dedicated configuration-media slot belongs to this flow.
-    // The user-controlled CD/DVD drive (including an arbitrary repair disc)
-    // is never force-ejected or changed merely because setup has completed.
     NSURL *receipt = [self.machine.URL URLByAppendingPathComponent:@"State/LegacySetupMedia.plist"];
-    NSDictionary *owner = [NSDictionary dictionaryWithContentsOfURL:receipt];
-    if (![owner[@"MachineIdentifier"] isEqual:self.machine.configuration[@"Identifier"]] ||
-        ![owner[@"VolumeUUID"] isEqual:report[@"VolumeUUID"]] || ![report[@"PixelChecksPassed"] isEqual:@YES])
-        return;
-    // XML plist output is native to every supported period guest; Snow's
-    // plutil predates JSON conversion. Parse on the host without weakening
-    // the owned-media identity and successful-graphics checks below.
-    [self.guestAgent
-        runExecutable:@"/usr/bin/plutil"
-            arguments:@[ @"-convert", @"xml1", @"-o", @"-", @"/Volumes/VIM Setup/VirtualIntelMac.plist" ]
-              timeout:0
-           completion:^(NSDictionary *result, NSError *error) {
-             id policy = [NSPropertyListSerialization propertyListWithData:result[@"stdout"] ?: NSData.data
-                                                                   options:NSPropertyListImmutable
-                                                                    format:NULL
-                                                                     error:nil];
-             if (error || ![result[@"exitcode"] isEqual:@0] || ![policy isKindOfClass:NSDictionary.class] ||
-                 ![policy[@"MachineIdentifier"] isEqual:owner[@"MachineIdentifier"]] ||
-                 ![policy[@"VolumeUUID"] isEqual:owner[@"VolumeUUID"]])
-                 return;
-             [self.guestAgent runExecutable:@"/usr/sbin/diskutil"
-                                  arguments:@[ @"eject", @"/Volumes/VIM Setup" ]
-                                    timeout:0
-                                 completion:^(NSDictionary *ejected, NSError *failure) {
-                                   if (failure || ![ejected[@"exitcode"] isEqual:@0])
-                                       return; // Never force a mounted image.
-                                   [self.control execute:@"eject"
-                                               arguments:@{@"id" : @"opengl-setup-device"}
-                                              completion:^(id ignored, NSError *unused) {
-                                                if (!unused)
-                                                    self.openGLSetupMediaAttached = NO;
-                                              }];
-                                 }];
-           }];
+    [self.guestAgent retireSetupDiscOwnedBy:[NSDictionary dictionaryWithContentsOfURL:receipt]
+                          machineIdentifier:self.machine.configuration[@"Identifier"]
+                                     report:report
+                                    control:self.control
+                                    ejected:^{
+                                      self.openGLSetupMediaAttached = NO;
+                                    }];
 }
 - (BOOL)prepareMavericksSMBForBoot:(NSString *)boot {
     if (![self.machine.guest isEqual:@"mavericks"] || [self.mavericksSMBCheckedBoot isEqual:boot] ||
@@ -2857,49 +2792,18 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.state.guestPending = YES;
     VIMGuestAgent *agent = self.guestAgent;
     __weak VIMSession *weakSelf = self;
-    void (^finished)(NSString *) = ^(NSString *failure) {
-      VIMSession *session = weakSelf;
-      if (session.guestAgent != agent || !session.task.running)
-          return;
-      session.state.guestPending = NO;
-      if (failure)
-          [session logNote:@"Mavericks File Sharing compatibility could not be applied: %@", failure];
-      [session refreshGuestStatus];
-    };
-    [agent stageFiles:@{@"mavericks-smb-compat" : tool, @"codesign_allocate" : allocator}
-             progress:nil
-           completion:^(NSDictionary *receipt, NSError *issue) {
-             if (issue || !receipt) {
-                 finished(issue.localizedDescription ?: @"staging returned nothing");
-                 return;
-             }
-             NSString *program = [receipt[@"Directory"] stringByAppendingPathComponent:@"mavericks-smb-compat"];
-             NSString *allocatorProgram = [receipt[@"Directory"] stringByAppendingPathComponent:@"codesign_allocate"];
-             [agent runExecutable:@"/bin/chmod"
-                        arguments:@[ @"0700", program, allocatorProgram ]
-                          timeout:0
-                       completion:^(NSDictionary *mode, NSError *failure) {
-                         if (failure || ![mode[@"exitcode"] isEqual:@0]) {
-                             finished(failure.localizedDescription ?: @"chmod failed");
-                             return;
-                         }
-                         [agent runExecutable:program
-                                    arguments:@[ allocatorProgram ]
-                                      timeout:0
-                                   completion:^(NSDictionary *reply, NSError *failure) {
-                                     if (!failure && [reply[@"exitcode"] isEqual:@0]) {
-                                         finished(nil);
-                                         return;
-                                     }
-                                     NSString *detail = [[NSString alloc] initWithData:reply[@"stderr"] ?: NSData.data
-                                                                              encoding:NSUTF8StringEncoding];
-                                     finished(failure.localizedDescription
-                                                  ?: [NSString stringWithFormat:@"exit %@, signal %@: %@",
-                                                                                reply[@"exitcode"], reply[@"signal"],
-                                                                                detail]);
-                                   }];
-                       }];
-           }];
+    [agent applySMBCompatibilityTool:tool
+                           allocator:allocator
+                          completion:^(NSString *failure) {
+                            VIMSession *session = weakSelf;
+                            if (session.guestAgent != agent || !session.task.running)
+                                return;
+                            session.state.guestPending = NO;
+                            if (failure)
+                                [session
+                                    logNote:@"Mavericks File Sharing compatibility could not be applied: %@", failure];
+                            [session refreshGuestStatus];
+                          }];
     return YES;
 }
 - (void)finishGuestStatus:(NSDictionary *)report error:(NSError *)error {
@@ -3257,10 +3161,16 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                           session.completionGuestReport = report;
                           // The owned backend remains open until shutdown/cleanup,
                           // but its installer volumes need not stay on the desktop.
-                          [session ejectInstallerVolumes:@[
+                          __weak VIMSession *weakCurrent = session;
+                          [session.guestAgent ejectEmulatedVolumes:@[
                               @"/Volumes/macOS Base System", @"/Volumes/Install macOS Mojave",
                               @"/Volumes/Install macOS Catalina", @"/Volumes/Install macOS Big Sur"
-                          ]];
+                          ]
+                                                             while:^BOOL {
+                                                               VIMSession *current = weakCurrent;
+                                                               return current.task.running &&
+                                                                      current.completionGuestReport;
+                                                             }];
                       }
                       NSString *message = failure.localizedDescription
                                               ?: [VIMMachineModel reconciliationMessageForResult:result
@@ -3665,41 +3575,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     // Toolbar menus can be opened without AppKit requesting menuNeedsUpdate.
     // Enumerate metadata at opening, just like the menu-bar Devices submenu.
     [self menuNeedsUpdate:menu];
-}
-- (void)ejectInstallerVolumes:(NSArray<NSString *> *)volumes {
-    if (!volumes.count || !self.task.running || !self.completionGuestReport)
-        return;
-    NSString *volume = volumes.firstObject;
-    __weak VIMSession *weakSelf = self;
-    // Resolve and check the mounted installer before ejecting. A physical USB
-    // volume with the same name must never be mistaken for our QEMU media.
-    [self.guestAgent runExecutable:@"/usr/sbin/diskutil"
-                         arguments:@[ @"info", @"-plist", volume ]
-                           timeout:15
-                        completion:^(NSDictionary *result, NSError *error) {
-                          NSDictionary *info = (!error && [result[@"exitcode"] isEqual:@0])
-                                                   ? [NSPropertyListSerialization propertyListWithData:result[@"stdout"]
-                                                                                               options:0
-                                                                                                format:NULL
-                                                                                                 error:nil]
-                                                   : nil;
-                          NSArray *remaining = [volumes subarrayWithRange:NSMakeRange(1, volumes.count - 1)];
-                          NSString *media = info[@"MediaName"];
-                          BOOL installer = [info[@"MountPoint"] isEqual:volume] &&
-                                           [media isKindOfClass:NSString.class] && [media hasPrefix:@"QEMU "];
-                          if (!installer) {
-                              [weakSelf ejectInstallerVolumes:remaining];
-                              return;
-                          }
-                          [weakSelf.guestAgent runExecutable:@"/usr/sbin/diskutil"
-                                                   arguments:@[ @"eject", volume ]
-                                                     timeout:30
-                                                  completion:^(NSDictionary *ignored, NSError *issue) {
-                                                    // Never force/retry an uncertain guest eject; stopped-VM cleanup
-                                                    // remains authoritative for releasing/deleting the owned ISO.
-                                                    [weakSelf ejectInstallerVolumes:remaining];
-                                                  }];
-                        }];
 }
 - (NSMenu *)deviceMenuForKind:(NSString *)kind {
     VIMLiveDeviceMenu *menu = [[VIMLiveDeviceMenu alloc] initWithTitle:[kind isEqual:@"USB"] ? VIMUSBMenuTitle : kind];
@@ -4379,37 +4254,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       [self refreshGuestStatus];
       completion(error);
     };
-    [self.guestAgent connectWithCompletion:^(NSError *error) {
-      if (error)
-          finish(error);
-      else
-          [self runScreenSharingSteps:steps enabled:enabled finish:finish];
-    }];
-}
-- (void)runScreenSharingSteps:(NSArray<NSArray<NSString *> *> *)steps
-                      enabled:(BOOL)enabled
-                       finish:(void (^)(NSError *))finish {
-    NSArray<NSString *> *step = steps.firstObject;
-    [self.guestAgent
-        runExecutable:step.firstObject
-            arguments:[step subarrayWithRange:NSMakeRange(1, step.count - 1)]
-              timeout:30
-           completion:^(NSDictionary *result, NSError *failure) {
-             if (failure) {
-                 finish(failure);
-             } else if (steps.count > 1) {
-                 [self runScreenSharingSteps:[steps subarrayWithRange:NSMakeRange(1, steps.count - 1)]
-                                     enabled:enabled
-                                      finish:finish];
-             } else {
-                 finish([result[@"exitcode"] isEqual:@0] == enabled
-                            ? nil
-                            : VIMSessionError(enabled ? @"Screen Sharing is still off. Turn it on in the virtual Mac’s "
-                                                        @"System Preferences → Sharing."
-                                                      : @"Screen Sharing is still on. Turn it off in the virtual "
-                                                        @"Mac’s System Preferences → Sharing."));
-             }
-           }];
+    [self.guestAgent applyScreenSharingSteps:steps enabling:enabled completion:finish];
 }
 - (void)toggleScreenSharing:(id)sender {
     NSDictionary *settings = self.machine.editableConfiguration;
