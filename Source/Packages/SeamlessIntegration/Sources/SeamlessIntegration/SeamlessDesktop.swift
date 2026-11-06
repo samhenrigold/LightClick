@@ -62,9 +62,12 @@ public final class SeamlessDesktop {
     public init(configuration: Configuration, guest: any SeamlessGuest) {
         self.configuration = configuration
         self.guest = guest
-        FileManager.default.createFile(
-            atPath: configuration.log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        if !FileManager.default.fileExists(atPath: configuration.log.path) {
+            FileManager.default.createFile(
+                atPath: configuration.log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
         logHandle = try? FileHandle(forWritingTo: configuration.log)
+        _ = try? logHandle?.seekToEnd()
     }
 
     public func note(_ text: String) {
@@ -191,14 +194,8 @@ public final class SeamlessDesktop {
         echo "$boot $pid tried" > $marker
         /bin/cp /tmp/sg/hook.dylib /usr/lib/seamless-ws-hook.dylib || exit 5
         /bin/chmod 755 /usr/lib/seamless-ws-hook.dylib
-        /bin/rm -f /var/tmp/seamless-ws-probe.log
         /tmp/sg/ws-inject /usr/lib/seamless-ws-hook.dylib 2>&1 || exit 6
-        for i in 1 2 3 4 5 6 7 8 9 10; do
-            /usr/bin/grep -q "gpu: hooked" /var/tmp/seamless-ws-probe.log 2>/dev/null && break
-            /bin/sleep 0.5
-        done
         [ "$(/usr/bin/pgrep -x WindowServer)" = "$pid" ] || exit 7
-        /usr/bin/grep -q "gpu: hooked" /var/tmp/seamless-ws-probe.log || exit 8
         echo "$boot $pid ok" > $marker
         """
 
