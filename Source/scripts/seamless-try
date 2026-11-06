@@ -8,6 +8,8 @@
 #     scripts/seamless-try input-live <app> <machine> [SECONDS]  The same with your own trackpad, in a host window.
 #     scripts/seamless-try tree <app> <machine> [SECONDS]      Every window of a demo app as its own host window: shadow,
 #                                                              alpha, popover, panel, menu and sheet.
+#     scripts/seamless-try proxy <app> <machine> [SECONDS]     TextEdit as a host app: Dock tile, windows, menu, input, VM hidden.
+#     scripts/seamless-try safari <app> <machine> [SECONDS]    A real browser, with an animated page, through the hook.
 #     scripts/seamless-try hook <app> <machine> [SECONDS]      The same tree, by capture and then through a hook loaded
 #                                                              into a 10.9 clone's WindowServer, to compare them.
 #
@@ -19,6 +21,7 @@ app=${2:?usage: seamless-try stream|display|tree|hook|input|input-live <app> <ma
 machine=${3:?usage: seamless-try stream|display|tree|hook|input|input-live <app> <machine> [arguments]}
 shift 3
 "$source_root/scripts/build-seamless-probes" "$source_root/Build/seamless" 2>/dev/null
+[[ $mode != proxy ]] || "$source_root/scripts/build-seamless-integration" "$source_root/Build/seamless" 2>/dev/null
 driver_arguments=(--driver-arg "$mode")
 for argument in "$@"; do driver_arguments+=(--driver-arg "$argument"); done
 exec "$source_root/scripts/guest-bench" "$app" "$machine" "seamless-$mode" \

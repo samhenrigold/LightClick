@@ -1,4 +1,5 @@
 import AppKit
+import SeamlessInputKit
 import SeamlessIntegration
 @preconcurrency import UserNotifications
 
@@ -104,6 +105,15 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         case .reportMenuBarState: reportMenuBarState()
         case .showPlaceholderWindow(let id, let title, let x, let y, let width, let height):
             showWindow(id: id, title: title, frame: NSRect(x: x, y: y, width: width, height: height))
+        case .showSurface(
+            let id, let contextID, let x, let y, let width, let height, let margin, let level, let alpha, let order,
+            let title, let offsetX, let offsetY):
+            showSurface(
+                id: id, contextID: contextID, frame: NSRect(x: x, y: y, width: width, height: height), margin: margin,
+                level: level, alpha: alpha, order: order, title: title, offset: NSPoint(x: offsetX, y: offsetY))
+        case .removeSurface(let id):
+            surfaces.removeValue(forKey: id)?.window.close()
+        case .testInput: testInput()
         }
     }
 
@@ -147,6 +157,113 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                 menuBarVisible: NSMenu.menuBarVisible(), safeTop: Double(screen.safeAreaInsets.top),
                 notchLeft: Double(screen.auxiliaryTopLeftArea?.maxX ?? 0),
                 notchRight: Double(screen.auxiliaryTopRightArea?.minX ?? 0), screenWidth: Double(screen.frame.width)))
+    }
+
+    // MARK: Surfaces
+
+    /// A borderless window can't normally take keys, and a guest window's frame is in its pixels.
+    private final class SurfaceWindow: NSWindow {
+        override var canBecomeKey: Bool { true }
+        override var canBecomeMain: Bool { true }
+    }
+
+    private struct Surface {
+        var window: NSWindow
+        var host: CALayer
+        var input: NSView
+        var order: Int
+    }
+
+    private var surfaces: [Int: Surface] = [:]
+
+    private func showSurface(
+        id: Int, contextID: UInt32, frame: NSRect, margin: Double, level: Int, alpha: Double, order: Int, title: String,
+        offset: NSPoint
+    ) {
+        let surface = surfaces[id] ?? makeSurface(frame: frame)
+        surface.host.setValue(contextID, forKey: "contextId")
+        let window = surface.window
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if window.frame != frame { window.setFrame(frame, display: false) }
+        surface.host.frame = CGRect(origin: .zero, size: frame.size)
+        CATransaction.commit()
+        window.level = NSWindow.Level(rawValue: level)
+        window.alphaValue = alpha
+        window.title = title
+        SeamlessInputViewSetGuestOffset(surface.input, offset)
+        setEventShape(of: window, margin: margin, size: frame.size)
+        var updated = surface
+        updated.order = order
+        surfaces[id] = updated
+        let frontToBack = surfaces.values.sorted { $0.order < $1.order }
+        for other in frontToBack.reversed() { other.window.orderFront(nil) }
+        if NSApp.keyWindow == nil, let first = frontToBack.first(where: { $0.window.level == .normal }) {
+            first.window.makeKey()
+            first.window.makeFirstResponder(first.input)
+        }
+        NSApp.activate()
+    }
+
+    /// Real NSEvents through the real input view, from the window's middle. It doesn't exercise WindowServer's delivery,
+    /// but it needs no permission and doesn't touch the host's pointer.
+    private func testInput() {
+        guard let surface = surfaces.values.min(by: { $0.order < $1.order }) else { return }
+        let window = surface.window
+        let place = NSPoint(x: window.frame.width / 2, y: window.frame.height / 2)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard
+                let event = NSEvent.mouseEvent(
+                    with: type, location: place, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
+            else { continue }
+            if type == .leftMouseDown { surface.input.mouseDown(with: event) } else { surface.input.mouseUp(with: event) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            for type in [NSEvent.EventType.keyDown, .keyUp] {
+                guard
+                    let event = NSEvent.keyEvent(
+                        with: type, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                        context: nil, characters: "b", charactersIgnoringModifiers: "b", isARepeat: false, keyCode: 11)
+                else { continue }
+                if type == .keyDown { surface.input.keyDown(with: event) } else { surface.input.keyUp(with: event) }
+            }
+        }
+    }
+
+    private func makeSurface(frame: NSRect) -> Surface {
+        let window = SurfaceWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.isReleasedWhenClosed = false
+        let input = SeamlessMakeInputView(NSRect(origin: .zero, size: frame.size)) { [weak self] bytes in
+            MainActor.assumeIsolated { self?.send(.input(bytes: bytes)) }
+        }
+        input.autoresizingMask = [.width, .height]
+        input.wantsLayer = true
+        window.contentView = input
+        let hostClass = NSClassFromString("CALayerHost") as? CALayer.Type ?? CALayer.self
+        let host = hostClass.init()
+        host.anchorPoint = .zero
+        input.layer?.addSublayer(host)
+        return Surface(window: window, host: host, input: input, order: 0)
+    }
+
+    /// The window's pixels include its shadow, which mustn't take clicks. Only the guest window itself does.
+    private func setEventShape(of window: NSWindow, margin: Double, size: NSSize) {
+        typealias NewRegion = @convention(c) (UnsafePointer<CGRect>, UnsafeMutablePointer<UnsafeMutableRawPointer?>) -> Int32
+        typealias SetShape = @convention(c) (Int32, UInt32, UnsafeMutableRawPointer?) -> Int32
+        typealias Connection = @convention(c) () -> Int32
+        guard let sky = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
+            let newRegion = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGSNewRegionWithRect"),
+            let setShape = dlsym(sky, "SLSSetWindowEventShape"), let connection = dlsym(sky, "SLSMainConnectionID")
+        else { return }
+        var content = CGRect(x: margin, y: margin, width: size.width - 2 * margin, height: size.height - 2 * margin)
+        var region: UnsafeMutableRawPointer?
+        guard unsafeBitCast(newRegion, to: NewRegion.self)(&content, &region) == 0 else { return }
+        _ = unsafeBitCast(setShape, to: SetShape.self)(
+            unsafeBitCast(connection, to: Connection.self)(), UInt32(window.windowNumber), region)
     }
 
     private func showWindow(id: Int, title: String, frame: NSRect) {
@@ -210,6 +327,12 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     @objc private func menuChosen(_ sender: NSMenuItem) {
         guard let path = sender.representedObject as? [String] else { return }
         // A key equivalent goes to the guest as the key itself, so the guest's responder chain decides what it means.
+        if let event = NSApp.currentEvent, event.type == .keyDown,
+            let input = surfaces.values.first(where: { $0.window === NSApp.keyWindow })?.input
+        {
+            SeamlessInputViewForwardKeyEquivalent(input, event)
+            return
+        }
         send(.menuChosen(path: path, viaKey: NSApp.currentEvent?.type == .keyDown))
     }
 }

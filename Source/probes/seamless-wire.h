@@ -15,6 +15,7 @@
 #define SWM_HEADER_SIZE 12u
 #define SWM_MAX_DIMENSION 8192u // The largest frame the display path carries.
 #define SWM_MAX_TEXT 1024u
+#define SWM_MAX_MENU (16u * 1024 * 1024)
 #define SWM_MAX_MARGIN 1024u // Points of frame around a window, for its shadow.
 
 enum SWMType {
@@ -31,6 +32,9 @@ enum SWMType {
     SWM_GESTURE = 32,
     SWM_MODIFIERS = 33,
     SWM_TEXT = 34,
+    // App integration. See seamless-integration.md.
+    SWM_MENU = 48, // Guest to host: the app's menu as GuestMenuItem JSON.
+    SWM_MENU_PRESS = 49, // Host to guest: a menu path, items joined by '/'.
 };
 enum SWMPointerKind { SWM_MOVE = 0, SWM_DOWN = 1, SWM_UP = 2, SWM_DRAG = 3 };
 
@@ -135,6 +139,10 @@ struct SWMMessage {
         struct SWMFrame frame;
         struct SWMPointer pointer;
         struct SWMKey key;
+        struct {
+            const uint8_t *bytes;
+            uint32_t length;
+        } data; // SWM_MENU, SWM_MENU_PRESS
     } u;
 };
 
@@ -295,6 +303,17 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
         return SWM_NEED_MORE;
     uint16_t type = swm_r16(data + 4);
     uint32_t length = swm_r32(data + 8);
+    if (type == SWM_MENU || type == SWM_MENU_PRESS) {
+        if (swm_r16(data + 6) || !length || length > SWM_MAX_MENU)
+            return SWM_BAD;
+        *used = SWM_HEADER_SIZE + (size_t)length;
+        if (avail < *used)
+            return SWM_NEED_MORE;
+        m->type = type;
+        m->u.data.bytes = data + SWM_HEADER_SIZE;
+        m->u.data.length = length;
+        return SWM_OK;
+    }
     uint32_t fixed = 0;
     switch (type) {
         case SWM_HELLO:
