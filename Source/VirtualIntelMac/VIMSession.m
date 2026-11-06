@@ -331,11 +331,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property(nonatomic) BOOL retinaEnabled;
 @property(nonatomic) NSString *displayMode;
 @property NSString *displayToolDirectory;
-@property NSString *insertedMediaPath;
-@property NSString *insertedMediaFormat;
-@property BOOL mediaChangePending;
-@property NSMutableDictionary<NSNumber *, NSDictionary *> *additionalMedia;
-@property NSMutableSet<NSNumber *> *imageDevices;
+@property VIMImageDrives *imageDrives;
 @end
 @implementation VIMSession
 + (void)initialize {
@@ -1206,9 +1202,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       if ([kind isEqual:@"DEVICE_DELETED"])
           [session.usbClient deviceWasDeleted:event[@"data"][@"device"] control:session.control];
       if ([kind isEqual:@"DEVICE_DELETED"])
-          for (NSUInteger slot = 1; slot < VIMImageSlotCount; slot++)
-              if ([event[@"data"][@"device"] isEqual:[NSString stringWithFormat:@"image-usb-%lu", (unsigned long)slot]])
-                  [session.imageDevices removeObject:@(slot)];
+          [session.imageDrives deviceDeleted:event[@"data"][@"device"]];
       if ([kind isEqual:@"RESET"]) {
           session.guestIPAddresses = nil;
           session.displayToolDirectory = nil;
@@ -1229,24 +1223,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           session.displayView.displaySleeping = NO;
           session.statePanel.hidden = YES;
           session.status.stringValue = @"Running";
-      } else if ([kind isEqual:@"DEVICE_TRAY_MOVED"] && [event[@"data"][@"tray-open"] isEqual:@YES] &&
-                 !session.mediaChangePending) {
-          NSString *identifier = event[@"data"][@"id"] ?: event[@"data"][@"device"];
-          NSMutableDictionary *removed = [NSMutableDictionary new];
-          if ([identifier isEqual:VIMImageSlotDevice(0, session.insertedMediaFormat)]) {
-              if (session.insertedMediaPath.length)
-                  removed[@0] = session.insertedMediaPath;
-              session.insertedMediaPath = @"";
-              session.insertedMediaFormat = nil;
-          }
-          for (NSUInteger slot = 1; slot < VIMImageSlotCount; slot++)
-              if ([identifier isEqual:VIMImageSlotDevice(slot, @"raw")] ||
-                  [identifier isEqual:VIMImageSlotDevice(slot, @"dmg")]) {
-                  NSString *path = session.additionalMedia[@(slot)][@"Path"];
-                  if (path.length)
-                      removed[@(slot)] = path;
-                  [session.additionalMedia removeObjectForKey:@(slot)];
-              }
+      } else if ([kind isEqual:@"DEVICE_TRAY_MOVED"] && [event[@"data"][@"tray-open"] isEqual:@YES]) {
+          NSDictionary *removed =
+              [session.imageDrives trayOpenedOnDevice:event[@"data"][@"id"] ?: event[@"data"][@"device"]];
           NSDictionary *settings = VIMImageClearedSelections(session.machine.editableConfiguration, removed);
           NSError *failure = nil;
           if (settings.count && ![session.machine saveSettings:settings error:&failure])
@@ -1424,10 +1403,15 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             return NO;
         }
     }
-    self.insertedMediaPath = optical ?: @"";
-    self.insertedMediaFormat = opticalFormat;
-    self.additionalMedia = [NSMutableDictionary new];
-    self.imageDevices = [NSMutableSet new];
+    self.imageDrives = [[VIMImageDrives alloc] initWithControl:self.control
+                                                           bus:VIMImageUSBBus(self.machine.guest)
+                                                      basePort:(NSInteger)VIMImageUSBPort(self.machine.guest, 0)
+                                                     slotCount:VIMImageSlotCount];
+    self.imageDrives.describeFailure = ^NSError *(NSString *path, NSError *failure) {
+      return VIMFriendlyDiscImageError(path, failure);
+    };
+    if (optical.length)
+        [self.imageDrives startWithImage:optical format:opticalFormat slot:0];
     NSMutableArray<LaunchImage *> *additionalImages = [NSMutableArray new];
     for (NSUInteger slot = 1; slot < VIMImageSlotCount; slot++) {
         NSString *path = VIMImageSlotPath(config, slot);
@@ -1444,11 +1428,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                 return NO;
             }
         }
-        if (path.length)
-            self.additionalMedia[@(slot)] = @{@"Path" : path, @"Format" : format};
         if (path.length) {
+            [self.imageDrives startWithImage:path format:format slot:(NSInteger)slot];
             [additionalImages addObject:[[LaunchImage alloc] initWithSlot:(NSInteger)slot path:path format:format]];
-            [self.imageDevices addObject:@(slot)];
         }
     }
     NSString *setupMedia = nil;
@@ -2372,7 +2354,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                        finish(@{
                            @"Inserted" : @(path.length > 0),
                            @"Images" : images,
-                           @"MediaChangePending" : @(self.mediaChangePending)
+                           @"MediaChangePending" : @(self.imageDrives.changePending)
                        });
                      }];
         return;
@@ -4123,7 +4105,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return self.task.running && self.state.networkLinkConnected &&
                [self.guestIPAddresses containsObject:item.representedObject];
     if (item.action == @selector(ejectOpticalMedia:))
-        return !self.mediaChangePending &&
+        return !self.imageDrives.changePending &&
                [self.class imageRecordForMachine:self.machine
                                             slot:[item.representedObject unsignedIntegerValue]] != nil;
     if (item.action == @selector(sendMenuShortcut:))
@@ -5317,11 +5299,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return nil;
     VIMSession *session = sessions[SessionKey(machine)];
     if (session.task.running) {
-        NSDictionary *active =
-            slot ? session.additionalMedia[@(slot)]
-                 : (session.insertedMediaPath.length
-                        ? @{@"Path" : session.insertedMediaPath, @"Format" : session.insertedMediaFormat ?: @"raw"}
-                        : nil);
+        NSDictionary *active = [session.imageDrives mediaInSlot:(NSInteger)slot];
         if (active)
             return active;
         NSString *saved = VIMImageSlotPath(machine.editableConfiguration, slot);
@@ -5358,7 +5336,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
              if (!error)
                  return;
              VIMSession *session = sessions[SessionKey(machine)];
-             if (!session.task.running || session.mediaChangePending) {
+             if (!session.task.running || session.imageDrives.changePending) {
                  VIMPresentError(error, window);
                  return;
              }
@@ -5421,7 +5399,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           save(nil);
           return;
       }
-      [session changeRemovableMedia:path format:format slot:slot completion:save];
+      [session.imageDrives changeImage:path format:format slot:(NSInteger)slot completion:save];
     };
     if (!path.length) {
         apply(nil);
@@ -5439,212 +5417,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     }
     VIMCheckOpticalImage(path, format, [tool stringByAppendingPathComponent:@"qemu-img"], apply);
-}
-- (void)ensureImageDevice:(NSUInteger)slot completion:(void (^)(NSError *))completion {
-    if (!slot || [self.imageDevices containsObject:@(slot)]) {
-        completion(nil);
-        return;
-    }
-    NSString *transport = [NSString stringWithFormat:@"image-usb-%lu", (unsigned long)slot];
-    NSString *backend = [NSString stringWithFormat:@"image-backend-%lu", (unsigned long)slot];
-    // QMP blockdev-add creates a media node, not an empty BlockBackend.
-    // QEMU's fixed native drive_add command creates that removable backend;
-    // no shell, user-supplied monitor text or filename is passed through HMP.
-    NSString *add = [NSString stringWithFormat:@"drive_add 0 id=%@,if=none,media=disk,readonly=on", backend];
-    [self.control
-           execute:@"human-monitor-command"
-         arguments:@{@"command-line" : add}
-        completion:^(id result, NSError *error) {
-          if (!error && (![result isKindOfClass:NSString.class] ||
-                         ![[result stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
-                             isEqual:@"OK"]))
-              error = VIMSessionError(@"The virtual image drive could not be created.");
-          if (error) {
-              completion(error);
-              return;
-          }
-          __block BOOL transportCreated = NO;
-          void (^finish)(NSError *) = ^(NSError *failure) {
-            if (!failure) {
-                [self.imageDevices addObject:@(slot)];
-                completion(nil);
-                return;
-            }
-            void (^releaseBackend)(void) = ^{
-              [self.control execute:@"human-monitor-command"
-                          arguments:@{@"command-line" : [@"drive_del " stringByAppendingString:backend]}
-                         completion:^(id result, NSError *ignored) {
-                           completion(failure);
-                         }];
-            };
-            if (transportCreated)
-                [self.control execute:@"device_del"
-                            arguments:@{@"id" : transport}
-                           completion:^(id result, NSError *ignored) {
-                             releaseBackend();
-                           }];
-            else
-                releaseBackend();
-          };
-          __block void (^claimPort)(NSUInteger);
-          claimPort = ^(NSUInteger port) {
-            [self.control execute:@"device_add"
-                arguments:@{
-                    @"driver" : @"usb-bot",
-                    @"id" : transport,
-                    @"bus" : VIMImageUSBBus(self.machine.guest),
-                    @"port" : @(port).stringValue
-                }
-                completion:^(id result, NSError *failure) {
-                  // Explicit root ports avoid QEMU silently adding its USB1 hub on
-                  // the last free port. Only retry actual occupied-port errors.
-                  if (failure && port < VIMImageUSBPort(self.machine.guest, VIMImageSlotCount - 1) &&
-                      [failure.localizedDescription containsString:@"not found (in use?)"]) {
-                      claimPort(port + 1);
-                      return;
-                  }
-                  claimPort = nil;
-                  if (failure) {
-                      finish(failure);
-                      return;
-                  }
-                  transportCreated = YES;
-                  [self.control execute:@"device_add"
-                      arguments:@{
-                          @"driver" : @"scsi-hd",
-                          @"id" : VIMImageSlotDevice(slot, @"raw"),
-                          @"bus" : [transport stringByAppendingString:@".0"],
-                          @"drive" : backend,
-                          @"removable" : @YES,
-                          @"logical_block_size" : @512,
-                          @"physical_block_size" : @512
-                      }
-                      completion:^(id result, NSError *failure) {
-                        if (failure) {
-                            finish(failure);
-                            return;
-                        }
-                        // Hot-plugged usb-bot stays detached until its child is ready.
-                        [self.control execute:@"qom-set"
-                            arguments:@{
-                                @"path" : [@"/machine/peripheral/" stringByAppendingString:transport],
-                                @"property" : @"attached",
-                                @"value" : @YES
-                            }
-                            completion:^(id result, NSError *failure) {
-                              finish(failure);
-                            }];
-                      }];
-                }];
-          };
-          claimPort(VIMImageUSBPort(self.machine.guest, 1));
-        }];
-}
-- (void)changeRemovableMedia:(NSString *)path
-                      format:(NSString *)format
-                        slot:(NSUInteger)slot
-                  completion:(void (^)(NSError *))completion {
-    if (self.mediaChangePending) {
-        completion(VIMSessionError(@"Wait for the current disc change to finish, then try again."));
-        return;
-    }
-    self.mediaChangePending = YES;
-    // The public/UI record may describe an unavailable saved choice. Only
-    // actual live media can require a QMP eject or own a device to unplug.
-    NSDictionary *previous =
-        slot ? self.additionalMedia[@(slot)]
-             : (self.insertedMediaPath.length
-                    ? @{@"Path" : self.insertedMediaPath, @"Format" : self.insertedMediaFormat ?: @"raw"}
-                    : nil);
-    NSString *oldPath = previous[@"Path"] ?: @"", *oldFormat = previous[@"Format"];
-    void (^record)(NSString *, NSString *) = ^(NSString *file, NSString *kind) {
-      if (!slot) {
-          self.insertedMediaPath = file;
-          self.insertedMediaFormat = kind;
-      } else if (file.length)
-          self.additionalMedia[@(slot)] = @{@"Path" : file, @"Format" : kind};
-      else
-          [self.additionalMedia removeObjectForKey:@(slot)];
-    };
-    void (^finish)(NSError *) = ^(NSError *error) {
-      self.mediaChangePending = NO;
-      if (error && [error.localizedDescription.localizedLowercaseString containsString:@"locked"])
-          error = [NSError errorWithDomain:@"VirtualIntelMac.Media"
-                                      code:1
-                                  userInfo:@{
-                                      NSLocalizedDescriptionKey : @"This disc is in use",
-                                      NSLocalizedRecoverySuggestionErrorKey :
-                                          @"In the virtual Mac, eject the disc in Finder, then try again. Close any "
-                                          @"apps using it first. Your image hasn’t been changed.",
-                                      NSUnderlyingErrorKey : error
-                                  }];
-      if (error && path.length)
-          error = VIMFriendlyDiscImageError(path, error);
-      completion(error);
-    };
-    void (^insert)(NSString *, NSString *, void (^)(NSError *)) =
-        ^(NSString *file, NSString *kind, void (^done)(NSError *)) {
-          [self.control execute:@"blockdev-change-medium"
-                      arguments:@{
-                          @"id" : VIMImageSlotDevice(slot, kind),
-                          @"filename" : file,
-                          @"format" : kind,
-                          @"read-only-mode" : @"read-only"
-                      }
-                     completion:^(id result, NSError *error) {
-                       done(error);
-                     }];
-        };
-    void (^disconnect)(void) = ^{
-      if (!slot || ![self.imageDevices containsObject:@(slot)]) {
-          record(@"", nil);
-          finish(nil);
-          return;
-      }
-      [self.control execute:@"device_del"
-                  arguments:@{@"id" : [NSString stringWithFormat:@"image-usb-%lu", (unsigned long)slot]}
-                 completion:^(id result, NSError *error) {
-                   if (!error) {
-                       [self.imageDevices removeObject:@(slot)];
-                       record(@"", nil);
-                   }
-                   finish(error);
-                 }];
-    };
-    if (!path.length) {
-        if (!oldPath.length) {
-            disconnect();
-            return;
-        }
-        [self.control execute:@"eject"
-                    arguments:@{@"id" : VIMImageSlotDevice(slot, oldFormat)}
-                   completion:^(id result, NSError *error) {
-                     if (error) {
-                         finish(error);
-                         return;
-                     }
-                     disconnect();
-                   }];
-        return;
-    }
-    if (oldPath.length) {
-        finish([oldPath isEqual:path]
-                   ? nil
-                   : VIMSessionError(@"Disconnect this drive’s current image before choosing another."));
-        return;
-    }
-    [self ensureImageDevice:slot
-                 completion:^(NSError *failure) {
-                   if (failure) {
-                       finish(failure);
-                       return;
-                   }
-                   insert(path, format, ^(NSError *error) {
-                     if (!error)
-                         record(path, format);
-                     finish(error);
-                   });
-                 }];
 }
 - (void)chooseOpticalMedia:(id)sender {
     [VIMSession chooseOpticalMediaForMachine:self.machine window:self.window];
