@@ -96,6 +96,21 @@ public struct GuestSessionState: Sendable {
         mayRunGuestAction && !installationRequested && !clipboardPending && !bootPolicyPending
     }
 
+    /// Whether a menu action is available, going by the session alone, or nil if it depends on the item or anything else.
+    /// `controlReady` means the control connection has answered.
+    public func enablesMenuAction(_ action: String, controlReady: Bool) -> Bool? {
+        switch action {
+        case "startAgain:": !running
+        case "resetMachine:": mayForceReset
+        case "sendForceQuitKey:", "takeScreenshot:", "sendMenuShortcut:": running && !preparing
+        case "undo:", "cut:", "copy:", "paste:", "selectAll:", "forceStop:": running
+        case "shutdown:": mayRequestShutdown && controlReady
+        case "toggleUSBDevice:": running && controlReady
+        case "toggleScreenSharing:": guestAgentFree
+        default: nil
+        }
+    }
+
     /// Whether the host should stay awake for this session: it's installing something and isn't halted.
     public func keepsHostAwake(hasInstallerMedia: Bool, installState: String?, hasCompletionReport: Bool) -> Bool {
         let settingUp = hasInstallerMedia || installState == "patching" || installState == "host-populated"

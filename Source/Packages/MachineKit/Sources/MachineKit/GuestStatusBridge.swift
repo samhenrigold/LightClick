@@ -186,6 +186,11 @@ public final class GuestSessionStateBridge: NSObject {
             hasCompletionReport: hasCompletionReport)
     }
 
+    @objc(enablesMenuAction:controlReady:)
+    public func enablesMenuAction(_ action: String, controlReady: Bool) -> NSNumber? {
+        state.enablesMenuAction(action, controlReady: controlReady).map { $0 as NSNumber }
+    }
+
     @objc(presentsSetupFailure:)
     public func presentsSetupFailure(_ message: String) -> Bool {
         state.presentsSetupFailure(message)

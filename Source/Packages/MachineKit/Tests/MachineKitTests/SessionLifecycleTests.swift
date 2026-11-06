@@ -510,6 +510,32 @@ private let exitCases = [
         }
     }
 
+    @Test func menuActionsFollowTheSession() {
+        let stopped = GuestSessionState()
+        #expect(stopped.enablesMenuAction("startAgain:", controlReady: false) == true)
+        #expect(idle.enablesMenuAction("startAgain:", controlReady: true) == false)
+        for action in ["paste:", "forceStop:", "resetMachine:", "sendMenuShortcut:", "takeScreenshot:"] {
+            #expect(stopped.enablesMenuAction(action, controlReady: true) == false)
+            #expect(idle.enablesMenuAction(action, controlReady: false) == true)
+        }
+        let preparing = with { $0.preparing = true }
+        #expect(preparing.enablesMenuAction("paste:", controlReady: true) == true)
+        #expect(preparing.enablesMenuAction("sendForceQuitKey:", controlReady: true) == false)
+        #expect(preparing.enablesMenuAction("shutdown:", controlReady: true) == false)
+        #expect(with { $0.runState = "paused" }.enablesMenuAction("toggleScreenSharing:", controlReady: true) == false)
+    }
+
+    @Test func someActionsWaitForTheControlConnection() {
+        #expect(idle.enablesMenuAction("shutdown:", controlReady: true) == true)
+        #expect(idle.enablesMenuAction("shutdown:", controlReady: false) == false)
+        #expect(idle.enablesMenuAction("toggleUSBDevice:", controlReady: false) == false)
+    }
+
+    @Test func otherActionsAreNotTheSessionsToSay() {
+        #expect(idle.enablesMenuAction("ejectOpticalMedia:", controlReady: true) == nil)
+        #expect(idle.enablesMenuAction("about:", controlReady: true) == nil)
+    }
+
     @Test func aMachinesStatusReadsItsState() {
         let status = SessionRunState.status
         #expect(status(false, nil, false) == "Shut down")

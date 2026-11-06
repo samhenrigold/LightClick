@@ -3412,22 +3412,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [self refreshGuestStatus];
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
-    if (item.action == @selector(startAgain:)) {
+    if (item.action == @selector(startAgain:))
         item.state = self.task.running ? NSControlStateValueOn : NSControlStateValueOff;
-        return !self.task.running;
-    }
-    if (item.action == @selector(resetMachine:))
-        return self.guestSessionState.mayForceReset;
-    if (item.action == @selector(sendForceQuitKey:) || item.action == @selector(takeScreenshot:))
-        return self.task.running && !self.preparing;
-    if ([@[ @"undo:", @"cut:", @"copy:", @"paste:", @"selectAll:" ] containsObject:NSStringFromSelector(item.action)])
-        return self.task.running;
-    if (item.action == @selector(shutdown:))
-        return self.guestSessionState.mayRequestShutdown && self.shutdownButton.enabled;
-    if (item.action == @selector(forceStop:))
-        return self.task.running;
-    if (item.action == @selector(toggleUSBDevice:))
-        return self.task.running && self.shutdownButton.enabled;
+    NSNumber *rule = [self.guestSessionState enablesMenuAction:NSStringFromSelector(item.action)
+                                                  controlReady:self.shutdownButton.enabled];
+    if (rule)
+        return rule.boolValue;
     if (item.action == @selector(copyGuestIPAddress:))
         return self.task.running && self.state.networkLinkConnected &&
                [self.guestIPAddresses containsObject:item.representedObject];
@@ -3435,8 +3425,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return !self.imageDrives.changePending &&
                [self.class imageRecordForMachine:self.machine
                                             slot:[item.representedObject unsignedIntegerValue]] != nil;
-    if (item.action == @selector(sendMenuShortcut:))
-        return self.task.running && !self.preparing;
     if (item.action == @selector(changeRetinaMode:)) {
         item.state = [self.displayMode isEqual:@[ @"space", @"retina", @"scaled" ][item.tag]] ? NSControlStateValueOn
                                                                                               : NSControlStateValueOff;
@@ -3452,8 +3440,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     BOOL idle = self.guestSessionState.graphicsActionsEnabled;
     BOOL recorded = [NSFileManager.defaultManager
         fileExistsAtPath:[self.machine.URL URLByAppendingPathComponent:@"State/GuestInstallation.plist"].path];
-    if (item.action == @selector(toggleScreenSharing:))
-        return self.guestAgentFree;
     if (item.action == @selector(openScreenSharing:))
         return self.guestAgentFree && [self.machine.editableConfiguration[@"ScreenSharingEnabled"] boolValue] &&
                [VIMMachineModel screenSharingURLForConfiguration:self.machine.configuration];
