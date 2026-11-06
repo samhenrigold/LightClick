@@ -1422,6 +1422,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
+    int surface_x, surface_y, has_surface;
     int cropping, covered; // cropping: the message the host last had, if it's taking this from the display.
     double look_every;
     uint32_t surface_flushes;
@@ -1730,6 +1731,30 @@ static double display_scale(void) {
     return scale;
 }
 
+static struct SWSTable *tree_gpu_table;
+
+// Where the hook last drew this window's surface from. It moves when its shadow does, as with focus.
+static int tree_send_surface_origin(struct Stream *s, struct TreeWindow *w, CGWindowID id) {
+    for (uint32_t i = 0; i < tree_gpu_table->gpu_row_count && i < SWS_TREE; i++) {
+        const struct SWSGPURow *row = &tree_gpu_table->gpu_rows[i];
+        if (row->id != id || !row->frames)
+            continue;
+        int x = (int)row->x, y = (int)row->y;
+        if (w->has_surface && x == w->surface_x && y == w->surface_y)
+            return 0;
+        w->has_surface = 1;
+        w->surface_x = x;
+        w->surface_y = y;
+        uint8_t message[SWM_HEADER_SIZE + 12];
+        swm_header(message, SWM_SURFACE_ORIGIN, 12);
+        swm_w32(message + SWM_HEADER_SIZE, id);
+        swm_w32(message + SWM_HEADER_SIZE + 4, (uint32_t)x);
+        swm_w32(message + SWM_HEADER_SIZE + 8, (uint32_t)y);
+        return send_all(s->fd, message, sizeof(message));
+    }
+    return 0;
+}
+
 static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps, double seconds) {
     tree_connection = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
     tree_flush_seed = guest_symbol("CGSGetWindowFlushSeed", "SLSGetWindowFlushSeed");
@@ -1814,9 +1839,10 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             // and shadow. One a window in front covers also gets a capture a second, for the part under that window, which
             // only shows when nothing's over it on the host either, as in Mission Control. Anything else, such as a menu, a
             // popover or a sheet, gets a capture a second for its alpha.
-            int crop = no_pixels && item->layer == 0 && item->title[0] && item->alpha == 0x10000;
+            int own_surface = tree_shared && tree_gpu_table && tree_gpu_table->gpu_mode;
+            int crop = (no_pixels && item->layer == 0 && item->title[0] && item->alpha == 0x10000) || own_surface;
             int covered = 0;
-            for (int k = 0; crop && !covered && k < i; k++) {
+            for (int k = 0; crop && !own_surface && !covered && k < i; k++) {
                 const struct TreeItem *front = &items[k];
                 covered = front->layer == 0 && front->title[0] && CGRectIntersectsRect(front->bounds, item->bounds) &&
                           tree_group(front->id) != tree_group(id);
@@ -1862,6 +1888,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             s->alpha = (uint32_t)alpha;
             s->margin = margin;
             int kind = !no_pixels ? 0 : crop ? SWM_CROP : SWM_OVERLAY;
+            if (own_surface && tree_send_surface_origin(s, w, id))
+                goto done;
             if (kind)
                 stale = (!crop || covered) &&
                         (fresh || sized || !w->previous || covered != w->covered || tick - w->last_capture >= 1);
@@ -2361,8 +2389,24 @@ static void leap_set_home(void) {
         setenv("HOME", user->pw_dir, 1);
 }
 
+// Asks the hook, if it's loaded and has this, for each window on its own surface in place of the display.
+static int leap_set_own_surfaces(const char *self, int on) {
+    if (access(SWS_PATH, R_OK) || darwin_major() != 18)
+        return 0;
+    char scale[32];
+    snprintf(scale, sizeof(scale), "%g", display_scale());
+    char *const turn_on[] = {(char *)self, "gpu", "--scale", scale, "--mode", "1", "--skip-desktop", NULL};
+    char *const turn_off[] = {(char *)self, "gpu", "--mode", "0", NULL};
+    free(run_tool(on ? turn_on : turn_off));
+    return on;
+}
+
 static int leap_restore(void) {
     leap_set_home();
+    char self[PATH_MAX];
+    uint32_t length = sizeof(self);
+    if (!_NSGetExecutablePath(self, &length))
+        leap_set_own_surfaces(self, 0);
     printf("# restoring\n");
     fflush(stdout);
     leap_set_guest_shadows(0);
@@ -2415,6 +2459,8 @@ static int leap(const char *host, int port, const char *menu_tool) {
         return 3;
     }
     leap_hide_desktop();
+    if (leap_set_own_surfaces(self, 1) && leap_send(fd, "gpu\n"))
+        return 0;
     static char input[1 << 16], listed[1 << 14], last[1 << 14];
     size_t have = 0;
     double said = 0;
@@ -2438,6 +2484,8 @@ static int leap(const char *host, int port, const char *menu_tool) {
                     goto done;
                 if (second && !strcmp(line, "run"))
                     leap_run(self, menu_tool, first + 1, second + 1);
+                if (!strcmp(line, "gpu-off"))
+                    leap_set_own_surfaces(self, 0);
             }
             have -= (size_t)(line - input);
             memmove(input, line, have + 1);
@@ -2634,6 +2682,12 @@ int main(int argc, char **argv) {
         session_app = flag(argc, argv, "--session") ? app : NULL;
         no_pixels = flag(argc, argv, "--no-pixels");
         tree_shared = flag(argc, argv, "--shared");
+        if (tree_shared) {
+            int fd = open(SWS_PATH, O_RDONLY);
+            void *mapped = fd >= 0 ? mmap(NULL, sizeof(struct SWSTable), PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
+            if (mapped != MAP_FAILED && ((struct SWSTable *)mapped)->magic == SWS_MAGIC)
+                tree_gpu_table = mapped;
+        }
         alarm(session_app ? 0 : 600);
         pid_t child = 0, gl_child = 0;
         if (demo) {

@@ -71,6 +71,8 @@ public final class SeamlessDesktop {
         logHandle?.write(Data(String(format: "%.2f %@\n", CFAbsoluteTimeGetCurrent() - began, text).utf8))
     }
 
+    /// Whether any window's surface has come, for going back to cropping if the guest's turned them on and none do.
+    public var hasOwnSurfaces: (() -> Bool)?
     public weak var pixelSource: (any SeamlessPixelSource)? {
         didSet { for session in sessions.values { session.pixelSource = pixelSource } }
     }
@@ -148,12 +150,28 @@ public final class SeamlessDesktop {
             else { return false }
             // Mavericks has been seen to drop the agent's connection during this and be set up regardless. Without Accessibility there are only no menus.
             _ = await guest.run("/bin/sh", ["-c", SeamlessSession.setupScript, "sh", tool, menuTool])
+            // On Mojave, for windows of their own from the guest's next start. Until then, the display's frames do.
+            // shortcut: WindowServer only takes it at its start, until it can be put in one that's running.
+            if await guest.run("/usr/bin/uname", ["-r"]).output.hasPrefix("18."),
+                let hook = await guest.stage(tools.appending(path: "seamless-ws-hook.dylib"))
+            {
+                _ = await guest.run("/bin/sh", ["-c", installHookScript, "sh", hook])
+            }
             staged.insert(machine)
             return true
         }
         preparing[machine] = task
         return await task.value
     }
+
+    private static let installHookScript: String = {
+        let plist = "/System/Library/LaunchDaemons/com.apple.WindowServer.plist"
+        return "set -e; cp \"$1\" /var/tmp/seamless-ws-hook.dylib; chmod 755 /var/tmp/seamless-ws-hook.dylib; "
+            + "/usr/bin/grep -q seamless-ws-hook \(plist) && exit 0; "
+            + "/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables dict\" \(plist) || true; "
+            + "/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string "
+            + "/var/tmp/seamless-ws-hook.dylib\" \(plist); /usr/bin/plutil -lint \(plist)"
+    }()
 
     private func listen() -> Bool {
         let listener = socket(AF_INET, SOCK_STREAM, 0)
@@ -227,6 +245,16 @@ public final class SeamlessDesktop {
             if let first = apps.first?.path, first != front {
                 front = first
                 activateFront()
+            }
+        case "gpu":
+            note("# the guest's windows are composited for the host")
+            // If none arrives there'd be nothing showing at all, with the guest no longer drawing them on its display.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, !self.stopped, !(self.hasOwnSurfaces?() ?? false) else { return }
+                    self.note("# no surfaces came, so back to the display's frames")
+                    self.tell("gpu-off")
+                }
             }
         case "described":
             guard fields.count >= 3 else { return }

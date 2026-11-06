@@ -30,8 +30,9 @@ public struct SeamlessGuestRun: Sendable {
 /// when a window's surface has something new, which is the only damage it needs to report.
 @MainActor
 public protocol SeamlessPixelSource: AnyObject {
-    /// `window` is the guest's window number, `size` its size in guest pixels. The surface is shown whole, alpha and all.
-    func surface(forWindow window: UInt32, size: CGSize) -> IOSurfaceRef?
+    /// `window` is the guest's window number. The surface holds it with real alpha, from `surfaceOrigin` on the guest's display,
+    /// and can be bigger than it.
+    func surface(forWindow window: UInt32) -> IOSurfaceRef?
 }
 
 /// One guest app as a host app. Listens for its proxy and for the tool it starts in the guest, shows each of the guest's
@@ -65,6 +66,8 @@ public final class SeamlessSession {
         var pieces: [CALayer] = []
         /// Where the user dragged it to, relative to the guest's window, once they have. The guest's window stays put.
         var hostOffset: NSPoint?
+        /// Where its own surface starts on the guest's display, with its shadow, once the guest has said.
+        var surfaceOrigin: (x: Int32, y: Int32)?
         init(window: SessionWire.Window, context: NSObject, layer: CALayer) {
             self.window = window
             self.context = context
@@ -116,6 +119,9 @@ public final class SeamlessSession {
     private var measuring: (started: CFAbsoluteTime, arrived: Int, distinct: Int)?
     public var distinctFrames: (() -> Int)?
     private var testStarted = false
+    private let placeholderFrame: (surface: IOSurfaceRef, width: Int, height: Int)? = IOSurfaceCreate(
+        [kIOSurfaceWidth: 1, kIOSurfaceHeight: 1, kIOSurfaceBytesPerElement: 4, kIOSurfacePixelFormat: 0x4247_5241] as CFDictionary
+    ).map { ($0, 1, 1) }
 
     public init(configuration: Configuration, guest: any SeamlessGuest, finished: @escaping () -> Void) {
         self.configuration = configuration
@@ -391,6 +397,9 @@ public final class SeamlessSession {
             surface.cropped = true
             if case .overlay = message { surface.overlay = true } else { surface.overlay = false }
             showCrops(of: [surface])
+        case .surfaceOrigin(let id, let x, let y):
+            surfaces[id]?.surfaceOrigin = (x, y)
+            if let surface = surfaces[id] { showCrops(of: [surface]) }
         case .gone(let id):
             surfaces[id] = nil
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
@@ -550,11 +559,14 @@ public final class SeamlessSession {
     }
 
     public func windowPixelsChanged(_ id: UInt32) {
-        if let surface = surfaces[id] { showCrops(of: [surface]) }
+        guard let surface = surfaces[id] else { return }
+        surface.cropped = true
+        showCrops(of: [surface])
     }
 
     private func showCrops(of list: [Surface]) {
-        guard let frame else { return }
+        // With every window's own surface coming, there may never be a display frame.
+        guard let frame = frame ?? pixelSource.flatMap({ _ in placeholderFrame }) else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         for surface in list where surface.cropped { crop(surface, from: frame) }
@@ -577,11 +589,17 @@ public final class SeamlessSession {
                 width: part.width * scale / fullWidth, height: part.height * scale / fullHeight)
         }
         let layer = surface.layer
-        if let own = pixelSource?.surface(forWindow: window.id, size: CGSize(width: Double(window.pixelWidth), height: Double(window.pixelHeight))) {
+        if let own = pixelSource?.surface(forWindow: window.id), let origin = surface.surfaceOrigin {
+            let width = Double(IOSurfaceGetWidth(own))
+            let height = Double(IOSurfaceGetHeight(own))
             setPieces(of: surface, to: [], from: own, place: place, height: whole.height)
             layer.mask = nil
             layer.contents = own
-            layer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+            // Only the window: its shadow's the host's, and the surface is padded right and bottom.
+            layer.contentsRect = CGRect(
+                x: (Double(window.x) - Double(origin.x)) * scale / width,
+                y: (height - (Double(window.y) - Double(origin.y) + Double(window.height)) * scale) / height,
+                width: Double(window.width) * scale / width, height: Double(window.height) * scale / height)
             layer.cornerRadius = 0
             layer.masksToBounds = false
             layer.perform(NSSelectorFromString("setContentsChanged"))

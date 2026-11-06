@@ -1415,7 +1415,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return NO;
     }
     self.task.arguments = plan.arguments;
-    self.task.environment = plan.environment;
+    NSMutableDictionary *taskEnvironment = [plan.environment mutableCopy];
+    [taskEnvironment addEntriesFromDictionary:[VIMSeamlessHost qemuEnvironmentFor:self]];
+    self.task.environment = taskEnvironment;
     if (![self.machine prepareUpdaterDisplayForBoot:error]) {
         [self cleanUp];
         return NO;
