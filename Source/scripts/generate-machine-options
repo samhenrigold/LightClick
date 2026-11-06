@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Writes the typed machine options from machine-options.json, which is their one source of truth.
+
+    scripts/generate-machine-options           writes the generated files
+    scripts/generate-machine-options --check   exit 1 if one is stale, or if QEMU and the table disagree on a name
+
+Each option in the table has a variable name, a type, a default and a meaning. `options` are what the app sets, and get
+a field in the Swift type. `testingFlags` stay environment variables: they get only a name in the C header.
+
+Types: flag is on at exactly 1. presence is on when set at all, so even 0 turns it on: the Swift Bool leaves it unset
+for false. fastPath is on for arm64 unless 0, and elsewhere off unless 1 (qemu/pvg-tcg.h). int, string, path and enum
+are values. `inherited` says what happens to a value in the app's own environment: dropped, wins, or winsUnlessEmpty.
+`reader` is where the name is read: qemu and host (PassthroughOpenGL) must read it, engine is on the hv branches.
+"""
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+SOURCE = Path(__file__).resolve().parent.parent
+TABLE = 'machine-options.json'
+SWIFT = 'VirtualIntelMac/VIMMachineOptions.swift'
+KIT = 'Packages/MachineKit/Sources/MachineKit/ExecutionEngine.swift'
+HEADER = 'vendor/qemu/include/qemu/machine-options.h'
+NOTE = f'Generated from {TABLE} by scripts/generate-machine-options, and the build fails while this differs.'
+SWIFT_TYPES = {'flag': 'Bool', 'presence': 'Bool', 'int': 'Int', 'string': 'String', 'path': 'String'}
+READERS = {'qemu': 'vendor/qemu', 'host': 'PassthroughOpenGL'}
+LITERAL = r'"(PVG_|VIM_)[A-Z0-9_]+"|"LC_HVDBT(_[A-Z0-9_]+)?"|LC_OPTION_[A-Z0-9_]+'
+
+
+def validate(table):
+    """Everything wrong with the table: its typed fields must be able to say what QEMU's readers mean."""
+    problems = []
+    entries = table['options'] + table['testingFlags']
+    names = [entry['name'] for entry in entries]
+    problems += [f'{name}: listed twice' for name in sorted({n for n in names if names.count(n) > 1})]
+    for entry in entries:
+        missing = {'name', 'type', 'default', 'meaning', 'reader'} - entry.keys()
+        if missing:
+            problems.append(f'{entry["name"]}: missing {", ".join(sorted(missing))}')
+        if entry.get('reader') not in (*READERS, 'engine'):
+            problems.append(f'{entry["name"]}: unknown reader {entry.get("reader")}')
+    for option in table['options']:
+        if option['type'] != 'enum' and option['type'] not in SWIFT_TYPES:
+            problems.append(f'{option["name"]}: {option["type"]} can\'t be a typed option')
+        if option.get('inherited') not in ('dropped', 'wins', 'winsUnlessEmpty'):
+            problems.append(f'{option["name"]}: unknown inherited {option.get("inherited")}')
+    return problems
+
+
+def comment(entry):
+    return f'{entry["name"]} ({entry["type"]}, default {entry["default"]}): {entry["meaning"]}'
+
+
+def enum_name(option):
+    return option['swift'][0].upper()+option['swift'][1:]
+
+
+def environment_value(option):
+    field = option['swift']
+    if option['type'] in ('flag', 'presence'):
+        return f'{field} == true ? "1" : nil'
+    if option['type'] == 'int':
+        return f'{field}.map(String.init)'
+    if option['type'] == 'enum':
+        return f'{field}?.environmentValue'
+    return field
+
+
+def swift(table):
+    options = table['options']
+    enums = [option for option in options if option['type'] == 'enum']
+    lines = [f'// {NOTE}', '', '/// QEMU\'s environment-variable options that a launch sets. A nil leaves the variable to `Inherited`.',
+             'struct MachineOptions: Equatable, Sendable {']
+    for option in enums:
+        lines += [f'    enum {enum_name(option)}: String, Sendable {{']
+        lines += [f'        case {case}' for case in option['values']]
+        lines += ['', '        var environmentValue: String {', '            switch self {']
+        lines += [f'            case .{case}: "{value}"' for case, value in option['values'].items()]
+        lines += ['            }', '        }', '    }', '']
+    lines += ['    /// What a value in the app\'s own environment does.', '    private enum Inherited {',
+              '        case dropped, wins, winsUnlessEmpty', '    }', '']
+    for option in options:
+        kind = enum_name(option) if option['type'] == 'enum' else SWIFT_TYPES[option['type']]
+        lines += [f'    /// {comment(option)}', f'    var {option["swift"]}: {kind}?']
+    lines += ['', '    /// The options a Machine.plist can set.', '    init(configuration: [String: Any] = [:]) {']
+    for option in enums:
+        lines.append(f'        {option["swift"]} = (configuration["{option["plistKey"]}"] as? String).flatMap({enum_name(option)}.init(rawValue:))')
+    lines += ['    }', '', '    func apply(to environment: inout [String: String]) {',
+              '        let entries: [(name: String, value: String?, inherited: Inherited)] = [']
+    rows = [f'            ("{o["name"]}", {environment_value(o)}, .{o["inherited"]})' for o in options]
+    lines.append(',\n'.join(rows))
+    lines += ['        ]', '        for entry in entries {', '            switch entry.inherited {',
+              '            case .dropped: environment[entry.name] = entry.value',
+              '            case .wins: if environment[entry.name] == nil { environment[entry.name] = entry.value }',
+              '            case .winsUnlessEmpty:', '                if environment[entry.name]?.isEmpty ?? true, let value = entry.value {',
+              '                    environment[entry.name] = value', '                }',
+              '            }', '        }', '    }', '}', '']
+    return '\n'.join(lines)
+
+
+def machine_kit(table):
+    lines = [f'// {NOTE}', '']
+    for option in table['options']:
+        if 'plistKey' not in option:
+            continue
+        lines += [f'/// `{option["plistKey"]}`, a developer setting with no UI: {option["meaning"]}',
+                  f'public enum {option["enumName"]}: String, Codable, Sendable {{']
+        lines += [f'    case {case}' for case in option['values']]
+        lines += ['}', '']
+    return '\n'.join(lines)
+
+
+def header(table):
+    def block(entries):
+        return [line for entry in entries for line in
+                (f'/* {comment(entry)} */', f'#define LC_OPTION_{entry["name"]} "{entry["name"]}"')]
+    return '\n'.join([f'/* {NOTE} */', '#ifndef QEMU_MACHINE_OPTIONS_H', '#define QEMU_MACHINE_OPTIONS_H', '',
+                      '/* Set by the app (MachineOptions). */', *block(table['options']), '',
+                      '/* Testing flags, which stay environment variables. The app drops inherited PVG_ ones. */',
+                      *block(table['testingFlags']), '', '#endif', ''])
+
+
+def render(table):
+    return {SWIFT: swift(table), KIT: machine_kit(table), HEADER: header(table)}
+
+
+def literals(directory):
+    """The option names used in a tree's C and Objective-C, except in the generated header."""
+    specs = [f'{directory}/*.{suffix}' for suffix in ('c', 'h', 'm', 'inc')]
+    result = subprocess.run(['git', 'grep', '--untracked', '-hoE', LITERAL, '--', *specs, f':!{HEADER}'],
+                            cwd=SOURCE, capture_output=True, text=True)
+    if result.returncode > 1:
+        sys.exit(f'machine-options: {result.stderr.strip()}')
+    return {line.strip('"').removeprefix('LC_OPTION_') for line in result.stdout.split()}
+
+
+def drift(table, read):
+    """Names QEMU uses that the table lacks, and names the table says something reads that nothing does."""
+    entries = table['options'] + table['testingFlags']
+    listed = {entry['name'] for entry in entries}
+    problems = [f'{name}: QEMU reads it, but {TABLE} doesn\'t list it' for name in sorted(read['qemu'] - listed)]
+    problems += [f'{entry["name"]}: {TABLE} says {entry["reader"]} reads it, but nothing does' for entry in entries
+                 if entry['reader'] in READERS and entry['name'] not in read[entry['reader']]]
+    return problems
+
+
+def main():
+    table = json.loads((SOURCE/TABLE).read_text())
+    problems = validate(table)
+    outputs = render(table) if not problems else {}
+    if '--check' in sys.argv[1:]:
+        problems += drift(table, {reader: literals(directory) for reader, directory in READERS.items()})
+        problems += [f'{path} is stale' for path, text in outputs.items()
+                     if not (SOURCE/path).is_file() or (SOURCE/path).read_text() != text]
+    else:
+        for path, text in outputs.items():
+            (SOURCE/path).write_text(text)
+    if problems:
+        print('\n'.join(f'machine-options: {problem}' for problem in problems), file=sys.stderr)
+        sys.exit(f'machine-options: fix {TABLE}, then run scripts/generate-machine-options')
+
+
+if __name__ == '__main__':
+    main()
