@@ -6,7 +6,7 @@ import Foundation
 extension GuestAgentBridge {
     private func exit(_ reply: [String: Any]?) -> NSNumber? { reply?["exitcode"] as? NSNumber }
 
-    private func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 0) async throws -> [String: Any]? {
+    func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 0) async throws -> [String: Any]? {
         let reply: GuestReply = try await withCheckedThrowingContinuation { continuation in
             runExecutable(path, arguments: arguments, timeout: timeout) { result, error in
                 if let error {
@@ -272,6 +272,32 @@ extension GuestAgentBridge {
 }
 
 /// A guest answer on its way through a continuation, on the main actor at both ends.
+extension QMPConnectionBridge {
+    /// What a new emulator is told once its control channel answers. A link saved as disconnected goes down before the
+    /// guest runs, and `resume` is for an emulator that started paused. `failure` is told about the first refusal.
+    @objc(beginGuestWithLinkDown:resume:failure:)
+    public func beginGuest(linkDown: Bool, resume: Bool, failure: @escaping @Sendable (NSError) -> Void) {
+        // The bridge is only ever called from main, and its completions run there.
+        nonisolated(unsafe) let connection = self
+        @Sendable func resumeGuest() {
+            connection.execute("cont", arguments: [:]) { _, error in
+                if let error { failure(error) }
+            }
+        }
+        if linkDown {
+            execute("set_link", arguments: ["name": "ethernet", "up": false]) { _, error in
+                if let error {
+                    failure(error)
+                } else {
+                    resumeGuest()
+                }
+            }
+        } else if resume {
+            resumeGuest()
+        }
+    }
+}
+
 private struct GuestReply: @unchecked Sendable {
     let values: [String: Any]?
 }

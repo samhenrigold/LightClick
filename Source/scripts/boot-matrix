@@ -211,8 +211,9 @@ def clone_machine(machine, library, cpus):
 
 
 def process_table():
+    # lstart identifies a process, so it mustn't move when the host changes time zone.
     listing = subprocess.run(['ps', '-axo', 'pid=,ppid=,stat=,lstart=,comm='], capture_output=True, text=True,
-                             check=True)
+                             check=True, env={**os.environ, 'TZ': 'UTC'})
     table = {}
     for line in listing.stdout.splitlines():
         parts = line.split(None, 8)  # lstart is five words; comm may hold spaces

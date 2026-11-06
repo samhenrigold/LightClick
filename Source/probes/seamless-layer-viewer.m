@@ -1,14 +1,15 @@
 // Builds real host layers from a guest's render tree, as the hook's census printed it, for judging how close the host's
-// Core Animation comes to the guest's. Offline: nothing here talks to a guest. Shows one window at the desktop's level,
-// behind every other window and taking no clicks, over a plain window of the color asked for, writes it as read from
-// the screen, and says what it didn't know.
+// Core Animation comes to the guest's. Offline: nothing here talks to a guest, and nothing's shown. The host's CARenderer
+// draws the layers into a texture over the color asked for, so the images are composed from pixels by host CA, with no
+// window, and it works with the display off. What samples what's behind a window can't be seen this way: a backdrop layer
+// comes out as what's in the destination. Says what it didn't know.
 //
-//     xcrun clang -fobjc-arc -O2 -framework AppKit -framework QuartzCore -framework CoreImage \
+//     xcrun clang -fobjc-arc -O2 -framework AppKit -framework QuartzCore -framework Metal \
 //         probes/seamless-layer-viewer.m -o Build/seamless/seamless-layer-viewer
-//     seamless-layer-viewer census.txt BLOB_DIRECTORY TREE_INDEX OUTPUT.png [r,g,b] [--animate SECONDS]
+//     seamless-layer-viewer census.txt BLOB_DIRECTORY TREE_INDEX OUTPUT.png [r,g,b] [--at SECONDS]
 #import <AppKit/AppKit.h>
+#import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
-#include <dlfcn.h>
 
 // A list, or a word. Strings keep their quotes off.
 @interface Node : NSObject
@@ -95,8 +96,10 @@ static CGImageRef blob_image(unsigned index) {
         NSData *data = [NSData dataWithContentsOfFile:[blobs stringByAppendingPathComponent:file]];
         CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
         CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
-        CGImageRef image =
-            CGImageCreate(w, h, 8, 32, row, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
+        // shortcut: blobs from before the hook used IOSurfaceGetBytesPerRow have a padded row, at this alignment.
+        unsigned align = getenv("STRIDE_ALIGN") ? (unsigned)atoi(getenv("STRIDE_ALIGN")) : 0;
+        unsigned stride = align ? ((w * 4 + align - 1) & ~(align - 1)) : row;
+        CGImageRef image = CGImageCreate(w, h, 8, 32, stride, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
                           provider, NULL, NO, kCGRenderingIntentDefault);
         CGColorSpaceRelease(space);
         CGDataProviderRelease(provider);
@@ -146,7 +149,7 @@ static CALayer *make_layer(Node *n, CFTimeInterval renderNow) {
     for (NSUInteger i = 4; i < n.items.count; i++) {
         Node *item = n.items[i];
         NSString *name = [item wordAt:0];
-        if (!name)
+        if (!name || item.square)
             continue;
         if ([name isEqual:@"name"])
             layer.name = [item wordAt:1];
@@ -275,10 +278,10 @@ int main(int argc, char **argv) {
         blobs = @(argv[2]);
         int index = atoi(argv[3]);
         NSString *output = @(argv[4]);
-        CGFloat r = 1, g = 0, b = 0;
+        double r = 1, g = 0, b = 0;
         if (argc > 5)
             sscanf(argv[5], "%lf,%lf,%lf", &r, &g, &b);
-        double animateSeconds = argc > 7 && !strcmp(argv[6], "--animate") ? atof(argv[7]) : 0;
+        double animateSeconds = argc > 7 && !strcmp(argv[6], "--at") ? atof(argv[7]) : 0;
         animate = animateSeconds > 0;
         known = [NSSet setWithArray:@[
             @"allowsGroupBlending", @"hitTestsAsOpaque", @"allowsEdgeAntialiasing", @"edgeAntialiasingMask",
@@ -297,62 +300,71 @@ int main(int argc, char **argv) {
         NSString *text = [tree substringFromIndex:start.location];
         cursor = text.UTF8String;
         Node *root = parse_one();
-        [NSApplication sharedApplication];
-        NSApp.activationPolicy = NSApplicationActivationPolicyProhibited;
         CALayer *rootLayer = make_layer(root, 0);
         CGRect box = CGRectZero;
         for (CALayer *sub in rootLayer.sublayers)
             box = CGRectUnion(box, sub.frame);
-        if (box.size.width < 1)
+        if (box.size.width < 1 || box.size.width > 4096 || box.size.height > 4096)
             return 5;
-        CGFloat height = NSScreen.screens[0].frame.size.height;
-        NSRect frame = NSMakeRect(100, height - box.size.height - 100, box.size.width, box.size.height);
-        NSWindow *behind = [[NSWindow alloc] initWithContentRect:NSInsetRect(frame, -40, -40)
-                                                       styleMask:NSWindowStyleMaskBorderless
-                                                         backing:NSBackingStoreBuffered
-                                                           defer:NO];
-        behind.level = kCGDesktopWindowLevel;
-        behind.ignoresMouseEvents = YES;
-        behind.backgroundColor = [NSColor colorWithSRGBRed:r green:g blue:b alpha:1];
-        [behind orderBack:nil];
-        NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
-                                                       styleMask:NSWindowStyleMaskBorderless
-                                                         backing:NSBackingStoreBuffered
-                                                           defer:NO];
-        window.level = kCGDesktopWindowLevel;
-        window.ignoresMouseEvents = YES;
-        window.opaque = NO;
-        window.backgroundColor = NSColor.clearColor;
-        window.hasShadow = NO;
-        window.contentView.wantsLayer = YES;
-        CALayer *hostRoot = window.contentView.layer;
-        hostRoot.geometryFlipped = YES;
-        rootLayer.position = CGPointZero;
-        rootLayer.anchorPoint = CGPointZero;
-        [hostRoot addSublayer:rootLayer];
-        [window orderFront:nil];
         for (NSString *key in unknown)
             printf("unknown %s: %d\n", key.UTF8String, unknown[key].intValue);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((animate ? animateSeconds : 2) * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-                         typedef CGImageRef (*Create)(CGRect, CGWindowListOption, CGWindowID, CGWindowImageOption);
-                         Create create = (Create)dlsym(RTLD_DEFAULT, "CGWindowListCreateImage");
-                         CGRect rect = CGRectMake(frame.origin.x - 40, height - frame.origin.y - frame.size.height - 40,
-                                                  frame.size.width + 80, frame.size.height + 80);
-                         CGImageRef image =
-                             create
-                                 ? create(rect,
-                                          kCGWindowListOptionIncludingWindow | kCGWindowListOptionOnScreenBelowWindow,
-                                          (CGWindowID)window.windowNumber, kCGWindowImageBestResolution)
-                                 : NULL;
-                         if (image) {
-                             NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:image];
-                             [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:output
-                                                                                                     atomically:YES];
-                         }
-                         exit(image ? 0 : 6);
-                       });
-        [NSApp run];
+        size_t width = (size_t)box.size.width * 2, height = (size_t)box.size.height * 2;
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        MTLTextureDescriptor *descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                               width:width
+                                                              height:height
+                                                           mipmapped:NO];
+        descriptor.usage = MTLTextureUsageUnknown;
+        descriptor.storageMode = MTLStorageModeShared;
+        id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+        CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        CARenderer *renderer = [CARenderer rendererWithMTLTexture:texture
+                                                          options:@{kCARendererColorSpace : (__bridge id)space}];
+        CALayer *top = [CALayer layer];
+        top.anchorPoint = CGPointZero;
+        top.bounds = CGRectMake(0, 0, width, height);
+        CGColorRef color = CGColorCreateSRGB(r, g, b, 1);
+        top.backgroundColor = color;
+        CGColorRelease(color);
+        CALayer *scaled = [CALayer layer];
+        scaled.anchorPoint = CGPointZero;
+        scaled.bounds = CGRectMake(0, 0, box.size.width, box.size.height);
+        scaled.transform = CATransform3DMakeScale(2, 2, 1);
+        rootLayer.position = CGPointMake(-box.origin.x, -box.origin.y);
+        [scaled addSublayer:rootLayer];
+        [top addSublayer:scaled];
+        renderer.layer = top;
+        renderer.bounds = top.bounds;
+        [CATransaction commit];
+        [CATransaction flush];
+        CFTimeInterval began = CACurrentMediaTime();
+        [renderer beginFrameAtTime:began + animateSeconds timeStamp:NULL];
+        [renderer addUpdateRect:top.bounds];
+        CGRect update = renderer.updateBounds;
+        fprintf(stderr, "update %g,%g %gx%g\n", update.origin.x, update.origin.y, update.size.width, update.size.height);
+        [renderer render];
+        [renderer endFrame];
+        usleep(500000); // Its command buffer is its own, and nothing says when that's done.
+        NSMutableData *pixels = [NSMutableData dataWithLength:width * height * 4];
+        [texture getBytes:pixels.mutableBytes
+              bytesPerRow:width * 4
+               fromRegion:MTLRegionMake2D(0, 0, width, height)
+              mipmapLevel:0];
+        // The texture's first row is the layers' bottom.
+        uint8_t *rows = pixels.mutableBytes;
+        NSMutableData *line = [NSMutableData dataWithLength:width * 4];
+        for (size_t y = 0; y < height / 2; y++) {
+            memcpy(line.mutableBytes, rows + y * width * 4, width * 4);
+            memcpy(rows + y * width * 4, rows + (height - 1 - y) * width * 4, width * 4);
+            memcpy(rows + (height - 1 - y) * width * 4, line.mutableBytes, width * 4);
+        }
+        CGContextRef bitmap = CGBitmapContextCreate(pixels.mutableBytes, width, height, 8, width * 4, space,
+                                                    kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+        CGImageRef image = CGBitmapContextCreateImage(bitmap);
+        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:image];
+        [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:output atomically:YES];
+        printf("%zux%zu\n", width, height);
     }
     return 0;
 }
