@@ -356,6 +356,12 @@ public final class Tally: @unchecked Sendable {
         o += "cold blocks          " + perSecond(t.blocks) + "\n"
         o += "cold x86 insns       " + perSecond(t.insns) + "\n"
         o += "cold ARM words       " + perSecond(t.words) + "\n"
+        let opInsns = withUnsafeBytes(of: t.op_insns) { Array($0.bindMemory(to: UInt64.self)) }
+        let opWords = withUnsafeBytes(of: t.op_words) { Array($0.bindMemory(to: UInt64.self)) }
+        o += "  words after the last instruction of blocks: \(t.exit_words)\n  by OP_ number in tr_internal.h, ranked by words: op, insns, words, words per insn\n"
+        for op in opWords.indices.sorted(by: { opWords[$0] > opWords[$1] }).prefix(24) where opInsns[op] > 0 {
+            o += String(format: "  %3d %12llu %12llu %6.2f\n", op, opInsns[op], opWords[op], Double(opWords[op]) / Double(opInsns[op]))
+        }
         o += String(format: "translation time     %12.1f ms\n", seconds(t.translate_ns) * 1000)
         o += "blocks invalidated   " + perSecond(t.invalidated) + "\n"
         o +=

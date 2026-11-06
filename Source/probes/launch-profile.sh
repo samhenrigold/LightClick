@@ -8,12 +8,14 @@ cat > /tmp/p.d <<'EOF'
 profile-997 { @kind[arg0 ? "kernel" : "user"] = count(); }
 profile-997 /arg0/ { @kf[func(arg0)] = count(); }
 profile-997 { @who[execname, arg0 ? "k" : "u"] = count(); }
+profile-997 /arg1/ { @uf[execname, usym(arg1)] = count(); }
 io:::start { st[arg0] = timestamp; @ios = count(); @bytes = sum(args[0]->b_bcount); }
 io:::done /st[arg0]/ { @lat = sum(timestamp - st[arg0]); @maxlat = max(timestamp - st[arg0]); st[arg0] = 0; }
 dtrace:::END {
     printa("  samples %s %@d\n", @kind);
     trunc(@who, 14); printa("  who %s %s %@d\n", @who);
     trunc(@kf, 14); printa("  kernel %a %@d\n", @kf);
+    trunc(@uf, 30); printa("  user %s %A %@d\n", @uf);
     printa("  io count %@d\n", @ios); printa("  io bytes %@d\n", @bytes); printa("  io total latency ns %@d\n", @lat); printa("  io worst ns %@d\n", @maxlat);
 }
 EOF

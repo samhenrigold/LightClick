@@ -49,6 +49,7 @@ typedef struct {
     u64 rs_saved[MAX_VIEWS]; // where this vCPU's return stack stood when it left each view. 0: not been there yet
     u32 lock_depth, rs_epoch;
     u64 smc_held; // frame + 1: this vCPU's one-off store to a code frame hasn't run yet, so nobody may protect that frame again
+    bool shadow_stepping; // stepping the instruction in sti's shadow: an interrupt arriving before its first word has run must not end the shadow
     bool tracked_new; // a fill just started protecting a guest table, so what it read of that table may predate the protection
     u32 pin[2]; // view index + 1 of the current address space, by CPL 0 or 3. Eviction leaves these alone, so a CPL change needs no lock
     u32 xfl;
@@ -2193,7 +2194,7 @@ again:
             irq_deliver_now(rip, apic_vector);
             goto again;
         }
-        c->irq_shadow_rip = ~0ULL; // the instruction after sti runs first
+        me->shadow_stepping = true; // the instruction after sti runs first
     }
     c->stat_steps++;
     step_on();
@@ -2808,6 +2809,51 @@ static void helper_keep_flags(void) {
     c->x[R_S4] = c->x[R_AF];
 }
 
+// pcmpistri, for any imm8. Arguments as an element of a, of b, are bytes or words, signed or not; the strings end at their first zero.
+static void h_pcmpistri(void) {
+    u64 a[2] = {c->x[R_S0], c->x[R_S1]}, b[2] = {c->x[R_S2], c->x[R_S3]};
+    u32 imm = (u32)c->x[R_S4], words = imm & 1, n = words ? 8 : 16, agg = (imm >> 2) & 3, la = n, lb = n, res = 0;
+    u32 bits = words ? 16 : 8, sign = imm & 2;
+    int ea[16], eb[16];
+    for (u32 i = n; i-- > 0;) {
+        u32 x = (u32)(a[i * bits / 64] >> (i * bits % 64)) & ((1u << bits) - 1), y = (u32)(b[i * bits / 64] >> (i * bits % 64)) & ((1u << bits) - 1);
+        if (!x)
+            la = i;
+        if (!y)
+            lb = i;
+        ea[i] = sign ? (int)(x << (32 - bits)) >> (32 - bits) : (int)x;
+        eb[i] = sign ? (int)(y << (32 - bits)) >> (32 - bits) : (int)y;
+    }
+    for (u32 j = 0; j < n; j++) {
+        bool hit = false;
+        if (agg == 0) {
+            for (u32 i = 0; i < la && j < lb; i++)
+                hit = hit || ea[i] == eb[j];
+        } else if (agg == 1) {
+            for (u32 i = 0; i + 1 < la && j < lb; i += 2)
+                hit = hit || (ea[i] <= eb[j] && eb[j] <= ea[i + 1]);
+        } else if (agg == 2) {
+            hit = j >= la || j >= lb ? j >= la && j >= lb : ea[j] == eb[j];
+        } else {
+            hit = true;
+            for (u32 i = 0, k = j; i < n - j && i < la && hit; i++, k++)
+                hit = k < lb && ea[i] == eb[k];
+        }
+        if (hit)
+            res |= 1u << j;
+    }
+    u32 all = (1u << n) - 1, valid = (1u << lb) - 1;
+    u32 polarity = (imm >> 4) & 3;
+    if (polarity == 1)
+        res ^= all;
+    else if (polarity == 3)
+        res ^= valid;
+    c->x[R_S0] = res ? ((imm & 0x40) ? 31 - (u32)__builtin_clz(res) : (u32)__builtin_ctz(res)) : n;
+    c->x[R_S2] = (lb < n ? NZCV_Z : 0) | (la < n ? NZCV_N : 0) | (res ? 0 : NZCV_C) | ((res & 1) ? NZCV_V : 0); // C holds CF inverted
+    c->x[R_S3] = 1; // PF and AF clear
+    c->x[R_S4] = 1;
+}
+
 static void h_shift(void) {
     u64 v = c->x[R_S0], cnt = c->x[R_S1], desc_ = c->x[R_S2];
     u32 kind = desc_ & 7, size = (u32)(desc_ >> 8);
@@ -3009,6 +3055,10 @@ static void do_cli_sti(bool sti) {
 void mon_sync(void) {
     if (me->smc_held)
         __atomic_store_n(&me->smc_held, 0, __ATOMIC_RELEASE);
+    if (me->shadow_stepping) { // a synchronous way in: it ran, or faulted, which ends a shadow too
+        me->shadow_stepping = false;
+        c->irq_shadow_rip = ~0ULL;
+    }
     u32 ec = (u32)(c->esr >> 26);
     if (ec == 0x24) {
         handle_data_abort(true);
@@ -3330,6 +3380,9 @@ void mon_sync(void) {
                 break;
             case SVC_H_SHIFT:
                 h_shift();
+                break;
+            case SVC_H_PCMPISTRI:
+                h_pcmpistri();
                 break;
             case SVC_H_SHD:
                 h_shd();

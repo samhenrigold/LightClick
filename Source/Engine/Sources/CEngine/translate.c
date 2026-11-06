@@ -668,6 +668,9 @@ static TrResult do_translate(int key, int view, u64 cr3, int cpl, u64 rip, bool 
     for (int i = 0; i < count; i++) {
         const Insn *in = &list[i];
         insn_arm[i] = tr_cc;
+        if (i)
+            stats.op_words[list[i - 1].op & 127] += (u64)(tr_cc - insn_arm[i - 1]);
+        stats.op_insns[in->op & 127]++;
         pc_map[pc_map_used[cur_part]].arm_word = (u16)(tr_cc - start);
         pc_map[pc_map_used[cur_part]].rip_off = (u16)(in->rip - rip);
         pc_map_used[cur_part]++;
@@ -734,6 +737,7 @@ static TrResult do_translate(int key, int view, u64 cr3, int cpl, u64 rip, bool 
         }
     }
     u32 *tail = tr_cc;
+    stats.op_words[last->op & 127] += (u64)(tr_cc - insn_arm[count - 1]);
     if (fallthrough_end) {
         svc(SVC_DIRECT);
         stub_lit(last->next);
@@ -798,6 +802,7 @@ static TrResult do_translate(int key, int view, u64 cr3, int cpl, u64 rip, bool 
     sys_icache_invalidate(start, (u8 *)tr_cc - (u8 *)start);
     stats.blocks++;
     stats.words += tr_cc - start;
+    stats.exit_words += (u64)(tr_cc - tail);
     res.arm = tr_cc_va(start);
     stats.translate_ns += mach_absolute_time() - t0;
     return res;
