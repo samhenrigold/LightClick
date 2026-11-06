@@ -28,7 +28,7 @@ try:
     # Only this fixed synthetic hello, in any JSON dictionary order. No eval,
     # dependencies, secrets or general-purpose JSON approximation on Python2.5.
     compact = re.sub(r'\s', '', line)
-    fields = ['"type":"hello"', '"protocol":2', '"token":"' + 'a' * 64 + '"']
+    fields = ['"type":"hello"', '"protocol":2', '"token":"' + 'a' * 64 + '"', '"rich":1048576']
     if not compact.startswith('{') or not compact.endswith('}') or sorted(compact[1:-1].split(',')) != sorted(fields):
         raise RuntimeError('Unexpected private PTY hello')
     began = time.time()

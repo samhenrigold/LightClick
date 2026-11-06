@@ -15,6 +15,7 @@ static const NSUInteger MaxText = 1024 * 1024, MaxWire = 8 * 1024 * 1024;
 @property NSTimer *timer;
 @property NSDate *deadline;
 @property BOOL authenticated;
+@property NSUInteger richLimit; // 0 for a guest tool that didn't offer rich frames
 @property BOOL wasAllowed;
 @property NSInteger change;
 @property VIMClipboardPendingPublication publication;
@@ -112,6 +113,7 @@ static const NSUInteger MaxText = 1024 * 1024, MaxWire = 8 * 1024 * 1024;
     self.incoming = nil;
     self.outgoing = nil;
     self.authenticated = NO;
+    self.richLimit = 0;
     self.wasAllowed = NO;
     self.sent = 0;
     self.received = 0;
@@ -162,8 +164,15 @@ static const NSUInteger MaxText = 1024 * 1024, MaxWire = 8 * 1024 * 1024;
         }
         if (!n)
             return;
+        [self noteProgress];
         [self.outgoing replaceBytesInRange:NSMakeRange(0, n) withBytes:NULL length:0];
     }
+}
+// A long frame holds back the pong it's queued with, but QEMU stops taking or giving bytes if the guest's helper dies,
+// so a moving stream is as good a sign of life.
+- (void)noteProgress {
+    if (self.awaitingHeartbeat)
+        self.heartbeatDeadline = NSProcessInfo.processInfo.systemUptime + 30;
 }
 - (void)send:(NSDictionary *)message {
     NSData *data = [NSJSONSerialization dataWithJSONObject:message options:0 error:NULL];
@@ -189,7 +198,11 @@ static const NSUInteger MaxText = 1024 * 1024, MaxWire = 8 * 1024 * 1024;
         if (!self.displayPowerOnly)
             self.change = NSPasteboard.generalPasteboard.changeCount;
         self.lastHeartbeat = NSProcessInfo.processInfo.systemUptime;
-        [self send:@{@"type" : @"ready", @"protocol" : @2}];
+        id offer = self.displayPowerOnly ? nil : message[@"rich"];
+        self.richLimit =
+            [offer isKindOfClass:NSNumber.class] ? MIN([offer unsignedIntegerValue], VIMClipboardRichLimitVirtio) : 0;
+        [self send:self.richLimit ? @{@"type" : @"ready", @"protocol" : @2, @"rich" : @(self.richLimit)}
+                                  : @{@"type" : @"ready", @"protocol" : @2}];
         return;
     }
     if ([message[@"type"] isEqual:@"pong"]) {
@@ -214,9 +227,13 @@ static const NSUInteger MaxText = 1024 * 1024, MaxWire = 8 * 1024 * 1024;
             self.displayPowerChanged([asleep boolValue]);
         return;
     }
-    id sequence = message[@"sequence"], text = message[@"text"];
-    if (![message[@"type"] isEqual:@"text"] || ![sequence isKindOfClass:NSNumber.class] ||
-        ![text isKindOfClass:NSString.class]) {
+    id sequence = message[@"sequence"];
+    BOOL rich = [message[@"type"] isEqual:@"rich"];
+    NSString *text = message[@"text"];
+    NSData *rtf = nil, *png = nil;
+    if ((rich ? !VIMClipboardReadRichFrame(message, self.richLimit, &text, &rtf, &png)
+              : (![message[@"type"] isEqual:@"text"] || ![text isKindOfClass:NSString.class])) ||
+        ![sequence isKindOfClass:NSNumber.class]) {
         [self fail];
         return;
     }
@@ -230,6 +247,11 @@ static const NSUInteger MaxText = 1024 * 1024, MaxWire = 8 * 1024 * 1024;
     if (![self allowed])
         return;
     NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
+    if (rich) {
+        VIMClipboardPublishRich(pasteboard, text, rtf, png, NO);
+        self.change = pasteboard.changeCount;
+        return;
+    }
     [pasteboard clearContents];
     [pasteboard setString:text forType:NSPasteboardTypeString];
     self.change = pasteboard.changeCount;
@@ -275,8 +297,12 @@ static const NSUInteger MaxText = 1024 * 1024, MaxWire = 8 * 1024 * 1024;
         return;
     }
     NSString *text = [pasteboard stringForType:NSPasteboardTypeString];
-    if (!text) {
-        if (pasteboard.types.count && ![pasteboard availableTypeFromArray:@[ NSPasteboardTypeString ]]) {
+    NSData *rtf = nil, *png = nil;
+    BOOL richBytes = self.richLimit && VIMClipboardReadRich(pasteboard, &rtf, &png);
+    if (!text && !richBytes) {
+        NSArray *supported = self.richLimit ? [VIMClipboardRichTypes() arrayByAddingObject:NSPasteboardTypeString]
+                                            : @[ NSPasteboardTypeString ];
+        if (pasteboard.types.count && ![pasteboard availableTypeFromArray:supported]) {
             self.change = change;
             self.publication = (VIMClipboardPendingPublication){0};
         } else {
@@ -287,7 +313,13 @@ static const NSUInteger MaxText = 1024 * 1024, MaxWire = 8 * 1024 * 1024;
     }
     self.change = change;
     self.publication = (VIMClipboardPendingPublication){0};
-    if ([text lengthOfBytesUsingEncoding:NSUTF8StringEncoding] <= MaxText)
+    // Only into an empty queue, so a frame this long can't overflow the wire limit and fail the connection.
+    NSMutableDictionary *frame =
+        richBytes && !self.outgoing.length ? VIMClipboardRichFrame(text, rtf, png, self.richLimit) : nil;
+    if (frame) {
+        frame[@"sequence"] = @(++self.sent);
+        [self send:frame];
+    } else if (text && [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding] <= MaxText)
         [self send:@{@"type" : @"text", @"sequence" : @(++self.sent), @"text" : text}];
 }
 - (void)stream:(NSStream *)stream handleEvent:(NSStreamEvent)event {
@@ -307,15 +339,20 @@ static const NSUInteger MaxText = 1024 * 1024, MaxWire = 8 * 1024 * 1024;
         [self fail];
         return;
     }
+    [self noteProgress];
     [self.incoming appendBytes:buffer length:n];
     if (self.incoming.length > MaxWire) {
         [self fail];
         return;
     }
+    // Only the new bytes can hold a newline; a long frame arrives in many short reads.
+    NSUInteger searched = self.incoming.length - n;
     while (self.incoming.length) {
-        const uint8_t *start = self.incoming.bytes, *end = memchr(start, '\n', self.incoming.length);
+        const uint8_t *start = self.incoming.bytes,
+                      *end = memchr(start + searched, '\n', self.incoming.length - searched);
         if (!end)
             break;
+        searched = 0;
         NSUInteger length = end - start;
         NSData *line = [self.incoming subdataWithRange:NSMakeRange(0, length)];
         [self.incoming replaceBytesInRange:NSMakeRange(0, length + 1) withBytes:NULL length:0];

@@ -21,7 +21,7 @@ try:
     if not select.select([master], [], [], 5)[0]:
         raise RuntimeError('No private PTY hello')
     hello = json.loads(os.read(master, 1024))
-    if hello != {'type': 'hello', 'protocol': 2, 'token': 'a' * 64}:
+    if hello != {'type': 'hello', 'protocol': 2, 'token': 'a' * 64, 'rich': 1048576}:
         raise RuntimeError('Unexpected private PTY hello')
     began = time.time()
     os.write(master, '{"type":"text","sequence":1,"text":"must not be applied"}\n')

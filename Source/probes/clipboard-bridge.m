@@ -52,7 +52,7 @@ int main(void) {
         NSDictionary *ready = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:buffer length:size]
                                                               options:0
                                                                 error:NULL];
-        NSCAssert([ready[@"type"] isEqual:@"ready"], @"authenticated handshake");
+        NSCAssert([ready[@"type"] isEqual:@"ready"] && !ready[@"rich"], @"a guest that offers nothing stays on text");
         // Advance metadata only, not a 30-second sleep. The production timer
         // emits a ping even with default-deny foreground policy. A valid pong
         // retains authentication and must not trigger recovery.
@@ -85,6 +85,41 @@ int main(void) {
         NSCAssert(!bridge.connected && lost == before + 2, @"dead helper detected despite open QEMU socket");
         close(fd);
         NSCAssert([bridge startWithSocketPath:path error:&error], @"explicit stop reconnect");
+        fd = accept(server, NULL, NULL);
+        Send(fd, @{@"type" : @"hello", @"protocol" : @2, @"token" : bridge.token});
+        recv(fd, buffer, sizeof(buffer), MSG_DONTWAIT);
+        // A frame that needs the offer is refused without it, and doesn't reach the pasteboard.
+        Send(fd, @{@"type" : @"rich", @"sequence" : @1, @"rtf" : @"e30="});
+        NSCAssert(!bridge.connected, @"rich frame without the offer");
+        close(fd);
+        NSCAssert([bridge startWithSocketPath:path error:&error], @"rich reconnect");
+        fd = accept(server, NULL, NULL);
+        Send(fd, @{@"type" : @"hello", @"protocol" : @2, @"token" : bridge.token, @"rich" : @(1 << 30)});
+        size = recv(fd, buffer, sizeof(buffer), MSG_DONTWAIT);
+        NSCAssert(size > 0, @"rich ready");
+        ready = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:buffer length:size] options:0 error:NULL];
+        NSCAssert([ready[@"rich"] isEqual:@(4 * 1024 * 1024)], @"the host caps what a guest can offer");
+        // Default policy denies, so this valid frame is consumed but not applied.
+        Send(fd, @{@"type" : @"rich", @"sequence" : @1, @"rtf" : @"e30="});
+        NSCAssert(bridge.connected, @"rich frame accepted after the offer");
+        Send(fd, @{@"type" : @"rich", @"sequence" : @2, @"image" : @"e30="});
+        NSCAssert(!bridge.connected, @"an image that isn't a PNG ends the connection");
+        close(fd);
+        // A stream still moving keeps the connection through a pong held behind a long frame.
+        NSCAssert([bridge startWithSocketPath:path error:&error], @"progress reconnect");
+        fd = accept(server, NULL, NULL);
+        Send(fd, @{@"type" : @"hello", @"protocol" : @2, @"token" : bridge.token});
+        recv(fd, buffer, sizeof(buffer), MSG_DONTWAIT);
+        [bridge setValue:@1 forKey:@"awaitingHeartbeat"];
+        [bridge setValue:@(NSProcessInfo.processInfo.systemUptime - 1) forKey:@"heartbeatDeadline"];
+        NSCAssert(send(fd, "{", 1, 0) == 1, @"partial frame");
+        Pump();
+        [bridge tick];
+        NSCAssert(bridge.connected, @"bytes in flight count as a heartbeat");
+        NSCAssert(send(fd, "}\n", 2, 0) == 2, @"finish frame");
+        Pump();
+        close(fd);
+        NSCAssert([bridge startWithSocketPath:path error:&error], @"explicit stop reconnect 2");
         fd = accept(server, NULL, NULL);
         Send(fd, @{@"type" : @"hello", @"protocol" : @2, @"token" : bridge.token});
         recv(fd, buffer, sizeof(buffer), MSG_DONTWAIT);
