@@ -299,7 +299,7 @@ The goal is a guest that is at its desktop 1 to 2 s after the app asks, with no 
 
 **Two ways to resume.**
 1. A new process with `-incoming` or `-loadvm`. No engine exists yet, so loading has nothing to tell it. The first high-half TB miss makes one as at a boot's hand-off, the others join, and a vCPU in user mode stays on TCG until it next enters the kernel. Device mappings come from the listener at creation. This is what a hidden start wants, and needs no engine change that the code shows.
-2. `loadvm` in a running process, which also covers reset. RAM changes behind the engine, so it must forget everything. `hvdbt_reset` does this, as below.
+2. `loadvm` in a running process. RAM changes behind the engine, so it must forget everything, and `hvdbt_reset` does that on the reset a load starts with. Nothing has run this in a guest: the app's QEMU ends on a guest reboot and the app starts another, so a reboot is a first boot to the engine (measured: back at the desktop in 42 s at 4 vCPUs), and the machine's disks are raw, which `savevm` can't use. The app also holds the one QMP connection.
 
 **Getting to 1 to 2 s is not the engine's problem first.** These are the unknowns, largest first:
 - **Device state outside QEMU.** `PassthroughOpenGL` logs contexts from early in a boot, and they live in the host. Nothing here has looked at whether that device can save or recreate them, and a guest whose GL contexts vanish may not recover. The rest: virtio-serial and COM2 chardev peers reconnecting, `virtio-sound` with `x-apple-reconfigure`, USB, and `-drive ...,snapshot=on` media. Any migration blocker will name itself when a save is tried.
@@ -324,6 +324,8 @@ One vCPU is the largest gap to a usable guest. This is the design, what it costs
 **One translator lock**, on the host, around `HC_TRANSLATE`, `HC_SMC`, `HC_VIEW_INVALIDATE_VA` and `HC_VIEW_DROP`. `os_unfair_lock` in a path that already costs an exit. Order is monitor lock then translator lock, and the translator never takes the other, so holding the monitor lock over a kill is safe, if not fast.
 
 **Nothing shared on the hottest paths.** Translated code changes in no way. Syscall, sysret, iret, exceptions, in-VM APIC and the indirect lookup take no lock and write nothing shared. A CPL change finds its view through a per-vCPU pin: a pinned view can't be evicted, so the pin needs no lock. Only leaving an address space takes it. LRU stamps move from every view switch to the unpin. `lookup` reads the per-view hash table, whose inserts already publish value before key.
+
+**One view per root.** A view's key is the page table root and mode, not the PCID: shadows are always in step, so a PCID separates nothing, and XNU gives an address space a PCID per CPU. Keying by PCID cost a view per vCPU per process: at 4 vCPUs, evictions fell from 11,862 to 1,096 in an exec run without it, and `exec_per_s` rose 10 to 20%.
 
 **Validate after marking, under the lock.** The monitor's single-vCPU order has races that matter now, all with one shape: something was read, then something was protected. Each is handled the same way: protect first, then look again.
 - A fill walks and installs under the lock, and every trapped page-table store takes the lock, so a store can't fall between them. The unlocked walk before it only sorts faults and devices from RAM.

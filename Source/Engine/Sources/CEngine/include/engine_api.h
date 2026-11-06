@@ -146,6 +146,7 @@ void engine_debug_text(EngineHandle *engine, char *out, unsigned long size);
 void engine_ctx_post_vector(void *ctx, uint8_t vector, bool level);
 void engine_ctx_set_stop(void *ctx);
 void engine_ctx_set_irq_line(void *ctx, bool level);
+void engine_spin_hint(void);
 bool engine_ctx_note_write(void *ctx, const unsigned char *page_info, uint64_t gpa, uint64_t bytes);
 void *engine_test_shared_ram(uint64_t bytes);
 
