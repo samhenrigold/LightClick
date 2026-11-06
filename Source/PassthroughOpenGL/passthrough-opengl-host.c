@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <math.h>
+#include "glsl-late-extensions.h"
 #include "pixel-format-host.h"
 #include "passthrough-opengl-endian.h"
 #ifdef VIM_PASSTHROUGH_OPENGL_COMMAND_TIMING
@@ -1773,7 +1774,20 @@ static int DGHostShaderSource(struct DGHostContext *context, struct DGMessage *m
     if (!s)
         return -1;
     GLint length = (GLint)m->args[1];
-    glShaderSource((GLuint)m->args[0], 1, &s, &length);
+    size_t header = 0, moved_length = 0;
+    char *copy = malloc((size_t)length + 1), *moved = NULL;
+    if (copy) {
+        memcpy(copy, s, (size_t)length);
+        moved = DGGLSLHoistLateExtensions(copy, (size_t)length, &header, &moved_length);
+    }
+    if (moved) {
+        const GLchar *parts[] = {copy, moved, copy + header};
+        GLint lengths[] = {(GLint)header, (GLint)moved_length, length - (GLint)header};
+        glShaderSource((GLuint)m->args[0], 3, parts, lengths);
+    } else
+        glShaderSource((GLuint)m->args[0], 1, &s, &length);
+    free(moved);
+    free(copy);
     return 0;
 }
 static int DGTightTexSubImage2D(struct DGHostContext *c, struct DGMessage *m, struct DGReply *reply) {
