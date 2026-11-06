@@ -167,7 +167,7 @@ int main(int argc, char **argv) {
     }
     usleep(100000);
     thread_terminate(thread);
-    for (int i = 0; i < 50 && shared->installed_pid != pid; i++)
+    for (int i = 0; i < 200 && shared->installed_pid != pid; i++)
         usleep(100000);
     if (shared->installed_pid != pid) {
         fprintf(stderr, "the hook in %d refused; see its log\n", pid);

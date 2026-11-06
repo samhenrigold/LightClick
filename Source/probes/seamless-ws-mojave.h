@@ -555,6 +555,8 @@ static void census_blob(const void *object, uint32_t seed, void *surface) {
         }
         surface_unlock(surface, 1, NULL);
     }
+    if (found == 4096 && surface)
+        census_log(0, "(no-blob)");
     if (found < 4096)
         census_log(0, "(blob %u)", found); // Into the stream the tree is being printed to.
 }
@@ -576,11 +578,11 @@ static void surface_show_hook(void *object, unsigned a, unsigned b) {
     surface_show_original(object, a, b);
 }
 
-// A gradient's show leaves out its colors. The layer keeps its gradient at +0x40, with its count at +0x10, its
-// locations at +0x18 and its colors at +0x20, as Gradient::set_colors reads.
+// A gradient's show leaves out its colors. The layer keeps its gradient in place at +0x10, with its count at +0x10 in
+// that, its locations at +0x18 and its colors at +0x20, as Gradient::set_colors and GradientLayer::set_property read.
 static void (*gradient_show_original)(void *, unsigned, unsigned);
 static void gradient_show_hook(char *layer, unsigned a, unsigned b) {
-    const char *gradient = census_printing ? *(const char **)(layer + 0x40) : NULL;
+    const char *gradient = census_printing ? layer + 0x10 : NULL;
     size_t count = gradient ? *(const size_t *)(gradient + 0x10) : 0;
     const float *colors = gradient ? *(const float *const *)(gradient + 0x20) : NULL;
     const float *locations = gradient ? *(const float *const *)(gradient + 0x18) : NULL;
