@@ -3153,161 +3153,144 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           VIMPresentError(error, session.window);
           return; // no ambiguous automatic retry
       }
-      NSString *phase = outcome[@"Phase"];
-      if ([phase isEqual:@"credential-required"]) {
-          [session dismissSetupNotice];
-          NSAlert *alert = [NSAlert new];
-          VIMSetInstallerAlertIcon(alert, session.machine.guest);
-          alert.messageText = @"Enter the virtual Mac’s password";
-          alert.informativeText = [NSString
-              stringWithFormat:@"Enter the password you chose for “%@” in this virtual Mac to resume its saved setup. "
-                               @"Your existing account won’t be replaced. This password won’t be saved on this Mac.",
-                               outcome[@"Username"] ?: @""];
-          NSSecureTextField *password = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 280, 24)];
-          password.placeholderString = @"Virtual Mac password";
-          alert.accessoryView = password;
-          [alert addButtonWithTitle:@"Continue"];
-          [alert addButtonWithTitle:@"Not Now"];
-          alert.window.initialFirstResponder = password;
-          session.guestStatus.stringValue = @"A password is needed to resume setup";
-          VIMPresentAlert(alert, session.window, ^(NSModalResponse response) {
-            NSString *value = response == NSAlertFirstButtonReturn ? password.stringValue : nil;
-            password.stringValue = @"";
-            if (!value || !session.task.running || session.state.shutdownRequested)
-                return;
-            NSError *failure = nil;
-            if (![session.openGLSetup providePassword:value error:&failure]) {
-                VIMPresentError(failure, session.window);
-                return;
-            }
-            [session refreshOpenGLSetup];
-          });
-          return;
-      }
-      if ([@[ @"unmanaged", @"unsupported", @"setup-unavailable" ] containsObject:phase]) {
-          [session dismissSetupNotice];
-          if ([phase isEqual:@"setup-unavailable"])
-              [session.log writeData:[@"\n[Light Click] Automatic OpenGL setup left the current system unchanged; "
-                                      @"continuing desktop monitoring.\n" dataUsingEncoding:NSUTF8StringEncoding]];
-          session.state.openGLDesktopMonitoring = YES;
-          [session refreshGuestStatus];
-          return;
-      }
-      if ([phase isEqual:@"recovery"]) {
-          [session dismissSetupNotice];
-          session.guestStatus.stringValue =
-              [NSString stringWithFormat:@"Installing %@…", VIMOperatingSystemName(session.machine.guest)];
-          // Apple's installer owns the real progress/UI. The next boot
-          // creates a new coordinator; no UART polling while copying an OS.
-          return;
-      }
-      if ([phase isEqual:@"needs-restart"]) {
-          if (session.openGLRestartAttempted)
-              return;
-          void (^restart)(void) = ^{
-            if (!session.task.running || session.state.shutdownRequested)
-                return;
-            NSError *failure = nil;
-            if (![session.machine prepareOpenGLRestartWithReport:outcome[@"Report"] error:&failure]) {
-                [session dismissSetupNotice];
-                VIMPresentError(failure, session.window);
-                return;
-            }
-            session.openGLRestartAttempted = YES;
-            [session applyLifecycleEvent:VIMSessionEventGuestRebootExpected];
-            [session updateInstallationActivity];
-            session.guestStatus.stringValue = @"Finishing setup — restarting this Mac…";
-            if (![outcome[@"ExistingGuestUpdate"] boolValue]) {
-                NSDictionary *profile = [NSDictionary
-                    dictionaryWithContentsOfURL:[session.machine.URL
-                                                    URLByAppendingPathComponent:@"State/AutomaticSetup.plist"]];
-                [session showSetupNoticeAutomatic:[outcome[@"Automatic"] boolValue]
-                                   automaticLogin:[(profile[@"AutomaticLogin"] ?: @YES) boolValue]
-                                       restarting:YES];
-            }
-            [session.guestAgent requestRestartWithCompletion:^(NSError *issue) {
-              if (!issue) {
-                  NSError *saveError = nil;
-                  [session.machine recordOpenGLRestartAcknowledged:&saveError];
-                  if (saveError)
-                      VIMPresentError(saveError, session.window);
-              } else if (session.task.running) {
-                  [session dismissSetupNotice];
-                  session.guestStatus.stringValue = @"Restart was not confirmed. Restart from the Apple menu to "
-                                                    @"continue setup. Your setup records were retained.";
-              }
-            }];
-          };
-          if ([outcome[@"Automatic"] boolValue] || VIMCreatingGuestFromArguments())
-              restart();
-          else {
+      VIMOpenGLSetupOutcome *decision = [[VIMOpenGLSetupOutcome alloc] initWithOutcome:outcome];
+      NSString *waiting = [decision waitingMessageForOSName:VIMOperatingSystemName(session.machine.guest)];
+      switch (decision.step) {
+          case VIMOpenGLSetupStepAskForPassword:
+              [session askForOpenGLSetupPasswordForUser:outcome[@"Username"]];
+              break;
+          case VIMOpenGLSetupStepMonitorDesktop:
               [session dismissSetupNotice];
-              NSAlert *alert = [NSAlert new];
-              VIMSetAppAlertIcon(alert);
-              BOOL updated = [outcome[@"ExistingGuestUpdate"] boolValue];
-              alert.messageText =
-                  updated ? @"Restart to use updated graphics support?" : @"Restart to finish graphics setup?";
-              alert.informativeText =
-                  updated ? @"Graphics support has been updated. Save any open work, then restart this Mac to use it."
-                          : @"Graphics support is installed. Restart this Mac to load it. Save any open work first.";
-              [alert addButtonWithTitle:@"Restart"];
-              [alert addButtonWithTitle:@"Later"];
-              [alert beginSheetModalForWindow:session.window
-                            completionHandler:^(NSModalResponse result) {
-                              if (result == NSAlertFirstButtonReturn)
-                                  restart();
-                              else if ([outcome[@"ExistingGuestUpdate"] boolValue]) {
-                                  // The installed update waits for a user-approved restart;
-                                  // retain normal clipboard/status/services in this boot.
-                                  session.state.openGLDesktopMonitoring = YES;
-                                  [session refreshGuestStatus];
-                              }
-                            }];
-          }
-          return;
+              if (decision.leftSystemUnchanged)
+                  [session.log writeData:[@"\n[Light Click] Automatic OpenGL setup left the current system unchanged; "
+                                          @"continuing desktop monitoring.\n" dataUsingEncoding:NSUTF8StringEncoding]];
+              session.state.openGLDesktopMonitoring = YES;
+              [session refreshGuestStatus];
+              break;
+          case VIMOpenGLSetupStepInstallerRunning:
+              [session dismissSetupNotice];
+              session.guestStatus.stringValue = waiting;
+              break;
+          case VIMOpenGLSetupStepRestart:
+              if (!session.openGLRestartAttempted)
+                  [session restartForOpenGLSetup:outcome decision:decision];
+              break;
+          case VIMOpenGLSetupStepFinish:
+              [session finishOpenGLSetupWithReport:outcome[@"Report"]];
+              break;
+          case VIMOpenGLSetupStepWaitAndAskAgain:
+              session.guestStatus.stringValue = waiting;
+              [session scheduleGuestStatusRetry];
+              break;
       }
-      if ([phase isEqual:@"complete"]) {
-          [session dismissSetupNotice];
-          NSError *failure = nil;
-          if (![session.machine finishOpenGLSetupWithReport:outcome[@"Report"] error:&failure]) {
-              VIMPresentError(
-                  failure
-                      ?: VIMSessionError(
-                             @"Setup could not yet be verified. Its installer and recovery records were retained."),
-                  session.window);
-              return;
-          }
-          session.completionGuestReport = outcome[@"Report"];
-          session.openGLLargeResizeReady = YES;
-          session.lastRequestedSize = NSZeroSize;
-          [session scheduleResize];
-          session.guestStatus.stringValue = @"Graphics support is ready";
-          [session retireOpenGLSetupDiscWithReport:outcome[@"Report"]];
-          [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
-          // The persistent receipt ends setup work for this boot. On a later
-          // boot the guest bootstrap checks native files for update repair.
-          session.state.openGLDesktopMonitoring = YES;
-          [session refreshGuestStatus];
-          return;
-      }
-      session.guestStatus.stringValue =
-          [phase isEqual:@"payload-media-wait"] ? @"Waiting for the graphics update disc…"
-          : [phase isEqual:@"root-volume-wait"] ? @"Waiting for this Mac’s startup disk…"
-          : [phase isEqual:@"desktop-wait"]     ? @"Waiting for this Mac’s desktop…"
-          : [@[ @"desktop-services-wait", @"file-sharing-busy" ] containsObject:phase]
-              ? @"Finishing File Sharing setup…"
-          : [phase isEqual:@"update-restart-wait"] ? @"Restart this Mac when its system update finishes…"
-          : [phase isEqual:@"account-busy"]        ? @"Creating your Mac account…"
-          : [phase isEqual:@"restarting"]
-              ? @"Restarting to finish setup…"
-              : [NSString stringWithFormat:@"Starting %@…", VIMOperatingSystemName(session.machine.guest)];
-      [session.guestTimer invalidate];
-      session.guestTimer = [NSTimer scheduledTimerWithTimeInterval:15
-                                                           repeats:NO
-                                                             block:^(NSTimer *timer) {
-                                                               [weakSelf refreshGuestStatus];
-                                                             }];
     }];
+}
+- (void)askForOpenGLSetupPasswordForUser:(NSString *)username {
+    [self dismissSetupNotice];
+    NSAlert *alert = [NSAlert new];
+    VIMSetInstallerAlertIcon(alert, self.machine.guest);
+    alert.messageText = @"Enter the virtual Mac’s password";
+    alert.informativeText = [NSString
+        stringWithFormat:@"Enter the password you chose for “%@” in this virtual Mac to resume its saved setup. "
+                         @"Your existing account won’t be replaced. This password won’t be saved on this Mac.",
+                         username ?: @""];
+    NSSecureTextField *password = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 280, 24)];
+    password.placeholderString = @"Virtual Mac password";
+    alert.accessoryView = password;
+    [alert addButtonWithTitle:@"Continue"];
+    [alert addButtonWithTitle:@"Not Now"];
+    alert.window.initialFirstResponder = password;
+    self.guestStatus.stringValue = @"A password is needed to resume setup";
+    VIMPresentAlert(alert, self.window, ^(NSModalResponse response) {
+      NSString *value = response == NSAlertFirstButtonReturn ? password.stringValue : nil;
+      password.stringValue = @"";
+      if (!value || !self.task.running || self.state.shutdownRequested)
+          return;
+      NSError *failure = nil;
+      if (![self.openGLSetup providePassword:value error:&failure]) {
+          VIMPresentError(failure, self.window);
+          return;
+      }
+      [self refreshOpenGLSetup];
+    });
+}
+- (void)restartForOpenGLSetup:(NSDictionary *)outcome decision:(VIMOpenGLSetupOutcome *)decision {
+    void (^restart)(void) = ^{
+      if (!self.task.running || self.state.shutdownRequested)
+          return;
+      NSError *failure = nil;
+      if (![self.machine prepareOpenGLRestartWithReport:outcome[@"Report"] error:&failure]) {
+          [self dismissSetupNotice];
+          VIMPresentError(failure, self.window);
+          return;
+      }
+      self.openGLRestartAttempted = YES;
+      [self applyLifecycleEvent:VIMSessionEventGuestRebootExpected];
+      [self updateInstallationActivity];
+      self.guestStatus.stringValue = @"Finishing setup — restarting this Mac…";
+      if (decision.showsRestartNotice) {
+          NSDictionary *profile = [NSDictionary
+              dictionaryWithContentsOfURL:[self.machine.URL URLByAppendingPathComponent:@"State/AutomaticSetup.plist"]];
+          [self showSetupNoticeAutomatic:decision.automatic
+                          automaticLogin:[(profile[@"AutomaticLogin"] ?: @YES) boolValue]
+                              restarting:YES];
+      }
+      [self.guestAgent requestRestartWithCompletion:^(NSError *issue) {
+        if (!issue) {
+            NSError *saveError = nil;
+            [self.machine recordOpenGLRestartAcknowledged:&saveError];
+            if (saveError)
+                VIMPresentError(saveError, self.window);
+        } else if (self.task.running) {
+            [self dismissSetupNotice];
+            self.guestStatus.stringValue = @"Restart was not confirmed. Restart from the Apple menu to "
+                                           @"continue setup. Your setup records were retained.";
+        }
+      }];
+    };
+    if ([decision restartsWithoutAskingWhenCreatingGuest:VIMCreatingGuestFromArguments()]) {
+        restart();
+        return;
+    }
+    [self dismissSetupNotice];
+    NSAlert *alert = [NSAlert new];
+    VIMSetAppAlertIcon(alert);
+    alert.messageText = decision.restartPromptTitle;
+    alert.informativeText = decision.restartPromptDetail;
+    [alert addButtonWithTitle:@"Restart"];
+    [alert addButtonWithTitle:@"Later"];
+    [alert beginSheetModalForWindow:self.window
+                  completionHandler:^(NSModalResponse result) {
+                    if (result == NSAlertFirstButtonReturn)
+                        restart();
+                    else if (decision.monitorsDesktopIfDeclined) {
+                        self.state.openGLDesktopMonitoring = YES;
+                        [self refreshGuestStatus];
+                    }
+                  }];
+}
+- (void)finishOpenGLSetupWithReport:(NSDictionary *)report {
+    [self dismissSetupNotice];
+    NSError *failure = nil;
+    if (![self.machine finishOpenGLSetupWithReport:report error:&failure]) {
+        VIMPresentError(
+            failure
+                ?: VIMSessionError(
+                       @"Setup could not yet be verified. Its installer and recovery records were retained."),
+            self.window);
+        return;
+    }
+    self.completionGuestReport = report;
+    self.openGLLargeResizeReady = YES;
+    self.lastRequestedSize = NSZeroSize;
+    [self scheduleResize];
+    self.guestStatus.stringValue = @"Graphics support is ready";
+    [self retireOpenGLSetupDiscWithReport:report];
+    [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
+    // The persistent receipt ends setup work for this boot. On a later
+    // boot the guest bootstrap checks native files for update repair.
+    self.state.openGLDesktopMonitoring = YES;
+    [self refreshGuestStatus];
 }
 - (void)retireOpenGLSetupDiscWithReport:(NSDictionary *)report {
     if (!self.openGLSetupMediaAttached)

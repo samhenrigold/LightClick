@@ -293,3 +293,77 @@ private let exitCases = [
                     : "This Mac stopped unexpectedly. You can start it again or inspect Session Details."))
     }
 }
+
+@Suite struct OpenGLSetupOutcomeTests {
+    @Test(arguments: [
+        ("credential-required", OpenGLSetupStep.askForPassword),
+        ("unmanaged", .monitorDesktop),
+        ("unsupported", .monitorDesktop),
+        ("setup-unavailable", .monitorDesktop),
+        ("recovery", .installerRunning),
+        ("needs-restart", .restart),
+        ("complete", .finish),
+        ("booting", .waitAndAskAgain),
+        ("audio-busy", .waitAndAskAgain),
+        ("payload-media-wait", .waitAndAskAgain),
+        ("anything new", .waitAndAskAgain)
+    ])
+    func stepForPhase(_ phase: String, _ step: OpenGLSetupStep) {
+        #expect(OpenGLSetupOutcome(phase: phase).step == step)
+    }
+
+    @Test func noPhaseKeepsWaiting() {
+        #expect(OpenGLSetupOutcome(phase: nil).step == .waitAndAskAgain)
+        #expect(OpenGLSetupOutcome(phase: nil).waitingMessage(osName: "Snow") == "Starting Snow…")
+    }
+
+    @Test func onlySetupUnavailableIsLogged() {
+        #expect(OpenGLSetupOutcome(phase: "setup-unavailable").leftSystemUnchanged)
+        #expect(!OpenGLSetupOutcome(phase: "unmanaged").leftSystemUnchanged)
+    }
+
+    @Test(arguments: [
+        ("recovery", "Installing Snow…"),
+        ("payload-media-wait", "Waiting for the graphics update disc…"),
+        ("root-volume-wait", "Waiting for this Mac’s startup disk…"),
+        ("desktop-wait", "Waiting for this Mac’s desktop…"),
+        ("desktop-services-wait", "Finishing File Sharing setup…"),
+        ("file-sharing-busy", "Finishing File Sharing setup…"),
+        ("update-restart-wait", "Restart this Mac when its system update finishes…"),
+        ("account-busy", "Creating your Mac account…"),
+        ("restarting", "Restarting to finish setup…"),
+        ("booting", "Starting Snow…"),
+        ("audio-busy", "Starting Snow…")
+    ])
+    func waitingMessage(_ phase: String, _ message: String) {
+        #expect(OpenGLSetupOutcome(phase: phase).waitingMessage(osName: "Snow") == message)
+    }
+
+    @Test func aRestartAsksUnlessSomeoneCantAnswer() {
+        let asked = OpenGLSetupOutcome(phase: "needs-restart")
+        #expect(!asked.restartsWithoutAsking(creatingGuest: false))
+        #expect(asked.restartsWithoutAsking(creatingGuest: true))
+        #expect(OpenGLSetupOutcome(phase: "needs-restart", automatic: true).restartsWithoutAsking(creatingGuest: false))
+    }
+
+    @Test func anUpdateAndAFirstSetupDifferInWhatFollows() {
+        let first = OpenGLSetupOutcome(phase: "needs-restart")
+        let update = OpenGLSetupOutcome(phase: "needs-restart", existingGuestUpdate: true)
+        #expect(first.showsRestartNotice && !first.monitorsDesktopIfDeclined)
+        #expect(!update.showsRestartNotice && update.monitorsDesktopIfDeclined)
+        #expect(first.restartPromptTitle == "Restart to finish graphics setup?")
+        #expect(update.restartPromptTitle == "Restart to use updated graphics support?")
+    }
+
+    @Test func theBridgeReadsTheCoordinatorsDictionaryAndRefusesWrongTypes() {
+        let bridged = OpenGLSetupOutcomeBridge(
+            outcome: ["Phase": "needs-restart", "Automatic": true, "ExistingGuestUpdate": true] as NSDictionary)
+        #expect(bridged.step == .restart)
+        #expect(bridged.automatic)
+        #expect(bridged.monitorsDesktopIfDeclined)
+        #expect(OpenGLSetupOutcomeBridge(outcome: nil).step == .waitAndAskAgain)
+        let wrong = OpenGLSetupOutcomeBridge(outcome: ["Phase": 1, "Automatic": "YES"] as NSDictionary)
+        #expect(wrong.step == .waitAndAskAgain)
+        #expect(!wrong.automatic)
+    }
+}
