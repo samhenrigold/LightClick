@@ -23,11 +23,17 @@ import Testing
     }
 
     @Test func onlyAnotherGuestStartsTheConfigurationPageOver() {
-        #expect(NewMachineDefaults.pageStartsOver(pageGuest: nil, jobGuest: nil, guest: .lion))
-        #expect(!NewMachineDefaults.pageStartsOver(pageGuest: .lion, jobGuest: nil, guest: .lion))
-        #expect(NewMachineDefaults.pageStartsOver(pageGuest: .lion, jobGuest: nil, guest: .mojave))
-        #expect(!NewMachineDefaults.pageStartsOver(pageGuest: nil, jobGuest: .lion, guest: .lion))
-        #expect(NewMachineDefaults.pageStartsOver(pageGuest: .tiger, jobGuest: .lion, guest: .mojave))
+        #expect(NewMachineDefaults.pageFill(pageGuest: nil, jobGuest: nil, guest: .lion) == .defaults)
+        #expect(NewMachineDefaults.pageFill(pageGuest: .lion, jobGuest: nil, guest: .lion) == .keep)
+        #expect(NewMachineDefaults.pageFill(pageGuest: .lion, jobGuest: nil, guest: .mojave) == .defaults)
+        #expect(NewMachineDefaults.pageFill(pageGuest: .tiger, jobGuest: .lion, guest: .mojave) == .defaults)
+    }
+
+    @Test func comingBackToASavedJobsGuestBringsTheJobBack() {
+        #expect(NewMachineDefaults.pageFill(pageGuest: .mojave, jobGuest: .lion, guest: .lion) == .job)
+        #expect(
+            NewMachineDefaults.pageFill(pageGuest: nil, jobGuest: .lion, guest: .lion) == .job, "A reopened window.")
+        #expect(NewMachineDefaults.pageFill(pageGuest: .lion, jobGuest: .lion, guest: .lion) == .keep)
     }
 
     @Test func hostLimitsLeaveMemoryAndCapAt64() {

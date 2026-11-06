@@ -31,6 +31,11 @@ public struct GuestCommandResult: Sendable {
         Self.text(standardError).flatMap { $0.isEmpty ? nil : $0 }
     }
 
+    /// Standard error for a journal, or `nonText` if it can't be decoded. Nil if there's none to record.
+    public func log(nonText: String?) -> String? {
+        standardError.isEmpty ? nil : Self.text(standardError) ?? nonText
+    }
+
     /// Foundation's UTF-8 decoding, which is what the journal has always held.
     static func text(_ data: Data) -> String? {
         NSString(data: data, encoding: String.Encoding.utf8.rawValue) as String?

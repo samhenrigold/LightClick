@@ -199,7 +199,7 @@ static void InstallUSBHelper(BOOL terminal, void (^completion)(NSError *)) {
 - (void)connectDevice:(NSDictionary *)device
             processID:(pid_t)pid
             directory:(NSString *)directory
-              control:(VIMQMPConnection *)control
+              control:(id)control
            completion:(void (^)(NSError *))completion {
     if (!self.prepared || self.stopped) {
         completion(VIMUSBError(@"USB capture is not ready."));
@@ -329,9 +329,7 @@ static void InstallUSBHelper(BOOL terminal, void (^completion)(NSError *)) {
                 });
               }];
 }
-- (void)disconnectDevice:(NSString *)identifier
-                 control:(VIMQMPConnection *)control
-              completion:(void (^)(NSError *))completion {
+- (void)disconnectDevice:(NSString *)identifier control:(id)control completion:(void (^)(NSError *))completion {
     NSDictionary *session = self.sessions[identifier];
     if (!session) {
         completion(VIMUSBError(@"This USB connection has already ended."));
@@ -356,7 +354,7 @@ static void InstallUSBHelper(BOOL terminal, void (^completion)(NSError *)) {
             completion(nil);
           }];
 }
-- (void)deviceWasDeleted:(NSString *)identifier control:(VIMQMPConnection *)control {
+- (void)deviceWasDeleted:(NSString *)identifier control:(id)control {
     NSString *character = self.retiringCharacters[identifier];
     if (!character)
         return;

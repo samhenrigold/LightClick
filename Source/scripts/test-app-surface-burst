@@ -2,7 +2,7 @@
 set -euo pipefail
 root=${0:A:h:h}
 mkdir -p "$root/Build/Probes"
-xcrun clang -fobjc-arc -fmodules -Wall -mmacosx-version-min=11.0 -arch x86_64 -arch arm64 \
+"$root/scripts/clang-with-swift-packages" GuestControl -- -fobjc-arc -fmodules -Wall -mmacosx-version-min=15.0 \
     -I "$root/VirtualIntelMac" -framework Cocoa -framework Metal -framework QuartzCore -lbsm \
     "$root/probes/app-surface-burst.m" \
     "$root/VirtualIntelMac/VIMDisplayConnection.m" "$root/VirtualIntelMac/VIMMetalView.m" \

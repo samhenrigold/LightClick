@@ -73,18 +73,18 @@ int main(void) {
                   @"Command release must release a shortcut whose key-up AppKit consumed");
         [events removeAllObjects];
         [view flagsChanged:Flags(55, 0)];
-        NSCAssert(!events.count && ![[view valueForKey:@"pressedKeys"] count],
+        NSCAssert(!events.count && ![[view valueForKeyPath:@"inputEvents.pressedKeys"] count],
                   @"A duplicate release must never press Command");
         [view flagsChanged:Flags(55, NSEventModifierFlagCommand | NX_DEVICELCMDKEYMASK)];
         [view flagsChanged:Flags(54, NSEventModifierFlagCommand | NX_DEVICELCMDKEYMASK | NX_DEVICERCMDKEYMASK)];
         [view flagsChanged:Flags(55, NSEventModifierFlagCommand | NX_DEVICERCMDKEYMASK)];
-        NSCAssert([[view valueForKey:@"pressedKeys"] isEqual:[NSSet setWithObject:@"meta_r"]],
+        NSCAssert([[view valueForKeyPath:@"inputEvents.pressedKeys"] isEqual:[NSSet setWithObject:@"meta_r"]],
                   @"Left Command release preserves the held right Command");
         NSUInteger count = events.count;
         [view flagsChanged:Flags(55, NSEventModifierFlagCommand | NX_DEVICERCMDKEYMASK)];
         NSCAssert(events.count == count, @"Duplicate left release while right is held is idempotent");
         [view flagsChanged:Flags(54, 0)];
-        NSCAssert(![[view valueForKey:@"pressedKeys"] count], @"Both sides released");
+        NSCAssert(![[view valueForKeyPath:@"inputEvents.pressedKeys"] count], @"Both sides released");
         NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 100, 100)
                                                        styleMask:NSWindowStyleMaskTitled
                                                          backing:NSBackingStoreBuffered
@@ -102,14 +102,14 @@ int main(void) {
         [view captureInput];
         [view keyDown:key];
         [view routeCapturedKey:Flags(58, NSEventModifierFlagControl | NSEventModifierFlagOption)];
-        NSCAssert(!view.inputCaptured && window.firstResponder != view && ![[view valueForKey:@"pressedKeys"] count],
+        NSCAssert(!view.inputCaptured && window.firstResponder != view && ![[view valueForKeyPath:@"inputEvents.pressedKeys"] count],
                   @"Control-Option releases keyboard focus and all guest keys");
         NSCAssert(lastBatch.count == 5, @"The two held keys and three mouse buttons release in one transport request");
         [window makeFirstResponder:view];
         [view captureInput];
         [view keyDown:key];
         [window makeFirstResponder:window];
-        NSCAssert(!view.inputCaptured && ![[view valueForKey:@"pressedKeys"] count],
+        NSCAssert(!view.inputCaptured && ![[view valueForKeyPath:@"inputEvents.pressedKeys"] count],
                   @"Moving keyboard focus within a window releases held guest keys");
         puts("PASS: aggregate/device modifiers, duplicate releases, both Command keys, consumed shortcut release, "
              "uncapture and focus loss; no host input injection");
