@@ -164,7 +164,7 @@ import Testing
         #expect(PackageStorage.summary(capacityBytes: 3 << 29, allocatedBytes: 0).hasPrefix("Disk capacity: 1.5 GB\n"))
     }
 
-    @Test func measuringSeparatesTheDiskAndSkipsHiddenFiles() throws {
+    @Test func measuringSeparatesTheDiskAndSkipsLinksAndHiddenFiles() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let disks = root.appendingPathComponent("Disks")
         try FileManager.default.createDirectory(at: disks, withIntermediateDirectories: true)
@@ -172,6 +172,9 @@ import Testing
         try Data(repeating: 1, count: 100_000).write(to: disks.appendingPathComponent("System.qcow2"))
         try Data(repeating: 2, count: 8192).write(to: root.appendingPathComponent("Machine.plist"))
         try Data(repeating: 3, count: 500_000).write(to: root.appendingPathComponent(".hidden"))
+        // Sorts or hashes anywhere relative to Disks, which must still be counted.
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("Link"), withDestinationURL: disks.appendingPathComponent("System.qcow2"))
         let measured = PackageStorage.measure(package: root, disk: "Disks/System.qcow2")
         #expect(measured.diskBytes >= 100_000 && measured.diskBytes < 500_000)
         #expect(measured.otherBytes >= 8192 && measured.otherBytes < 100_000)

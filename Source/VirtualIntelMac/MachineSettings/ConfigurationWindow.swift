@@ -21,6 +21,7 @@ final class ConfigurationWindow: NSWindowController, NSToolbarDelegate, NSTableV
     var feedback = NSTextField()
     var memoryField: NSTextField?
     var memorySlider: NSSlider?
+    var memoryStepper: NSStepper?
     var descriptionEditor: NSTextView?
     private var descriptionTimer: Timer?
     private(set) var sidebar: ConfigurationSidebar?
@@ -449,6 +450,8 @@ final class ConfigurationWindow: NSWindowController, NSToolbarDelegate, NSTableV
             do {
                 try machine.saveSettings(["MemoryMiB": value])
                 feedback.stringValue = ""
+                memorySlider?.doubleValue = Double(value) / 1024
+                memoryStepper?.integerValue = value
                 completion?()
             } catch {
                 feedback.stringValue = error.localizedDescription

@@ -39,6 +39,7 @@ extension ConfigurationWindow {
         stepper.doubleValue = memory.doubleValue
         stepper.target = self
         stepper.action = #selector(memoryStepped)
+        memoryStepper = stepper
         let memoryRow = NSStackView(views: [memory, NSTextField(labelWithString: "MB"), stepper])
         memoryRow.spacing = 4
 
@@ -87,6 +88,7 @@ extension ConfigurationWindow {
     @objc private func memorySlid(_ sender: NSSlider) {
         let value = hardwareLimits.memoryMiB(fromSliderGiB: sender.doubleValue)
         memoryField?.integerValue = value
+        memoryStepper?.integerValue = value
         commit(["MemoryMiB": value])
     }
 

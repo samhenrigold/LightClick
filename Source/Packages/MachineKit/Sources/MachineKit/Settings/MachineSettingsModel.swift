@@ -268,11 +268,8 @@ public struct PackageStorage: Equatable, Sendable {
             at: package, includingPropertiesForKeys: keys, options: .skipsHiddenFiles)
         while let file = files?.nextObject() as? URL {
             guard let values = try? file.resourceValues(forKeys: Set(keys)) else { continue }
-            if values.isSymbolicLink == true {
-                files?.skipDescendants()
-                continue
-            }
-            guard values.isRegularFile == true else { continue }
+            // The enumerator doesn't follow links. Calling skipDescendants here would skip the next real folder.
+            guard values.isSymbolicLink != true, values.isRegularFile == true else { continue }
             let allocated = values.fileAllocatedSize ?? 0
             let size = UInt64(allocated != 0 ? allocated : values.fileSize ?? 0)
             var info = stat()
