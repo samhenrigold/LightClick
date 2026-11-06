@@ -25,6 +25,7 @@ import shutil
 import signal
 import subprocess
 import time
+import uuid
 
 source = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -43,6 +44,7 @@ parser.add_argument('--program', help='stage this local x86 program and run it o
 parser.add_argument('--driver', type=Path, help='run this Python file in place of a benchmark, with request() and stage() from here')
 parser.add_argument('--driver-arg', action='append', default=[], help='passed to --driver as `arguments`')
 parser.add_argument('--sample', type=int, help='sample QEMU for this many seconds during the workload, into Build/bench/<tag>.sample')
+parser.add_argument('--fresh-identifier', action='store_true', help='give the clone its own machine identifier')
 args = parser.parse_args()
 bench = source/'Build/bench/lc-bench'
 events = source/'Build/bench'/f'{args.tag}.events'
@@ -84,6 +86,9 @@ extra = ' '.join(shlex.quote(item) for item in args.qemu)
 (binary/'qemu-system-x86_64').chmod(0o755)
 diagnostics = work/'diagnostics'
 diagnostics.mkdir(mode=0o700)
+if args.fresh_identifier:
+    # What a Seamless session's sockets and proxies are named from, which a clone shouldn't share with a live session.
+    subprocess.run(['plutil', '-replace', 'Identifier', '-string', str(uuid.uuid4()).upper(), str(machine/'Machine.plist')], check=True)
 env = dict(os.environ, CFFIXED_USER_HOME=str(home))
 process = subprocess.Popen([str(app/'Contents/MacOS/Light Click'), '--open-vm', str(machine), '--guest-diagnostics-root',
                             str(diagnostics)], env=env, stdout=(work/'app.log').open('w'), stderr=subprocess.STDOUT,
