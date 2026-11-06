@@ -298,6 +298,10 @@ couldn't confirm either way.
 
 ## Reproducing
 
+`probes/gpu-bench.m` is the guest workload: OpenGL, and Metal from 10.14. Its header has the build line and `scripts/guest-bench`
+the A/B commands. `metal_shared_*`, `metal_gpuwrite_*` and `metal_touch_*` are the lines to watch for items 1 to 3, with
+`VIM_PVG_TIMING=1` to confirm with `PVG shadow` that the shadow path ran at all. It has run on the host only so far.
+
     xcrun clang -arch x86_64 -O2 -fno-objc-arc -undefined dynamic_lookup -I vendor/qemu/hw/display \
         -framework Foundation -framework Metal probes/host-shadow-import-rules.m -o /tmp/rules && /tmp/rules
 
