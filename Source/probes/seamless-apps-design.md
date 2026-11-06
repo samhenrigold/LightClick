@@ -13,7 +13,7 @@ Labels: **[measured]** by a probe here. **[read]** seen in code or a binary. **[
 
 ## Try it on your Mac
 
-A normal build has this now. **Use a clone: making a Dock app changes the machine.** It adds a library to its WindowServer, in `/System/Library/LaunchDaemons/com.apple.WindowServer.plist`. Mavericks is what's been tested in full, on its own proxy, at 2x and 1x. Nothing yet has been seen on a display.
+A normal build has this now. **Use a clone: making a Dock app changes the machine.** It adds a library to its WindowServer, in `/System/Library/LaunchDaemons/com.apple.WindowServer.plist`. Mavericks is what's been tested in full, at 2x and 1x, and Mojave at 2x with no drag in. Only 10.9 gets the hook. Nothing yet has been seen on a display.
 
 1. Build, from `Source`:
 
@@ -144,6 +144,8 @@ So Safari goes up 4.6 times with both, and past that WindowServer has room to sp
 | TextEdit, captures/s | 1.0 | 11.9, for 1.5 frames/s |
 
 The columns aren't only the engine. `CGSGetWindowFlushSeed` doesn't move for a CSS animation here: in the TCG run, 475 of 497 looks were skipped by it while the page changed. So the tool now looks faster for 2 s whenever its once-a-second look finds a change the seed missed, which is what the engine column ran with. It costs an idle-looking TextEdit 11.9 captures/s, probably for its caret, and an animation starts up to a second late. What would replace it is a composite in the server: `WSCompositeWindowToDestination` into an IOSurface, or a client request that says a CA context changed. Both unbuilt, and given Mavericks' result for the first, measure before building.
+
+**A session from a proxy** ran on `Mojave Test`, from a `build-app`, at 2x on the engine, with no hook: the proxy, the hidden machine, the opened document, typing, File > New, the mirrored menu (about 15 KB, 300 to 500 ms), the sheet on quitting with its view service's contents, the edited file coming back, the promised file, badge, attention, shutdown and removal. Accessibility needed a row for `/usr/libexec/AppleQEMUGuestAgent`, where Mojave's agent lives; without it both the menu and posted events silently did nothing. The setup now asks for its parent's path. **What didn't work: the drag in.** The helper's shields came up and it was pressed, but it never said `drag_started`, and nothing landed. The press may be going to the wrong place, as it was at (179, 256) in one case; not looked into, so `seamless-session-try` fails that check on Mojave. The drag-out check passing there may be a pasteboard left from before, so it's weak.
 
 **A composite in the server, bounded, not built.** `CGSHWCaptureWindowList` is the path through `WSCompositeWindowToDestination`, by a disassembly of `CaptureSurfaceMetal::Populate`, so its time is a fair stand-in for one, on Mojave on the engine at 2x:
 
