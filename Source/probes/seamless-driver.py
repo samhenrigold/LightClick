@@ -301,7 +301,9 @@ def proxy(seconds):
              '/usr/bin/sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "'
              + ' '.join(f"INSERT OR REPLACE INTO access (service,client,client_type,allowed,prompt_count) VALUES "
                         f"('kTCCServiceAccessibility','{client}',1,1,1);"
-                        for client in ('/tmp/sg/ig', '/tmp/sg/g', '/usr/bin/sudo', '/usr/bin/env')) +
+                        for client in ('/private/tmp/sg/ig', '/tmp/sg/ig', '/private/tmp/sg/g', '/usr/bin/sudo', '/usr/bin/env',
+                                       # 10.9 asks TCC about the responsible process, and from a daemon that's the agent.
+                                       '/Library/Application Support/Virtual Intel Mac/GuestTools/opengl-install-bootstrap')) +
              '"; /usr/bin/killall tccd; sleep 2')
     print(request({'Executable': '/bin/sh', 'Arguments': ['-c', setup, 'sh', guest, tool]}, 120), flush=True)
     apps = request({'Executable': '/tmp/sg/ig', 'Arguments': ['apps']}, 300).get('Stdout', '')
@@ -336,10 +338,20 @@ def proxy(seconds):
         windows = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
         evidence.append('\n'.join(w for w in windows.splitlines() if 'TextEdit (' in w or f'pid={app_pid} ' in w))
         evidence.append(f'(VM app pid {app_pid}: any row above with it is still on screen)')
+        # The proxy's own menu bar, read back through the host's Accessibility.
+        menu = subprocess.run([str(results/'seamless-integration-guest'), 'menu', '--app', 'TextEdit (Mavericks)'], capture_output=True, text=True).stdout
+        tree = next((row for row in menu.splitlines() if row.startswith('[')), '')
+        try:
+            import json
+            top = json.loads(tree)
+            evidence.append('Host menu bar of the proxy: ' + ', '.join(item.get('title', '') for item in top) +
+                            f' ({sum(len(item.get("children") or []) for item in top)} items in those menus)')
+        except ValueError:
+            evidence.append(f'Host menu bar of the proxy: unreadable: {menu[:300]}')
 
     watcher = threading.Thread(target=look)
     watcher.start()
-    status, _ = run(guest, ['tree', '--app', 'TextEdit', '--open', '--hook', '--menu-tool', '/tmp/sg/ig', '--port', str(port), '--seconds', str(seconds)])
+    status, _ = run('/usr/bin/env', ['SEAMLESS_RUN_IN_PLACE=1', '/tmp/sg/g', 'tree', '--app', 'TextEdit', '--open', '--hook', '--menu-tool', '/tmp/sg/ig', '--port', str(port), '--seconds', str(seconds)])
     watcher.join()
     print(f'# guest exit {status}', flush=True)
     try:

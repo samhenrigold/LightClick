@@ -289,6 +289,14 @@ static void activate_owner(struct Stream *s) {
 
 static void post_pointer(struct Stream *s, const struct SWMPointer *e) {
     s->pointer_events++;
+    if (s->pointer_events <= 8 && !s->test_pattern) {
+        ProcessSerialNumber front = {0, 0};
+        pid_t front_pid = 0;
+        GetFrontProcess(&front);
+        GetProcessPID(&front, &front_pid);
+        printf("# %.1f pointer %u kind %d at %.1f,%.1f for window %u; front pid %d, target %d\n", now(),
+               s->pointer_events, e->kind, e->x / 16.0, e->y / 16.0, e->window, front_pid, s->pid);
+    }
     if (s->test_pattern) {
         if (e->kind == SWM_DOWN)
             s->clicks++;
@@ -334,6 +342,13 @@ static void post_pointer(struct Stream *s, const struct SWMPointer *e) {
 
 static void post_key(struct Stream *s, const struct SWMKey *k) {
     s->key_events++;
+    if (s->key_events <= 2 && !s->test_pattern) {
+        ProcessSerialNumber front = {0, 0};
+        pid_t front_pid = 0;
+        GetFrontProcess(&front);
+        GetProcessPID(&front, &front_pid);
+        printf("# %.1f key %u down %d; front pid %d, target %d\n", now(), k->keycode, k->down, front_pid, s->pid);
+    }
     if (s->test_pattern) {
         if (k->down)
             s->keys++;
@@ -363,6 +378,7 @@ static char *run_tool(char *const *arguments) {
     pid_t child = fork();
     if (child == 0) {
         dup2(ends[1], 1);
+        dup2(ends[1], 2);
         close(ends[0]);
         close(ends[1]);
         execv(arguments[0], arguments);
@@ -398,6 +414,11 @@ static void *menu_thread(void *unused) {
         char *end = line ? strchr(line, '\n') : NULL;
         if (end)
             *end = 0;
+        if (!(line && *line == '[')) {
+            static int told;
+            if (told++ < 3)
+                printf("# menu tool said: %.300s\n", text ? text : "(nothing)");
+        }
         if (line && *line == '[') {
             pthread_mutex_lock(&menu_lock);
             free(menu_json);
@@ -441,8 +462,9 @@ static void menu_press(struct Stream *s, const char *path, uint32_t length) {
     memcpy(copy, path, length);
     copy[length] = 0;
     char *const arguments[] = {(char *)menu_tool, "press", "--app", (char *)menu_app, "--path", copy, NULL};
-    free(run_tool(arguments));
-    printf("# pressed %s\n", copy);
+    char *said = run_tool(arguments);
+    printf("# pressed %s: %.200s\n", copy, said ? said : "");
+    free(said);
     s->menu_presses++;
 }
 
@@ -1196,6 +1218,7 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
     unsigned skipped = 0, roster = 0, seed_answers = 0;
     double first_window = 0;
     double started = now();
+    printf("# %.1f tree starts\n", started);
     static struct TreeItem items[TREE_ITEMS];
     for (;;) {
         double tick = now();
@@ -1248,7 +1271,11 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 entry->id = id;
                 // A capture only for what the backing doesn't hold: the shadow when it changes, and GL or video always.
                 if (entry->present && !entry->accelerated && entry->width && !fresh && !sized && w->previous)
-                    stale = item->has_surfaces || item->shadow_key != w->shadow_key;
+                    // shortcut: nothing yet says when a surface changed, so a window with any is captured at 15 Hz.
+                    // That includes plain text views, which get a surface for their overlay scrollers; a hook on
+                    // surface flushes would end this.
+                    stale =
+                        (item->has_surfaces && tick - w->last_capture > 1.0 / 15) || item->shadow_key != w->shadow_key;
             }
             s->window = id;
             s->pid = w->pid;
