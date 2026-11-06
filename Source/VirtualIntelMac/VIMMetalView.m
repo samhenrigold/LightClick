@@ -47,6 +47,7 @@
 // Opt-in pacing diagnosis, independent of GPU-completion/ownership ACKs.
 @property BOOL measurePresentation;
 @property NSUInteger presentedFrames;
+@property(readwrite) NSUInteger arrivedFrames;
 @property NSUInteger skippedPresentations;
 @property NSUInteger reorderedPresentations;
 @property CFTimeInterval firstPresentedAt;
@@ -1183,14 +1184,20 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
 - (void)presentWidth:(NSUInteger)width
               height:(NSUInteger)height
               stride:(NSUInteger)stride
-          completion:(void (^)(BOOL))completion {
+                    completion:(void (^)(BOOL))completion {
+    self.arrivedFrames++;
+    if (self.frameObserver && self.frameBuffer && stride >= width * 4 && stride * height <= self.frameBuffer.length)
+        self.frameObserver(NULL, self.frameBuffer.contents, width, height, stride);
     [self presentWidth:width height:height stride:stride sourceTexture:nil completion:completion];
 }
 - (void)presentSurface:(IOSurfaceRef)surface
                  width:(NSUInteger)width
                 height:(NSUInteger)height
-            completion:(void (^)(BOOL))completion {
+                        completion:(void (^)(BOOL))completion {
     NSAssert(NSThread.isMainThread, @"Presentation is main-thread owned");
+    self.arrivedFrames++;
+    if (self.frameObserver && surface)
+        self.frameObserver(surface, NULL, width, height, IOSurfaceGetBytesPerRow(surface));
     if (!surface || width < 320 || height < 200 || width > 8192 || height > 8192 ||
         IOSurfaceGetPixelFormat(surface) != 0x42475241 || IOSurfaceGetPlaneCount(surface) != 0 ||
         IOSurfaceGetBytesPerElement(surface) != 4 || IOSurfaceGetWidth(surface) < width ||

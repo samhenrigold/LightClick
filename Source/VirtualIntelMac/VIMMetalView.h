@@ -56,6 +56,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// GPU-only source path. Producer must finish writes before calling and must
 /// not mutate/recycle the surface until completion. Retains storage through
 /// Metal use; completion is a resource-release signal, not scanout evidence.
+/// Every frame the guest's display path delivers, before anything decides whether to show it. Either a surface, or bytes valid
+/// only for the call.
+@property(nullable, copy) void (^frameObserver)(IOSurfaceRef _Nullable surface, const void *_Nullable bytes, NSUInteger width,
+                                                NSUInteger height, NSUInteger stride);
+@property(readonly) NSUInteger arrivedFrames;
 - (void)presentSurface:(IOSurfaceRef)surface
                  width:(NSUInteger)width
                 height:(NSUInteger)height

@@ -121,9 +121,31 @@ final class SeamlessHost: NSObject {
             configuration: .init(
                 socketPath: socket, guestApp: app, tools: tools, log: URL(fileURLWithPath: socket + ".log")),
             guest: AgentGuest(machinePath: machine), finished: finished)
-        session.test = SeamlessSessionTest(environment: ProcessInfo.processInfo.environment["LC_SEAMLESS_TEST"])
+                let environment = ProcessInfo.processInfo.environment
+        session.test = SeamlessSessionTest(environment: environment["LC_SEAMLESS_TEST"])
+        session.usesDisplayFrames = environment["LC_SEAMLESS_CAPTURE"] == nil
+        session.stopAfter = environment["LC_SEAMLESS_STOP_AFTER"].flatMap(Double.init)
+        observeFrames(machine: machine, session: session)
         self.session = session
         session.start()
+    }
+
+    //     /// The display view exists once the machine's session has started.
+    private static func observeFrames(machine: String, session: SeamlessSession) {
+        Task {
+            while true {
+                if let running = VIMSession.running(forMachinePath: machine) {
+                    running.setFrameObserver { [weak session] surface, bytes, width, height, stride in
+                        MainActor.assumeIsolated {
+                            session?.frameArrived(
+                                surface: surface, bytes: bytes, width: Int(width), height: Int(height), stride: Int(stride))
+                        }
+                    }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
     }
 
     // MARK: Making a proxy

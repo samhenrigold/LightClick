@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import IOSurface
 import QuartzCore
 
 /// What a session needs of the machine it runs on: the guest agent the app already holds.
@@ -72,7 +73,16 @@ public final class SeamlessSession {
     private var documentsWaiting: [String] = []
     private var guestDragFiles: [String] = []
     private var logHandle: FileHandle?
-    public var test: SeamlessSessionTest?
+        public var test: SeamlessSessionTest?
+    /// Crop each window from the frames windowed mode shows, rather than capture it. Set before `start`.
+    public var usesDisplayFrames = false
+    /// For measuring: quit the guest app this long after its first window.
+    public var stopAfter: Double?
+    private var frame: (surface: IOSurfaceRef, width: Int, height: Int)?
+    private var copies: [IOSurfaceRef] = []
+    private var copyIndex = 0
+    private var arrived = 0
+    private var measuring: (started: CFAbsoluteTime, arrived: Int)?
     private var testStarted = false
 
     public init(configuration: Configuration, guest: any SeamlessGuest, finished: @escaping () -> Void) {
@@ -151,7 +161,8 @@ public final class SeamlessSession {
             "--hook",
             "--menu-tool", "/tmp/sg/ig", "--port", String(port), "--seconds", "0"
         ]
-        if test != nil { arguments.append("--test-badge") }
+                if test != nil { arguments.append("--test-badge") }
+        if usesDisplayFrames { arguments.append("--no-pixels") }
         return await guest.run("/usr/bin/env", arguments)
     }
 
@@ -355,8 +366,25 @@ public final class SeamlessSession {
             surface = made
             surfaces[window.id] = made
         }
-        surface.window = window
+                surface.window = window
         tellProxy(surface)
+        if let stopAfter, measuring == nil {
+            measuring = (CFAbsoluteTimeGetCurrent(), arrived)
+            // Past the window's opening, then over the same time windowed mode was measured for.
+            DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter - 22) {
+                MainActor.assumeIsolated { self.measuring = (CFAbsoluteTimeGetCurrent(), self.arrived) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter) {
+                MainActor.assumeIsolated {
+                    if let measuring = self.measuring {
+                        let seconds = CFAbsoluteTimeGetCurrent() - measuring.started
+                        self.note(
+                            String(format: "# frames: %.1f/s over %.0f s", Double(self.arrived - measuring.arrived) / seconds, seconds))
+                    }
+                    self.handle(.quit)
+                }
+            }
+        }
         // A guest whose menu can't be read still gets its test.
         if test != nil, !testStarted {
             DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
@@ -407,7 +435,8 @@ public final class SeamlessSession {
         let y = primary - (Double(window.y) - side + offset.y) - height
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        surface.layer.frame = CGRect(x: 0, y: 0, width: width, height: height)
+                surface.layer.frame = CGRect(x: 0, y: 0, width: width, height: height)
+        if let frame { crop(surface, from: frame) }
         CATransaction.commit()
         CATransaction.flush()
         proxy?.send(
@@ -417,6 +446,54 @@ public final class SeamlessSession {
                 x: x, y: y, width: width, height: height, margin: side, level: Int(window.level),
                 alpha: Double(window.alpha) / 65536, order: Int(window.order), title: window.title, offsetX: offset.x,
                 offsetY: offset.y))
+    }
+
+    //     // MARK: Windowed mode's frames
+
+    /// One frame of the guest's display, as windowed mode gets it. Everything shows the same surface, each through its own crop.
+    public func frameArrived(surface: IOSurfaceRef?, bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) {
+        arrived += 1
+        guard usesDisplayFrames, let current = surface ?? copy(bytes, width: width, height: height, stride: stride) else { return }
+        frame = (current, width, height)
+        guard !surfaces.isEmpty else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for surface in surfaces.values { crop(surface, from: (current, width, height)) }
+        CATransaction.commit()
+        CATransaction.flush()
+    }
+
+    private func crop(_ surface: Surface, from frame: (surface: IOSurfaceRef, width: Int, height: Int)) {
+        let window = surface.window
+        let scale = window.width > 0 ? Double(window.pixelWidth) / Double(window.width) : 1
+        let fullWidth = Double(frame.width), fullHeight = Double(frame.height)
+        surface.layer.contents = frame.surface
+        surface.layer.contentsRect = CGRect(
+            x: Double(window.x) * scale / fullWidth, y: Double(window.y) * scale / fullHeight,
+            width: Double(window.width) * scale / fullWidth, height: Double(window.height) * scale / fullHeight)
+        // A surface a producer has drawn into again is the same object, which on its own wouldn't refresh.
+        surface.layer.perform(NSSelectorFromString("setContentsChanged"))
+    }
+
+    /// The display path that hands over shared memory rather than a surface: two surfaces, so one is never being read as it's written.
+    private func copy(_ bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) -> IOSurfaceRef? {
+        guard let bytes else { return nil }
+        if copies.first.map({ IOSurfaceGetWidth($0) != width || IOSurfaceGetHeight($0) != height }) ?? true {
+            let properties: [CFString: Any] = [
+                kIOSurfaceWidth: width, kIOSurfaceHeight: height, kIOSurfaceBytesPerElement: 4,
+                kIOSurfacePixelFormat: 0x4247_5241
+            ]
+            copies = (0..<2).compactMap { _ in IOSurfaceCreate(properties as CFDictionary) }
+        }
+        guard copies.count == 2 else { return nil }
+        copyIndex = 1 - copyIndex
+        let target = copies[copyIndex]
+        IOSurfaceLock(target, [], nil)
+        let row = IOSurfaceGetBytesPerRow(target)
+        let base = IOSurfaceGetBaseAddress(target)
+        for y in 0..<height { memcpy(base + y * row, bytes + y * stride, min(row, stride)) }
+        IOSurfaceUnlock(target, [], nil)
+        return target
     }
 
     // MARK: The proxy's side

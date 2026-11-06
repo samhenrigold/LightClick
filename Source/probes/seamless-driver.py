@@ -338,6 +338,18 @@ def mojave(seconds):
     (results/f'{tag}-hook.log').write_text(log)
 
 
+def windowed(seconds):
+    # The bar: frames the same page gets through windowed mode's own path, counted where they reach the app.
+    guest = stage(guest_tool)
+    print(run(guest, ['open-app', '--app', 'Safari'])[0], flush=True)
+    time.sleep(15)
+    first = request({'Action': 'display-frames'}, 60).get('Arrived', 0)
+    started = time.time()
+    time.sleep(seconds)
+    last = request({'Action': 'display-frames'}, 60).get('Arrived', 0)
+    print(f'windowed_frames {(last - first) / (time.time() - started):.1f} /s', flush=True)
+
+
 def capture_bench():
     guest = stage(guest_tool)
     run(guest, ['capture-bench', '--app', 'Safari', '--open'])
@@ -426,6 +438,8 @@ def proxy(seconds):
 
 if arguments[0] == 'capture-bench':
     capture_bench()
+elif arguments[0] == 'windowed':
+    windowed(int(arguments[1]) if len(arguments) > 1 else 22)
 elif arguments[0] == 'mojave':
     mojave(int(arguments[1]) if len(arguments) > 1 else 22)
 elif arguments[0] == 'tree-bench':

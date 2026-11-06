@@ -1986,6 +1986,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                     }];
         return;
     }
+        if ([command[@"Action"] isEqual:@"display-frames"]) {
+        finish(@{@"Arrived" : @(self.displayView.arrivedFrames)});
+        return;
+    }
     if ([command[@"Action"] isEqual:@"display-request"]) {
         if (!self.task.running) {
             finish(@{@"Error" : @"Start the virtual Mac before asking for a display size."});
@@ -4091,6 +4095,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (void)endExclusiveGuestAgentUse {
     self.state.diagnosticPending = NO;
     [self updateClipboardForBoot:self.state.usernameBoot];
+}
+- (void)setFrameObserver:(void (^)(IOSurfaceRef, const void *, NSUInteger, NSUInteger, NSUInteger))observer {
+    self.displayView.frameObserver = observer;
 }
 - (IBAction)makeDockApp:(id)sender {
     [VIMSeamlessHost makeProxyFor:self];

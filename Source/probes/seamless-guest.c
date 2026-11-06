@@ -1691,6 +1691,16 @@ static int tree_items_from_hook(struct TreeItem *items, const char *app, pid_t p
 
 // With `pid`, only that process's windows. The clock starts at the first window, since an app can take a long time to
 // start under emulation, and a run that sees none says what it did see.
+static int no_pixels;
+
+static double display_scale(void) {
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
+    double scale = mode && CGDisplayModeGetWidth(mode) ? (double)CGDisplayModeGetPixelWidth(mode) / CGDisplayModeGetWidth(mode) : 1;
+    if (mode)
+        CGDisplayModeRelease(mode);
+    return scale;
+}
+
 static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps, double seconds) {
     tree_connection = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
     tree_flush_seed = guest_symbol("CGSGetWindowFlushSeed", "SLSGetWindowFlushSeed");
@@ -1771,7 +1781,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             CGRect bounds = item->bounds;
             const char *title = item->title, *owner = item->owner;
             int alpha = item->alpha, layer = item->layer;
-            int margin = item->margin;
+                        // With no pixels, only where windows are: the host crops them from the display's own frames, without a margin.
+            int margin = no_pixels ? 0 : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
                 sized = !CGSizeEqualToSize(bounds.size, w->bounds.size) || margin != w->margin;
             uint32_t seed = 0;
@@ -1809,7 +1820,30 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             s->bounds = bounds;
             s->order = order;
             s->alpha = (uint32_t)alpha;
-            s->margin = margin;
+                        s->margin = margin;
+            if (no_pixels) {
+                if (fresh || moved || sized || order != w->order || alpha != w->alpha || strcmp(title, w->title)) {
+                    s->pixel_width = w->pixel_width = (uint32_t)(bounds.size.width * display_scale() + 0.5);
+                    s->pixel_height = w->pixel_height = (uint32_t)(bounds.size.height * display_scale() + 0.5);
+                    s->group = tree_group(id);
+                    if (send_window(s, title, owner, layer))
+                        goto done;
+                }
+                if (fresh) {
+                    if (!roster)
+                        first_window = tick;
+                    roster++;
+                    printf("# window %u layer %d %s \"%s\" %gx%g group %u at %.1f s\n", id, layer, owner, title,
+                           bounds.size.width, bounds.size.height, s->group, tick - started);
+                }
+                w->bounds = bounds;
+                w->order = order;
+                w->alpha = alpha;
+                w->margin = margin;
+                snprintf(w->title, sizeof(w->title), "%s", title);
+                order++;
+                continue;
+            }
             if (!stale) {
                 skipped++;
                 uint32_t scale =
@@ -2183,7 +2217,8 @@ int main(int argc, char **argv) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
         // A session lasts as long as the app does, and the rest are runs that mustn't outlive a stuck guest.
-        session_app = flag(argc, argv, "--session") ? app : NULL;
+                session_app = flag(argc, argv, "--session") ? app : NULL;
+        no_pixels = flag(argc, argv, "--no-pixels");
         alarm(session_app ? 0 : 600);
         pid_t child = 0, gl_child = 0;
         if (demo) {
