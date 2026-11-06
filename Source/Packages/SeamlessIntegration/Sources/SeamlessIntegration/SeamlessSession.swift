@@ -35,6 +35,8 @@ public protocol SeamlessPixelSource: AnyObject {
     func surface(forWindow window: UInt32) -> IOSurfaceRef?
     /// Where it starts on the guest's display, if the surface itself says. Otherwise the guest's tool does.
     func surfaceOrigin(forWindow window: UInt32) -> (x: Int32, y: Int32)?
+    /// Whether windows are coming this way now, which leaves the display's frames with nothing current in them.
+    var hasSurfaces: Bool { get }
 }
 
 /// One guest app as a host app. Listens for its proxy and for the tool it starts in the guest, shows each of the guest's
@@ -632,6 +634,13 @@ public final class SeamlessSession {
         }
         surface.ownSurfaceLayer?.removeFromSuperlayer()
         surface.ownSurfaceLayer = nil
+        // Until its first one comes, this window has nothing of its own. What's in the frame could be anyone's.
+        if pixelSource?.hasSurfaces ?? false {
+            setPieces(of: surface, to: [], from: frame.surface, place: place, height: whole.height)
+            layer.contents = nil
+            layer.mask = nil
+            return
+        }
         // One guest pixel to one host pixel takes none of its neighbours' at the edges.
         let filter: CALayerContentsFilter = scale == (NSScreen.main?.backingScaleFactor ?? 0) ? .nearest : .linear
         layer.magnificationFilter = filter
