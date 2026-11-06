@@ -2479,12 +2479,18 @@ static int leap_set_own_surfaces(const char *self, int on) {
     return on;
 }
 
-static int leap_restore(void) {
+static int leap_restore(const char *menu_tool) {
     leap_set_home();
     char self[PATH_MAX];
     uint32_t length = sizeof(self);
     if (!_NSGetExecutablePath(self, &length))
         leap_set_own_surfaces(self, 0);
+    // WindowServer has only been drawing what changes, and the display hasn't been getting even that.
+    if (menu_tool && menu_tool[0] && darwin_major() == 18) {
+        sleep(1);
+        char *const redraw[] = {(char *)menu_tool, "redraw-display", NULL};
+        free(run_tool(redraw));
+    }
     printf("# restoring\n");
     fflush(stdout);
     leap_set_guest_shadows(0);
@@ -2502,7 +2508,7 @@ static void leap_hide_for_frames(void) {
 }
 
 // Puts everything back however this process ends, which includes the display, if windows' own surfaces had turned it off.
-static void leap_arrange_restore(void) {
+static void leap_arrange_restore(const char *menu_tool) {
     int ends[2];
     if (pipe(ends))
         return;
@@ -2525,7 +2531,7 @@ static void leap_arrange_restore(void) {
         char self[PATH_MAX];
         uint32_t length = sizeof(self);
         if (!_NSGetExecutablePath(self, &length))
-            execl(self, "seamless-guest", "leap-restore", (char *)NULL);
+            execl(self, "seamless-guest", "leap-restore", "--menu-tool", menu_tool, (char *)NULL);
         _exit(1);
     }
     close(ends[0]);
@@ -2542,7 +2548,7 @@ static int leap(const char *host, int port, const char *menu_tool, int own_surfa
         printf("# ERROR can't reach the host: %s\n", strerror(errno));
         return 3;
     }
-    leap_arrange_restore();
+    leap_arrange_restore(menu_tool);
     if (own_surfaces && leap_set_own_surfaces(self, 1)) {
         if (leap_send(fd, "gpu\n"))
             return 0;
@@ -2759,7 +2765,7 @@ int main(int argc, char **argv) {
         return seamless_demo_app_main();
     }
     if (!strcmp(command, "leap-restore"))
-        return leap_restore();
+        return leap_restore(option(argc, argv, "--menu-tool", ""));
     if (!strcmp(command, "leap")) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);

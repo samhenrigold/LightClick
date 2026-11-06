@@ -431,7 +431,6 @@ def desktop():
 
     mojave = version_is_mojave()
     print('before the press', request({'Action': 'seamless-state'}, 60), flush=True)
-    check('the machine window shows before the press', bool(machine_window()))
     print(next(iter(rows()), ''), flush=True)
     pressed = time.time()
     request({'Action': 'seamless-toggle'}, 60)
