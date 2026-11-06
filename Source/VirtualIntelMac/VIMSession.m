@@ -4858,8 +4858,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [VIMMachineSettings showForMachine:self.machine section:@"Hardware" category:@"Network" window:self.window];
 }
 - (BOOL)guestAgentFree {
-    return self.task.running && !self.preparing && !self.preparationRequested && !self.guestPending &&
-           !self.diagnosticPending && !self.clipboardPending && !self.bootPolicyPending &&
+    return self.task.running && !self.preparing && !self.preparationRequested && !self.state.guestPending &&
+           !self.state.diagnosticPending && !self.state.clipboardPending && !self.state.bootPolicyPending &&
            ![@[ @"paused", @"suspended" ] containsObject:self.lastRunState];
 }
 - (void)applyGuestScreenSharing:(BOOL)enabled completion:(void (^)(NSError *))completion {
@@ -4868,9 +4868,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         completion(VIMSessionError(@"Start this Mac and wait for setup to finish, then try again."));
         return;
     }
-    self.guestPending = YES;
+    self.state.guestPending = YES;
     void (^finish)(NSError *) = ^(NSError *error) {
-      self.guestPending = NO;
+      self.state.guestPending = NO;
       [self refreshGuestStatus];
       completion(error);
     };
