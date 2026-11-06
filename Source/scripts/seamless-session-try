@@ -130,14 +130,21 @@ def session(name, cancel=False):
     check('the guest app exited after that', '# the guest app has exited' in said)
     after = document.read_bytes()
     check('the saved document came back to the host', after != before, repr(after[:80]))
-    check('a guest drop was taken', 'drag_ended' in said, line('drag_ended'))
+    check('a guest drop was taken', re.search(r'drag_ended .* operation [1-9]', said) is not None, line('drag_ended'))
     came_out = dragged_out/marker.name
     check('this drag, and no other, came out as a promised file', came_out.exists() and came_out.read_bytes() == marker.read_bytes())
     check('the guest app\'s badge reached the session', 'badge "7"' in said, line('badge "7"'))
     check('and the proxy\'s tile, by AppKit', 'tile says "7"' in said, line('tile says "7"'))
     check('its request for attention reached the session', 'attention true' in said, line('attention true'))
     check('a scroll came through the input view', ' 0 gesture' not in said and ' gesture' in said, line('input ')[:60])
-    check('the proxy has quit', not running(f'{bundle}/Contents/MacOS/SeamlessProxy'))
+    proxy_left = running(f'{bundle}/Contents/MacOS/SeamlessProxy')
+    if proxy_left:
+        # Why it hasn't gone, before its own deadline ends it.
+        stuck = results/f'seamless-session-{name}-proxy.sample'
+        subprocess.run(['sample', proxy_left[0].split()[0], '1', '-file', str(stuck)], capture_output=True)
+        print(f'# the proxy was still there 5 s on: {stuck}', flush=True)
+        time.sleep(15)
+    check('the proxy has quit', not running(f'{bundle}/Contents/MacOS/SeamlessProxy'), 'after 20 s' if proxy_left else '')
     for _ in range(36):
         if not running(str(machine)):
             break

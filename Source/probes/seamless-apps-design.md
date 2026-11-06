@@ -134,6 +134,29 @@ So Safari goes up 4.6 times with both, and past that WindowServer has room to sp
 
 **Surface flushes:** TextEdit's 13 captures a second bought 1.9 frames. The hook now sees a surface flush as a request arrives at WindowServer, by `msgh_id` in its `mach_msg` interposer, `0x7268` and inline `0x7267` on 13F34, and counts by window; there's no state left behind to read afterward. A window with surfaces gets a capture when one flushes, or once a second. On the engine at 2x, TextEdit went from 13.8 captures/s to 1.0 and WindowServer from 14% to 6%, with its frames still arriving, and the demo's GL view kept its 41 frames/s in all. A scrolling overlay scroller's look with this wasn't checked, and if its surface doesn't flush through these requests it updates once a second.
 
+### Where a frame's time goes, and why the transport didn't change
+
+Before building a new transport, the tool timed its stages, on the engine at 2x, 22 s each, one run each, with other clones on this Mac:
+
+| Share of the tool's time | Mavericks Safari | Mojave Safari |
+| --- | --- | --- |
+| Getting the image | 1% | 0% |
+| Reading its pixels | 46% | 53% |
+| Comparing | 2% | 1% |
+| Sending, through the guest's network and slirp | 48% | 42% |
+| Frames/s, MB/s sent | 10.9, 21 | 6.4, 12.7 |
+
+So sending did cost as much as reading, but they took turns, on a guest with four vCPUs, and each frame sent the whole width of its changed rows. Sending now has its own thread, and only the changed columns go:
+
+| After | Mavericks Safari | Mojave Safari |
+| --- | --- | --- |
+| Reading its pixels | 86% | 87% |
+| The sending thread | 5% | 5% |
+| Frames/s, MB/s sent | **21.3**, 3.9 | **10.2**, 2.4 |
+| WindowServer's CPU | 66% | 49% |
+
+That doubled Mavericks and took Mojave up by more than half for a few dozen lines, and the network is now 5% of the time. **So there's no shared-memory or host-GPU transport here:** with this test page it has at most that 5% to win, on a guest kernel extension or a new path per guest generation. The page is a small moving box, though, and a full-window video would still send every pixel, so this holds until something shows otherwise. What's left is reading, about 40 ms for 3.6 million pixels on Mavericks and 86 ms on Mojave, which is `CGDataProviderCopyData`, and where the composite happens.
+
 ### Mojave: the hook has no backing to read
 
 `Mojave Test`, one boot each way, hook loaded through `DYLD_INSERT_LIBRARIES` and its `mach_msg` interposer reached. Its row in the hook's `builds` table only reports. `+0xf0` is a window's backing, as `release_window` shows, and **TextEdit's and Safari's windows have none**, on samples taken while they were open: only the menu bar's and pre-login windows do. An app linked for 10.14 is composited from its CA layers. So Mavericks' hook, reading backings, has nothing to read here. The tree still comes from the client's window list, so nothing here needs the hook yet.
@@ -143,9 +166,9 @@ So Safari goes up 4.6 times with both, and past that WindowServer has room to sp
 | Safari, frames/s (capture ms, WindowServer CPU) | 1.0 (106, 35%) | 6.2 (79, 33%) |
 | TextEdit, captures/s | 1.0 | 11.9, for 1.5 frames/s |
 
-The columns aren't only the engine. `CGSGetWindowFlushSeed` doesn't move for a CSS animation here: in the TCG run, 475 of 497 looks were skipped by it while the page changed. So the tool now looks faster for 2 s whenever its once-a-second look finds a change the seed missed, which is what the engine column ran with. It costs an idle-looking TextEdit 11.9 captures/s, probably for its caret, and an animation starts up to a second late. What would replace it is a composite in the server: `WSCompositeWindowToDestination` into an IOSurface, or a client request that says a CA context changed. Both unbuilt, and given Mavericks' result for the first, measure before building.
+The columns aren't only the engine. `CGSGetWindowFlushSeed` doesn't move for a CSS animation here: in the TCG run, 475 of 497 looks were skipped by it while the page changed. So a window's looks are steered by what they find: half as long between them when one finds a change the seed missed, down to 15 Hz, and twice as long when it finds nothing, up to a second. TextEdit, idle but for its caret, went from 11.2 captures/s to 3.2. An animation takes a few looks to climb, which is up to about two seconds. What would replace it is a composite in the server: `WSCompositeWindowToDestination` into an IOSurface, or a client request that says a CA context changed. Both unbuilt, and given Mavericks' result for the first, measure before building.
 
-**A session from a proxy** ran on `Mojave Test`, from a `build-app`, at 2x on the engine, with no hook: the proxy, the hidden machine, the opened document, typing, File > New, the mirrored menu (about 15 KB, 300 to 500 ms), the sheet on quitting with its view service's contents, the edited file coming back, the promised file, badge, attention, shutdown and removal. Accessibility needed a row for `/usr/libexec/AppleQEMUGuestAgent`, where Mojave's agent lives; without it both the menu and posted events silently did nothing. The setup now asks for its parent's path. **What didn't work: the drag in.** The helper's shields came up and it was pressed, but it never said `drag_started`, and nothing landed. The press may be going to the wrong place, as it was at (179, 256) in one case; not looked into, so `seamless-session-try` fails that check on Mojave. The drag-out check passing there may be a pasteboard left from before, so it's weak.
+**A session from a proxy** ran on `Mojave Test`, from a `build-app`, at 2x on the engine, with no hook: the proxy, the hidden machine, the opened document, typing, File > New, the mirrored menu (about 15 KB, 300 to 500 ms), the sheet on quitting with its view service's contents, the edited file coming back, the promised file, badge, attention, shutdown and removal. Accessibility needed a row for `/usr/libexec/AppleQEMUGuestAgent`, where Mojave's agent lives; without it both the menu and posted events silently did nothing. The setup now asks for its parent's path. The drag in failed at first because the helper said it was ready before its shields had reached the screen, so the press went straight through; it now waits half a second. A drop was then taken, though once `drag_ended` came with operation 0, refused, and the same drop was taken on the next launch; not explained. The drag out is checked with a file made for that one drag, so a stale pasteboard can't pass.
 
 **A composite in the server, bounded, not built.** `CGSHWCaptureWindowList` is the path through `WSCompositeWindowToDestination`, by a disassembly of `CaptureSurfaceMetal::Populate`, so its time is a fair stand-in for one, on Mojave on the engine at 2x:
 
@@ -167,7 +190,8 @@ dictionary came back empty. `probes/seamless-session-join.h` now joins Finder's 
 - The hook delivers backing-store contents and the tree. Shadows, GL, text views with overlay scrollers and whole CA-backed windows such as Safari's still come from a capture, at about 4 frames/s for an animated Safari. See "Per-window composite" for why a composite in the server wasn't the answer.
 - The machine still has a window and a library window, cleared and ordered out; and a session has no microphone, since Core Audio can stop answering QEMU's open of it and hang the boot: `AudioQueueStart` returned `268451843`, which is `MACH_RCV_TIMED_OUT`, so `coreaudiod` not answering, and later a boot sat in `AudioQueueDispose` on the same device.
 - The proxy's own copy isn't signed for distribution, and nothing here has been through notarization. A session can't start while another instance of the app has the machine open, and what that looks like has not been run.
-- A document is copied into the guest and copied back when its modification date changes: plain files only, with the host's copy losing if both change. Second launches, reopening, Cancel at the prompt, a guest crash during a session and quitting before the guest is up weren't run. A lost session quits the proxy.
+- A document is copied into the guest and copied back when its modification date changes: plain files only, with the host's copy losing if both change. A guest crash during a session and quitting before the guest is up weren't run. A lost session quits the proxy.
+- Second launches, Cancel at the prompt, a folder left at the socket's path and a proxy opened while another app holds the machine are all in `seamless-session-try` now. One Mojave cancel run left the proxy alive after `.terminate`, which then swallowed the next open. It now exits regardless after 15 s, and the test keeps a sample if that happens again; the cause isn't known.
 - Only 10.9 has a working hook; see the Mojave section. A hook already in a guest isn't replaced by a newer one.
 - Pixels go over TCP through slirp. Nothing is zero-copy yet.
 - Full screen wasn't exercised. Tooltips and drag images weren't tried. Host-native dragging isn't done: dragging runs in the guest, with the host window following.

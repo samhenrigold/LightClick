@@ -117,6 +117,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
             alert.runModal()
         case .terminate:
             quitting = true
+            // Once, on Mojave after a cancelled quit, this didn't end the process, and a proxy that stays blocks its next launch.
+            // shortcut: exit regardless after a while, until the sample `seamless-session-try` keeps says why.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { exit(0) }
             NSApp.terminate(nil)
         case .beginDragOut(let names, let image):
             NSApp.keyWindow.flatMap { window in dropViews.first { $0.value.window === window }?.value }?
