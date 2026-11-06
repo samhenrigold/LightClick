@@ -810,10 +810,11 @@ struct TreeWindow {
     uint32_t hook_sequence;
     uint8_t *hook_rows; // The last backing read from the hook, to find which rows changed.
     uint32_t hook_width, hook_height;
+    unsigned captures;
 };
 
 static struct SWSTable *tree_table;
-static uint64_t hook_frames, hook_rows_copied, hook_match_good, hook_match_total;
+static uint64_t hook_frames, hook_rows_copied, hook_match_good, hook_match_total, hook_seed_skips;
 static double hook_seconds;
 
 // An opaque pixel's color should agree between a capture and the backing store, if the hook reads what it thinks it
@@ -823,7 +824,7 @@ static void hook_compare(const uint8_t *pixels, uint32_t width, uint32_t origin,
     for (uint32_t y = 2; y < e->height; y += 7)
         for (uint32_t x = 2; x < e->width; x += 11) {
             const uint8_t *b = backing + ((size_t)y * e->width + x) * 4;
-            if (b[3] != 255)
+            if (b[3] != 255 && !e->opaque)
                 continue;
             const uint8_t *p = pixels + ((size_t)(y + origin) * width + x + origin) * 4;
             hook_match_total++;
@@ -860,8 +861,10 @@ static uint8_t *hook_overlay(struct TreeWindow *w, const struct SWSEntry *e, uin
         hook_rows_copied++;
         uint8_t *to = pixels + (size_t)(y + origin) * stride + (size_t)origin * 4;
         for (uint32_t x = 0; x < e->width; x++, from += 4, to += 4)
-            if (from[3] == 255)
-                memcpy(to, from, 4);
+            if (from[3] == 255 || e->opaque) {
+                memcpy(to, from, 3);
+                to[3] = 255;
+            }
     }
     return pixels;
 }
@@ -1020,6 +1023,7 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 s->capture_worst = spent > s->capture_worst ? spent : s->capture_worst;
                 s->captures++;
                 w->last_capture = tick;
+                w->captures++;
                 w->seed = seed;
                 if (!pixels) {
                     order++;
@@ -1097,11 +1101,13 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 swm_put_u32_message(gone, sizeof(gone), SWM_GONE, windows[i].id);
                 if (send_all(s->fd, gone, sizeof(gone)))
                     goto done;
+                if (tree_table)
+                    hook_seed_skips += tree_table->slots[i].seed_skips;
                 free(windows[i].previous);
                 free(windows[i].hook_rows);
                 memset(&windows[i], 0, sizeof(windows[i]));
                 if (tree_table)
-                    tree_table->slots[i].id = 0;
+                    memset(&tree_table->slots[i], 0, sizeof(tree_table->slots[i]));
             }
         for (;;) {
             // At least one look per tick: a capture longer than a tick would otherwise starve input entirely.
@@ -1125,6 +1131,17 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
         }
     }
 done:;
+    for (int i = 0; tree_table && i < TREE_MAX_WINDOWS && i < SWS_SLOTS; i++) {
+        const struct SWSEntry *e = &tree_table->slots[i];
+        hook_seed_skips += e->seed_skips;
+        // Anything that isn't "backing" here is being captured instead, and is what the hook has left to do.
+        if (e->id)
+            printf("# window %u: %s, backing %ux%u, %u changes, captures %u, on %s\n", e->id,
+                   !e->present      ? "no backing"
+                   : e->accelerated ? "accelerated"
+                                    : "backing",
+                   e->width, e->height, e->sequence, windows[i].captures, windows[i].title);
+    }
     double elapsed = now() - started;
     printf("connected %d bool\n", s->fd >= 0);
     printf("windows_seen %u count\n", roster);
@@ -1144,6 +1161,7 @@ done:;
         printf("hook_matches_capture %.1f %% of %llu samples\n",
                hook_match_total ? 100.0 * hook_match_good / hook_match_total : 0, hook_match_total);
         printf("hook_passes %llu count\n", tree_table->passes);
+        printf("hook_seed_skips %llu count\n", hook_seed_skips);
         printf("hook_windowserver_time %.2f s\n",
                (double)tree_table->ticks_spent * tree_table->ticks_numer / tree_table->ticks_denom / 1e9);
     }

@@ -20,20 +20,22 @@ frame by frame. A click on a real button and a typed key, sent from the host, ch
 
 | 22 s, 7 windows over the run, a counter changing at 30 Hz, asked for 30 Hz | By capture | Through the hook |
 | --- | --- | --- |
-| Frames reaching the host | 13.5/s | 23.6/s |
-| Window server calls for pixels | 45.1/s, 15.1 ms mean, 56 ms worst | 19.1/s, 12.1 ms mean, 49 ms worst |
-| Tool's time in those calls | 68% | 23% (5 s refresh of each window, for the shadow and GL) |
-| Tool's time applying hook rows | | 5.2% |
-| Time the hook spends in WindowServer | | 2.87 s, about 13%, 4,815 passes at 0.6 ms |
-| Sent | 3.5 MB/s | 4.8 MB/s |
+| Frames reaching the host | 13.0/s | 25.5/s |
+| Calls to WindowServer for pixels | 42.6/s, 15.7 ms mean, 58 ms worst | 1.3/s, for the shadow, 19.2 ms mean |
+| Tool's time in those calls | 67% | 3% |
+| Tool's time applying hook rows | | 5.6% |
+| Time the hook spends in WindowServer | | 0.56 s of 22, 4,532 passes, 5,590 skipped by flush seed |
+| Sent | 3.1 MB/s | 5.1 MB/s |
 
-- **The hook reads the right pixels:** with no animation running, 100% of 69,331 opaque pixels sampled from backing stores matched a capture of the same window. With the
-  counter it's 99.7% of 31,519, as the two are read at different moments.
+- **The hook reads the right pixels:** 100% of 36,847 opaque pixels sampled from backing stores matched a capture of the same window.
+- **Damage is the flush seed:** window `+0xe0` is the shared state `CGSWindowROStateGetFlushSeed` reads at `+0x1c`. A run showed it moving with the pixels and nothing around it moving. Using it cut
+  the hook's time from 2.9 s to 0.56 s. A full compare once a second stays, as a guard.
 - **Injection works:** `DYLD_INSERT_LIBRARIES` in WindowServer's launchd plist loads the library, and its `mach_msg` interposer runs on the main thread, though the caller is
   in the shared cache. The desktop stayed up.
 - **Offsets confirmed:** window `+0x108` is the backing, and `CGXBackingStoreDataIndexed(b, 1, 0)` gives readable BGRA, premultiplied, top row first, in shared memory at `0x1c0000000` up.
-  Window `+0x100` holds the scale as a float. Of 31 windows at a login desktop, only one was accelerated: the Dock (2306x86).
-- **One-window TextEdit stream, by capture:** 26 ms at 1310x854 pixels, 52 ms at 2560x1410, with a click on the zoom button working through `CGEventPost` from the console user.
+  Window `+0x100` holds the scale as a float. Plane 1 of those accessors is empty for an opaque backing, so plane 0 is the one to read, with its alpha byte ignored when `CGXBackingStoreHasAlpha` says so. Of 31
+  windows at a login desktop, only one was accelerated: the Dock (2306x86).
+- **One-window TextEdit stream, by capture:** 26 ms at 1310x854 pixels, 51 ms at 2560x1410. A click on the zoom button zoomed it and a typed key entered its text, through `CGEventPost` from the console user.
 
 What was wrong before these worked: `launchctl bsexec` only moves the bootstrap port, and prints "bsexec failed: Inappropriate ioctl for device" on 10.9. WindowServer finds a
 client's GUI session from its **audit session**, so a tool started by the guest agent stayed in the system's: the connection and display calls worked, but the window list and session
@@ -44,12 +46,11 @@ dictionary came back empty. `probes/seamless-console.h` now joins Finder's audit
 
 - The composed images are made by the viewer from each host window's exact pixels, not read from the screen, because the host's display was asleep and `screencapture` failed. Nobody has yet
   looked at these as real windows on a display, with the real Dock, Mission Control or menu bar.
-- The hook only delivers window contents. The shadow still comes from a capture, which is refreshed every 5 s and on resize. So it's also still needed for accelerated windows and GL views, which the
-  hook skips. A window's order, bounds, alpha and title also still come from `CGWindowList`, polled.
-- The hook compares every wanted window's rows on each pass, rather than knowing what changed. That 13% is the cost to remove.
+- The hook only delivers window contents. The shadow still comes from a capture, refreshed every 5 s and on resize, so an active window going inactive keeps its old shadow for up to 5 s. Accelerated
+  windows and GL views also still need capturing. No accelerated window or GL view has been in the demo, so that path is unmeasured. A window's order, bounds, alpha and title still come from `CGWindowList`, polled.
 - Pixels go over TCP through slirp. Nothing is zero-copy yet. No GPU composite, and nothing headless.
 - Dragging a window, resizing, scrolling and full-screen weren't exercised in the tree. Tooltips and drag images weren't tried.
-- Mojave: no hook. Its symbols are read, not run.
+- Mojave: no hook. Its symbols are read, not run. A `tree` run on the Mojave Test clone never ran: no one logged in to its desktop within 300 s, and I didn't look into why.
 
 ## Answer
 
@@ -87,7 +88,7 @@ architecture now. "Input" and "Integration" name the parallel work; see [Interfa
 
 | Requirement | Mechanism | Host API | Proven | Unknown |
 | --- | --- | --- | --- | --- |
-| **A** One surface per window, in order, overlapping | Window tree from `CGWindowListCopyWindowInfo`; pixels from the hook, or capture | `NSWindow` per guest window, ordered and at the guest's level | On Mavericks, through the hook, at 23.6 frames/s for a live window [measured] | Accelerated windows; rate with a big live window |
+| **A** One surface per window, in order, overlapping | Window tree from `CGWindowListCopyWindowInfo`; pixels from the hook, or capture | `NSWindow` per guest window, ordered and at the guest's level | On Mavericks, through the hook, at 25.5 frames/s for a live window [measured] | Accelerated windows; rate with a big live window |
 | **A** Drop shadows, real alpha | `CGWindowListCreateImage` of the bounds grown by a margin includes the shadow, on transparent, and backing rows are laid over it. Host `hasShadow` off | Non-opaque window; `SLSSetWindowEventShape` so the shadow doesn't take clicks | Real 10.9 shadows on Mavericks [measured]. A 48-point margin clipped an active window's; 96 doesn't | Taking the shadow from `CGXWindowShadowGet` instead of a capture; an active-to-inactive change between refreshes |
 | **A** Popovers, sheets, menus, tooltips, panels, drag images | All are guest windows with the same owner; `CGSCopyAssociatedWindows` groups them with their parent. Host places them by guest position, so they extend past the parent by themselves | Same; `addChildWindow:` once a proxy moves groups | Popover, panel, menu (layer 101), sheet on Mavericks [measured]. Tooltips and drag images not tried | Drag images may be owned by another process. A popup menu's group didn't include its parent, so grouping isn't only `CGSCopyAssociatedWindows` |
 | Window animations | Bounds and alpha sent as they change; the popover's growth arrived frame by frame [measured]. Transforms: `CGSGetWindowTransform` | Frame, alpha, layer transform | Size and alpha only | Genie and Mission-style transforms under capture; hook composites them |
@@ -117,7 +118,7 @@ architecture now. "Input" and "Integration" name the parallel work; see [Interfa
 | **A** Guest crash, panic or reboot with apps open | Session sees the agent or QEMU go; proxies stay with their last frames and a dialog, and are told "relaunch" or "close" | | No | State across reboot |
 | **A** Several VMs at once | Each proxy bound to a machine by bundle ID; each session has its own offset and socket | Identity carries machine ID | No | RAM and battery; ports already clash (`boot-clone` knows) |
 | **A** Fallback when no hook for a build | Layered: hook, else client interface, else a plain windowed VM. Chosen by build at start | Existing window | Client interface runs with no hook | Which builds lack which client calls |
-| **A** Battery and idle cost | Guest idle cost is the main term; hook damage instead of polling. The hook now costs about 13% of WindowServer's time while comparing rows | | `CGSGetWindowFlushSeed` errors for another process's windows on macOS 27 [measured: `seed_answers 0`], and its code looks windows up in a client-side table on 10.9 too [read]. So damage needs the hook | The VM's idle CPU under TCG; `capture_share` reports the probe's cost |
+| **A** Battery and idle cost | Guest idle cost is the main term; hook damage instead of polling. The hook costs about 2.5% of one thread with a window changing at 30 Hz, and the tool still polls the window list | | `CGSGetWindowFlushSeed` errors for another process's windows on macOS 27 [measured: `seed_answers 0`], and its code looks windows up in a client-side table on 10.9 too [read]. So damage needs the hook | The VM's idle CPU under TCG; `capture_share` reports the probe's cost |
 
 ### App identity and integration (parallel work)
 
@@ -265,8 +266,7 @@ symbol and branch validation, and `PVGMetalCompat` runs inside WindowServer [rea
 1. **Done on Mavericks: injection and backing stores** (`probes/seamless-ws-hook.c`, `seamless-ws-table.h`). Loads by `DYLD_INSERT_LIBRARIES`, interposes `mach_msg` to run between requests
    on the main thread, resolves local symbols from the on-disk `CoreGraphics`, comparing each function's bytes with memory since the file's `LC_UUID` needn't match the shared cache,
    and publishes wanted windows' changed rows through a shared file. It changes nothing WindowServer does.
-2. **Next: damage.** Replace the row compare with the seeds the server already keeps. A window's state is reached through the shared-memory references at `+0xd8` to `+0xf8`, and the client bumps a flush
-   seed in it (`CGSWindowRWStateIncrementFlushSeed`); which field is which still needs working out.
+2. **Done on Mavericks: damage**, from the flush seed at `*(window + 0xe0) + 0x1c`.
 3. **Next: the window tree and shadow from inside**, with `WSGetVisibleWindowArray` and `CGXWindowShadowGet`, which removes the remaining captures. Then per-window composite in the server for accelerated
    windows, Mojave `WSCompositeWindowToDestination`, Mavericks `CGXRedrawWindowToLayer`, into an IOSurface per window, on the GPU.
 4. **Hand that surface to the host** without a CPU copy (below).
@@ -293,7 +293,7 @@ offsets. Whether a normal client may make that layer is unknown.
 
 | Stage | Path | Copies | Status |
 | --- | --- | --- | --- |
-| Now | TCP over slirp to host loopback (`10.0.2.2`) | Capture or hook, kernel, slirp, viewer | Works from Mavericks [measured]: 4.8 MB/s used, limit unknown |
+| Now | TCP over slirp to host loopback (`10.0.2.2`) | Capture or hook, kernel, slirp, viewer | Works from Mavericks [measured]: 5.1 MB/s used, limit unknown |
 | Next | `guestfwd` into a private Unix socket | Same | Off any host port; needs a launch-plan change; requires shared networking |
 | vmware-svga | Hook composites through PassthroughOpenGL, so the texture is **already on the host GPU**. Host exports an IOSurface per window to the app through the existing `VIMSurfaceFrameMessage` capability transport and `presentSurface:` | None | [inferred]; `display-surface-message.h`, `passthrough-opengl-surfaces-host.c` exist. Needs a window identity marked in the GL stream or the guest IOSurface name |
 | PVG | Hook composites to a Metal texture in the guest; host sees it inside `apple-gfx` only as commands | Unknown | **Open.** Options: guest-RAM-backed shared buffer that the helper's gather (`gpu-performance-notes.md`) imports without copy; or a blit to a shared buffer, per window, in a region the helper maps. Needs a real read of `apple-gfx-helper.m` |
@@ -323,7 +323,7 @@ Stable now: `probes/seamless-wire.h`. Numbers 32-47 are reserved for input, 48-6
 ## Plan
 
 1. Done: capture measured, injection and offsets proven, backing stores delivered on Mavericks. See [above](#measured-on-a-mavericks-clone).
-2. Next: **hook damage, window tree and shadow** on Mavericks, removing polling and capture.
+2. Next: **window tree and shadow from the hook** on Mavericks, removing polling and the last captures.
 3. **Accelerated windows:** per-window composite for them, and a Safari or GL app in the demo.
 4. **Zero-copy for vmware-svga**, through PassthroughOpenGL.
 5. **Proxies:** `CALayerHost`, generated bundles, session process, invisible VM.

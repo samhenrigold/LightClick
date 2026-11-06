@@ -19,7 +19,8 @@ struct SWSEntry {
     uint32_t width, height; // Pixels. Rows here are tightly packed BGRA premultiplied, top first.
     volatile uint32_t sequence; // Goes up when any row changes.
     uint64_t offset; // Into the arena.
-    uint64_t compare_ticks, copy_rows;
+    uint64_t next_compare, copy_rows, seed_skips;
+    uint32_t seed, opaque; // `opaque`: no alpha in these rows, so treat every pixel as solid.
 };
 
 struct SWSTable {

@@ -225,6 +225,8 @@ def hook(seconds):
     guest = stage(guest_tool)
     tree(seconds, guest)
     tree(seconds, guest, hook=True)
+    log = request({'Executable': '/bin/cat', 'Arguments': ['/var/tmp/seamless-ws-probe.log']}, 120).get('Stdout') or ''
+    (results/f'{tag}.log').write_text(log)
 
 
 def diag():

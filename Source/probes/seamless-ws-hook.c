@@ -203,9 +203,8 @@ static void sample(void) {
 
 static struct SWSTable *table;
 
-// Compares each wanted window's backing with the last copy row by row, and copies only what changed. Runs at most once
-// per 8 ms of WindowServer's main thread, between requests, where its structures are consistent. This assumes
-// nothing about what changed, so it costs a read of the window; a flush-seed check would avoid that.
+// Copies the rows of each wanted window's backing that changed, for windows whose flush seed moved. Runs at most once
+// per 8 ms of WindowServer's main thread, between requests, where its structures are consistent.
 static void publish(void) {
     static uint64_t next;
     uint64_t now = mach_absolute_time();
@@ -223,10 +222,22 @@ static void publish(void) {
         if (!backing)
             continue;
         e->accelerated = backing_is_accelerated(backing) != 0;
-        uint32_t width = backing_width(backing), height = backing_height(backing), row = backing_row_bytes(backing, 1);
-        const uint8_t *data = backing_data(backing, 1, 0);
-        if (e->accelerated || !data || !width || !height || row < width * 4 || backing_bits(backing) != 32)
+        // Plane 1 of these two accessors only answers for a backing with alpha; plane 0 answers for all, including an
+        // opaque window, whose alpha byte is meaningless.
+        uint32_t width = backing_width(backing), height = backing_height(backing), row = backing_row_bytes(backing, 0);
+        const uint8_t *data = backing_data(backing, 0, 0);
+        e->opaque = !backing_has_alpha(backing);
+        if (e->accelerated || !data || !width || !height || row < width * 4 || backing_bits(backing) != 32) {
+            // Says why once per window, since each of these falls back to a capture.
+            static uint32_t told[64];
+            if (told[i] != e->id) {
+                told[i] = e->id;
+                note("window %u not published: accelerated=%d data=%p/%p %ux%u rowbytes=%u bits=%u flags=%02x\n", e->id,
+                     e->accelerated, data, backing_data(backing, 1, 1), width, height, row, backing_bits(backing),
+                     ((const uint8_t *)backing)[0x41]);
+            }
             continue;
+        }
         uint64_t size = (uint64_t)width * height * 4;
         if (e->width != width || e->height != height) {
             // shortcut: wraps over older windows' rows, which then read wrong until they change. Fine for a demo's few
@@ -241,6 +252,17 @@ static void publish(void) {
             e->height = height;
             e->sequence++;
         }
+        // Its flush seed goes up when the app flushes, so nothing else needs looking at. +0xe0 is the shared state
+        // CGSWindowROStateGetFlushSeed reads at +0x1c; a run showed it moving with the pixels, and nothing else near it
+        // moving. The occasional full compare is for anything that reaches the backing without a flush.
+        const uint32_t *state = *(const uint32_t **)(window + 0xe0);
+        uint32_t seed = state ? state[7] : 0;
+        if (state && seed == e->seed && e->sequence && now < e->next_compare) {
+            e->seed_skips++;
+            continue;
+        }
+        e->seed = seed;
+        e->next_compare = now + 1000000000ull * table->ticks_denom / table->ticks_numer;
         uint8_t *dest = table->arena + e->offset;
         int changed = 0;
         for (uint32_t y = 0; y < height; y++) {
