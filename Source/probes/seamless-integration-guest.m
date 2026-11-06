@@ -774,6 +774,24 @@ int main(int argc, char **argv) {
             printJSON(app);
             return 0;
         }
+        if (!strcmp(command, "redraw-display")) {
+            // Over everything and gone again, which leaves WindowServer all of the display to draw, for when it's gone without.
+            [NSApplication sharedApplication];
+            for (NSScreen *screen in NSScreen.screens) {
+                NSWindow *cover = [[NSWindow alloc] initWithContentRect:screen.frame
+                                                              styleMask:NSWindowStyleMaskBorderless
+                                                                backing:NSBackingStoreBuffered
+                                                                  defer:NO];
+                cover.level = NSScreenSaverWindowLevel;
+                cover.backgroundColor = NSColor.blackColor;
+                cover.releasedWhenClosed = NO;
+                [cover orderFrontRegardless];
+                [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+                [cover close];
+            }
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
+            return 0;
+        }
         if (!strcmp(command, "icon"))
             return printIcon(option(argc, argv, "--path", ""));
         if (!strcmp(command, "menu"))

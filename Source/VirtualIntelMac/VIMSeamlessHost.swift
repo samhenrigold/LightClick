@@ -69,6 +69,56 @@ private final class AgentGuest: SeamlessGuest {
     }
 }
 
+/// Each guest window's latest surface from QEMU, on Mojave with the hook loaded. Idle otherwise: nothing sends to it.
+@MainActor
+private final class WindowSurfaces: SeamlessPixelSource {
+    private var surfaces: [UInt32: IOSurfaceRef] = [:]
+    let noDisplayFile: URL
+    weak var desktop: SeamlessDesktop?
+    private var receiver: GuestWindowSurfaceReceiver?
+
+    init?(machineIdentifier: String, directory: URL) {
+        noDisplayFile = directory.appending(path: "nodisplay")
+        try? FileManager.default.removeItem(at: noDisplayFile)
+        receiver = try? GuestWindowSurfaceReceiver(service: Self.service(machineIdentifier)) { [weak self] frame in
+            let surface = UnsafeTransfer(frame.surface)
+            let window = frame.window
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.arrived(window, surface.value) }
+            }
+        }
+        if receiver == nil { return nil }
+    }
+
+    static func service(_ identifier: String) -> String { "gold.samhenri.LightClick.seamless.\(identifier)" }
+
+    private func arrived(_ window: UInt32, _ surface: IOSurfaceRef) {
+        guard let desktop else { return }
+        if surfaces.isEmpty { FileManager.default.createFile(atPath: noDisplayFile.path, contents: nil) }
+        if surfaces[window] == nil {
+            desktop.note("# window \(window)'s own surface: \(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))")
+        }
+        surfaces[window] = surface
+        desktop.windowPixelsChanged(window)
+    }
+
+    var hasSurfaces: Bool { !surfaces.isEmpty }
+
+    func surface(forWindow window: UInt32) -> IOSurfaceRef? { surfaces[window] }
+
+    /// The display's frames are what show the window that's coming back.
+    func stop() {
+        surfaces = [:]
+        desktop = nil
+        try? FileManager.default.removeItem(at: noDisplayFile)
+    }
+}
+
+private struct UnsafeTransfer<Value>: @unchecked Sendable {
+    let value: Value
+    init(_ value: Value) { self.value = value }
+}
+
 /// The app's end of seamless guest apps: running one as a process with no window of its own, and making the proxy for one.
 @MainActor @objc(VIMSeamlessHost)
 final class SeamlessHost: NSObject {
@@ -154,8 +204,32 @@ final class SeamlessHost: NSObject {
 
     private static var desktops: [String: SeamlessDesktop] = [:]
     private static var windowHidden: Set<String> = []
+    private static var windowSurfaces: [String: WindowSurfaces] = [:]
+
+    private static func surfaceDirectory(_ identifier: String) -> URL {
+        FileManager.default.temporaryDirectory.appending(path: "lc-surfaces-\(identifier.prefix(8))")
+    }
+
+    /// For QEMU, before it starts: where to send each window's surface, once a guest has been asked for them. Nothing goes
+    /// there until then. Not Mavericks' half of this, which turns on a second run of its GL.
+    @objc static func qemuEnvironment(for session: VIMSession) -> [String: String] {
+        guard let machine = try? VIMMachine.load(URL(fileURLWithPath: session.machinePath)),
+            let identifier = machine.configuration["Identifier"] as? String
+        else { return [:] }
+        let directory = surfaceDirectory(identifier)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        guard windowSurfaces[session.machinePath] != nil
+            || WindowSurfaces(machineIdentifier: identifier, directory: directory).map({
+                windowSurfaces[session.machinePath] = $0
+                return true
+            }) ?? false
+        else { return [:] }
+        return GuestWindowSurfaceReceiver.environment(service: WindowSurfaces.service(identifier), directory: directory.path)
+            .filter { $0.key.hasPrefix("VIM_SEAMLESS_PVG") }
+    }
 
     @objc static func isActive(for session: VIMSession) -> Bool { desktops[session.machinePath] != nil }
+    @objc static func hasOwnSurfaces(for session: VIMSession) -> Bool { windowSurfaces[session.machinePath]?.hasSurfaces ?? false }
 
     /// So the button's quick from the first press. Once the guest's agent answers, and not while something's measuring it or
     /// the app's only there to run one guest app.
@@ -203,6 +277,10 @@ final class SeamlessHost: NSObject {
             guest: AgentGuest(machinePath: path))
         desktops[path] = desktop
         session.noteSeamlessChanged()
+        let surfaces = windowSurfaces[path]
+        surfaces?.desktop = desktop
+        desktop.pixelSource = surfaces
+        desktop.hasOwnSurfaces = { surfaces?.hasSurfaces ?? false }
         // The window only goes once something's there in its place, and comes back if nothing is.
         desktop.windowsChanged = { count in
             if count > 0, !windowHidden.contains(path) {
@@ -221,6 +299,7 @@ final class SeamlessHost: NSObject {
             }
         }
         desktop.ended = { failure in
+            surfaces?.stop()
             desktops[path] = nil
             windowHidden.remove(path)
             session.setFrameObserver(nil)

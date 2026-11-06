@@ -1415,7 +1415,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return NO;
     }
     self.task.arguments = plan.arguments;
-    self.task.environment = plan.environment;
+    NSMutableDictionary *taskEnvironment = [plan.environment mutableCopy];
+    [taskEnvironment addEntriesFromDictionary:[VIMSeamlessHost qemuEnvironmentFor:self]];
+    self.task.environment = taskEnvironment;
     if (![self.machine prepareUpdaterDisplayForBoot:error]) {
         [self cleanUp];
         return NO;
@@ -1996,7 +1998,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     }
     if ([command[@"Action"] isEqual:@"seamless-state"]) {
-        finish(@{@"Active" : @([VIMSeamlessHost isActiveFor:self]), @"WindowVisible" : @(self.window.isVisible)});
+        finish(@{@"Active" : @([VIMSeamlessHost isActiveFor:self]), @"WindowVisible" : @(self.window.isVisible),
+                 @"OwnSurfaces" : @([VIMSeamlessHost hasOwnSurfacesFor:self])});
         return;
     }
     if ([command[@"Action"] isEqual:@"seamless-toggle"]) {

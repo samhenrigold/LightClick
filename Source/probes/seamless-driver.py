@@ -415,7 +415,7 @@ def desktop():
 
     def proxy_windows():
         running = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
-        pids = {row.split()[0] for row in running if 'Seamless Apps/' in row}
+        pids = {row.split()[0] for row in running if 'Seamless Apps/' in row and f'Build/bench/{tag}/' in row}
         return [row for row in rows() if re.search(r'pid=(\d+)', row).group(1) in pids and ' 0x0' not in row]
 
     checks = []
@@ -429,7 +429,8 @@ def desktop():
         match = re.search(r'pid=(\d+)', found)
         return int(match.group(1)) if match else 0
 
-    check('the machine window shows before the press', bool(machine_window()))
+    mojave = version_is_mojave()
+    print('before the press', request({'Action': 'seamless-state'}, 60), flush=True)
     print(next(iter(rows()), ''), flush=True)
     pressed = time.time()
     request({'Action': 'seamless-toggle'}, 60)
@@ -448,6 +449,8 @@ def desktop():
         print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
         time.sleep(1)
     check('the machine window hides', not machine_window())
+    if mojave:
+        check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
         subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-{window}.png')])
@@ -474,6 +477,8 @@ def desktop():
         time.sleep(2)
     moving = subprocess.run([meter, window or '0', '8'], capture_output=True, text=True).stdout
     print('moving', moving, flush=True)
+    rate = re.search(r'presented ([0-9.]+)', moving)
+    check('the window shows its page moving', rate is not None and float(rate.group(1)) >= 30)
     # Moved on the host, past where the machine's window was: the guest's doesn't follow, it still moves, and a click still lands.
     def place(of):
         row = next((row for row in rows() if f'id={of} ' in row), '')
@@ -481,6 +486,7 @@ def desktop():
         found = re.search(r'bounds=(-?[\d.]+),(-?[\d.]+)', row)
         return (float(found.group(1)), float(found.group(2))) if found else None
     if safari and window:
+        (results/f'{tag}-clicks.txt.command').write_text('move')
         before = place(window)
         os.kill(safari, signal.SIGUSR2)
         time.sleep(2)
@@ -497,6 +503,31 @@ def desktop():
         print(said, flush=True)
         check('input still reaches it there', re.search(r'median \d+ ms', said) is not None)
         check('it stayed there', place(window) == after)
+        # Two apps' windows overlap in the guest. TextEdit's over Safari's, so apart on the host, Safari's must show its own page there,
+        # dark from a click, and no TextEdit. Saved by each window's ID, for looking at.
+        command = results/f'{tag}-clicks.txt.command'
+        textedit = proxy_pid('TextEdit')
+        other = next((re.search(r'id=(\d+)', row).group(1) for row in proxy_windows() if 'TextEdit' in row), None)
+        command.write_text('move')
+        if textedit:
+            os.kill(textedit, signal.SIGUSR2)
+        time.sleep(2)
+        # An odd number of clicks, so its page is dark where TextEdit's white would otherwise be.
+        (results/f'{tag}-clicks.txt').write_text('')
+        os.kill(safari, signal.SIGUSR1)
+        time.sleep(1.5)
+        for name, wanted in (('safari', window), ('textedit', other)):
+            if wanted:
+                subprocess.run(['screencapture', '-x', '-o', '-l', wanted, str(results/f'{tag}-apart-{name}.png')])
+        command.write_text('resize')
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(1)
+        during = subprocess.run([meter, window, '1'], capture_output=True, text=True).stdout
+        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-resizing.png')])
+        time.sleep(4)
+        print('during a resize', during, flush=True)
+        print('after resize', next((row[-40:] for row in proxy_windows() if f'id={window} ' in row), ''), flush=True)
+        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-resized.png')])
         frame = capture(f'{tag}-desktop-frame.png')
         print('guest frame', frame, flush=True)
     pressed = time.time()

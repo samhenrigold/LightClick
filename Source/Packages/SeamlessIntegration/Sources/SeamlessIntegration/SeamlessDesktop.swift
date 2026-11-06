@@ -62,15 +62,20 @@ public final class SeamlessDesktop {
     public init(configuration: Configuration, guest: any SeamlessGuest) {
         self.configuration = configuration
         self.guest = guest
-        FileManager.default.createFile(
-            atPath: configuration.log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        if !FileManager.default.fileExists(atPath: configuration.log.path) {
+            FileManager.default.createFile(
+                atPath: configuration.log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
         logHandle = try? FileHandle(forWritingTo: configuration.log)
+        _ = try? logHandle?.seekToEnd()
     }
 
-    private func note(_ text: String) {
+    public func note(_ text: String) {
         logHandle?.write(Data(String(format: "%.2f %@\n", CFAbsoluteTimeGetCurrent() - began, text).utf8))
     }
 
+    /// Whether any window's surface has come, for going back to cropping if the guest's turned them on and none do.
+    public var hasOwnSurfaces: (() -> Bool)?
     public weak var pixelSource: (any SeamlessPixelSource)? {
         didSet { for session in sessions.values { session.pixelSource = pixelSource } }
     }
@@ -121,12 +126,20 @@ public final class SeamlessDesktop {
             finish("This Mac isn’t ready yet. Wait for it to finish starting, then try again.")
             return
         }
+        var ownSurfaces = false
+        if pixelSource != nil {
+            let injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
+            note("# hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)\(injected.failure ?? "")")
+            ownSurfaces = injected.exitCode == 0
+            if stopped { return }
+        }
         var ran = SeamlessGuestRun(exitCode: nil, output: "", failure: nil)
         // On Mavericks the agent's connection can drop just after setup, under whatever runs next. Nothing's reached the user yet.
         for attempt in 1...4 {
             ran = await guest.run(
                 "/usr/bin/env",
-                ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--port", String(port), "--menu-tool", "/tmp/sg/ig"])
+                ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--port", String(port), "--menu-tool", "/tmp/sg/ig"]
+                    + (ownSurfaces ? ["--own-surfaces"] : []))
             if stopped || ran.exitCode != nil || control >= 0 || attempt == 4 { break }
             note("# trying again: \(ran.failure ?? "")")
             try? await Task.sleep(for: .seconds(3))
@@ -148,12 +161,43 @@ public final class SeamlessDesktop {
             else { return false }
             // Mavericks has been seen to drop the agent's connection during this and be set up regardless. Without Accessibility there are only no menus.
             _ = await guest.run("/bin/sh", ["-c", SeamlessSession.setupScript, "sh", tool, menuTool])
+            // On Mojave, ready for a press to load into WindowServer.
+            if await guest.run("/usr/bin/uname", ["-r"]).output.hasPrefix("18."),
+                let hook = await guest.stage(tools.appending(path: "seamless-ws-hook.dylib")),
+                let injector = await guest.stage(tools.appending(path: "seamless-ws-inject"))
+            {
+                let copy = "cp \"$1\" /tmp/sg/hook.dylib; cp \"$2\" /tmp/sg/ws-inject; chmod 755 /tmp/sg/ws-inject"
+                _ = await guest.run("/bin/sh", ["-c", copy, "sh", hook, injector])
+            }
             staged.insert(machine)
             return true
         }
         preparing[machine] = task
         return await task.value
     }
+
+    /// Loads the hook into the running WindowServer, so each window comes on a surface of its own. If this goes wrong WindowServer
+    /// dies and logs the user out, so it's only for the one build it's been run on, is tried once per guest start and is never
+    /// retried, whatever happened. Exit 0 means the hook's in this WindowServer; anything else leaves the display's frames.
+    private static let injectScript = """
+        [ "$(/usr/bin/uname -r | /usr/bin/cut -d. -f1)" = 18 ] || exit 3
+        [ "$(/usr/bin/sw_vers -buildVersion)" = 18G103 ] || exit 3
+        [ -x /tmp/sg/ws-inject ] && [ -f /tmp/sg/hook.dylib ] || exit 3
+        /usr/bin/grep -q seamless-ws-hook /System/Library/LaunchDaemons/com.apple.WindowServer.plist && exit 3
+        pid=$(/usr/bin/pgrep -x WindowServer); [ -n "$pid" ] || exit 3
+        boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed 's/.*sec = \\([0-9]*\\).*/\\1/')
+        marker=/var/tmp/seamless-ws-press
+        said=$(/bin/cat $marker 2>/dev/null)
+        [ "$said" = "$boot $pid ok" ] && exit 0
+        case "$said" in "$boot "*) exit 4;; esac
+        # Written first, so a WindowServer that dies with this isn't tried again.
+        echo "$boot $pid tried" > $marker
+        /bin/cp /tmp/sg/hook.dylib /usr/lib/seamless-ws-hook.dylib || exit 5
+        /bin/chmod 755 /usr/lib/seamless-ws-hook.dylib
+        /tmp/sg/ws-inject /usr/lib/seamless-ws-hook.dylib 2>&1 || exit 6
+        [ "$(/usr/bin/pgrep -x WindowServer)" = "$pid" ] || exit 7
+        echo "$boot $pid ok" > $marker
+        """
 
     private func listen() -> Bool {
         let listener = socket(AF_INET, SOCK_STREAM, 0)
@@ -227,6 +271,16 @@ public final class SeamlessDesktop {
             if let first = apps.first?.path, first != front {
                 front = first
                 activateFront()
+            }
+        case "gpu":
+            note("# the guest's windows are composited for the host")
+            // If none arrives there'd be nothing showing at all, with the guest no longer drawing them on its display.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, !self.stopped, !(self.hasOwnSurfaces?() ?? false) else { return }
+                    self.note("# no surfaces came, so back to the display's frames")
+                    self.tell("gpu-off")
+                }
             }
         case "described":
             guard fields.count >= 3 else { return }
