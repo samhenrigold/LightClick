@@ -26,11 +26,9 @@ static BOOL AssemblyError(NSError **error, NSString *message) {
     return NO;
 }
 static BOOL NativeAutomatedRecovery(NSString *guest) {
-    // Genuine14F27,15G31,16G29 and17G66 rc.install launch Language Chooser with
-    // TARGET_APP and -f minstall configuration. Keep the signed installer.
-    return [@[ @"yosemite", @"elcapitan", @"sierra", @"highsierra" ] containsObject:guest];
+    return [VIMGuestMediaPlan planForGuest:guest].usesNativeInstaller;
 }
-static BOOL SerialRecovery(NSString *guest) { return [@[ @"mojave", @"catalina" ] containsObject:guest]; }
+static BOOL SerialRecovery(NSString *guest) { return [VIMGuestMediaPlan planForGuest:guest].usesSerialAgent; }
 static NSInteger OpenGLBootstrapMediaVersion(NSString *guest) {
     // Earlier Leopard images can fall through to the manual language picker
     // before Disk Arbitration publishes the already attached setup medium.
@@ -242,12 +240,7 @@ static NSURL *MountDirectory(NSError **error) {
 - (BOOL)prepareLeopardRecoveryMemoryAtMount:(NSURL *)mount error:(NSError **)error;
 - (BOOL)prepareSerialRecoveryAtMount:(NSURL *)mount error:(NSError **)error;
 - (void)completedWork:(double)fraction;
-- (BOOL)run:(NSString *)path
-           arguments:(NSArray<NSString *> *)arguments
-    workingDirectory:(nullable NSURL *)workingDirectory
-             timeout:(NSTimeInterval)timeout
-             cleanup:(BOOL)cleanup
-               error:(NSError **)error;
+- (BOOL)perform:(VIMToolInvocation *)command error:(NSError **)error;
 @end
 static bool HFSInstallerProgress(uint64_t completed, uint64_t total, void *context) {
     VIMInstallerAssembly *assembly = (__bridge VIMInstallerAssembly *)context;
@@ -270,29 +263,16 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     if (!mounted)
         return NO;
     NSURL *volume = [working.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"Recovery-volume.img"];
-    BOOL attached = [self run:@"/usr/bin/hdiutil"
-                    arguments:@[
-                        @"attach", @"-readonly", @"-owners", @"off", @"-nobrowse", @"-noautoopen", @"-mountpoint",
-                        mounted.path, working.path
-                    ]
-                      timeout:180
-                      cleanup:NO
-                        error:error];
+    BOOL attached = [self perform:[VIMToolInvocation attachReadOnlyIgnoringOwnersImage:working.path
+                                                                            mountPoint:mounted.path]
+                            error:error];
     BOOL copied = NO;
-    if (attached && [self run:@"/usr/sbin/diskutil"
-                        arguments:@[ @"info", @"-plist", mounted.path ]
-                          timeout:60
-                          cleanup:NO
-                            error:error]) {
-        NSDictionary *info = [NSDictionary dictionaryWithContentsOfURL:self.lastLog];
-        NSString *device = info[@"DeviceNode"];
-        NSRegularExpression *pattern = [NSRegularExpression regularExpressionWithPattern:@"^/dev/disk[0-9]+s[0-9]+$"
-                                                                                 options:0
-                                                                                   error:NULL];
-        if ([info[@"FilesystemType"] isEqual:@"hfs"] && [device isKindOfClass:NSString.class] &&
-            [pattern numberOfMatchesInString:device options:0 range:NSMakeRange(0, device.length)] == 1) {
-            NSString *raw = [device stringByReplacingCharactersInRange:NSMakeRange(5, 0) withString:@"r"];
-            copied = VIMCopyHFSInstallerVolume(raw.fileSystemRepresentation, volume.fileSystemRepresentation,
+    if (attached && [self perform:[VIMToolInvocation deviceInfoForMountPoint:mounted.path] error:error]) {
+        VIMImagePartitionDevice *device =
+            [VIMImagePartitionDevice deviceFromInfo:[NSDictionary dictionaryWithContentsOfURL:self.lastLog]
+                                       requiringHFS:YES];
+        if (device) {
+            copied = VIMCopyHFSInstallerVolume(device.rawPath.fileSystemRepresentation, volume.fileSystemRepresentation,
                                                HFSExtractionProgress, (__bridge void *)self) == 0;
             if (!copied)
                 AssemblyError(
@@ -306,11 +286,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     BOOL detached = YES;
     if (attached) {
         NSError *issue = nil;
-        detached = [self run:@"/usr/bin/hdiutil"
-                   arguments:@[ @"detach", mounted.path ]
-                     timeout:60
-                     cleanup:YES
-                       error:&issue];
+        detached = [self perform:[VIMToolInvocation detachMountPoint:mounted.path] error:&issue];
         if (!detached && error)
             *error = issue;
     }
@@ -575,12 +551,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         }
         VIMInstallerAssembly *worker = [self new];
         worker.job = logs;
-        BOOL attached = [worker
-                  run:@"/usr/bin/hdiutil"
-            arguments:@[ @"attach", @"-readonly", @"-nobrowse", @"-noautoopen", @"-mountpoint", mount.path, URL.path ]
-              timeout:180
-              cleanup:NO
-                error:error];
+        BOOL attached = [worker perform:[VIMToolInvocation attachReadOnlyImage:URL.path mountPoint:mount.path]
+                                  error:error];
         NSString *guest = nil;
         if (attached) {
             NSDictionary *version = [NSDictionary
@@ -604,11 +576,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                      @"installer app for a newer OS.");
         }
         NSError *detachError = nil;
-        BOOL detached = !attached || [worker run:@"/usr/bin/hdiutil"
-                                         arguments:@[ @"detach", mount.path ]
-                                           timeout:60
-                                           cleanup:YES
-                                             error:&detachError];
+        BOOL detached = !attached || [worker perform:[VIMToolInvocation detachMountPoint:mount.path]
+                                               error:&detachError];
         if (detached) {
             rmdir(mount.fileSystemRepresentation);
             [NSFileManager.defaultManager removeItemAtURL:logs error:nil];
@@ -720,11 +689,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     BOOL flat = InstallerPackageImage(package);
     NSURL *expanded = [self.job URLByAppendingPathComponent:@"RestoreDistribution"];
     if (flat && (![fm createDirectoryAtURL:expanded withIntermediateDirectories:NO attributes:nil error:error] ||
-                 ![self run:@"/usr/bin/xar"
-                     arguments:@[ @"-xf", package.path, @"-C", expanded.path ]
-                       timeout:180
-                       cleanup:NO
-                         error:error]))
+                 ![self perform:[VIMToolInvocation extractArchive:package.path into:expanded.path] error:error]))
         return NO;
     NSURL *distribution = flat ? [expanded URLByAppendingPathComponent:@"Distribution"]
                                : [package URLByAppendingPathComponent:@"Contents/OSInstall.dist"];
@@ -777,20 +742,15 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     // xar's -C applies ONLY to extraction. During creation it silently logs
     // missing relative files yet exits zero, producing an empty archive.
     // Give the child a real cwd, then extract/read back its actual members.
-    NSMutableArray *args = [@[ @"-cf", output.path ] mutableCopy];
     NSArray *entries = [fm contentsOfDirectoryAtPath:expanded.path error:error];
     if (!entries.count)
         return NO;
-    [args addObjectsFromArray:[entries sortedArrayUsingSelector:@selector(compare:)]];
-    if (![self run:@"/usr/bin/xar" arguments:args workingDirectory:expanded timeout:180 cleanup:NO error:error])
+    if (![self perform:[VIMToolInvocation createArchive:output.path members:entries directory:expanded.path]
+                 error:error])
         return NO;
     NSURL *verify = [self.job URLByAppendingPathComponent:@"RestoreDistributionReadback"];
     if (![fm createDirectoryAtURL:verify withIntermediateDirectories:NO attributes:nil error:error] ||
-        ![self run:@"/usr/bin/xar"
-            arguments:@[ @"-xf", output.path, @"-C", verify.path ]
-              timeout:180
-              cleanup:NO
-                error:error] ||
+        ![self perform:[VIMToolInvocation extractArchive:output.path into:verify.path] error:error] ||
         ![[NSString stringWithContentsOfURL:[verify URLByAppendingPathComponent:@"Distribution"]
                                    encoding:NSUTF8StringEncoding
                                       error:error] isEqual:patched])
@@ -843,40 +803,16 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                                                 error:error];
     if (!empty || ![empty writeToURL:policy options:NSDataWritingAtomic error:error])
         return NO;
-    return [self run:@"/usr/bin/ditto"
-               arguments:@[ @"--norsrc", @"--noextattr", @"--noacl", original.path, automatic.path ]
-                 timeout:180
-                 cleanup:NO
+    return [self perform:[VIMToolInvocation copy:original.path to:automatic.path timeout:180] error:error] &&
+           [self perform:[VIMToolInvocation signAdHocApplication:automatic.path entitlements:policy.path]
                    error:error] &&
-           [self run:@"/usr/bin/codesign"
-               arguments:@[
-                   @"--force", @"--sign", @"-", @"--digest-algorithm=sha1,sha256", @"--entitlements", policy.path,
-                   automatic.path
-               ]
-                 timeout:60
-                 cleanup:NO
-                   error:error] &&
-           [self run:@"/usr/bin/codesign"
-               arguments:@[ @"--verify", @"--strict", automatic.path ]
-                 timeout:60
-                 cleanup:NO
-                   error:error];
+           [self perform:[VIMToolInvocation verifySignatureOfApplication:automatic.path] error:error];
 }
 // No shell, package scripts, privileged installer invocation, or output pipes.
 // Logs stay in the job; a child producing much output cannot deadlock its parent.
-- (BOOL)run:(NSString *)path
-    arguments:(NSArray<NSString *> *)arguments
-      timeout:(NSTimeInterval)timeout
-      cleanup:(BOOL)cleanup
-        error:(NSError **)error {
-    return [self run:path arguments:arguments workingDirectory:nil timeout:timeout cleanup:cleanup error:error];
-}
-- (BOOL)run:(NSString *)path
-           arguments:(NSArray<NSString *> *)arguments
-    workingDirectory:(NSURL *)workingDirectory
-             timeout:(NSTimeInterval)timeout
-             cleanup:(BOOL)cleanup
-               error:(NSError **)error {
+- (BOOL)perform:(VIMToolInvocation *)command error:(NSError **)error {
+    NSString *path = command.path;
+    BOOL cleanup = command.isCleanup;
     if (self.cancelled && !cleanup)
         return AssemblyError(error, @"Installer preparation was cancelled. Downloads were retained.");
     NSURL *log = [self.job
@@ -888,15 +824,10 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSFileHandle *output = [[NSFileHandle alloc] initWithFileDescriptor:fd closeOnDealloc:YES];
     NSTask *task = [NSTask new];
     task.executableURL = [NSURL fileURLWithPath:path];
-    if (workingDirectory)
-        task.currentDirectoryURL = workingDirectory;
-    NSMutableArray *taskArguments = [arguments mutableCopy];
-    // makehybrid does not implement -puppetstrings (and rejects it outright).
-    // Its progress uses the learned/estimated duration instead of percentages.
-    BOOL percentOutput = [path.lastPathComponent isEqual:@"hdiutil"] && [arguments.firstObject isEqual:@"convert"];
-    if (percentOutput)
-        [taskArguments addObject:@"-puppetstrings"];
-    task.arguments = taskArguments;
+    if (command.workingDirectory)
+        task.currentDirectoryURL = [NSURL fileURLWithPath:command.workingDirectory];
+    task.arguments = command.launchArguments;
+    BOOL percentOutput = command.reportsPercent;
     NSMutableDictionary *environment = [NSProcessInfo.processInfo.environment mutableCopy];
     environment[@"LC_ALL"] = @"C";
     environment[@"LANG"] = @"C";
@@ -912,8 +843,9 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return NO;
     NSTimeInterval start = NSProcessInfo.processInfo.systemUptime;
     double begin = self.workFraction, end = MAX(begin, self.workEnd);
-    NSString *timingKey = [NSString stringWithFormat:@"VIMPreparationDuration-%@-%@-%@-%@", self.progressGuest ?: @"",
-                                                     self.stage ?: @"", path.lastPathComponent, arguments.firstObject];
+    NSString *timingKey =
+        [NSString stringWithFormat:@"VIMPreparationDuration-%@-%@-%@-%@", self.progressGuest ?: @"", self.stage ?: @"",
+                                   path.lastPathComponent, command.arguments.firstObject];
     double learned = [NSUserDefaults.standardUserDefaults doubleForKey:timingKey];
     double estimate = learned > 0 ? learned : MAX(1, self.workEstimate);
     NSFileHandle *reader = percentOutput ? [NSFileHandle fileHandleForReadingFromURL:log error:nil] : nil;
@@ -956,7 +888,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                       self.timeRemaining(seconds);
                 });
         }
-        if ((self.cancelled && !cleanup) || NSProcessInfo.processInfo.systemUptime - start > timeout) {
+        if ((self.cancelled && !cleanup) || NSProcessInfo.processInfo.systemUptime - start > command.timeout) {
             interrupted = YES;
             [task terminate];
             if (dispatch_semaphore_wait(ended, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC))) {
@@ -997,22 +929,17 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                               guest:(NSString *)guest
                        jobDirectory:(NSURL *)directory
                               error:(NSError **)error {
-    NSString *name = @{
-        @"lion" : @"Install Mac OS X Lion.app",
-        @"mountainlion" : @"Install OS X Mountain Lion.app",
-        @"yosemite" : @"Install OS X Yosemite.app",
-        @"elcapitan" : @"Install OS X El Capitan.app",
-        @"sierra" : @"Install macOS Sierra.app"
-    }[guest];
+    VIMGuestMediaPlan *plan = [VIMGuestMediaPlan planForGuest:guest];
+    NSString *name = plan.installerApplicationName, *package = plan.diskImagePackageName;
     NSFileManager *fm = NSFileManager.defaultManager;
-    if (!name || !RegularFile(image) || !directory.isFileURL || [fm fileExistsAtPath:directory.path]) {
+    if (!package || !RegularFile(image) || !directory.isFileURL || [fm fileExistsAtPath:directory.path]) {
         AssemblyError(error, @"Choose a complete Apple download and a new preparation directory.");
         return nil;
     }
     NSDictionary *space = [fm attributesOfFileSystemForPath:directory.URLByDeletingLastPathComponent.path error:error];
     if (!space)
         return nil;
-    if ([space[NSFileSystemFreeSize] unsignedLongLongValue] < (16ULL << 30)) {
+    if ([space[NSFileSystemFreeSize] unsignedLongLongValue] < VIMScratchRequirement.assembly) {
         AssemblyError(error, @"Installer preparation needs at least 16 GB of available space.");
         return nil;
     }
@@ -1037,30 +964,18 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSURL *mount = MountDirectory(error);
     if (!mount)
         return nil;
-    BOOL mounted =
-        [self run:@"/usr/bin/hdiutil"
-            arguments:@[ @"attach", @"-readonly", @"-nobrowse", @"-noautoopen", @"-mountpoint", mount.path, image.path ]
-              timeout:180
-              cleanup:NO
-                error:error];
+    BOOL mounted = [self perform:[VIMToolInvocation attachReadOnlyImage:image.path mountPoint:mount.path] error:error];
     BOOL unpacked = NO;
     NSURL *expanded = [directory URLByAppendingPathComponent:@"Expanded"];
-    NSString *package = [guest isEqual:@"sierra"] ? @"InstallOS.pkg" : @"InstallMacOSX.pkg";
     if (mounted) {
         [self report:@"Unpacking the original Mac OS X installer…"];
         [self nextWorkTo:.35 seconds:90];
-        unpacked = [self run:@"/usr/sbin/pkgutil"
-                   arguments:@[ @"--expand-full", [mount URLByAppendingPathComponent:package].path, expanded.path ]
-                     timeout:1800
-                     cleanup:NO
-                       error:error];
+        unpacked = [self perform:[VIMToolInvocation expandPackage:[mount URLByAppendingPathComponent:package].path
+                                                             into:expanded.path]
+                           error:error];
     }
     NSError *issue = nil;
-    BOOL detached = [self run:@"/usr/bin/hdiutil"
-                    arguments:@[ @"detach", mount.path ]
-                      timeout:60
-                      cleanup:YES
-                        error:&issue];
+    BOOL detached = [self perform:[VIMToolInvocation detachMountPoint:mount.path] error:&issue];
     if (detached)
         rmdir(mount.fileSystemRepresentation);
     if (!unpacked || !detached) {
@@ -1113,7 +1028,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSDictionary *space = [fm attributesOfFileSystemForPath:directory.URLByDeletingLastPathComponent.path error:error];
     if (!space)
         return nil;
-    if ([space[NSFileSystemFreeSize] unsignedLongLongValue] < (16ULL << 30)) {
+    if ([space[NSFileSystemFreeSize] unsignedLongLongValue] < VIMScratchRequirement.assembly) {
         AssemblyError(error, @"Installer preparation needs at least 16 GB of available space.");
         return nil;
     }
@@ -1140,12 +1055,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     BOOL outerMounted = NO, baseMounted = NO, success = NO;
     NSDictionary *completedReceipt = nil;
     @try {
-        outerMounted = [self
-                  run:@"/usr/bin/hdiutil"
-            arguments:@[ @"attach", @"-readonly", @"-nobrowse", @"-noautoopen", @"-mountpoint", outer.path, esd.path ]
-              timeout:180
-              cleanup:NO
-                error:error];
+        outerMounted = [self perform:[VIMToolInvocation attachReadOnlyImage:esd.path mountPoint:outer.path]
+                               error:error];
         if (!outerMounted)
             return nil;
         if (!RegularFile([outer URLByAppendingPathComponent:@"BaseSystem.dmg"]) ||
@@ -1156,14 +1067,10 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         base = MountDirectory(error);
         if (!base)
             return nil;
-        baseMounted = [self run:@"/usr/bin/hdiutil"
-                      arguments:@[
-                          @"attach", @"-readonly", @"-nobrowse", @"-noautoopen", @"-mountpoint", base.path,
-                          [outer URLByAppendingPathComponent:@"BaseSystem.dmg"].path
-                      ]
-                        timeout:180
-                        cleanup:NO
-                          error:error];
+        baseMounted = [self
+            perform:[VIMToolInvocation attachReadOnlyImage:[outer URLByAppendingPathComponent:@"BaseSystem.dmg"].path
+                                                mountPoint:base.path]
+              error:error];
         if (!baseMounted)
             return nil;
         NSDictionary *version =
@@ -1176,27 +1083,19 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         app = [directory URLByAppendingPathComponent:@"Install OS X Mavericks.app"];
         [self report:@"Preparing the original Mavericks installer…"];
         [self nextWorkTo:.2 seconds:10];
-        if (![self run:@"/usr/bin/ditto"
-                arguments:@[
-                    @"--norsrc", @"--noextattr", @"--noacl",
-                    [base URLByAppendingPathComponent:app.lastPathComponent].path, app.path
-                ]
-                  timeout:300
-                  cleanup:NO
-                    error:error])
+        if (![self perform:[VIMToolInvocation copy:[base URLByAppendingPathComponent:app.lastPathComponent].path
+                                                to:app.path
+                                           timeout:300]
+                     error:error])
             return nil;
         NSURL *support = [app URLByAppendingPathComponent:@"Contents/SharedSupport"];
         if (![fm createDirectoryAtURL:support withIntermediateDirectories:YES attributes:nil error:error])
             return nil;
         [self nextWorkTo:.43 seconds:90];
-        if (![self run:@"/usr/bin/ditto"
-                arguments:@[
-                    @"--norsrc", @"--noextattr", @"--noacl", esd.path,
-                    [support URLByAppendingPathComponent:@"InstallESD.dmg"].path
-                ]
-                  timeout:1800
-                  cleanup:NO
-                    error:error])
+        if (![self perform:[VIMToolInvocation copy:esd.path
+                                                to:[support URLByAppendingPathComponent:@"InstallESD.dmg"].path
+                                           timeout:1800]
+                     error:error])
             return nil;
         for (NSString *file in @[ @"BaseSystem.dmg", @"BaseSystem.chunklist" ])
             if (![fm copyItemAtURL:[outer URLByAppendingPathComponent:file]
@@ -1230,11 +1129,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
             BOOL mounted = mount == base ? baseMounted : outerMounted;
             if (mounted) {
                 NSError *issue = nil;
-                if (![self run:@"/usr/bin/hdiutil"
-                        arguments:@[ @"detach", mount.path ]
-                          timeout:60
-                          cleanup:YES
-                            error:&issue]) {
+                if (![self perform:[VIMToolInvocation detachMountPoint:mount.path] error:&issue]) {
                     success = NO;
                     if (error && !*error)
                         *error = issue;
@@ -1271,25 +1166,20 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     // A restore DVD is already a complete bootable installation system. It
     // has no InstallAssistant to manufacture or extract. Keep the completed
     // original until its generated replacement has been verified.
-    if (VIMGuestHasTrait(guest, VIMGuestTraitRestoreDVD)) {
+    VIMGuestMediaPlan *plan = [VIMGuestMediaPlan planForGuest:guest];
+    if (plan.route == VIMAssemblyRouteRestoreDisc) {
         if (!NonemptyFile(files[@"diskimage"])) {
             AssemblyError(error, @"Choose the complete Mac OS X restore DVD image.");
             return nil;
         }
         return files[@"diskimage"];
     }
-    if ([guest isEqual:@"mavericks"])
+    if (plan.route == VIMAssemblyRouteRecoveryESD)
         return [self assembleMavericks:files[@"esd"] jobDirectory:directory error:error];
-    if ([@[ @"lion", @"mountainlion", @"yosemite", @"elcapitan", @"sierra" ] containsObject:guest])
+    if (plan.route == VIMAssemblyRouteClassicDiskImage)
         return [self assembleClassicDiskImage:files[@"diskimage"] guest:guest jobDirectory:directory error:error];
-    NSDictionary *names = @{
-        @"highsierra" : @"Install macOS High Sierra.app",
-        @"mojave" : @"Install macOS Mojave.app",
-        @"catalina" : @"Install macOS Catalina.app",
-        @"bigsur" : @"Install macOS Big Sur.app"
-    };
-    NSString *name = names[guest];
-    BOOL splitInstaller = ![guest isEqual:@"bigsur"];
+    BOOL splitInstaller = plan.route == VIMAssemblyRouteSplitPackages;
+    NSString *name = plan.installerApplicationName;
     if (!name || !directory.isFileURL || !RegularFile(files[@"assistant"]) ||
         (splitInstaller && (!RegularFile(files[@"recovery"]) || !RegularFile(files[@"esd"])))) {
         AssemblyError(error, @"The installer inputs are missing or unsupported.");
@@ -1299,7 +1189,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSDictionary *space = [fm attributesOfFileSystemForPath:directory.URLByDeletingLastPathComponent.path error:error];
     if (!space)
         return nil;
-    if ([space[NSFileSystemFreeSize] unsignedLongLongValue] < 16ULL * 1024 * 1024 * 1024) {
+    if ([space[NSFileSystemFreeSize] unsignedLongLongValue] < VIMScratchRequirement.assembly) {
         AssemblyError(error, @"Installer preparation needs at least 16 GB of available scratch space.");
         return nil;
     }
@@ -1317,11 +1207,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     self.progressGuest = guest;
     [self report:@"Checking the Apple installer package…"];
     [self nextWorkTo:.05 seconds:5];
-    if (![self run:@"/usr/sbin/pkgutil"
-            arguments:@[ @"--check-signature", files[@"assistant"].path ]
-              timeout:300
-              cleanup:NO
-                error:error])
+    if (![self perform:[VIMToolInvocation checkSignatureOfPackage:files[@"assistant"].path] error:error])
         return nil;
     // A valid third-party Developer ID is not an Apple OS installer signature.
     // pkgutil is pinned to the system binary and its output locale above is fixed.
@@ -1339,11 +1225,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     [self completedWork:.05];
     [self report:@"Unpacking the installer…"];
     [self nextWorkTo:.30 seconds:splitInstaller ? 45 : 180];
-    if (![self run:@"/usr/sbin/pkgutil"
-            arguments:@[ @"--expand-full", files[@"assistant"].path, expanded.path ]
-              timeout:1800
-              cleanup:NO
-                error:error])
+    if (![self perform:[VIMToolInvocation expandPackage:files[@"assistant"].path into:expanded.path] error:error])
         return nil;
     // Apple packages may be a single component or a product archive containing components.
     NSMutableArray<NSURL *> *candidates = [NSMutableArray array];
@@ -1392,11 +1274,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         [self report:@"Adding Apple’s signed installation package…"];
         [self completedWork:.30];
         [self nextWorkTo:.43 seconds:120];
-        if (![self run:@"/usr/bin/ditto"
-                arguments:@[ @"--norsrc", @"--noextattr", @"--noacl", files[@"assistant"].path, destination.path ]
-                  timeout:1800
-                  cleanup:NO
-                    error:error])
+        if (![self perform:[VIMToolInvocation copy:files[@"assistant"].path to:destination.path timeout:1800]
+                     error:error])
             return nil;
     }
     if (splitInstaller) {
@@ -1406,14 +1285,9 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         NSURL *mount = MountDirectory(error);
         if (!mount)
             return nil;
-        BOOL attached = [self run:@"/usr/bin/hdiutil"
-                        arguments:@[
-                            @"attach", @"-readonly", @"-nobrowse", @"-noautoopen", @"-mountpoint", mount.path,
-                            files[@"recovery"].path
-                        ]
-                          timeout:180
-                          cleanup:NO
-                            error:error];
+        BOOL attached = [self perform:[VIMToolInvocation attachReadOnlyImage:files[@"recovery"].path
+                                                                  mountPoint:mount.path]
+                                error:error];
         BOOL copied = attached;
         if (attached) {
             for (NSString *file in @[
@@ -1432,11 +1306,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         }
         // Also attempt cleanup on a timed-out attach, which can have mounted before exiting.
         NSError *detachError = nil;
-        BOOL detached = [self run:@"/usr/bin/hdiutil"
-                        arguments:@[ @"detach", mount.path ]
-                          timeout:60
-                          cleanup:YES
-                            error:&detachError];
+        BOOL detached = [self perform:[VIMToolInvocation detachMountPoint:mount.path] error:&detachError];
         if (detached)
             rmdir(mount.fileSystemRepresentation);
         if (!copied)
@@ -1460,22 +1330,15 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         [self report:@"Copying macOS installation data…"];
         [self completedWork:.36];
         [self nextWorkTo:.43 seconds:75];
-        if (![self run:@"/usr/bin/ditto"
-                arguments:@[ @"--norsrc", @"--noextattr", @"--noacl", files[@"esd"].path, esdDestination.path ]
-                  timeout:1800
-                  cleanup:NO
-                    error:error])
+        if (![self perform:[VIMToolInvocation copy:files[@"esd"].path to:esdDestination.path timeout:1800] error:error])
             return nil;
     }
     NSString *payload = splitInstaller ? @"InstallESD.dmg" : @"SharedSupport.dmg";
     if (![self.class validateInstallerApplication:app guest:guest error:error])
         return nil;
     [self nextWorkTo:.45 seconds:3];
-    if (![self run:@"/usr/bin/hdiutil"
-            arguments:@[ @"imageinfo", @"-plist", [support URLByAppendingPathComponent:payload].path ]
-              timeout:60
-              cleanup:NO
-                error:error])
+    if (![self perform:[VIMToolInvocation imageInfoForImage:[support URLByAppendingPathComponent:payload].path]
+                 error:error])
         return nil;
     NSDictionary *receipt = @{@"FormatVersion" : @1, @"Guest" : guest, @"Stage" : @"assembled", @"Installer" : name};
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:receipt
@@ -1498,16 +1361,13 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         AssemblyError(error, @"Media preparation must run on a background worker.");
         return nil;
     }
-    BOOL tiger = [guest isEqual:@"tiger"], snow = [guest isEqual:@"snowleopard"], leopard = [guest isEqual:@"leopard"],
-         restoreDVD = tiger || snow || leopard;
+    VIMGuestMediaPlan *plan = [VIMGuestMediaPlan planForGuest:guest];
+    BOOL tiger = plan.restoreDisc == VIMRestoreDiscKindTiger, snow = plan.restoreDisc == VIMRestoreDiscKindSnowLeopard,
+         leopard = plan.restoreDisc == VIMRestoreDiscKindLeopard,
+         restoreDVD = plan.restoreDisc != VIMRestoreDiscKindNone;
     if (!restoreDVD && ![self.class validateInstallerApplication:installer guest:guest error:error])
         return nil;
-    BOOL classic =
-        restoreDVD || [@[ @"lion", @"mountainlion", @"mavericks", @"yosemite", @"elcapitan", @"sierra", @"highsierra" ]
-                          containsObject:guest];
-    // Tiger uses its measured native Darwin8 rc.cdrom/minstall handoff, not
-    // the Darwin9/x64 bootstrap or scoped Installer injection below.
-    BOOL bootstrap = classic && !tiger;
+    BOOL classic = plan.bootsCDISInstaller, bootstrap = plan.usesBootstrap;
     NSURL *openGLSupport =
         self.openGLSupportDirectory ?: VIMGuestFileURL([@"OpenGLGuests/" stringByAppendingString:guest]);
     if (bootstrap && !VerifyOpenGLSupport(openGLSupport, guest, error))
@@ -1515,20 +1375,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     if (tiger && (!VIMTigerControlPayload(openGLSupport, error) || !VIMTigerInstallerGraphics(openGLSupport, error) ||
                   !VIMTigerInstallerAudio(openGLSupport, error)))
         return nil;
-    NSString *name = @{
-        @"tiger" : @"Install Mac OS X.app",
-        @"leopard" : @"Install Mac OS X.app",
-        @"snowleopard" : @"Install Mac OS X.app",
-        @"lion" : @"Install Mac OS X Lion.app",
-        @"mountainlion" : @"Install OS X Mountain Lion.app",
-        @"mavericks" : @"Install OS X Mavericks.app",
-        @"yosemite" : @"Install OS X Yosemite.app",
-        @"elcapitan" : @"Install OS X El Capitan.app",
-        @"sierra" : @"Install macOS Sierra.app",
-        @"highsierra" : @"Install macOS High Sierra.app",
-        @"mojave" : @"Install macOS Mojave.app",
-        @"catalina" : @"Install macOS Catalina.app"
-    }[guest];
+    NSString *name = plan.usesRecoveryMedia ? plan.installerApplicationName : nil;
     NSURL *base =
         restoreDVD ? installer : [installer URLByAppendingPathComponent:@"Contents/SharedSupport/BaseSystem.dmg"];
     NSURL *esd =
@@ -1542,7 +1389,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSDictionary *space = [fm attributesOfFileSystemForPath:directory.URLByDeletingLastPathComponent.path error:error];
     if (!space)
         return nil;
-    if ([space[NSFileSystemFreeSize] unsignedLongLongValue] < 24ULL * 1024 * 1024 * 1024) {
+    if ([space[NSFileSystemFreeSize] unsignedLongLongValue] < VIMScratchRequirement.recoveryMedia) {
         AssemblyError(error, @"Media preparation needs at least 24 GB of available scratch space.");
         return nil;
     }
@@ -1564,14 +1411,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         NSURL *sourceMount = MountDirectory(error);
         if (!sourceMount)
             return nil;
-        BOOL mounted =
-            [self run:@"/usr/bin/hdiutil"
-                arguments:@[
-                    @"attach", @"-readonly", @"-nobrowse", @"-noautoopen", @"-mountpoint", sourceMount.path, esd.path
-                ]
-                  timeout:180
-                  cleanup:NO
-                    error:error];
+        BOOL mounted = [self perform:[VIMToolInvocation attachReadOnlyImage:esd.path mountPoint:sourceMount.path]
+                               error:error];
         BOOL copied = mounted;
         base = [directory URLByAppendingPathComponent:@"Original-BaseSystem.dmg"];
         if (mounted)
@@ -1579,11 +1420,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                  toURL:base
                                  error:error];
         NSError *issue = nil;
-        BOOL detached = [self run:@"/usr/bin/hdiutil"
-                        arguments:@[ @"detach", sourceMount.path ]
-                          timeout:60
-                          cleanup:YES
-                            error:&issue];
+        BOOL detached = [self perform:[VIMToolInvocation detachMountPoint:sourceMount.path] error:&issue];
         if (detached)
             rmdir(sourceMount.fileSystemRepresentation);
         if (!copied || !detached) {
@@ -1597,18 +1434,11 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return nil;
     // Keep HFS metadata and symlinks inside an image even when the library is
     // on exFAT. A directory copy on that filesystem cannot represent BaseSystem.
-    BOOL modernImages = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27;
-    // UDRW conversion fails with ftruncate(EINVAL) on exFAT. Banded UDSB
-    // avoids that host filesystem limitation, preserving the exact HFS catalog.
-    NSURL *working = [directory
-        URLByAppendingPathComponent:modernImages ? @"Recovery-working.img" : @"Recovery-working.sparsebundle"];
+    VIMWorkingImageBackend *backend = [VIMWorkingImageBackend
+        backendForMacOSMajorVersion:NSProcessInfo.processInfo.operatingSystemVersion.majorVersion];
+    BOOL modernImages = backend.isDiskutil;
+    NSURL *working = [directory URLByAppendingPathComponent:backend.workingImageName];
     [self report:@"Reading installer recovery system…"];
-    NSString *imageTool = modernImages ? @"/usr/sbin/diskutil" : @"/usr/bin/hdiutil";
-    NSArray *convert = modernImages ? @[ @"image", @"create", @"from", @"--format", @"RAW", base.path, working.path ]
-                                    : @[ @"convert", @"-format", @"UDSB", @"-o", working.path, base.path ];
-    NSString *capacity = restoreDVD ? @"10g" : classic ? @"8g" : @"16g";
-    NSArray *resize = modernImages ? @[ @"image", @"resize", @"--size", capacity, working.path ]
-                                   : @[ @"resize", @"-size", capacity, working.path ];
     [self completedWork:.45];
     [self nextWorkTo:.56 seconds:25];
     BOOL converted = NO;
@@ -1619,58 +1449,37 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         NSURL *original = MountDirectory(error);
         if (!original)
             return nil;
-        BOOL sourceAttached = [self run:@"/usr/bin/hdiutil"
-                              arguments:@[
-                                  @"attach", @"-readonly", @"-owners", @"off", @"-nobrowse", @"-noautoopen",
-                                  @"-mountpoint", original.path, base.path
-                              ]
-                                timeout:180
-                                cleanup:NO
-                                  error:error];
+        BOOL sourceAttached = [self perform:[VIMToolInvocation attachReadOnlyIgnoringOwnersImage:base.path
+                                                                                      mountPoint:original.path]
+                                      error:error];
         if (sourceAttached && LeopardRestoreProfile(original, error) &&
-            [self run:@"/usr/sbin/diskutil"
-                arguments:@[ @"info", @"-plist", original.path ]
-                  timeout:60
-                  cleanup:NO
-                    error:error]) {
-            NSDictionary *info = [NSDictionary dictionaryWithContentsOfURL:self.lastLog];
-            NSString *device = info[@"DeviceNode"];
-            NSRegularExpression *pattern = [NSRegularExpression regularExpressionWithPattern:@"^/dev/disk[0-9]+s[0-9]+$"
-                                                                                     options:0
-                                                                                       error:nil];
-            if ([device isKindOfClass:NSString.class] &&
-                [pattern numberOfMatchesInString:device options:0 range:NSMakeRange(0, device.length)] == 1) {
+            [self perform:[VIMToolInvocation deviceInfoForMountPoint:original.path] error:error]) {
+            VIMImagePartitionDevice *device =
+                [VIMImagePartitionDevice deviceFromInfo:[NSDictionary dictionaryWithContentsOfURL:self.lastLog]
+                                           requiringHFS:NO];
+            if (device) {
                 if (modernImages) {
                     // The block node is exclusively owned by the mounted
                     // filesystem. Use that same image partition's raw node
                     // for read-only copying, never unmount a user's disk.
-                    NSString *raw = [device stringByReplacingCharactersInRange:NSMakeRange(5, 0) withString:@"r"];
-                    converted =
-                        VIMCopyHFSInstallerVolume(raw.fileSystemRepresentation, working.fileSystemRepresentation,
-                                                  HFSExtractionProgress, (__bridge void *)self) == 0;
+                    converted = VIMCopyHFSInstallerVolume(device.rawPath.fileSystemRepresentation,
+                                                          working.fileSystemRepresentation, HFSExtractionProgress,
+                                                          (__bridge void *)self) == 0;
                     if (!converted)
                         AssemblyError(error, self.cancelled
                                                  ? @"Installer preparation was cancelled. Your download is saved."
                                                  : @"The Leopard installation volume couldn’t be copied. Check the "
                                                    @"library drive and try again; the original DVD is unchanged.");
                 } else
-                    converted =
-                        [self run:@"/usr/bin/hdiutil"
-                            arguments:@[ @"create", @"-srcdevice", device, @"-format", @"UDSB", @"-o", working.path ]
-                              timeout:600
-                              cleanup:NO
-                                error:error];
+                    converted = [self perform:[VIMToolInvocation createWorkingImageFromDevice:device at:working.path]
+                                        error:error];
             } else
                 AssemblyError(error, @"The Leopard DVD’s installation partition couldn’t be identified safely. Its "
                                      @"original image was not changed.");
         }
         if (sourceAttached) {
             NSError *issue = nil;
-            if (![self run:@"/usr/bin/hdiutil"
-                    arguments:@[ @"detach", original.path ]
-                      timeout:60
-                      cleanup:YES
-                        error:&issue]) {
+            if (![self perform:[VIMToolInvocation detachMountPoint:original.path] error:&issue]) {
                 converted = NO;
                 if (error)
                     *error = issue;
@@ -1678,7 +1487,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         }
         rmdir(original.fileSystemRepresentation);
     } else
-        converted = [self run:imageTool arguments:convert timeout:600 cleanup:NO error:error];
+        converted = [self perform:[VIMToolInvocation createWorkingImageFrom:base.path at:working.path backend:backend]
+                            error:error];
     if (!converted) {
         rmdir(mount.fileSystemRepresentation);
         return nil;
@@ -1696,19 +1506,17 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     }
     BOOL partitionedInstaller = restoreDVD || volumeOnly;
     [self nextWorkTo:.60 seconds:8];
-    if (![self run:imageTool arguments:resize timeout:180 cleanup:NO error:error]) {
+    if (![self perform:[VIMToolInvocation resizeWorkingImage:working.path capacity:plan.workingCapacity backend:backend]
+                 error:error]) {
         rmdir(mount.fileSystemRepresentation);
         return nil;
     }
     [self nextWorkTo:.65 seconds:10];
-    NSMutableArray *attachArguments =
-        [@[ @"attach", @"-owners", @"off", @"-nobrowse", @"-noautoopen", @"-mountpoint", mount.path ] mutableCopy];
-    // A source-device volume copy is intentionally plain HFS, not UDIF.
-    // Supply its known raw class rather than guess it from a filename suffix.
-    if (volumeOnly)
-        [attachArguments addObjectsFromArray:@[ @"-imagekey", @"diskimage-class=CRawDiskImage" ]];
-    [attachArguments addObject:working.path];
-    BOOL attached = [self run:@"/usr/bin/hdiutil" arguments:attachArguments timeout:180 cleanup:NO error:error];
+    // WRITES: the only writable attach, and only of this job's working copy.
+    BOOL attached = [self perform:[VIMToolInvocation attachWorkingImage:working.path
+                                                             mountPoint:mount.path
+                                                              rawVolume:volumeOnly]
+                            error:error];
     BOOL copied = NO;
     NSDictionary *version = nil, *tigerPolicy = nil, *tigerControls = nil;
     if (attached) {
@@ -1725,16 +1533,12 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                 struct stat info;
                 BOOL removed = restoreDVD || lstat(packages.fileSystemRepresentation, &info) != 0 ||
                                [fm removeItemAtURL:packages error:error];
-                BOOL imageInstaller = [guest isEqual:@"highsierra"];
+                BOOL imageInstaller = plan.carriesInstallerImages;
                 NSURL *sourceMount = restoreDVD || imageInstaller ? nil : MountDirectory(error);
-                BOOL sourceAttached = sourceMount && [self run:@"/usr/bin/hdiutil"
-                                                         arguments:@[
-                                                             @"attach", @"-readonly", @"-nobrowse", @"-noautoopen",
-                                                             @"-mountpoint", sourceMount.path, esd.path
-                                                         ]
-                                                           timeout:180
-                                                           cleanup:NO
-                                                             error:error];
+                BOOL sourceAttached =
+                    sourceMount && [self perform:[VIMToolInvocation attachReadOnlyImage:esd.path
+                                                                             mountPoint:sourceMount.path]
+                                           error:error];
                 if (snow)
                     copied = [fm fileExistsAtPath:[packages URLByAppendingPathComponent:@"OSInstall.mpkg"].path] &&
                              [self removeRestoreModelRestrictionAtMount:mount error:error];
@@ -1759,30 +1563,21 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                     // app or an edited/synthetic Apple package distribution.
                     [self report:@"Adding macOS installation images…"];
                     [self nextWorkTo:.87 seconds:100];
-                    copied = [self run:@"/usr/bin/ditto"
-                             arguments:@[
-                                 @"--norsrc", @"--noextattr", @"--noacl",
-                                 [installer URLByAppendingPathComponent:@"Contents/SharedSupport"].path, mount.path
-                             ]
-                               timeout:1800
-                               cleanup:NO
-                                 error:error];
+                    copied =
+                        [self perform:[VIMToolInvocation
+                                             copy:[installer URLByAppendingPathComponent:@"Contents/SharedSupport"].path
+                                               to:mount.path
+                                          timeout:1800]
+                                error:error];
                 } else if (removed && sourceAttached) {
                     [self report:@"Adding OS X installation packages…"];
                     [self nextWorkTo:.87 seconds:100];
-                    copied = [self run:@"/usr/bin/ditto"
-                             arguments:@[
-                                 @"--norsrc", @"--noextattr", @"--noacl",
-                                 [sourceMount URLByAppendingPathComponent:@"Packages"].path, packages.path
-                             ]
-                               timeout:1800
-                               cleanup:NO
-                                 error:error];
-                    // Yosemite660's recovery element resolves BaseSystem from
-                    // the enclosing distribution volume's ROOT on flat media.
-                    // A file only under System/Installation yields false with
-                    // errno0, shown by the installer as "Undefined error:0".
-                    NSString *recoveryDirectory = NativeAutomatedRecovery(guest) ? @"" : @"System/Installation";
+                    copied =
+                        [self perform:[VIMToolInvocation copy:[sourceMount URLByAppendingPathComponent:@"Packages"].path
+                                                           to:packages.path
+                                                      timeout:1800]
+                                error:error];
+                    NSString *recoveryDirectory = plan.baseSystemDirectory;
                     for (NSString *file in @[ @"BaseSystem.dmg", @"BaseSystem.chunklist" ])
                         if (copied) {
                             // High Sierra's genuine three-package installer keeps
@@ -1804,13 +1599,12 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                 if (copied && bootstrap) {
                     NSURL *extras = [packages URLByAppendingPathComponent:@"Extras"],
                           *support = [extras URLByAppendingPathComponent:@"VirtualIntelMac"];
-                    copied =
-                        [fm createDirectoryAtURL:extras withIntermediateDirectories:YES attributes:nil error:error] &&
-                        [self run:@"/usr/bin/ditto"
-                            arguments:@[ @"--norsrc", @"--noextattr", @"--noacl", openGLSupport.path, support.path ]
-                              timeout:180
-                              cleanup:NO
-                                error:error];
+                    copied = [fm createDirectoryAtURL:extras
+                                 withIntermediateDirectories:YES
+                                                  attributes:nil
+                                                       error:error] &&
+                             [self perform:[VIMToolInvocation copy:openGLSupport.path to:support.path timeout:180]
+                                     error:error];
                     if (copied && NativeAutomatedRecovery(guest)) {
                         NSURL *early = [mount URLByAppendingPathComponent:@"etc/rc.cdrom.local"];
                         NSString *launcher = @"#!/bin/sh\nexec "
@@ -1957,11 +1751,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                 }
                 if (sourceMount) {
                     NSError *issue = nil;
-                    BOOL clean = [self run:@"/usr/bin/hdiutil"
-                                 arguments:@[ @"detach", sourceMount.path ]
-                                   timeout:60
-                                   cleanup:YES
-                                     error:&issue];
+                    BOOL clean = [self perform:[VIMToolInvocation detachMountPoint:sourceMount.path] error:&issue];
                     if (clean)
                         rmdir(sourceMount.fileSystemRepresentation);
                     if (sourceAttached && !clean) {
@@ -1977,11 +1767,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                 [self completedWork:.65];
                 [self nextWorkTo:.87 seconds:100];
                 if (removed)
-                    copied = [self run:@"/usr/bin/ditto"
-                             arguments:@[ @"--norsrc", @"--noextattr", @"--noacl", installer.path, stub.path ]
-                               timeout:1800
-                               cleanup:NO
-                                 error:error];
+                    copied = [self perform:[VIMToolInvocation copy:installer.path to:stub.path timeout:1800]
+                                     error:error];
                 if (copied && SerialRecovery(guest))
                     copied = [self prepareSerialRecoveryAtMount:mount error:error];
             }
@@ -1990,11 +1777,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     }
     NSError *detachError = nil;
     [self nextWorkTo:.90 seconds:12];
-    BOOL detached = [self run:@"/usr/bin/hdiutil"
-                    arguments:@[ @"detach", mount.path ]
-                      timeout:60
-                      cleanup:YES
-                        error:&detachError];
+    BOOL detached = [self perform:[VIMToolInvocation detachMountPoint:mount.path] error:&detachError];
     if (detached)
         rmdir(mount.fileSystemRepresentation);
     if (!copied)
@@ -2022,11 +1805,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         [self completedWork:partitionedInstaller ? .96 : .99];
     } else {
         NSURL *converted = [directory URLByAppendingPathComponent:@"Installer-blocks.cdr"];
-        if (![self run:@"/usr/bin/hdiutil"
-                arguments:@[ @"convert", working.path, @"-format", @"UDTO", @"-o", converted.path ]
-                  timeout:1800
-                  cleanup:NO
-                    error:error] ||
+        if (![self perform:[VIMToolInvocation convertToBlocks:working.path output:converted.path] error:error] ||
             ![fm moveItemAtURL:converted toURL:volumeImage error:error])
             return nil;
     }
@@ -2058,12 +1837,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSURL *readback = MountDirectory(error);
     if (!readback)
         return nil;
-    BOOL readbackMounted = [self
-              run:@"/usr/bin/hdiutil"
-        arguments:@[ @"attach", @"-readonly", @"-nobrowse", @"-noautoopen", @"-mountpoint", readback.path, image.path ]
-          timeout:180
-          cleanup:NO
-            error:error];
+    BOOL readbackMounted = [self perform:[VIMToolInvocation attachReadOnlyImage:image.path mountPoint:readback.path]
+                                   error:error];
     BOOL readbackValid = NO;
     if (readbackMounted) {
         NSDictionary *actual = [NSDictionary
@@ -2121,11 +1896,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                     @"\"${LAUNCH}\" /System/Installation/Packages/Extras/VirtualIntelMac/opengl-installer-launch "
                     @"\"${TARGET_APP}\""];
         NSError *issue = nil;
-        BOOL clean = [self run:@"/usr/bin/hdiutil"
-                     arguments:@[ @"detach", readback.path ]
-                       timeout:60
-                       cleanup:YES
-                         error:&issue];
+        BOOL clean = [self perform:[VIMToolInvocation detachMountPoint:readback.path] error:&issue];
         if (!clean) {
             if (error)
                 *error = issue;
@@ -2204,7 +1975,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSDictionary *space = [fm attributesOfFileSystemForPath:directory.URLByDeletingLastPathComponent.path error:error];
     if (!space)
         return nil;
-    if ([space[NSFileSystemFreeSize] unsignedLongLongValue] < 32ULL * 1024 * 1024 * 1024) {
+    if ([space[NSFileSystemFreeSize] unsignedLongLongValue] < VIMScratchRequirement.hybridMedia) {
         AssemblyError(error, @"Media preparation needs at least 32 GB of available scratch space.");
         return nil;
     }
@@ -2221,11 +1992,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     self.step = 0;
     self.progressGuest = @"bigsur";
     [self report:@"Checking Apple’s signed installation package…"];
-    if (![self run:@"/usr/sbin/pkgutil"
-            arguments:@[ @"--check-signature", support.path ]
-              timeout:300
-              cleanup:NO
-                error:error])
+    if (![self perform:[VIMToolInvocation checkSignatureOfPackage:support.path] error:error])
         return nil;
     NSString *signature = [NSString stringWithContentsOfURL:self.lastLog encoding:NSUTF8StringEncoding error:error];
     BOOL apple = NO;
@@ -2249,12 +2016,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     [self report:@"Reading Big Sur installer boot files…"];
     [self completedWork:.45];
     [self nextWorkTo:.48 seconds:12];
-    BOOL attached = [self
-              run:@"/usr/bin/hdiutil"
-        arguments:@[ @"attach", @"-readonly", @"-nobrowse", @"-noautoopen", @"-mountpoint", mount.path, support.path ]
-          timeout:180
-          cleanup:NO
-            error:error];
+    BOOL attached = [self perform:[VIMToolInvocation attachReadOnlyImage:support.path mountPoint:mount.path]
+                            error:error];
     BOOL extractedOK = NO;
     NSDictionary *asset = nil;
     if (attached) {
@@ -2285,20 +2048,16 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                 @"AssetData/boot/BridgeVersion.plist", @"AssetData/boot/BridgeVersion.bin",
                 @"AssetData/boot/PlatformSupport.plist", @"AssetData/boot/SystemVersion.plist"
             ];
-            NSMutableArray *arguments = [NSMutableArray arrayWithObjects:@"-q", [archives.firstObject path], nil];
-            [arguments addObjectsFromArray:members];
-            [arguments addObjectsFromArray:@[ @"-d", extracted.path ]];
             [self nextWorkTo:.60 seconds:50];
-            extractedOK = [self run:@"/usr/bin/unzip" arguments:arguments timeout:600 cleanup:NO error:error];
+            extractedOK = [self perform:[VIMToolInvocation unzip:[archives.firstObject path]
+                                                         members:members
+                                                            into:extracted.path]
+                                  error:error];
         } else
             AssemblyError(error, @"The Big Sur update archive or version metadata is ambiguous or missing.");
     }
     NSError *detachError = nil;
-    BOOL detached = [self run:@"/usr/bin/hdiutil"
-                    arguments:@[ @"detach", mount.path ]
-                      timeout:60
-                      cleanup:YES
-                        error:&detachError];
+    BOOL detached = [self perform:[VIMToolInvocation detachMountPoint:mount.path] error:&detachError];
     if (detached)
         rmdir(mount.fileSystemRepresentation);
     if (!extractedOK)
@@ -2338,11 +2097,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
             return nil;
     }
     NSURL *manifests = [extracted URLByAppendingPathComponent:@"AssetData/boot/Firmware/Manifests/InstallerBoot"];
-    if (![self run:@"/usr/bin/ditto"
-            arguments:@[ @"--norsrc", @"--noextattr", @"--noacl", manifests.path, stage.path ]
-              timeout:120
-              cleanup:NO
-                error:error])
+    if (![self perform:[VIMToolInvocation copy:manifests.path to:stage.path timeout:120] error:error])
         return nil;
     NSURL *preferences = [stage URLByAppendingPathComponent:@"Library/Preferences/SystemConfiguration"];
     if (![fm createDirectoryAtURL:preferences withIntermediateDirectories:YES attributes:nil error:error])
@@ -2367,14 +2122,10 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     [self report:@"Copying macOS installation files into the media…"];
     [self completedWork:.65];
     [self nextWorkTo:.90 seconds:120];
-    if (![self run:@"/usr/bin/ditto"
-            arguments:@[
-                @"--norsrc", @"--noextattr", @"--noacl", installer.path,
-                [stage URLByAppendingPathComponent:installer.lastPathComponent].path
-            ]
-              timeout:1800
-              cleanup:NO
-                error:error])
+    if (![self perform:[VIMToolInvocation copy:installer.path
+                                            to:[stage URLByAppendingPathComponent:installer.lastPathComponent].path
+                                       timeout:1800]
+                 error:error])
         return nil;
     if (![fm removeItemAtURL:extracted error:error])
         return nil;
@@ -2382,15 +2133,13 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     [self completedWork:.9];
     NSURL *image = [directory URLByAppendingPathComponent:@"Installer.iso"];
     [self nextWorkTo:.99 seconds:120];
-    if (![self run:@"/usr/bin/hdiutil"
-            arguments:@[
-                @"makehybrid", @"-hfs", @"-udf", @"-hfs-volume-name", @"Install macOS Big Sur",
-                @"-hfs-blessed-directory", [stage URLByAppendingPathComponent:@"System/Library/CoreServices"].path,
-                @"-o", image.path, stage.path
-            ]
-              timeout:1800
-              cleanup:NO
-                error:error])
+    if (![self
+            perform:[VIMToolInvocation
+                        makeHybridImageFromStage:stage.path
+                                blessedDirectory:[stage URLByAppendingPathComponent:@"System/Library/CoreServices"].path
+                                      volumeName:@"Install macOS Big Sur"
+                                          output:image.path]
+              error:error])
         return nil;
     NSNumber *imageSize = FlushGeneratedImage(image, error);
     if (!imageSize)
