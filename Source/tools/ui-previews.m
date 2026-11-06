@@ -4,7 +4,6 @@
 #import <Cocoa/Cocoa.h>
 #import "VIMLibraryViewController.h"
 #import "VIMMachine.h"
-#import "VIMMachineSettings.h"
 #import "VIMSession.h"
 #import "VIMMenuController.h"
 #import "AppDelegate.h"
@@ -419,119 +418,6 @@ int main(int argc, const char *argv[]) {
         }
         Render(stopped, [output stringByAppendingPathComponent:@"Guest-Stopped.png"]);
         [stopped orderOut:nil];
-        [VIMMachineSettings showForMachine:models.firstObject
-                                    window:window
-                                completion:^{
-                                }];
-        for (NSWindow *configuration in NSApp.windows)
-            if ([configuration.title containsString:@"Configuration"]) {
-                id controller = configuration.windowController;
-                NSCAssert([[controller valueForKey:@"section"] isEqual:@"Hardware"],
-                          @"Configuration opens on Hardware");
-                for (NSString *section in @[ @"General", @"Hardware", @"Sharing" ]) {
-                    NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:section];
-                    [controller performSelector:@selector(selectSection:) withObject:item];
-                    if (![section isEqual:@"General"]) {
-                        NSTableView *categories = (id)FindView(configuration.contentView, NSTableView.class);
-                        NSCAssert(
-                            categories && !categories.allowsEmptySelection && !categories.allowsMultipleSelection &&
-                                categories.selectedRow == [[controller valueForKey:@"hardwareIndex"] integerValue],
-                            @"Hardware and Sharing must always keep exactly one category selected");
-                    }
-                    Render(configuration,
-                           [output stringByAppendingPathComponent:[section stringByAppendingString:@".png"]]);
-                }
-                [controller setValue:@YES forKey:@"hostFiles"];
-                [controller performSelector:@selector(render)];
-                Render(configuration, [output stringByAppendingPathComponent:@"Sharing-Host.png"]);
-                [controller setValue:@NO forKey:@"hostFiles"];
-                [controller performSelector:@selector(render)];
-                Render(configuration, [output stringByAppendingPathComponent:@"Sharing-GuestFiles.png"]);
-                NSButton *guestSharing = FindGuestSettings(configuration.contentView, @"sharing");
-                NSCAssert(guestSharing && !guestSharing.enabled && guestSharing.target == controller,
-                          @"Guest Sharing action is wired, but requires a running VM");
-                [controller setValue:@NO forKey:@"hostFiles"];
-                [controller setValue:@1 forKey:@"hardwareIndex"];
-                [controller setValue:@"mac" forKey:@"guestUsername"];
-                [controller performSelector:@selector(render)];
-                NSCAssert([[controller valueForKey:@"hardwareIndex"] integerValue] == 1,
-                          @"Rebuilding the no-empty-selection table must not reset the requested category");
-                Render(configuration, [output stringByAppendingPathComponent:@"Sharing-SSH.png"]);
-                NSTabView *directions = (NSTabView *)FindView(configuration.contentView, NSTabView.class);
-                NSCAssert(directions.numberOfTabViewItems == 2 &&
-                              [directions.tabViewItems[0].label isEqual:@"This Mac"] &&
-                              [directions.tabViewItems[1].label isEqual:@"Virtual Mac"],
-                          @"Sharing uses native direction tabs");
-                NSTextField *account = [controller valueForKey:@"fields"][@"GuestUsername"];
-                NSCAssert(NSWidth(account.frame) >= 239,
-                          @"Guest account field must fit its placeholder and real short names");
-                NSScrollView *instructions = (NSScrollView *)directions.selectedTabViewItem.view;
-                NSView *document = instructions.documentView, *pane = document.subviews.firstObject;
-                [instructions.contentView
-                    scrollToPoint:NSMakePoint(0, MAX(0, NSHeight(document.bounds) -
-                                                            NSHeight(instructions.contentView.bounds)))];
-                [instructions reflectScrolledClipView:instructions.contentView];
-                NSCAssert(NSHeight(document.bounds) - NSMaxY(pane.frame) >= 19.5,
-                          @"Instruction document retains its bottom margin");
-                NSCAssert(NSMaxY(instructions.contentView.bounds) >= NSMaxY(pane.frame) + 19.5,
-                          @"Last text and bottom margin can scroll fully into view");
-                Render(configuration, [output stringByAppendingPathComponent:@"Sharing-SSH-Scrolled.png"]);
-                [directions selectTabViewItemAtIndex:0];
-                NSCAssert([[controller valueForKey:@"hostFiles"] boolValue] &&
-                              FindView(configuration.contentView, NSTabView.class) == directions,
-                          @"Native tabs switch without rebuilding the preference window");
-                configuration.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-                Render(configuration, [output stringByAppendingPathComponent:@"Sharing-Dark.png"]);
-                [controller setValue:@"Hardware" forKey:@"section"];
-                [controller setValue:@4 forKey:@"hardwareIndex"];
-                [controller performSelector:@selector(render)];
-                for (NSString *appearance in @[ NSAppearanceNameAqua, NSAppearanceNameDarkAqua ]) {
-                    configuration.appearance = [NSAppearance appearanceNamed:appearance];
-                    Render(configuration,
-                           [output stringByAppendingPathComponent:[appearance stringByAppendingString:@"-Sound.png"]]);
-                    NSButton *guestPrivacy = FindGuestSettings(configuration.contentView, @"microphone");
-                    NSCAssert(guestPrivacy && !guestPrivacy.enabled && guestPrivacy.target == controller,
-                              @"Guest microphone privacy action is wired, but requires a running VM");
-                    NSScrollView *detail = nil;
-                    NSButton *restore = nil;
-                    for (NSView *child in configuration.contentView.subviews) {
-                        if ([child.identifier isEqual:@"ConfigurationDetail"])
-                            detail = (id)child;
-                        if ([child isKindOfClass:NSButton.class] &&
-                            [((NSButton *)child).title isEqual:@"Restore Defaults"])
-                            restore = (id)child;
-                    }
-                    NSCAssert(detail && restore && !NSIntersectsRect(detail.frame, restore.frame),
-                              @"Hardware scrolling must not overlap Restore Defaults");
-                }
-                configuration.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
-                for (NSNumber *index in @[ @1, @2, @3, @6 ]) {
-                    [controller setValue:index forKey:@"hardwareIndex"];
-                    [controller performSelector:@selector(render)];
-                    Render(
-                        configuration,
-                        [output stringByAppendingPathComponent:[NSString stringWithFormat:@"Hardware-%@.png", index]]);
-                }
-                [controller setValue:@3 forKey:@"hardwareIndex"];
-                [controller performSelector:@selector(render)];
-                [controller performSelector:@selector(networkAdvanced:) withObject:nil];
-                NSWindowController *sheet = [controller valueForKey:@"editorSheet"];
-                NSCAssert(sheet.window.sheetParent == configuration, @"Network Advanced is a real sheet");
-                Render(sheet.window, [output stringByAppendingPathComponent:@"Network-Advanced.png"]);
-                [sheet performSelector:@selector(cancel:) withObject:nil];
-                [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
-                [controller setValue:@"Sharing" forKey:@"section"];
-                [controller setValue:@0 forKey:@"hardwareIndex"];
-                [controller setValue:@NO forKey:@"hostFiles"];
-                [controller performSelector:@selector(render)];
-                [controller performSelector:@selector(toggleAdvancedSharing:) withObject:nil];
-                sheet = [controller valueForKey:@"editorSheet"];
-                NSCAssert(sheet.window.sheetParent == configuration, @"Sharing port editing is a real sheet");
-                Render(sheet.window, [output stringByAppendingPathComponent:@"Sharing-Advanced.png"]);
-                [sheet performSelector:@selector(cancel:) withObject:nil];
-                [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
-                [configuration orderOut:nil];
-            }
         // The real global preference pane should fit its content, not retain a
         // fixed-height void beneath it. No settings actions are invoked here.
         AppDelegate *appDelegate = [AppDelegate new];

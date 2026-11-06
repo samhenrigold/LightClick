@@ -19,7 +19,6 @@
 #import "VIMGuestBootPolicy.h"
 #import "VIMGuestProgress.h"
 #import "VIMHostSupport.h"
-#import "VIMMachineSettings.h"
 #import "VIMPlayButton.h"
 #import "VIMAlerts.h"
 #import "VIMDiscImage.h"

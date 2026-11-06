@@ -9,7 +9,6 @@
 #import "Light_Click-Swift.h"
 #import "VIMAlerts.h"
 #import "VIMMenuController.h"
-#import "VIMMachineSettings.h"
 #import "VIMDiagnostics.h"
 #import "VIMUSBClient.h"
 #import "VIMNetworkClient.h"
