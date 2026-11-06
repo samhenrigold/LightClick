@@ -1755,6 +1755,15 @@ static int tree_send_surface_origin(struct Stream *s, struct TreeWindow *w, CGWi
     return 0;
 }
 
+static int tree_surface_has_shadow(CGWindowID id) {
+    for (uint32_t i = 0; i < tree_gpu_table->gpu_row_count && i < SWS_TREE; i++) {
+        const struct SWSGPURow *row = &tree_gpu_table->gpu_rows[i];
+        if (row->id == id && row->frames)
+            return row->x < row->window_x || row->y < row->window_y;
+    }
+    return 0;
+}
+
 static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps, double seconds) {
     tree_connection = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
     tree_flush_seed = guest_symbol("CGSGetWindowFlushSeed", "SLSGetWindowFlushSeed");
@@ -1848,7 +1857,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                           tree_group(front->id) != tree_group(id);
             }
             // A shared desktop has the guest's shadows off, so there's only the window itself to show, and the host's shadow.
-            int margin = own_surface ? item->margin : crop || tree_shared ? 0 : item->margin;
+            // Room for the guest's shadow if its surface has one, or else there's the window's own shape for the host's.
+            int margin = own_surface && tree_surface_has_shadow(id) ? item->margin : crop || tree_shared ? 0 : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
                 sized = !CGSizeEqualToSize(bounds.size, w->bounds.size) || margin != w->margin;
             uint32_t seed = 0;

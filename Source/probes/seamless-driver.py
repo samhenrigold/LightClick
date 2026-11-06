@@ -506,9 +506,10 @@ def desktop():
         if textedit:
             os.kill(textedit, signal.SIGUSR2)
         time.sleep(2)
+        # An odd number of clicks, so its page is dark where TextEdit's white would otherwise be.
+        (results/f'{tag}-clicks.txt').write_text('')
         os.kill(safari, signal.SIGUSR1)
-        os.kill(safari, signal.SIGUSR1)
-        time.sleep(1)
+        time.sleep(1.5)
         for name, wanted in (('safari', window), ('textedit', other)):
             if wanted:
                 subprocess.run(['screencapture', '-x', '-o', '-l', wanted, str(results/f'{tag}-apart-{name}.png')])

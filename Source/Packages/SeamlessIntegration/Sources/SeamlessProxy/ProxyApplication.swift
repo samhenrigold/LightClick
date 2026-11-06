@@ -309,6 +309,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         send(.surfaceMoved(windowID: id, x: frame.minX, y: primary - frame.maxY))
     }
 
+    /// A test means the app's main window, not whatever small one is in front of it.
+    private static func area(_ surface: Surface) -> Double { surface.window.frame.width * surface.window.frame.height }
+
     private var testCommandPath: String {
         (ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] ?? "") + ".command"
     }
@@ -341,7 +344,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         let source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
         source.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, let front = self.surfaces.min(by: { $0.value.order < $1.value.order }) else { return }
+                guard let self, let front = self.surfaces.max(by: { Self.area($0.value) < Self.area($1.value) }) else { return }
                 let command = (try? String(contentsOfFile: self.testCommandPath, encoding: .utf8)) ?? ""
                 if command.hasPrefix("resize") {
                     self.testResize(front.value)
@@ -376,7 +379,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     /// Real NSEvents through the real input view, from the window's middle. It doesn't exercise WindowServer's delivery,
     /// but it needs no permission and doesn't touch the host's pointer.
     private func testClick() {
-        guard let surface = surfaces.values.min(by: { $0.order < $1.order }) else { return }
+        guard let surface = surfaces.values.max(by: { Self.area($0) < Self.area($1) }) else { return }
         let window = surface.window
         let place = NSPoint(x: window.frame.width / 2, y: window.frame.height / 2)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
@@ -394,7 +397,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     }
 
     private func testInput() {
-        guard let surface = surfaces.values.min(by: { $0.order < $1.order }) else { return }
+        guard let surface = surfaces.values.max(by: { Self.area($0) < Self.area($1) }) else { return }
         let window = surface.window
         testClick()
         // A real scroll event through the trackpad's path. The other gestures can't be made without a trackpad.
