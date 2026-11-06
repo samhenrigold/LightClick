@@ -118,6 +118,87 @@ struct GuestRoutinesTests {
         }
     }
 
+    @Test func aHelpersFailureNamesItsStepAndExit() {
+        #expect(GuestAgentBridge.helperFailure("setup", code: 0, failed: false) == nil)
+        #expect(GuestAgentBridge.helperFailure("setup", code: 3, failed: false) == "setup (exit 3)")
+        #expect(GuestAgentBridge.helperFailure("setup", code: nil, failed: true) == "setup")
+        #expect(GuestAgentBridge.helperFailure("setup", code: nil, failed: false) == "setup")
+    }
+
+    private func provision(_ agent: GuestAgentBridge, wanted: Bool = true) async throws -> String? {
+        let directory = NSTemporaryDirectory() + UUID().uuidString
+        try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        let helper = URL(fileURLWithPath: directory + "/guest-clipboard")
+        let settings = URL(fileURLWithPath: directory + "/Clipboard.json")
+        try Data("h".utf8).write(to: helper)
+        try Data("{}".utf8).write(to: settings)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            agent.connect { _ in continuation.resume() }
+        }
+        return await withCheckedContinuation { continuation in
+            agent.provisionHelper(helper, configuration: settings, named: "Clipboard.json", stillWanted: { wanted }) {
+                continuation.resume(returning: $0)
+            }
+        }
+    }
+
+    /// What a guest answers to staging, then `rest` for the helper's own steps.
+    private static func stagingOutcome(
+        _ rest: @escaping @Sendable (FakeGuestAgent.Process) -> FakeGuestAgent.Outcome = { _ in .finished(exitCode: 0) }
+    ) -> @Sendable (FakeGuestAgent.Process) -> FakeGuestAgent.Outcome {
+        { process in
+            switch process.path {
+            case "/usr/bin/mktemp": .finished(exitCode: 0, output: "/private/var/tmp/VirtualIntelMac.abc123\n")
+            case "/bin/sh": .finished(exitCode: 0, output: "0\n")
+            default: rest(process)
+            }
+        }
+    }
+
+    @Test func aHelperRunsOnlyOnceItsFilesAreSecured() async throws {
+        try await withAgent(outcomes: Self.stagingOutcome()) { agent, fake in
+            let failure = try await provision(agent)
+            #expect(failure == nil)
+            let run = fake.state.withLock { $0.processes.map { [$0.path] + $0.arguments } }
+            let tail = Array(run.suffix(3))
+            #expect(tail[0] == ["/bin/chmod", "0700", "/private/var/tmp/VirtualIntelMac.abc123/guest-clipboard"])
+            #expect(tail[1] == ["/bin/chmod", "0600", "/private/var/tmp/VirtualIntelMac.abc123/Clipboard.json"])
+            #expect(tail[2].first?.hasSuffix("guest-clipboard") == true)
+            #expect(tail[2].dropFirst().first == "--provision")
+        }
+    }
+
+    @Test func aHelperNoLongerWantedStopsAfterTheTransfer() async throws {
+        try await withAgent(outcomes: Self.stagingOutcome()) { agent, fake in
+            let failure = try await provision(agent, wanted: false)
+            #expect(failure == "transfer")
+            #expect(fake.state.withLock { $0.processes.contains { $0.arguments.first == "--provision" } } == false)
+        }
+    }
+
+    @Test func aFailedChmodNamesItsStep() async throws {
+        try await withAgent(
+            outcomes: Self.stagingOutcome {
+                $0.arguments == ["0700", "/private/var/tmp/VirtualIntelMac.abc123/guest-clipboard"]
+                    ? .finished(exitCode: 1) : .finished(exitCode: 0)
+            }
+        ) { agent, _ in
+            let failure = try await provision(agent)
+            #expect(failure == "executable preparation")
+        }
+    }
+
+    @Test func aFailedHelperReportsItsExit() async throws {
+        try await withAgent(
+            outcomes: Self.stagingOutcome {
+                $0.arguments.first == "--provision" ? .finished(exitCode: 7) : .finished(exitCode: 0)
+            }
+        ) { agent, _ in
+            let failure = try await provision(agent)
+            #expect(failure == "GUI helper setup (exit 7)")
+        }
+    }
+
     @Test func anEmulatedVolumeIsOneTheEmulatorMounted() {
         #expect(GuestAgentBridge.isEmulatedVolume(["MountPoint": "/V", "MediaName": "QEMU HARDDISK"], at: "/V"))
         #expect(!GuestAgentBridge.isEmulatedVolume(["MountPoint": "/V", "MediaName": "SanDisk"], at: "/V"))

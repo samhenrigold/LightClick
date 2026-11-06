@@ -130,6 +130,65 @@ extension GuestAgentBridge {
         }
     }
 
+    // MARK: - Guest helpers
+
+    /// Sets up a helper installed with the guest's graphics support, giving it its configuration on stdin. The completion
+    /// gets the step that failed, or nil.
+    @objc(provisionInstalledHelperWithConfiguration:completion:)
+    public func provisionInstalledHelper(configuration: Data, completion: @escaping (String?) -> Void) {
+        runExecutable(
+            "/Library/Application Support/Virtual Intel Mac/GuestTools/guest-clipboard",
+            arguments: ["--provision-stdin"], standardInput: configuration, timeout: 0
+        ) { [self] result, error in
+            completion(
+                Self.helperFailure("installed GUI helper setup", code: exit(result), failed: error != nil))
+        }
+    }
+
+    /// Stages a helper and its private configuration, and has it set itself up. The completion gets the step that failed,
+    /// or nil. `stillWanted` is asked once the transfer is done, since it can outlast the helper's bridge.
+    @objc(provisionHelper:configuration:named:stillWanted:completion:)
+    public func provisionHelper(
+        _ helper: URL, configuration: URL, named name: String, stillWanted: @escaping () -> Bool,
+        completion: @escaping (String?) -> Void
+    ) {
+        Task { @MainActor in
+            var step = "transfer"
+            do {
+                guard let directory = try await staged(["guest-clipboard": helper, name: configuration]), stillWanted()
+                else {
+                    completion(step)
+                    return
+                }
+                step = "executable preparation"
+                let program = (directory as NSString).appendingPathComponent("guest-clipboard")
+                guard exit(try await run("/bin/chmod", ["0700", program], timeout: 10)) == 0 else {
+                    completion(step)
+                    return
+                }
+                step = "private configuration preparation"
+                // guest-file-open follows the agent's umask, not the source file's mode. Tighten the private
+                // configuration before its native validator reads it. The staging directory is root-only.
+                let settings = (directory as NSString).appendingPathComponent(name)
+                guard exit(try await run("/bin/chmod", ["0600", settings], timeout: 10)) == 0 else {
+                    completion(step)
+                    return
+                }
+                step = "GUI helper setup"
+                let result = try await run(program, ["--provision", settings], timeout: 30)
+                completion(Self.helperFailure(step, code: exit(result), failed: false))
+            } catch {
+                completion(step)
+            }
+        }
+    }
+
+    /// The step's name with its exit status if it reported one, or nil if it succeeded.
+    static func helperFailure(_ step: String, code: NSNumber?, failed: Bool) -> String? {
+        if code == 0 && !failed { return nil }
+        return code.map { "\(step) (exit \($0))" } ?? step
+    }
+
     // MARK: - Setup media
 
     /// Whether the mounted setup disc is the one this machine made, going by its receipt, after a good graphics check.

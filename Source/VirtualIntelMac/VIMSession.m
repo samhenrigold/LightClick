@@ -4281,14 +4281,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     else
         self.clipboardRetryAfter = [NSDate dateWithTimeIntervalSinceNow:60];
     __weak VIMSession *weakSelf = self;
-    __block NSString *step = @"transfer";
-    void (^finish)(BOOL) = ^(BOOL ok) {
+    void (^finish)(NSString *) = ^(NSString *failedStep) {
       VIMSession *session = weakSelf;
       session.state.clipboardPending = NO;
       VIMClipboardBridge *bridge = powerOnly ? session.powerBridge : session.clipboard;
       if (![bridge.token isEqual:token])
           return;
-      if (ok) {
+      if (!failedStep) {
           if (powerOnly)
               session.powerConfiguredBoot = boot;
           else {
@@ -4296,92 +4295,39 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
               session.clipboardConfiguredBoot = boot;
           }
           [bridge awaitGuestHandshake];
-      } else {
-          NSString *message = [NSString stringWithFormat:@"Guest %@ %@ did not finish.",
-                                                         powerOnly ? @"display-power observer" : @"clipboard", step];
-          if (![session.clipboardFailure isEqual:message])
-              [session logNote:@"%@", message];
-          [bridge stop];
+          // Let the independent clipboard provision after display setup releases
+          // ownership; do not wait another minute or race the guest-agent channel.
           if (powerOnly)
-              session.powerBridge = nil;
-          else {
-              session.clipboardFailure = message;
-              session.clipboard = nil;
-          }
+              [session updateBridgeForBoot:boot displayPowerOnly:NO];
+          else
+              [session restoreDisplaySelectionForBoot:boot];
+          return;
       }
-      // Let the independent clipboard provision after display setup releases
-      // ownership; do not wait another minute or race the guest-agent channel.
-      if (powerOnly && ok)
-          [session updateBridgeForBoot:boot displayPowerOnly:NO];
-      if (!powerOnly && ok)
-          [session restoreDisplaySelectionForBoot:boot];
+      NSString *message = [NSString stringWithFormat:@"Guest %@ %@ did not finish.",
+                                                     powerOnly ? @"display-power observer" : @"clipboard", failedStep];
+      if (![session.clipboardFailure isEqual:message])
+          [session logNote:@"%@", message];
+      [bridge stop];
+      if (powerOnly)
+          session.powerBridge = nil;
+      else {
+          session.clipboardFailure = message;
+          session.clipboard = nil;
+      }
     };
     if (self.machine.preMetalGuest) {
-        step = @"installed GUI helper setup";
-        [self.guestAgent
-            runExecutable:@"/Library/Application Support/Virtual Intel Mac/GuestTools/guest-clipboard"
-                arguments:@[ @"--provision-stdin" ]
-            standardInput:data
-                  timeout:0
-               completion:^(NSDictionary *result, NSError *error) {
-                 if (result[@"exitcode"])
-                     step = [NSString stringWithFormat:@"installed GUI helper setup (exit %@)", result[@"exitcode"]];
-                 finish(!error && [result[@"exitcode"] isEqual:@0]);
-               }];
+        [self.guestAgent provisionInstalledHelperWithConfiguration:data completion:finish];
         return;
     }
-    [self.guestAgent stageFiles:@{
-        @"guest-clipboard" : [tools URLByAppendingPathComponent:@"guest-clipboard"],
-        configName : configuration
-    }
-                       progress:nil
-                     completion:^(NSDictionary *receipt, NSError *error) {
-                       VIMSession *session = weakSelf;
-                       if (error || !session.task.running ||
-                           ![(powerOnly ? session.powerBridge : session.clipboard).token isEqual:token]) {
-                           finish(NO);
-                           return;
-                       }
-                       step = @"executable preparation";
-                       NSString *directory = receipt[@"Directory"],
-                                *helper = [directory stringByAppendingPathComponent:@"guest-clipboard"];
-                       [session.guestAgent
-                           runExecutable:@"/bin/chmod"
-                               arguments:@[ @"0700", helper ]
-                                 timeout:10
-                              completion:^(NSDictionary *mode, NSError *issue) {
-                                if (issue || ![mode[@"exitcode"] isEqual:@0]) {
-                                    finish(NO);
-                                    return;
-                                }
-                                step = @"private configuration preparation";
-                                NSString *configuration = [directory stringByAppendingPathComponent:configName];
-                                // guest-file-open follows the agent's umask, not the source file's
-                                // mode. Tighten the private configuration explicitly before its
-                                // native validator reads it (the staging directory is root-only).
-                                [weakSelf.guestAgent
-                                    runExecutable:@"/bin/chmod"
-                                        arguments:@[ @"0600", configuration ]
-                                          timeout:10
-                                       completion:^(NSDictionary *privacy, NSError *privacyError) {
-                                         if (privacyError || ![privacy[@"exitcode"] isEqual:@0]) {
-                                             finish(NO);
-                                             return;
-                                         }
-                                         step = @"GUI helper setup";
-                                         [weakSelf.guestAgent
-                                             runExecutable:helper
-                                                 arguments:@[ @"--provision", configuration ]
-                                                   timeout:30
-                                                completion:^(NSDictionary *result, NSError *problem) {
-                                                  if (result[@"exitcode"])
-                                                      step = [NSString stringWithFormat:@"GUI helper setup (exit %@)",
-                                                                                        result[@"exitcode"]];
-                                                  finish(!problem && [result[@"exitcode"] isEqual:@0]);
-                                                }];
-                                       }];
-                              }];
-                     }];
+    [self.guestAgent provisionHelper:[tools URLByAppendingPathComponent:@"guest-clipboard"]
+                       configuration:configuration
+                               named:configName
+                         stillWanted:^BOOL {
+                           VIMSession *session = weakSelf;
+                           return session.task.running &&
+                                  [(powerOnly ? session.powerBridge : session.clipboard).token isEqual:token];
+                         }
+                          completion:finish];
 }
 + (void)setNetworkConnected:(BOOL)connected machine:(VIMMachine *)machine completion:(void (^)(NSError *))completion {
     VIMSession *session = sessions[SessionKey(machine)];
