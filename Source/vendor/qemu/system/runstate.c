@@ -29,6 +29,7 @@
 #include "chardev/char.h"
 #include "crypto/cipher.h"
 #include "crypto/init.h"
+#include <execinfo.h>
 #include "exec/cpu-common.h"
 #include "system/ramblock.h"
 #include "system/ramlist.h"
@@ -906,7 +907,9 @@ static int panic_text_scan(RAMBlock *block, void *opaque)
 void qemu_system_reset_request(ShutdownCause reason)
 {
     if (current_cpu && current_cpu->cpu_index >= 0) {
-        fprintf(stderr, "reset requested, cause %d, on vCPU %d:\n", reason, current_cpu->cpu_index);
+        void *callers[16]; /* which device or fault asked: a triple fault, 0xcf9, the keyboard controller */
+        fprintf(stderr, "reset requested, cause %d, on vCPU %d, by:\n", reason, current_cpu->cpu_index);
+        backtrace_symbols_fd(callers, backtrace(callers, 16), 2);
         cpu_dump_state(current_cpu, stderr, CPU_DUMP_CODE | CPU_DUMP_CCOP);
         qemu_ram_foreach_block(panic_text_scan, NULL);
     }
