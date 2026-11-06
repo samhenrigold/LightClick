@@ -107,6 +107,33 @@ public final class SessionDiagnostics: NSObject {
         unlink(path("Running.json"))
     }
 
+    // MARK: - Checks
+
+    /// What's wrong with a request to connect or eject an image, or nil.
+    @objc(issueWithImageRequest:slotCount:)
+    public class func imageRequestIssue(_ command: [String: Any], slotCount: Int) -> String? {
+        guard let path = command["Path"] as? String, path.isEmpty || (path as NSString).isAbsolutePath else {
+            return "Choose an absolute disc-image path, or an empty path to eject."
+        }
+        guard let slot = command["Slot"] == nil ? 0 : command["Slot"] as? NSNumber,
+            slot.doubleValue == Double(slot.uintValue), slot.uintValue < slotCount
+        else { return "Choose an image drive from0 to\(slotCount - 1)." }
+        return nil
+    }
+
+    /// What's wrong with a batch of guest input events, or nil.
+    @objc(issueWithInputBatch:ready:)
+    public class func inputBatchIssue(_ events: Any?, ready: Bool) -> String? {
+        guard ready, let events = events as? [Any], !events.isEmpty, events.count <= 64 else {
+            return "The guest is not ready for this input batch."
+        }
+        let valid = events.allSatisfy { event in
+            guard let event = event as? [String: Any], let type = event["type"] as? String else { return false }
+            return ["abs", "btn", "key"].contains(type) && event["data"] is [String: Any]
+        }
+        return valid ? nil : "Invalid guest input event."
+    }
+
     // MARK: - Commands
 
     /// Runs `command`, which is one of these or else names a guest executable. `finish` then runs once, on main.

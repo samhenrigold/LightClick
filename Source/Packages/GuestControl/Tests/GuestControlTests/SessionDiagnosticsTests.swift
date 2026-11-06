@@ -120,6 +120,41 @@ struct SessionDiagnosticsTests {
                 for: ["app", "--guest-diagnostics-root", open], machinePath: "/a", identifier: identifier) == nil)
     }
 
+    // MARK: - Checks
+
+    @Test func imageRequestsNeedAnAbsolutePathOrNone() {
+        let issue = SessionDiagnostics.imageRequestIssue
+        #expect(issue(["Path": "/a.iso"], 4) == nil)
+        #expect(issue(["Path": ""], 4) == nil)
+        #expect(issue(["Path": "a.iso"], 4)?.hasPrefix("Choose an absolute") == true)
+        #expect(issue([:], 4)?.hasPrefix("Choose an absolute") == true)
+        #expect(issue(["Path": 1], 4)?.hasPrefix("Choose an absolute") == true)
+    }
+
+    @Test func imageRequestsNeedAWholeSlotInRange() {
+        let issue = SessionDiagnostics.imageRequestIssue
+        let wrong = "Choose an image drive from0 to3."
+        #expect(issue(["Path": "", "Slot": 3], 4) == nil)
+        #expect(issue(["Path": "", "Slot": 4], 4) == wrong)
+        #expect(issue(["Path": "", "Slot": -1], 4) == wrong)
+        #expect(issue(["Path": "", "Slot": 1.5], 4) == wrong)
+        #expect(issue(["Path": "", "Slot": "1"], 4) == wrong)
+    }
+
+    @Test func inputBatchesAreBoundedAndTyped() {
+        let issue = SessionDiagnostics.inputBatchIssue
+        let event: [String: Any] = ["type": "key", "data": [String: Any]()]
+        let notReady = "The guest is not ready for this input batch."
+        #expect(issue([event], true) == nil)
+        #expect(issue([event], false) == notReady)
+        #expect(issue([], true) == notReady)
+        #expect(issue(nil, true) == notReady)
+        #expect(issue(Array(repeating: event, count: 65), true) == notReady)
+        for bad: Any in [1, ["type": "key"], ["type": "wheel", "data": [String: Any]()], ["data": [String: Any]()]] {
+            #expect(issue([bad], true) == "Invalid guest input event.")
+        }
+    }
+
     // MARK: - Hardware reports
 
     @Test(arguments: [

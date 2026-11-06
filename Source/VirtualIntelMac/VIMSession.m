@@ -2148,17 +2148,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     }
     if ([command[@"Action"] isEqual:@"insert-disc"]) {
+        NSString *issue = [VIMSessionDiagnostics issueWithImageRequest:command slotCount:VIMImageSlotCount];
+        if (issue) {
+            finish(@{@"Error" : issue});
+            return;
+        }
         NSString *path = command[@"Path"];
-        if (![path isKindOfClass:NSString.class] || (path.length && !path.isAbsolutePath)) {
-            finish(@{@"Error" : @"Choose an absolute disc-image path, or an empty path to eject."});
-            return;
-        }
         NSNumber *slot = command[@"Slot"] ?: @0;
-        if (![slot isKindOfClass:NSNumber.class] || slot.doubleValue != slot.unsignedIntegerValue ||
-            slot.unsignedIntegerValue >= VIMImageSlotCount) {
-            finish(@{@"Error" : @"Choose an image drive from0 to3."});
-            return;
-        }
         [VIMSession insertImage:path
                            slot:slot.unsignedIntegerValue
                         machine:self.machine
@@ -2222,18 +2218,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     }
     if ([command[@"Action"] isEqual:@"input"]) {
         NSArray *events = command[@"Events"];
-        if (!self.task.running || !self.displayView.inputHandler || ![events isKindOfClass:NSArray.class] ||
-            !events.count || events.count > 64) {
-            finish(@{@"Error" : @"The guest is not ready for this input batch."});
+        NSString *issue =
+            [VIMSessionDiagnostics issueWithInputBatch:events ready:self.task.running && self.displayView.inputHandler];
+        if (issue) {
+            finish(@{@"Error" : issue});
             return;
         }
-        for (id event in events)
-            if (![event isKindOfClass:NSDictionary.class] ||
-                ![@[ @"abs", @"btn", @"key" ] containsObject:event[@"type"]] ||
-                ![event[@"data"] isKindOfClass:NSDictionary.class]) {
-                finish(@{@"Error" : @"Invalid guest input event."});
-                return;
-            }
         self.displayView.inputHandler(events);
         finish(@{@"Queued" : @YES});
         return;
