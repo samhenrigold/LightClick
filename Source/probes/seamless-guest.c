@@ -11,8 +11,10 @@
 //     seamless-guest program [--app TextEdit] [--port 7654] [--seconds 20]    Opens the app and streams it.
 //     seamless-guest open-app --app TextEdit
 //     seamless-guest display --width W --height H [--scale 1]                 Selects a mode the host has offered.
-//     seamless-guest place --app TextEdit (--x X --y Y | --slot N) [--moves K]    Moves its front window by
-//     Accessibility.
+//     seamless-guest place --app TextEdit (--x X --y Y | --slot N) [--moves K]    Moves its front window.
+//     seamless-guest program-tree [--port 7654] [--seconds 20]                Streams the demo app's every window.
+//     seamless-guest tree (--app NAME | --all) [--host H] [--port P] [--seconds N]    Streams every window of an app.
+//     seamless-guest demo-app                                                 See seamless-demo-app.m.
 //
 // Only public CoreGraphics and HIServices. This is the demo, not the design: see
 // seamless-apps-design.md for why per-window capture is the fallback rather than the plan.
@@ -35,6 +37,8 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <dlfcn.h>
+#include <limits.h>
 #include "seamless-slots.h"
 #include "../tools/guest-display-modes.h"
 
@@ -138,6 +142,7 @@ struct Stream {
     unsigned pointer_events, key_events, captures, frames_changed;
     double capture_seconds, capture_worst;
     uint64_t bytes_sent;
+    uint32_t order, group, alpha, margin;
 };
 
 // Returns tightly packed BGRA premultiplied pixels the caller frees, whatever the source image's layout was.
@@ -218,6 +223,10 @@ static int send_window(struct Stream *s, const char *title, const char *owner, i
         (uint16_t)(owner_length > SWM_MAX_TEXT ? SWM_MAX_TEXT : owner_length),
         title,
         owner,
+        s->order,
+        s->group,
+        s->alpha ? s->alpha : 0x10000,
+        s->margin,
     };
     size_t n = swm_put_window(out, sizeof(out), &w);
     return n ? send_all(s->fd, out, n) : -1;
@@ -270,14 +279,17 @@ static void post_pointer(struct Stream *s, const struct SWMPointer *e) {
             s->clicks++;
         return;
     }
-    CGPoint point = CGPointMake(s->bounds.origin.x + e->x / 16.0, s->bounds.origin.y + e->y / 16.0);
+    CGPoint point = e->window ? CGPointMake(s->bounds.origin.x + e->x / 16.0, s->bounds.origin.y + e->y / 16.0)
+                              : CGPointMake(e->x / 16.0, e->y / 16.0);
     CGEventType type;
     CGMouseButton button = e->button == 1   ? kCGMouseButtonRight
                            : e->button == 2 ? kCGMouseButtonCenter
                                             : kCGMouseButtonLeft;
     switch (e->kind) {
         case SWM_DOWN:
-            activate_owner(s);
+            // In a tree, a click lands where it would on the guest's own screen, which is right whichever app owns it.
+            if (e->window)
+                activate_owner(s);
             type = e->button == 1   ? kCGEventRightMouseDown
                    : e->button == 2 ? kCGEventOtherMouseDown
                                     : kCGEventLeftMouseDown;
@@ -836,6 +848,231 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
     return result;
 }
 
+// The whole window tree, as the guest's screen has it: every window is its own surface, with its shadow and alpha, at
+// its guest position, whether or not something covers it. This uses only WindowServer's client interface, so it needs
+// no hook; seamless-apps-design.md says what a hook adds. It's the source a hook would replace.
+#define TREE_MAX_WINDOWS 64
+// Comfortably wider than a 10.9 window shadow, so the capture rectangle holds all of it and its position is known.
+#define TREE_SHADOW_MARGIN 48
+
+struct TreeWindow {
+    CGWindowID id;
+    uint32_t seed, order;
+    int alpha;
+    CGRect bounds;
+    char title[256];
+    uint8_t *previous;
+    uint32_t pixel_width, pixel_height;
+    double last_capture;
+    int seen, announced;
+    pid_t pid;
+};
+
+static int (*tree_connection)(void);
+static int (*tree_flush_seed)(int, CGWindowID, uint32_t *);
+static CFArrayRef (*tree_associated)(int, CGWindowID);
+
+static void *guest_symbol(const char *cgs, const char *sls) {
+    void *found = dlsym(RTLD_DEFAULT, cgs);
+    return found ? found : dlsym(RTLD_DEFAULT, sls);
+}
+
+static uint32_t tree_group(CGWindowID id) {
+    if (!tree_associated || !tree_connection)
+        return 0;
+    CFArrayRef list = tree_associated(tree_connection(), id);
+    uint32_t lowest = 0;
+    for (CFIndex i = 0; list && i < CFArrayGetCount(list); i++) {
+        CFTypeRef value = CFArrayGetValueAtIndex(list, i);
+        int number = 0;
+        if (CFGetTypeID(value) == CFNumberGetTypeID() && CFNumberGetValue(value, kCFNumberIntType, &number) &&
+            number > 0 && (!lowest || (uint32_t)number < lowest))
+            lowest = (uint32_t)number;
+    }
+    if (list)
+        CFRelease(list);
+    return lowest;
+}
+
+static int tree_wants(CFDictionaryRef d, const char *app) {
+    char owner[256];
+    text_for(d, kCGWindowOwnerName, owner, sizeof(owner));
+    CGRect bounds = bounds_for(d);
+    if (bounds.size.width < 1 || bounds.size.height < 1 || int_for(d, kCGWindowLayer) < 0)
+        return 0;
+    if (app)
+        return !strcmp(owner, app);
+    return strcmp(owner, "Window Server") && strcmp(owner, "Dock") && strcmp(owner, "SystemUIServer");
+}
+
+static int stream_tree(struct Stream *s, const char *app, double fps, double seconds) {
+    tree_connection = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
+    tree_flush_seed = guest_symbol("CGSGetWindowFlushSeed", "SLSGetWindowFlushSeed");
+    tree_associated = guest_symbol("CGSCopyAssociatedWindows", "SLSCopyAssociatedWindows");
+    printf("# seeds %s, groups %s\n", tree_flush_seed ? "yes" : "NO", tree_associated ? "yes" : "NO");
+    struct TreeWindow windows[TREE_MAX_WINDOWS];
+    memset(windows, 0, sizeof(windows));
+    unsigned skipped = 0, roster = 0, seed_answers = 0;
+    double started = now();
+    for (;;) {
+        double tick = now();
+        if (seconds > 0 && tick - started > seconds)
+            break;
+        CFArrayRef list = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+        for (int i = 0; i < TREE_MAX_WINDOWS; i++)
+            windows[i].seen = 0;
+        uint32_t order = 0;
+        for (CFIndex i = 0; list && i < CFArrayGetCount(list); i++) {
+            CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
+            if (!tree_wants(d, app))
+                continue;
+            CGWindowID id = (CGWindowID)int_for(d, kCGWindowNumber);
+            struct TreeWindow *w = NULL;
+            for (int k = 0; !w && k < TREE_MAX_WINDOWS; k++)
+                if (windows[k].id == id)
+                    w = &windows[k];
+            for (int k = 0; !w && k < TREE_MAX_WINDOWS; k++)
+                if (!windows[k].id)
+                    w = &windows[k];
+            if (!w)
+                continue;
+            int fresh = w->id != id;
+            w->id = id;
+            w->seen = 1;
+            w->pid = int_for(d, kCGWindowOwnerPID);
+            CGRect bounds = bounds_for(d);
+            char title[256], owner[256];
+            text_for(d, kCGWindowName, title, sizeof(title));
+            text_for(d, kCGWindowOwnerName, owner, sizeof(owner));
+            double alpha_value = 1;
+            CFNumberRef alpha_number = number_for(d, kCGWindowAlpha);
+            if (alpha_number)
+                CFNumberGetValue(alpha_number, kCFNumberDoubleType, &alpha_value);
+            int alpha = (int)(alpha_value * 0x10000);
+            int layer = int_for(d, kCGWindowLayer);
+            int moved = !CGRectEqualToRect(bounds, w->bounds), sized = !CGSizeEqualToSize(bounds.size, w->bounds.size);
+            uint32_t seed = 0;
+            int have_seed = tree_flush_seed && tree_connection && !tree_flush_seed(tree_connection(), id, &seed);
+            seed_answers += have_seed;
+            // A seed doesn't cover GL or video surfaces in a window, so look anyway once a second.
+            int stale = !have_seed || seed != w->seed || sized || fresh || !w->previous || tick - w->last_capture > 1;
+            s->window = id;
+            s->pid = w->pid;
+            s->bounds = bounds;
+            s->order = order;
+            s->alpha = (uint32_t)alpha;
+            s->margin = TREE_SHADOW_MARGIN;
+            if (!stale) {
+                skipped++;
+            } else {
+                CGRect rect = CGRectInset(bounds, -TREE_SHADOW_MARGIN, -TREE_SHADOW_MARGIN);
+                double before = now();
+                CGImageRef image =
+                    CGWindowListCreateImage(rect, kCGWindowListOptionIncludingWindow, id, kCGWindowImageDefault);
+                uint32_t width = 0, height = 0;
+                uint8_t *pixels = image ? copy_pixels(image, &width, &height) : NULL;
+                if (image)
+                    CGImageRelease(image);
+                double spent = now() - before;
+                s->capture_seconds += spent;
+                s->capture_worst = spent > s->capture_worst ? spent : s->capture_worst;
+                s->captures++;
+                w->last_capture = tick;
+                w->seed = seed;
+                if (!pixels) {
+                    order++;
+                    continue;
+                }
+                if (width != w->pixel_width || height != w->pixel_height) {
+                    free(w->previous);
+                    w->previous = NULL;
+                }
+                int resend = fresh || moved || !w->announced || order != w->order || alpha != w->alpha ||
+                             strcmp(title, w->title) || width != w->pixel_width || height != w->pixel_height;
+                s->pixel_width = w->pixel_width = width;
+                s->pixel_height = w->pixel_height = height;
+                if (resend) {
+                    s->group = tree_group(id);
+                    if (send_window(s, title, owner, layer)) {
+                        free(pixels);
+                        goto done;
+                    }
+                    w->announced = 1;
+                }
+                s->previous = w->previous;
+                if (send_changes(s, pixels, width, height)) {
+                    w->previous = NULL;
+                    goto done;
+                }
+                w->previous = s->previous;
+                s->previous = NULL;
+                if (fresh) {
+                    roster++;
+                    printf("# window %u layer %d %s \"%s\" %gx%g group %u at %.1f s\n", id, layer, owner, title,
+                           bounds.size.width, bounds.size.height, s->group, tick - started);
+                }
+                w->bounds = bounds;
+                w->order = order;
+                w->alpha = alpha;
+                snprintf(w->title, sizeof(w->title), "%s", title);
+                order++;
+                continue;
+            }
+            if (moved || order != w->order || alpha != w->alpha) {
+                s->pixel_width = w->pixel_width;
+                s->pixel_height = w->pixel_height;
+                s->group = tree_group(id);
+                if (send_window(s, title, owner, layer))
+                    goto done;
+                w->bounds = bounds;
+                w->order = order;
+                w->alpha = alpha;
+            }
+            order++;
+        }
+        if (list)
+            CFRelease(list);
+        for (int i = 0; i < TREE_MAX_WINDOWS; i++)
+            if (windows[i].id && !windows[i].seen) {
+                uint8_t gone[SWM_HEADER_SIZE + SWM_GONE_SIZE];
+                swm_put_u32_message(gone, sizeof(gone), SWM_GONE, windows[i].id);
+                if (send_all(s->fd, gone, sizeof(gone)))
+                    goto done;
+                free(windows[i].previous);
+                memset(&windows[i], 0, sizeof(windows[i]));
+            }
+        for (;;) {
+            double left = tick + 1 / fps - now();
+            if (left <= 0)
+                break;
+            if (s->fd < 0) {
+                usleep((useconds_t)(left * 1e6));
+                break;
+            }
+            fd_set reads;
+            FD_ZERO(&reads);
+            FD_SET(s->fd, &reads);
+            struct timeval timeout = {(time_t)left, (int)((left - (time_t)left) * 1e6)};
+            if (select(s->fd + 1, &reads, NULL, NULL, &timeout) > 0 && drain_input(s))
+                goto done;
+        }
+    }
+done:;
+    double elapsed = now() - started;
+    printf("connected %d bool\n", s->fd >= 0);
+    printf("windows_seen %u count\n", roster);
+    printf("capture_mean %.1f ms\n", s->captures ? s->capture_seconds / s->captures * 1000 : 0);
+    printf("capture_worst %.1f ms\n", s->capture_worst * 1000);
+    printf("capture_rate %.1f /s\n", s->captures / elapsed);
+    printf("captures_skipped_by_seed %u count\n", skipped);
+    printf("seed_answers %u count\n", seed_answers);
+    printf("frames_sent_rate %.1f /s\n", s->frames_changed / elapsed);
+    printf("sent %.2f MB/s\n", s->bytes_sent / elapsed / 1e6);
+    printf("capture_share %.0f %%\n", s->capture_seconds / elapsed * 100);
+    return 0;
+}
+
 static const char *option(int argc, char **argv, const char *name, const char *fallback) {
     for (int i = 2; i + 1 < argc; i++)
         if (!strcmp(argv[i], name))
@@ -857,6 +1094,46 @@ int main(int argc, char **argv) {
     const char *app = option(argc, argv, "--app", "TextEdit");
     if (!strcmp(command, "list"))
         return list_windows();
+    if (!strcmp(command, "demo-app")) {
+        extern int seamless_demo_app_main(void);
+        return seamless_demo_app_main();
+    }
+    if (!strcmp(command, "tree") || !strcmp(command, "program-tree")) {
+        // Only ever reads windows, so it's safe on the host; the program form opens an app, so it isn't.
+        int demo = !strcmp(command, "program-tree");
+        if (demo && darwin_major() > 20)
+            return 64;
+        if (geteuid() == 0 && !in_session)
+            return run_in_console_session(argc, argv, 1);
+        alarm(600);
+        pid_t child = 0;
+        if (demo) {
+            char self[PATH_MAX];
+            uint32_t length = sizeof(self);
+            child = _NSGetExecutablePath(self, &length) ? -1 : fork();
+            if (child == 0) {
+                execl(self, "seamless-guest", "demo-app", (char *)NULL);
+                _exit(127);
+            }
+            sleep(3);
+        }
+        struct Stream s;
+        memset(&s, 0, sizeof(s));
+        s.fd = connect_to(option(argc, argv, "--host", "10.0.2.2"), atoi(option(argc, argv, "--port", "7654")));
+        if (s.fd < 0)
+            printf("# ERROR can't reach the host (%s); measuring capture alone\n", strerror(errno));
+        else {
+            uint8_t hello[SWM_HEADER_SIZE + SWM_HELLO_SIZE];
+            swm_put_u32_message(hello, sizeof(hello), SWM_HELLO, SWM_VERSION);
+            send_all(s.fd, hello, sizeof(hello));
+        }
+        const char *target = flag(argc, argv, "--all") ? NULL : demo ? "seamless-guest" : app;
+        int result = stream_tree(&s, target, atof(option(argc, argv, "--fps", "30")),
+                                 atof(option(argc, argv, "--seconds", "20")));
+        if (child > 0)
+            kill(child, SIGTERM);
+        return s.fd < 0 ? 3 : result;
+    }
     if (!strcmp(command, "program") || !strcmp(command, "open-app") || !strcmp(command, "display")) {
         // These steal the pointer or change the display, so they can't be left to run on the host by accident. Big Sur
         // is Darwin 20.
@@ -894,6 +1171,8 @@ int main(int argc, char **argv) {
               "       seamless-guest stream (--app NAME | --window ID | --test-pattern)\n"
               "                      [--host 10.0.2.2] [--port 7654] [--fps 30] [--seconds N]\n"
               "       seamless-guest program [--app NAME] [--port 7654] [--seconds 20]\n"
+              "       seamless-guest tree (--app NAME | --all) [--host H] [--port P] [--seconds N]\n"
+              "       seamless-guest program-tree [--port P] [--seconds N]\n"
               "       seamless-guest open-app --app NAME\n"
               "       seamless-guest display --width W --height H [--scale 1]\n"
               "       seamless-guest place --app NAME (--x X --y Y | --slot N [--slot-width W --slot-height H])\n"

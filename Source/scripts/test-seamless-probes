@@ -5,7 +5,7 @@
 set -euo pipefail
 source_root=${0:A:h:h}
 work=$(mktemp -d)
-trap 'kill ${viewer_pid:-} ${guest_pid:-} 2>/dev/null || true; rm -rf "$work"' EXIT
+trap 'kill ${viewer_pid:-} ${guest_pid:-} ${demo_pid:-} 2>/dev/null || true; rm -rf "$work"' EXIT
 xcrun clang -std=c99 -Wall -Wextra -fsanitize=address,undefined -g -O1 "$source_root/probes/seamless-wire-test.c" -o "$work/wire-test"
 "$work/wire-test"
 "$source_root/scripts/build-seamless-probes" "$work"
@@ -16,3 +16,20 @@ sleep 1
 "$work/seamless-guest" stream --test-pattern --host 127.0.0.1 --port "$port" --fps 30 &
 guest_pid=$!
 wait "$viewer_pid"
+kill "$guest_pid" 2>/dev/null || true
+
+# The whole tree, on this host's own real windows: a popover, panel, menu and sheet, and their shadows.
+port=$((20000 + RANDOM % 20000))
+"$work/seamless-guest" demo-app &
+demo_pid=$!
+sleep 2
+"$work/seamless-viewer" --tree --port "$port" --exit-after 24 --png "$work/tree" > "$work/tree.log" 2>&1 &
+viewer_pid=$!
+sleep 1
+"$work/seamless-guest" tree --app seamless-guest --host 127.0.0.1 --port "$port" --seconds 20
+wait "$viewer_pid" || print -u2 "tree viewer exited $?"
+kill "$demo_pid" 2>/dev/null || true
+cat "$work/tree.log"
+# Something must have arrived with a real shadow in it.
+grep -E 'partial alpha' "$work/tree.log" | awk '{for (i = 1; i < NF; i++) if ($i == "partial") { if ($(i - 1) + 0 > 0.1) found = 1 } } END { exit !found }'
+print "seamless tree: ok"

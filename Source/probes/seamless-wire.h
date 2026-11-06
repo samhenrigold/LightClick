@@ -11,10 +11,11 @@
 #include <string.h>
 
 #define SWM_MAGIC 0x314D5753u // "SWM1" on the wire.
-#define SWM_VERSION 1u
+#define SWM_VERSION 2u
 #define SWM_HEADER_SIZE 12u
 #define SWM_MAX_DIMENSION 8192u // The largest frame the display path carries.
 #define SWM_MAX_TEXT 1024u
+#define SWM_MAX_MARGIN 1024u // Points of frame around a window, for its shadow.
 
 enum SWMType {
     // Guest to host.
@@ -30,7 +31,7 @@ enum SWMType {
 enum SWMPointerKind { SWM_MOVE = 0, SWM_DOWN = 1, SWM_UP = 2, SWM_DRAG = 3 };
 
 #define SWM_HELLO_SIZE 4u
-#define SWM_WINDOW_FIXED 40u
+#define SWM_WINDOW_FIXED 56u
 #define SWM_FRAME_FIXED 32u
 #define SWM_GONE_SIZE 4u
 #define SWM_POINTER_SIZE 20u
@@ -44,13 +45,18 @@ struct SWMWindow {
     uint32_t pixel_width, pixel_height;
     uint16_t title_length, owner_length;
     const char *title, *owner; // UTF-8, not terminated, inside the receive buffer.
+    uint32_t order; // 0 is frontmost among those sent.
+    uint32_t group; // Lowest window ID among those WindowServer moves with this one; 0 if alone.
+    uint32_t alpha; // 16.16 fixed point, as the guest's system alpha.
+    uint32_t margin; // The pixels cover the bounds grown this many points each way, shadow included.
 };
 // One band of BGRA premultiplied pixels, tightly packed, full_width and full_height being the whole window's size.
 struct SWMFrame {
     uint32_t window, sequence, full_width, full_height, x, y, width, height;
     const uint8_t *pixels;
 };
-// Coordinates are window-relative points times 16, so Retina half-points survive.
+// Coordinates are points times 16, so Retina half-points survive: relative to `window`, or to the guest's screen if
+// `window` is 0.
 struct SWMPointer {
     uint32_t window;
     uint8_t kind, button, clicks;
@@ -118,6 +124,10 @@ static inline size_t swm_put_window(uint8_t *out, size_t capacity, const struct 
     swm_w32(p + 32, w->pixel_height);
     swm_w16(p + 36, w->title_length);
     swm_w16(p + 38, w->owner_length);
+    swm_w32(p + 40, w->order);
+    swm_w32(p + 44, w->group);
+    swm_w32(p + 48, w->alpha);
+    swm_w32(p + 52, w->margin);
     if (w->title_length)
         memcpy(p + SWM_WINDOW_FIXED, w->title, w->title_length);
     if (w->owner_length)
@@ -259,7 +269,12 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
             w->pixel_height = swm_r32(p + 32);
             w->title_length = swm_r16(p + 36);
             w->owner_length = swm_r16(p + 38);
-            if (w->title_length > SWM_MAX_TEXT || w->owner_length > SWM_MAX_TEXT ||
+            w->order = swm_r32(p + 40);
+            w->group = swm_r32(p + 44);
+            w->alpha = swm_r32(p + 48);
+            w->margin = swm_r32(p + 52);
+            if (w->title_length > SWM_MAX_TEXT || w->owner_length > SWM_MAX_TEXT || w->alpha > 0x10000u ||
+                w->margin > SWM_MAX_MARGIN ||
                 length != SWM_WINDOW_FIXED + (uint32_t)w->title_length + w->owner_length || w->width <= 0 ||
                 w->height <= 0 || w->width > (int32_t)SWM_MAX_DIMENSION || w->height > (int32_t)SWM_MAX_DIMENSION ||
                 !w->pixel_width || !w->pixel_height || w->pixel_width > SWM_MAX_DIMENSION ||
