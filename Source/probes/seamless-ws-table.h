@@ -78,6 +78,10 @@ struct SWSTable {
         float x, y, width, height, saturation;
         float color[12];
     } gpu_backdrops[SWS_BACKDROPS];
+    // The tool writes this: leave the window's shadow out of its surface, for the host to draw one.
+    volatile uint32_t gpu_no_shadow;
+    // The tool writes this: how many surface updates to print the layer trees of.
+    volatile int32_t gpu_census;
     // Set by the hook once all its patches are in, for seamless-ws-inject to read.
     volatile int32_t installed_pid;
     uint8_t arena[SWS_ARENA];

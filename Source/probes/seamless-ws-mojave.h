@@ -13,11 +13,16 @@
 // is damaged. CA's animations have no connection and nobody asks: for them the update's own region, at +0x50 of the
 // state, says what changed on the display, so any window there gets a composite, needed or not. A window is also
 // damaged when it's new or moved. Only what changed is drawn, as on a display: each surface has the last frame's change
-// to catch up on, and a new or moved window is all drawn. So is one with anything over it, as the update's region
-// leaves out what's covered: a covered window that changes costs a whole composite each frame.
+// to catch up on, and a new or moved window is all drawn. So is what's in front of it, each time, as the update's
+// region leaves that out: a covered window that changes costs a composite of the covered part each frame.
 //
 // A surface's size says which window it is, as there's no other channel to the host. The low 8 bits of its width are
-// the ID's, and of its height 0xA0 and the ID's top 4 bits. Past the window it's transparent.
+// the ID's, and of its height 0xA0 and the ID's top 4 bits. Past the window it's transparent. After a composite, the
+// same composite of one point into a small surface with 0xB0 in place of 0xA0 follows on the same queue, and tells the
+// host's helper that the last is finished. A window with materials has a third, 0xC0, of its whole composite without
+// its shadow, when drawn whole: there, any alpha at all is the window's real shape, with its material's corners, a
+// popover's arrow and the like, as a material comes out clear but for an alpha of 1. The host masks its materials with
+// it.
 
 void *objc_autoreleasePoolPush(void);
 void objc_autoreleasePoolPop(void *);
@@ -41,15 +46,22 @@ static long (*array_count)(const void *);
 static const void *(*array_value)(const void *, long);
 static void *(*backdrop_screen_shape)(void *);
 static void (*enumerator_make)(void *, void *);
+static void *(*region_from_rect)(struct RectResult);
 static char (*enumerator_next_bounds)(void *, int *, int *, int *, int *);
 
 struct GPUWindow {
     uint32_t id;
     int width, height; // Of the surface.
     void *surfaces[2];
+    void *marker, *shape;
+    void *retired[2]; // What a resize left, kept for a few frames, as what's in flight may use them.
+    int retired_for;
     int next;
     void *pending, *previous; // What's changed since the last frame, and what changed in it. Null means all of it.
+    void *covered; // What's in front of it, which the update says nothing of.
     int whole; // Everything's to be drawn, on both surfaces, on the next two.
+    uint32_t frames;
+    float content[4]; // What the host's surface holds, in points.
     struct GPUWindow *more;
 };
 static struct GPUWindow *gpu_windows;
@@ -61,8 +73,7 @@ static struct RectResult (*window_rect)(void *);
 static void *gpu_contributors[64];
 static unsigned gpu_contributor_count;
 static unsigned gpu_order;
-static struct RectResult gpu_front[SWS_TREE]; // The windows before this one in the update.
-static unsigned gpu_front_count;
+static void *gpu_front; // The windows before this one in the update.
 static void contributors_hook(void *connection, void *session) {
     unsigned i = 0;
     while (i < gpu_contributor_count && gpu_contributors[i] != connection)
@@ -101,14 +112,33 @@ static char generate_layers_hook(char *state, char *window) {
     table->gpu_generate_calls++;
     uint32_t id = *(const uint32_t *)(window + 0x10);
     struct RectResult rect = window_rect(window);
-    // By bounds: a window's shadow reaches under the menu bar, and shouldn't count. One nobody will show still covers
-    // what's behind it on the display, as the Dock does.
-    int covered = 0;
-    for (unsigned i = 0; i < gpu_front_count && !covered; i++)
-        covered = rect.x < gpu_front[i].x + gpu_front[i].width && gpu_front[i].x < rect.x + rect.width &&
-                  rect.y < gpu_front[i].y + gpu_front[i].height && gpu_front[i].y < rect.y + rect.height;
-    if (gpu_front_count < SWS_TREE)
-        gpu_front[gpu_front_count++] = rect;
+    // What's in front of this window, by its real shape and without shadows, including one nobody will show, as the
+    // Dock: the update's region leaves that out, so it's drawn each time.
+    void *own = capture_shape(window, 0), *in_front = NULL;
+    if (own && gpu_front) {
+        in_front = region_intersection(gpu_front, own);
+        if (in_front && region_is_empty(in_front)) {
+            region_free(in_front);
+            in_front = NULL;
+        }
+    }
+    if (own) {
+        void *grown = gpu_front ? region_union(gpu_front, own) : NULL;
+        if (grown) {
+            region_free(gpu_front);
+            region_free(own);
+            gpu_front = grown;
+        } else if (!gpu_front)
+            gpu_front = own;
+        else
+            region_free(own);
+    }
+    {
+        struct GPUWindow *w = gpu_window(id);
+        if (w->covered)
+            region_free(w->covered);
+        w->covered = in_front;
+    }
     for (uint32_t i = 0; i < table->gpu_skip_count && i < 64; i++)
         if (table->gpu_skip[i] == id)
             return 0;
@@ -142,8 +172,6 @@ static char generate_layers_hook(char *state, char *window) {
         struct GPUWindow *w = gpu_window(id);
         if (fresh || !touched)
             w->whole = 2; // An app drawing where the display won't show it says nothing of where.
-        else if (covered && !w->whole)
-            w->whole = 1;
         if (touched) {
             void *grown = w->pending ? region_union(w->pending, touched) : NULL;
             if (grown) {
@@ -169,6 +197,12 @@ static char generate_layers_hook(char *state, char *window) {
         row->window_y = (float)rect.y;
         row->window_width = (float)rect.width;
         row->window_height = (float)rect.height;
+        struct GPUWindow *w = gpu_window(id);
+        row->frames = w->frames;
+        row->x = w->content[0];
+        row->y = w->content[1];
+        row->width = w->content[2];
+        row->height = w->content[3];
     }
     return 0;
 }
@@ -195,6 +229,12 @@ static void *gpu_make_surface(int id, const struct RectResult *bounds, float sca
     }
     note("window %d: surface %dx%d for %gx%g at %g, IOSurface %p\n", id, width, height, bounds->width, bounds->height,
          scale, *(void **)(surface + 0x70));
+    // For telling whether this reaches the host.
+    void (*set_value)(void *, const void *, const void *) = dlsym(RTLD_DEFAULT, "IOSurfaceSetValue");
+    const void *(*make_string)(void *, const char *, uint32_t) = dlsym(RTLD_DEFAULT, "CFStringCreateWithCString");
+    if (set_value && make_string)
+        set_value(*(void **)(surface + 0x70), make_string(NULL, "seamless-window", 0x08000100),
+                  make_string(NULL, "seamless-window-value", 0x08000100));
     return surface;
 }
 
@@ -207,7 +247,9 @@ static void gpu_publish_backdrops(uint32_t id, char *window) {
     for (uint32_t i = 0; i < count; i++)
         if (table->gpu_backdrops[i].id != id)
             table->gpu_backdrops[kept++] = table->gpu_backdrops[i];
-    const void *backdrops = *(void **)(window + 0x3c0);
+    // All of them as the app made them, and not those in use at +0x3c0: an inactive window's aren't there, and its
+    // sidebar is still clear.
+    const void *backdrops = *(void **)(window + 0x3b0);
     long total = backdrops ? array_count(backdrops) : 0;
     for (long b = 0; b < total; b++) {
         char *backdrop = (char *)array_value(backdrops, b);
@@ -236,6 +278,27 @@ static void gpu_publish_backdrops(uint32_t id, char *window) {
     table->gpu_backdrop_generation++;
 }
 
+static void gpu_composite(char *window, char *surface, const struct RectResult *bounds, void *clip, int no_shadow) {
+    void *compositor = metal_compositor(*(int *)(surface + 0x88));
+    gpu_clear_only = clip;
+    char *backing = *(char **)(surface + 0xa8);
+    void *color = *(void **)(surface + 0x60);
+    typedef void *(*MakeDestination)(void *, void *, void *, unsigned, unsigned, float, struct RectResult);
+    MakeDestination make = *(MakeDestination *)(*(char **)backing + 0x50);
+    void *destination = compositor
+                            ? make(backing, *(void **)((char *)compositor + 0x10), color,
+                                   0x10c20000u | (color ? 0x04000000u : 0), 0, *(float *)(surface + 0x68), *bounds)
+                            : NULL;
+    double transform[6] = {1, 0, 0, 1, 0, 0};
+    memcpy(&transform[4], window + 0x208, 16);
+    if (destination) {
+        // The first of the last four leaves out the shadow.
+        composite_window(window, destination, *(void **)(surface + 0x80), clip, transform, no_shadow, 1, 1, 1);
+        cf_release(destination);
+    }
+    gpu_clear_only = NULL;
+}
+
 static void gpu_compose_one(uint32_t id) {
     char *window = window_by_id(id);
     void *shape = window ? capture_shape(window, 1) : NULL;
@@ -253,9 +316,19 @@ static void gpu_compose_one(uint32_t id) {
     }
     struct GPUWindow *w = gpu_window(id);
     if (w->width != width || w->height != height) {
-        // shortcut: the old surfaces leak, as their release isn't safe with a frame in flight. Upgrade with a real
-        // session.
-        w->surfaces[0] = w->surfaces[1] = NULL;
+        // Another resize in the meantime: those go now, and they're older than anything in flight by then.
+        for (int i = 0; i < 2; i++) {
+            if (w->retired[i]) {
+                typedef void (*Release)(void *);
+                (*(Release *)(*(char **)w->retired[i] + 0x18))(w->retired[i]);
+            }
+            w->retired[i] = w->surfaces[i];
+            w->surfaces[i] = NULL;
+        }
+        // shortcut: the shape's surface leaks on a resize, at one for each new size, until they're counted with the
+        // others.
+        w->shape = NULL;
+        w->retired_for = 8;
         w->width = width;
         w->height = height;
         w->whole = 2;
@@ -267,32 +340,28 @@ static void gpu_compose_one(uint32_t id) {
     if (w->surfaces[which]) {
         // As CaptureSurfaceMetal::Populate(CGXWindow*, region), with the destination the whole surface and the clip
         // only what changed.
-        char *surface = w->surfaces[which];
-        void *compositor = metal_compositor(*(int *)(surface + 0x88));
         void *clip = shape, *both = NULL;
         if (w->whole > 0)
             w->whole--;
-        else if (w->pending && w->previous && (both = region_union(w->pending, w->previous)))
+        else if (w->pending && w->previous && (both = region_union(w->pending, w->previous))) {
             clip = both;
+            void *more = w->covered ? region_union(both, w->covered) : NULL;
+            if (more) {
+                region_free(both);
+                clip = both = more;
+            }
+        }
         if (clip == shape)
             table->gpu_whole_composites++;
-        gpu_clear_only = clip;
-        char *backing = *(char **)(surface + 0xa8);
-        void *color = *(void **)(surface + 0x60);
-        typedef void *(*MakeDestination)(void *, void *, void *, unsigned, unsigned, float, struct RectResult);
-        MakeDestination make = *(MakeDestination *)(*(char **)backing + 0x50);
-        void *destination = compositor
-                                ? make(backing, *(void **)((char *)compositor + 0x10), color,
-                                       0x10c20000u | (color ? 0x04000000u : 0), 0, *(float *)(surface + 0x68), bounds)
-                                : NULL;
-        double transform[6] = {1, 0, 0, 1, 0, 0};
-        memcpy(&transform[4], window + 0x208, 16);
-        if (destination) {
-            // The first of the last four leaves out the shadow.
-            composite_window(window, destination, *(void **)(surface + 0x80), clip, transform, 0, 1, 1, 1);
-            cf_release(destination);
+        gpu_composite(window, w->surfaces[which], &bounds, clip, table->gpu_no_shadow != 0);
+        void *backdrops = *(void **)(window + 0x3b0);
+        if (clip == shape && backdrops && array_count(backdrops) > 0) {
+            if (!w->shape)
+                w->shape = gpu_make_surface((int)id, &bounds, scale, width,
+                                            (height & ~0xff) + (int)(0xc0 | ((id >> 8) & 0xf)));
+            if (w->shape)
+                gpu_composite(window, w->shape, &bounds, clip, 1);
         }
-        gpu_clear_only = NULL;
         if (both)
             region_free(both);
         if (w->previous)
@@ -300,15 +369,37 @@ static void gpu_compose_one(uint32_t id) {
         w->previous = w->pending;
         w->pending = NULL;
         table->gpu_composites++;
+        if (!w->marker)
+            w->marker = gpu_make_surface((int)id, &bounds, scale, 512 + (int)(id & 0xff),
+                                         512 + (int)(0xb0 | ((id >> 8) & 0xf)));
+        struct RectResult point = {bounds.x, bounds.y, 1, 1};
+        void *one = region_from_rect(point);
+        if (w->marker && one) {
+            gpu_composite(window, w->marker, &bounds, one, 1);
+            region_free(one);
+        }
+        // Their release is as _XHWCaptureWindowListToIOSurface's.
+        if (w->retired_for > 0 && !--w->retired_for)
+            for (int i = 0; i < 2; i++)
+                if (w->retired[i]) {
+                    typedef void (*Release)(void *);
+                    (*(Release *)(*(char **)w->retired[i] + 0x18))(w->retired[i]);
+                    w->retired[i] = NULL;
+                }
         gpu_publish_backdrops(id, window);
+        w->frames++;
+        w->content[0] = (float)bounds.x;
+        w->content[1] = (float)bounds.y;
+        w->content[2] = (float)bounds.width;
+        w->content[3] = (float)bounds.height;
         for (unsigned i = 0; i < table->gpu_row_count; i++)
             if (table->gpu_rows[i].id == id) {
                 struct SWSGPURow *row = &table->gpu_rows[i];
-                row->x = (float)bounds.x;
-                row->y = (float)bounds.y;
-                row->width = (float)bounds.width;
-                row->height = (float)bounds.height;
-                row->frames++;
+                row->x = w->content[0];
+                row->y = w->content[1];
+                row->width = w->content[2];
+                row->height = w->content[3];
+                row->frames = w->frames;
             }
     }
     region_free(shape);
@@ -325,7 +416,9 @@ static void gpu_compose_damaged(void) {
         table->gpu_row_generation++;
         gpu_order = 0;
         gpu_contributor_count = 0;
-        gpu_front_count = 0;
+        if (gpu_front)
+            region_free(gpu_front);
+        gpu_front = NULL;
     }
     if (!gpu_damaged_count)
         return;
@@ -347,6 +440,42 @@ static void (*update_original)(void *, double);
 static void update_hook(void *context, double time) {
     update_original(context, time);
     gpu_compose_damaged();
+}
+
+// A census of what real windows' layers are, for sizing a translator to host layers: while gpu_census counts down, each
+// surface's update prints its tree into the log. CARenderUpdateCopyRegion is called once per surface's update, once its
+// contexts are added, and SkyLight reaches it through a pointer that can be changed at any moment.
+static void *(*copy_region_original)(void *);
+static void (*print_trees)(void *);
+static void (*set_message_function)(void (*)(const char *, va_list, void *), void *);
+static void census_line(const char *format, va_list arguments, void *info) {
+    (void)info;
+    vdprintf(logfd, format, arguments);
+}
+static void *copy_region_hook(void *update) {
+    if (table && table->gpu_census > 0 && print_trees && set_message_function && logfd >= 0) {
+        table->gpu_census--;
+        note("== census\n");
+        set_message_function(census_line, NULL);
+        print_trees(update);
+        set_message_function(NULL, NULL);
+    }
+    return copy_region_original(update);
+}
+static void gpu_census_install(void) {
+    enum { copy_region_stub = 0x2696f8 }; // In 18G103's SkyLight.
+    print_trees = dlsym(RTLD_DEFAULT, "CARenderUpdatePrintTrees");
+    copy_region_original = dlsym(RTLD_DEFAULT, "CARenderUpdateCopyRegion");
+    set_message_function = dlsym(RTLD_DEFAULT, "CASetMessageFunction");
+    const uint8_t *stub = (const uint8_t *)loaded_image() + copy_region_stub;
+    if (!print_trees || !copy_region_original || stub[0] != 0xff || stub[1] != 0x25) {
+        note("no census\n");
+        return;
+    }
+    int32_t offset;
+    memcpy(&offset, stub + 2, 4);
+    void *const *pointer = (void *const *)(stub + 6 + offset);
+    __atomic_store_n((void **)pointer, (void *)copy_region_hook, __ATOMIC_SEQ_CST);
 }
 
 static const uint8_t contributors_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53,
@@ -379,10 +508,11 @@ static int gpu_prepare(void) {
     array_value = dlsym(RTLD_DEFAULT, "CFArrayGetValueAtIndex");
     backdrop_screen_shape = resolved[12];
     enumerator_make = dlsym(RTLD_DEFAULT, "CGRegionForwardEnumeratorMake");
+    region_from_rect = dlsym(RTLD_DEFAULT, "CGRegionCreateWithRect");
     enumerator_next_bounds = dlsym(RTLD_DEFAULT, "CGRegionForwardEnumeratorGetNextBounds");
-    if (!array_count || !array_value || !enumerator_make || !enumerator_next_bounds || !region_intersection ||
-        !region_union || !cf_release || !main_display_device || !regions_intersect || !region_is_empty ||
-        !region_bounds || !region_free || !device_rgb) {
+    if (!region_from_rect || !array_count || !array_value || !enumerator_make || !enumerator_next_bounds ||
+        !region_intersection || !region_union || !cf_release || !main_display_device || !regions_intersect ||
+        !region_is_empty || !region_bounds || !region_free || !device_rgb) {
         note("gpu: a library symbol is missing; off\n");
         return 0;
     }

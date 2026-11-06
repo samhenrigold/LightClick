@@ -2555,6 +2555,10 @@ int main(int argc, char **argv) {
             t->gpu_skip_count = skipped;
             printf("skipping %u windows\n", skipped);
         }
+        if (option(argc, argv, "--census", NULL))
+            t->gpu_census = atoi(option(argc, argv, "--census", "0"));
+        if (option(argc, argv, "--no-shadow", NULL))
+            t->gpu_no_shadow = (uint32_t)atoi(option(argc, argv, "--no-shadow", "0"));
         if (option(argc, argv, "--mode", NULL))
             t->gpu_mode = (uint32_t)atoi(option(argc, argv, "--mode", "0"));
         printf("gpu mode %u scale %g generate %llu composites %llu whole %llu seconds %.3f\n", t->gpu_mode,

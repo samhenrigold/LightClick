@@ -847,8 +847,10 @@ __attribute__((constructor)) static void start(void) {
             close(fd);
         note("table %s\n", table ? "mapped" : "NOT mapped");
         // The second only for trying placement: it rewrites a function WindowServer's update calls, and isn't finished.
-        if (ready && table && !build->full && gpu_prepare() && patches_apply(gpu_patches, GPU_PATCHES))
+        if (ready && table && !build->full && gpu_prepare() && patches_apply(gpu_patches, GPU_PATCHES)) {
+            gpu_census_install();
             table->installed_pid = getpid();
+        }
         if (ready && table && build->full && (tree_in_gl || !access("/var/tmp/seamless-ws-placement", F_OK))) {
             region_with_rect = (void *(*)(struct RectResult))placement_targets[1];
             region_release_fn = (void (*)(void *))placement_targets[2];
