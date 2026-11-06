@@ -192,11 +192,9 @@ public final class GuestHelperLinks {
         clipboard = Link()
     }
 
-    /// The emulator has gone. A clipboard retry time stays, as it always has.
+    /// The emulator has gone, and a retry time from its run says nothing about the next one's.
     public func stop() {
-        clipboard.transport?.stop()
-        clipboard.transport = nil
-        clipboard.configuredBoot = nil
+        forgetClipboard()
         host.sessionState.clipboardPending = false
         displayPower.transport?.stop()
         displayPower = Link()

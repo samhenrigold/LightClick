@@ -242,7 +242,7 @@ private final class FakeHost: GuestHelperHost {
         #expect(links.transport(.clipboard) != nil)
     }
 
-    @Test func stoppingEndsBothAndKeepsOnlyTheClipboardsRetry() throws {
+    @Test func stoppingEndsBothAndLeavesNoWait() throws {
         let (links, host) = try make()
         links.update(.displayPower, boot: "b")
         host.provisions[0].done(nil)
@@ -252,6 +252,6 @@ private final class FakeHost: GuestHelperHost {
         #expect(!host.sessionState.clipboardPending)
         links.update(.displayPower, boot: "b")
         host.provisions[2].done(nil)
-        #expect(host.transports.count == 3, "The display observer goes again at once, the clipboard after its minute.")
+        #expect(host.transports.count == 4, "A new run starts both at once, with no minute left over from the last.")
     }
 }
