@@ -10,14 +10,17 @@ guard arguments.count >= 3, let id = CGWindowID(arguments[1]), let seconds = Dou
     exit(64)
 }
 _ = NSApplication.shared  // For the window server connection.
+// Swift's SDK has hidden it in favour of ScreenCaptureKit, which delivered nothing for a window here.
+typealias Read = @convention(c) (CGRect, UInt32, CGWindowID, UInt32) -> Unmanaged<CGImage>?
+let read = unsafeBitCast(dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage"), to: Read.self)
 var reads = 0, distinct = 0
 var last: UInt64 = 0
 var times: [Double] = []
 let started = Date()
 while Date().timeIntervalSince(started) < seconds {
     guard
-        let image = CGWindowListCreateImage(
-            .null, .optionIncludingWindow, id, [.boundsIgnoreFraming, .nominalResolution]),
+        let image = read(CGRect.null, CGWindowListOption.optionIncludingWindow.rawValue, id,
+            CGWindowImageOption([.boundsIgnoreFraming, .nominalResolution]).rawValue)?.takeRetainedValue(),
         let data = image.dataProvider?.data, let base = CFDataGetBytePtr(data)
     else { continue }
     reads += 1
