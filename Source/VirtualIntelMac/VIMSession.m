@@ -1706,29 +1706,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                     }];
                 return;
             }
-            NSUInteger trim = weakSelf.tabletTrim;
-            if (trim) {
-                // IOHIDEventDriver splits its removal percentage between both
-                // ends of the tablet range. An installed override may be zero.
-                NSMutableArray *calibrated = nil;
-                const int64_t maximum = 32767, inset = maximum * trim / 200, span = maximum - 2 * inset;
-                for (NSUInteger index = 0; index < events.count; index++) {
-                    NSDictionary *event = events[index], *data = event[@"data"];
-                    NSNumber *value = data[@"value"];
-                    NSString *axis = data[@"axis"];
-                    if (![event[@"type"] isEqual:@"abs"] || (![@"x" isEqual:axis] && ![@"y" isEqual:axis]) ||
-                        ![value isKindOfClass:NSNumber.class] || value.longLongValue < 0 ||
-                        value.longLongValue > maximum)
-                        continue;
-                    if (!calibrated)
-                        calibrated = [events mutableCopy];
-                    NSMutableDictionary *mapped = [data mutableCopy];
-                    mapped[@"value"] = @(inset + (value.longLongValue * span + maximum / 2) / maximum);
-                    calibrated[index] = @{@"type" : @"abs", @"data" : mapped};
-                }
-                if (calibrated)
-                    events = calibrated;
-            }
+            events = [VIMTabletCalibration eventsFrom:events trim:(NSInteger)weakSelf.tabletTrim];
             // Research workloads account for one reply per input they queue.
             if (motionCoalescer && !weakSelf.displayView.diagnosticInputObserver)
                 [motionCoalescer submitEvents:events];
