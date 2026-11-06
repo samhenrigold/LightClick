@@ -31,5 +31,7 @@ wait "$viewer_pid" || print -u2 "tree viewer exited $?"
 kill "$demo_pid" 2>/dev/null || true
 cat "$work/tree.log"
 # Something must have arrived with a real shadow in it.
-grep -E 'partial alpha' "$work/tree.log" | awk '{for (i = 1; i < NF; i++) if ($i == "partial") { if ($(i - 1) + 0 > 0.1) found = 1 } } END { exit !found }'
+# Host capture needs Screen Recording and an awake display; with neither, windows arrive but are clear.
+grep -E 'partial alpha' "$work/tree.log" | awk '{for (i = 1; i < NF; i++) if ($i == "partial") { if ($(i - 1) + 0 > 0.1) found = 1 } } END { exit !found }' ||
+    { print -u2 "No pixels had partial alpha. Is this host's display asleep?"; exit 1 }
 print "seamless tree: ok"
