@@ -213,22 +213,62 @@ So the composite is about a quarter of Safari's cost, and getting the pixels out
 
 ### Each window on the host's GPU, with no read in the guest
 
-**On rate, both generations reach windowed speed this way. Mojave delivers the whole window; Mavericks doesn't yet.** Safari with the animated page, at 2x, on the engine, four vCPUs, with other clones running on this Mac. Rates are over 30 s in one boot per column, read from counters on the host. All images are composed from pixels, not read from the screen.
+**Both generations deliver whole windows at windowed speed this way.** Safari with the animated page, at 2x, on the engine, four vCPUs, with other clones running on this Mac. Rates are over 30 s in one boot per column, read from counters on the host. All images are composed from pixels, not read from the screen.
 
 | Safari, frames/s reaching the host | Windowed | Each window on the GPU |
 | --- | --- | --- |
-| Mavericks | 60.0 presented, QEMU 19.0%, WindowServer 7.7% | 59.9 into its own IOSurface and to a `CALayer` in another process, every one changed, none dropped; QEMU 21.8%, WindowServer 7.7%, viewer 1.8%. **The window isn't whole yet: see below** |
-| Mojave | 60.4 presented, QEMU 53%, WindowServer 10.7% | 60.0 composites into a host IOSurface asked for at 60 Hz, 74 to 80 when asked for all it can, while the display kept 59.0; QEMU 112%, WindowServer 56% |
+| Mavericks | 60.0 presented, QEMU 19.0%, WindowServer 7.7% | 59.9 into its own IOSurface and to a `CALayer` in another process, every one changed, none dropped; QEMU 21.8%, WindowServer 7.7%, viewer 1.8% |
+| Mojave | 60 presented; see the table below | 60 to a `CALayer` in another process, with no composite of the display; see the table below |
 
 By capture over TCP, these were 11 and 6.2.
 
+CPU on Mojave, in one boot, with the hook injected between the two, on a Mac with a load of about 10:
+
+| Share of one core | Windowed, 21 s | Each window, 25 s |
+| --- | --- | --- |
+| Frames reaching a layer | 60 | 60, 1,612 of 1,624 composites drawing only what changed |
+| WindowServer, in the guest | 13.8% | 24.2% |
+| QEMU, which includes that | 65% | 58% |
+| PVG helper | 12.7% | 13.3% |
+| App | 0.7% | 0.1% |
+| Viewer, which reads pixels back to hash them, as a real one wouldn't | | 1.8% |
+| **All on the host** | **78%** | **73%** |
+
+So the host pays no more, and WindowServer pays more: 1.8 ms a composite here, and the update runs too. One run each, and windowed's QEMU alone was 49 to 65% across runs, so 78 against 73 shows no difference to speak of. Every composite whole, in another such boot, was WindowServer 19%, QEMU 60% and the helper 20%: so drawing only what changed saved the helper's time, and in the guest made no clear difference.
+
+**What each generation can do**
+
+| Generation | What's run | Whole window at windowed rate | Covered | Display off | In a running guest |
+| --- | --- | --- | --- | --- | --- |
+| Mojave 18G103 | PVG: a guest IOSurface is a host IOSurface | Yes, in a layer, read from the screen | Yes, at 60 | Yes | Yes, injected |
+| Mavericks 13F34 | GL replay into host IOSurfaces | Yes, composed from pixels | Not run; the clip should do it | No | No: its layer markers rest on an interposed `new[]`, which injection can't do. Patching `CoreGraphics`' lazy pointer for it should [inferred] |
+| Yosemite to High Sierra | Not run. GL compositor [memory] | Likely with Mavericks' method, per build | | | |
+| Catalina, Big Sur | Not run. Metal, PVG | Likely with Mojave's, per build; Big Sur's library symbols are in question | | | |
+| Tiger to Mountain Lion | Not inspected | See below | | | |
+
+**A window's own content, with no composite in the guest.** Not reached. Each window's layers are drawn by WindowServer, as CA's render server is in it on both systems [Mavericks read and measured from the GL stream, Mojave read]. So handing the host layer trees would mean running CA's renderer against them there. The composite left is what's cheap: on Mavericks the draws run once more on the host, on Mojave 1.8 ms a window in the guest.
+
+**Tiger to Mountain Lion, scoped and unrun.** Software backings are shared memory with the app [read on 10.9], so a window with no surfaces is a matter of reading its rows, as the hook does on 10.9. Doing that without a copy means an IOSurface over guest RAM, and fragmented 4K guest pages can't back one on a 16K host: `apple-gfx-legacy-shadow.m`'s notes say Metal refuses those imports. So one copy per damaged rectangle on the host, by its own CPU or GPU, which is `DG_VRAM_PATCH_DRAWABLE`'s kind of work [inferred]. Where a guest has PassthroughOpenGL, Mavericks' method applies if the compositor has the same shape, which isn't read: symbols and offsets are per build.
+
 **Mavericks (`PassthroughOpenGL/seamless-gpu-replay-host.c`).** WindowServer composites through CoreGraphics' own GL context record, one interpreter, and the CA tree of every app runs inside it, so a page's animation is plain draws on the display drawable: 3 draws a frame for this page. Each display update builds layers per window in `redraw_window`, then draws them all in `gl_composite_layer`. The hook patches those two entries, knows a layer by its `new[]` address, and before a window's layers sends its ID and bounds through `glPassThrough`, which reaches the host in order and does nothing in GL, so **neither the guest's GL client nor the wire changes, and no prebuilt is rebuilt.** The host runs each display draw a second time into that window's IOSurface, moving the viewport and scissor by its origin. That cost 1.1% of a thread here. Mismarking is what a first version had, placing draws by where they landed, since the Dock owns a full-screen window; markers fixed it.
 
-**What's wrong on Mavericks: the window isn't whole.** The image has the toolbar and the moving square, in the right places, with the page's text and white missing. In a trace of Safari opening, its window's 2560x1410 surface is drawn to the display drawable only in frames 3 and 4, during the opening effect, while its bounds are 748x413 and 856x473 points. The display has the whole page after that, and I haven't found what writes it there: `DG_SURFACE_IMPORT_REGION` and `DG_VRAM_IMPORT_DRAWABLE` are candidates the replay doesn't follow. Two ways of asking for a redraw failed: `WSRefreshDisplay` gave no large frame, and `CGXInvalidateWindowRegion`, called the way `WSFlushWindowList` does with arguments I guessed, left WindowServer restarting, four loads in one boot, with no crash report read. **So Mavericks' rate is measured, and a whole, correct window isn't.** The rate may also flatter it: the frames being redrawn are the animation's, and a full redraw hasn't been timed. A covered part of a window should go stale too [inferred, not tried]. The next thing to try is `CGXRedrawWindowToLayer` inside an update, which is what it's for.
+**The whole window on Mavericks.** A window's body reaches the display drawable only during its opening effect, so a surface started from what it draws has the toolbar and square and no page. `redraw_window` clips each window to the state's region at +0x18, so the hook sets that to everywhere for one redraw once a window's bounds have held for a second. The window then arrives whole, with its shadow and real alpha [measured, composed from pixels]. `WSRefreshDisplay` gave no large frame, and `CGXInvalidateWindowRegion` with guessed arguments left WindowServer restarting. The same clip should give a covered window and a timed full redraw with `gpu_mode` 2 [inferred, not run]. Mavericks still composites its display as well: nothing yet turns that off, and its CPU is the display's plus 1.1% of a thread for the replay.
 
 **Mojave.** A guest IOSurface is a host IOSurface: `texture.iosurface` on a guest's render target in the helper's `renderCommandEncoderWithDescriptor:` hook is non-nil, for the display's two surfaces and for a composite's. So nothing needs copying. `CGSHWCaptureWindowList` with no read in the guest already renders a window, with its shadow and alpha, into one, and that surface goes to another process by Mach port as it is. A whole Safari window with rounded corners and its shadow arrived that way, by CPU and through Core Image. These surfaces say 1 byte per element, with a row as long as the width in the CPU's view, so a CPU reader works out its own row, and a layer showing them hasn't been tried; Core Image read them correctly.
 
-Inferred, not measured: CPU can drop to about windowed. The composite on Mojave ran on top of the display's, through a client's IPC, allocating a surface each time. A hook calling `WSCompositeWindowToDestination` per damaged window into fixed surfaces, with `CompositorNoop` or `WSDisplayUpdatesAreDisabled` in place of the display's, should do the same work as windowed, one window at a time. Hook unbuilt. No damage signal yet either: a client loop has none, and on this page `CGSGetWindowFlushSeed` doesn't move. Telling windows apart on the host is by size here, which is enough for one window. The render pass, a surface's size or a hook's table of IOSurface IDs would do it. Neither generation has been looked at on a display: the viewer's windows are at desktop level, behind everything, and nobody has seen them.
+**The hook, on Mojave (`probes/seamless-ws-mojave.h`).** It leaves the display with no layers, and composites each damaged window to a surface of its own, by the entry points a capture uses. Read and measured on 18G103 only:
+
+- **Display off:** `generate_layers_for_window` returns 0 with no layers during an update, and runs as it does otherwise inside the hook's own composite, which also calls it. The helper stops encoding the display when `<directory>/nodisplay` exists.
+- **Damage:** the update's region at +0x50, by intersecting each window's capture shape, and the connections in `add_connection_to_update_contributors`, with a window's own at +0x18. CA's animations come with no connection. A window is damaged when new or moved too.
+- **Which window:** the surface's size. The low 8 bits of its width and the low 4 of its height carry the ID, with 0xA0 in the rest of the height's low byte. Past the window it's transparent. Bounds come from the session's window list by the same ID.
+- **One frame per composite:** a composite is several command buffers, so the helper sends a surface 6 ms after the last on it. That's latency, and has no signal from the guest yet.
+- **A covered window** with TextEdit over Safari: 60 frames/s, every frame's sampled pixels changing. The update's region leaves out what's covered, so a covered window's composite is whole.
+
+**A real layer.** Safari's window in a `CALayer` in another process was read from the screen with `screencapture -l`, of that one window, and is whole and correct. PVG's odd row bytes don't trouble Core Animation.
+
+**A running guest.** `probes/seamless-ws-inject.c` loads the hook into a running WindowServer, with no restart and the same PID afterward, and windows then arrive at 60 frames/s. It uses `task_for_pid` as root, a bare thread that asks for a real one, and `dlopen`. WindowServer's sandbox refuses a library in `/var/tmp`, so it goes in `/usr/lib`, which needs SIP off in the guest, as these guests have. The log and table it makes itself, ahead of the library. Live patching stops the other threads, and leaves pages executable throughout. Interposing doesn't work in a library loaded this way, so nothing on Mojave relies on it: the composites run from a patch of `update_display_callback`.
+
+Not done: a window that isn't Safari or a demo, overlap while moving or resizing, input, the session itself, other builds of 10.14, and any hook but this one on later systems.
 
 To run them, with a built app: `scripts/seamless-gpu prepare`, then `boot`, `desktop` and `run`, and for Mavericks with the hook in the copy's WindowServer plist and `/var/tmp/seamless-ws-gl-tree` present, `scripts/seamless-gpu-safari <app> <copy> <results> replay|windowed`. On Mojave, `VIM_SEAMLESS_PVG_DIR` writes the helper's render passes and `seamless-guest hw-loop --app Safari --hz 60` asks for the composites.
 

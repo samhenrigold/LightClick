@@ -30,8 +30,6 @@ static int (*display_accelerator)(void *);
 static void *(*metal_compositor)(int);
 static int (*composite_window)(void *, void *, void *, void *, void *, int, int, int, int);
 static void *(*region_intersection)(void *, void *);
-static void *(*opaque_shape)(void *, int);
-static char (*region_contains)(void *, void *);
 static void *(*region_union)(void *, void *);
 static void (*cf_release)(void *);
 static void *(*main_display_device)(void);
@@ -59,7 +57,8 @@ static struct RectResult (*window_rect)(void *);
 static void *gpu_contributors[64];
 static unsigned gpu_contributor_count;
 static unsigned gpu_order;
-static void *gpu_in_front; // What the windows before this one in the update cover.
+static struct RectResult gpu_front[SWS_TREE]; // The windows before this one in the update.
+static unsigned gpu_front_count;
 static void contributors_hook(void *connection, void *session) {
     unsigned i = 0;
     while (i < gpu_contributor_count && gpu_contributors[i] != connection)
@@ -81,6 +80,14 @@ static struct GPUWindow *gpu_window(uint32_t id) {
         gpu_windows = w;
     }
     return w;
+}
+
+// A composite clears what it's given to clear, in the same points as a clip: for a capture, all of it. Here that's only
+// the clip, so what's drawn isn't blended over itself and the rest stays.
+static void (*clear_original)(void *, void *, float);
+static void *gpu_clear_only;
+static void clear_hook(void *metal, void *region, float alpha) {
+    clear_original(metal, gpu_clear_only ? gpu_clear_only : region, alpha);
 }
 
 static char generate_layers_hook(char *state, char *window) {
@@ -112,15 +119,13 @@ static char generate_layers_hook(char *state, char *window) {
         asked = gpu_contributors[i] == connection;
     void *damage = *(void **)(state + 0x50);
     void *shape = capture_shape(window, 1);
-    int covered = shape && gpu_in_front && regions_intersect(gpu_in_front, shape);
-    if (shape) {
-        void *grown = gpu_in_front ? region_union(gpu_in_front, shape) : NULL;
-        if (grown)
-            region_free(gpu_in_front);
-        gpu_in_front = grown ? grown : gpu_in_front;
-        if (!gpu_in_front)
-            gpu_in_front = region_union(shape, shape);
-    }
+    // By bounds: a window's shadow reaches under the menu bar, and shouldn't count.
+    int covered = 0;
+    for (unsigned i = 0; i < gpu_front_count && !covered; i++)
+        covered = rect.x < gpu_front[i].x + gpu_front[i].width && gpu_front[i].x < rect.x + rect.width &&
+                  rect.y < gpu_front[i].y + gpu_front[i].height && gpu_front[i].y < rect.y + rect.height;
+    if (gpu_front_count < SWS_TREE)
+        gpu_front[gpu_front_count++] = rect;
     void *touched = damage && shape ? region_intersection(damage, shape) : NULL;
     if (touched && region_is_empty(touched)) {
         region_free(touched);
@@ -218,8 +223,7 @@ static void gpu_compose_one(uint32_t id) {
         w->surfaces[which] = gpu_make_surface((int)id, &bounds, scale, width, height);
     if (w->surfaces[which]) {
         // As CaptureSurfaceMetal::Populate(CGXWindow*, region), with the destination the whole surface and the clip
-        // only what changed. Its flag 0x10000000 clears all that a composite doesn't cover, so that goes for a clip,
-        // and what that clip holds must be opaque, or it'd be blended over itself. Otherwise it's a whole composite.
+        // only what changed.
         char *surface = w->surfaces[which];
         void *compositor = metal_compositor(*(int *)(surface + 0x88));
         void *clip = shape, *both = NULL;
@@ -227,28 +231,24 @@ static void gpu_compose_one(uint32_t id) {
             w->whole--;
         else if (w->pending && w->previous && (both = region_union(w->pending, w->previous)))
             clip = both;
-        if (both) {
-            void *solid = opaque_shape(window, 0);
-            if (!solid || !region_contains(solid, both))
-                clip = shape;
-            if (solid)
-                region_free(solid);
-        }
-        unsigned clears = clip == shape ? 0x10000000u : 0;
+        if (clip == shape)
+            table->gpu_whole_composites++;
+        gpu_clear_only = clip;
         char *backing = *(char **)(surface + 0xa8);
         void *color = *(void **)(surface + 0x60);
         typedef void *(*MakeDestination)(void *, void *, void *, unsigned, unsigned, float, struct RectResult);
         MakeDestination make = *(MakeDestination *)(*(char **)backing + 0x50);
-        void *destination =
-            compositor ? make(backing, *(void **)((char *)compositor + 0x10), color,
-                              0x00c20000u | clears | (color ? 0x04000000u : 0), 0, *(float *)(surface + 0x68), bounds)
-                       : NULL;
+        void *destination = compositor
+                                ? make(backing, *(void **)((char *)compositor + 0x10), color,
+                                       0x10c20000u | (color ? 0x04000000u : 0), 0, *(float *)(surface + 0x68), bounds)
+                                : NULL;
         double transform[6] = {1, 0, 0, 1, 0, 0};
         memcpy(&transform[4], window + 0x208, 16);
         if (destination) {
             composite_window(window, destination, *(void **)(surface + 0x80), clip, transform, 1, 1, 1, 1);
             cf_release(destination);
         }
+        gpu_clear_only = NULL;
         if (both)
             region_free(both);
         if (w->previous)
@@ -269,9 +269,10 @@ static void gpu_compose_one(uint32_t id) {
     region_free(shape);
 }
 
-// Called where WindowServer waits for its next request. Its update has finished, and nothing's holding Metal's locks.
-static void gpu_compose_damaged(mach_msg_option_t option) {
-    if (!table || gpu_busy || (option & MACH_SEND_MSG) || !pthread_equal(pthread_self(), main_thread))
+// Called when an update has finished, so nothing's holding Metal's locks. Runs on WindowServer's own thread, as it's
+// the update's caller, and needs no interposing, so it works in a WindowServer already running.
+static void gpu_compose_damaged(void) {
+    if (!table || gpu_busy)
         return;
     if (gpu_order) {
         // shortcut: rows aren't checked for tearing: the tool's look is a snapshot, and order changes rarely.
@@ -279,10 +280,7 @@ static void gpu_compose_damaged(mach_msg_option_t option) {
         table->gpu_row_generation++;
         gpu_order = 0;
         gpu_contributor_count = 0;
-        if (gpu_in_front) {
-            region_free(gpu_in_front);
-            gpu_in_front = NULL;
-        }
+        gpu_front_count = 0;
     }
     if (!gpu_damaged_count)
         return;
@@ -300,6 +298,12 @@ static void gpu_compose_damaged(mach_msg_option_t option) {
     gpu_busy = 0;
 }
 
+static void (*update_original)(void *, double);
+static void update_hook(void *context, double time) {
+    update_original(context, time);
+    gpu_compose_damaged();
+}
+
 static void gpu_install(void) {
     capture_shape = resolved[2];
     compositor_for_device = resolved[3];
@@ -308,8 +312,6 @@ static void gpu_install(void) {
     metal_compositor = resolved[7];
     composite_window = resolved[8];
     region_intersection = dlsym(RTLD_DEFAULT, "CGRegionCreateIntersectionWithRegion");
-    opaque_shape = resolved[9];
-    region_contains = dlsym(RTLD_DEFAULT, "CGRegionContainsRegion");
     region_union = dlsym(RTLD_DEFAULT, "CGRegionCreateUnionWithRegion");
     cf_release = dlsym(RTLD_DEFAULT, "CFRelease");
     main_display_device = dlsym(RTLD_DEFAULT, "CGXMainDisplayDevice");
@@ -318,16 +320,37 @@ static void gpu_install(void) {
     region_bounds = dlsym(RTLD_DEFAULT, "CGRegionGetBoundingBox");
     region_free = dlsym(RTLD_DEFAULT, "CGRegionRelease");
     device_rgb = dlsym(RTLD_DEFAULT, "CGColorSpaceCreateDeviceRGB");
-    if (!region_contains || !region_intersection || !region_union || !cf_release || !main_display_device ||
-        !regions_intersect || !region_is_empty || !region_bounds || !region_free || !device_rgb) {
+    if (!region_intersection || !region_union || !cf_release || !main_display_device || !regions_intersect ||
+        !region_is_empty || !region_bounds || !region_free || !device_rgb) {
         note("gpu: a library symbol is missing; off\n");
         return;
     }
+    // Other threads stop while code changes under them. Between here and resuming them, nothing may take a lock they
+    // might hold, so no logging and no allocating.
+    thread_act_array_t threads = NULL;
+    mach_msg_type_number_t thread_count = 0;
+    thread_t me = mach_thread_self();
+    task_threads(mach_task_self(), &threads, &thread_count);
+    for (mach_msg_type_number_t i = 0; i < thread_count; i++)
+        if (threads[i] != me)
+            thread_suspend(threads[i]);
     generate_layers_original = (char (*)(char *, char *))patch_entry(resolved[1], (const void *)generate_layers_hook);
     // Its entry differs from the others: pushes and a compare, 17 bytes, which can run anywhere.
     static const uint8_t contributors_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53,
                                                  0x50, 0x80, 0xbe, 0x00, 0x02, 0x00, 0x00, 0x00};
+    static const uint8_t clear_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41,
+                                          0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50};
+    clear_original = (void (*)(void *, void *, float))patch_entry_with(resolved[10], (const void *)clear_hook,
+                                                                       clear_entry, sizeof(clear_entry));
+    static const uint8_t update_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
+                                           0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x30};
+    update_original = (void (*)(void *, double))patch_entry_with(resolved[11], (const void *)update_hook, update_entry,
+                                                                 sizeof(update_entry));
     contributors_original = (void (*)(void *, void *))patch_entry_with(resolved[6], (const void *)contributors_hook,
                                                                        contributors_entry, sizeof(contributors_entry));
-    note("gpu: hooked %p %p\n", (void *)generate_layers_original, (void *)contributors_original);
+    for (mach_msg_type_number_t i = 0; i < thread_count; i++)
+        if (threads[i] != me)
+            thread_resume(threads[i]);
+    note("gpu: hooked %p %p %p %p, %u threads stopped\n", (void *)generate_layers_original,
+         (void *)contributors_original, (void *)clear_original, (void *)update_original, thread_count);
 }
