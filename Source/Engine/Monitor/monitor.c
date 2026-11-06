@@ -166,7 +166,7 @@ static inline void hostcall(u64 code) {
 
 // ---- Views: an x86 address space seen from one privilege level ----
 typedef struct {
-    u64 cr3; // masked: table address and PCID
+    u64 cr3; // masked: table address
     u32 cpl, valid; // cpl: 4 added in compatibility mode, whose code at any rip decodes differently
     u32 sees_shared, pad_shared; // sees_shared: its lookup table may hold blocks of a shared domain
     u64 root0, root1; // VA of shadow roots
@@ -719,7 +719,8 @@ static View *domain_keeper(u64 pml4e_target, View *requester) {
 }
 
 static inline u32 view_mode(void) { return c->cpl | (c->compat ? 4 : 0); }
-static inline u64 cr3_key(u64 cr3) { return (c->cr4 & (1ULL << 17)) ? (cr3 & (X_ADDR | 0xfff)) : (cr3 & X_ADDR); }
+// The table alone: shadows are always in step, so a PCID separates nothing here, and XNU gives one address space a PCID per CPU, which would be a view per CPU.
+static inline u64 cr3_key(u64 cr3) { return cr3 & X_ADDR; }
 
 static View *view_current(void) { return &views[c->view]; }
 

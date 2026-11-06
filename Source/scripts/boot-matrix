@@ -11,6 +11,7 @@ A CASE is one quoted string, a name and then switches:
     'smp2-no-share cpus=2 desktop=300 LC_HVDBT_NO_SHARE=1'
     'stress cpus=4 program=/path/to/x86-program expect="PASSED: 0 failures"'
     'gpu program=Build/bench/gpu-bench expect="# failures 0"'     (see probes/gpu-bench.m)
+    'apps cpus=4 runs=3 program=probes/real-apps.sh LC_HVDBT=1'   (an i386 launch loop and Keynote: run it after engine changes)
 
     cpus=N      CPUCount in the clone (default: the machine's)
     runs=N      boots of this case (default 1)
