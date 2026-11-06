@@ -104,7 +104,7 @@ public final class ImagePartitionDeviceBridge: NSObject {
 
 @objc(VIMToolInvocation)
 public final class ToolInvocationBridge: NSObject {
-    private let value: ToolInvocation
+    let value: ToolInvocation
 
     private init(_ value: ToolInvocation) {
         self.value = value

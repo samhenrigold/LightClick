@@ -548,9 +548,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return NO;
     NSTimeInterval start = NSProcessInfo.processInfo.systemUptime;
     double begin = self.workFraction, end = MAX(begin, self.workEnd);
-    NSString *timingKey =
-        [NSString stringWithFormat:@"VIMPreparationDuration-%@-%@-%@-%@", self.progressGuest ?: @"", self.stage ?: @"",
-                                   path.lastPathComponent, command.arguments.firstObject];
+    NSString *timingKey = [VIMToolProgress timingKeyForGuest:self.progressGuest stage:self.stage invocation:command];
     double learned = [NSUserDefaults.standardUserDefaults doubleForKey:timingKey];
     double estimate = learned > 0 ? learned : MAX(1, self.workEstimate);
     NSFileHandle *reader = percentOutput ? [NSFileHandle fileHandleForReadingFromURL:log error:nil] : nil;
@@ -568,24 +566,16 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                 NSRange newline = [lines rangeOfString:@"\n" options:NSBackwardsSearch];
                 if (newline.location != NSNotFound) {
                     NSString *complete = [lines substringToIndex:newline.location + 1];
-                    for (NSString *line in [complete componentsSeparatedByString:@"\n"])
-                        if ([line hasPrefix:@"PERCENT:"])
-                            toolFraction = MAX(toolFraction, MIN(1, [[line substringFromIndex:8] doubleValue] / 100));
+                    toolFraction = [VIMToolProgress reportedFractionInLines:complete after:toolFraction];
                     NSUInteger consumed = [complete lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
                     [pending replaceBytesInRange:NSMakeRange(0, consumed) withBytes:NULL length:0];
                 }
             }
-            // Tool output is authoritative. Otherwise use a measured duration,
-            // slowing near the end instead of claiming completion prematurely.
-            double fraction =
-                toolFraction >= 0
-                    ? MIN(.99, toolFraction)
-                    : MIN(.98, elapsed < estimate * .9 ? elapsed / estimate
-                                                       : .9 + .08 * (1 - exp(-(elapsed - estimate * .9) / estimate)));
+            double fraction = [VIMToolProgress fractionWithReported:toolFraction elapsed:elapsed estimate:estimate];
             [self completedWork:begin + (end - begin) * fraction];
-            double operationRemaining = toolFraction > .01 && elapsed > 1
-                                            ? elapsed * (1 - MIN(.999, toolFraction)) / toolFraction
-                                            : MAX(1, estimate - elapsed);
+            double operationRemaining = [VIMToolProgress secondsRemainingWithReported:toolFraction
+                                                                              elapsed:elapsed
+                                                                             estimate:estimate];
             double seconds = operationRemaining + (1 - end) * 240;
             if (self.timeRemaining)
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -611,22 +601,15 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     if (task.terminationStatus == 0) {
         if (end > begin) {
             double duration = NSProcessInfo.processInfo.systemUptime - start;
-            [NSUserDefaults.standardUserDefaults setDouble:learned > 0 ? .6 * learned + .4 * duration : duration
+            [NSUserDefaults.standardUserDefaults setDouble:[VIMToolProgress learnedDurationAfter:learned
+                                                                                        measured:duration]
                                                     forKey:timingKey];
             [self completedWork:end];
         }
         return YES;
     }
     if (error)
-        *error = [NSError errorWithDomain:@"VirtualIntelMac.InstallerAssembly"
-                                     code:task.terminationStatus
-                                 userInfo:@{
-                                     NSLocalizedDescriptionKey : @"The OS installer couldn’t be prepared.",
-                                     NSLocalizedRecoverySuggestionErrorKey :
-                                         @"Your downloads are saved. Try again to resume setup. If it fails again, "
-                                         @"check that your library’s drive is connected and has enough free space.",
-                                     @"PreparationLog" : log.path
-                                 }];
+        *error = [VIMToolProgress toolFailureWithStatus:task.terminationStatus log:log.path];
     return NO;
 }
 - (NSURL *)assembleClassicDiskImage:(NSURL *)image
