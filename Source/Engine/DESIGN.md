@@ -404,7 +404,17 @@ A TCG baseline, same probe and 1380 s on Mojave and 300 s on Mavericks, one boot
 | fork_wait | 0.65 | 1.59 |
 | largecode_cold | 0.07 | 0.08 |
 
-Hot code is at parity, so code generation isn't where a launch goes. What's slow is crossing into the kernel, faults, and code seen for the first time. Rosetta's kernel is the host's, so those rows also compare kernels. Mojave's crossings cost about twice Mavericks' or more: it changes page tables at each. Its kernel reads `IA32_ARCH_CAPABILITIES` only in what look like its MDS paths, so this search found no way to tell it not to.
+Those hot rows above 1 were noise: 0.2 s slices, one run, with Rosetta not niced on a busy host. At fixed counts, about 14 s a phase, four rounds alternating with Rosetta niced the same, one vCPU:
+
+| ns per iteration | alu | branchy |
+|---|---|---|
+| Rosetta | 2.20 to 2.25 | 12.14 to 12.58 |
+| Mavericks, later rounds | 2.32 to 2.37 | 12.83 to 13.07 |
+| Mojave, later rounds | 2.36 to 2.57 | 12.84 to 13.77 |
+
+So about 5% behind Rosetta on Mavericks and up to 10% on Mojave, whose first rounds, at 1 vCPU, also carry what's left of its boot. The guest's clock isn't slow: its 110.6 s total against the host's 106.5 s between the first and last 2 s timeline rows in those loops, which can miss 4 s. `alu`'s loop is 29 ARM words for 29 x86 instructions with no flags kept, and `branchy` keeps flags only for the `andl` before its indirect call, as a call makes all of them live. Rosetta's code wasn't read: `/var/db/oah` isn't readable.
+
+Hot code is close to parity, so code generation isn't where a launch goes. What's slow is crossing into the kernel, faults, and code seen for the first time. Rosetta's kernel is the host's, so those rows also compare kernels. Mojave's crossings cost about twice Mavericks' or more: it changes page tables at each. Its kernel reads `IA32_ARCH_CAPABILITIES` only in what look like its MDS paths, so this search found no way to tell it not to.
 
 Making every flag live, `LC_HVDBT_ALL_FLAGS=1`, costs `alu` 5%, `branchy` 2%, and adds 4% to the code, with no visible effect on launches in one boot of each. In a launch profile no hot function stands out: `cache_fill` is 75 of 916 user samples. So no code generation work was done.
 
