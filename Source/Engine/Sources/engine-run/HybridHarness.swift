@@ -20,6 +20,7 @@ final class HybridHarness {
     var acks = 0
     var slept: UInt64 = 0
     var portsSeen: [String] = []
+    var icrSeen: [UInt64] = []
     nonisolated(unsafe) var timerOn = false
 
     func host(_ gpa: UInt64) -> UnsafeMutableRawPointer { ram + Int(gpa >= 1 << 32 ? gpa - (1 << 32) + below : gpa) }
@@ -78,6 +79,10 @@ final class HybridHarness {
                 engine_kick(target)
             }
         case 19: engine_unmap_direct(handle, 0xC000_0000, 1 << 16)
+        case 21:
+            if !icrSeen.isEmpty { failed = "an ICR access other than the send reached the host" }
+        case 22:
+            if icrSeen != [0x0300_0000_0000_40DD] { failed = "the host got ICR writes \(icrSeen)" }
         case 20:
             let target = handle!
             Thread.detachNewThread { [self] in
@@ -253,7 +258,7 @@ final class HybridHarness {
             has_interrupt_waiting: { _ in HybridHarness.current!.pendingVector },
             wait_for_interrupt: { _, _ in false },
             apic_eoi: { _, _ in },
-            apic_icr: { _, _ in })
+            apic_icr: { _, icr in HybridHarness.current!.icrSeen.append(icr) })
         guard let created = engine_create(&config, &ops) else { return 3 }
         machineOps = ops
         if ProcessInfo.processInfo.environment["ENGINE_HYBRID_SMP"] == "1" { engine_prepare_count(created, 2) }
@@ -270,6 +275,7 @@ final class HybridHarness {
         var s = EngineX86State()
         engine_get_state(handle, &s)
         s.rip = image.entry!
+        s.hybrid_apic_page = 0xD000_0000
         s.cr3 = root
         s.cr0 = 0x8001_0033
         s.cr4 = 0x620
