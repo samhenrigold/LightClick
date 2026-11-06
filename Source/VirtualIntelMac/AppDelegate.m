@@ -6,7 +6,7 @@
 #import "VIMMachine.h"
 #import "VIMInstallerWindow.h"
 #import "VIMHostSupport.h"
-#import "VIMNewMachineWindow.h"
+#import "Light_Click-Swift.h"
 #import "VIMAlerts.h"
 #import "VIMMenuController.h"
 #import "VIMMachineSettings.h"

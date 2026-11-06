@@ -53,6 +53,11 @@ public final class InstallerCatalogBridge: NSObject {
         }
     }
 
+    /// A guest's installer files, for Swift callers. Empty if the catalog has no entry for it.
+    public class func files(for guest: Guest) throws -> [InstallerFile] {
+        try store.current().installers.first { $0.guest == guest }?.files ?? []
+    }
+
     /// Debug override retains the exact Apple URL path on a loopback HTTP server.
     @objc(downloadURLForAppleURL:)
     public class func downloadURL(forAppleURL url: URL) -> URL {

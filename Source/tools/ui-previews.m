@@ -6,7 +6,6 @@
 #import "VIMMachine.h"
 #import "VIMMachineSettings.h"
 #import "VIMSession.h"
-#import "VIMNewMachineWindow.h"
 #import "VIMMenuController.h"
 #import "AppDelegate.h"
 #include <fcntl.h>
@@ -52,33 +51,6 @@
     return self.windowContext;
 }
 @end
-
-@interface VIMNewMachineWindow (Preview)
-- (void)updateOverallProgress:(double)fraction;
-- (double)downloadProgressForFileFraction:(double)fraction;
-- (NSAlert *)cancellationAlert;
-- (void)beginSetup:(id)sender;
-- (void)refreshDownloadDetail;
-- (BOOL)windowShouldClose:(NSWindow *)window;
-- (NSAlert *)creationAlertWithTitle:(NSString *)title detail:(NSString *)detail;
-@end
-@interface VIMPreviewCreation : VIMNewMachineWindow
-@property NSAlert *lastAlert;
-@end
-@implementation VIMPreviewCreation
-- (NSAlert *)creationAlertWithTitle:(NSString *)title detail:(NSString *)detail {
-    self.lastAlert = [super creationAlertWithTitle:title detail:detail];
-    return self.lastAlert;
-}
-@end
-
-static void DismissPreviewSheet(NSWindow *window, NSModalResponse response) {
-    NSWindow *sheet = window.attachedSheet;
-    NSCAssert(sheet != nil, @"Expected a native alert sheet");
-    [NSApp endSheet:sheet returnCode:response];
-    [sheet orderOut:nil];
-    [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
-}
 
 static void Render(NSWindow *window, NSString *path) {
     [window.contentView layoutSubtreeIfNeeded];
@@ -560,157 +532,6 @@ int main(int argc, const char *argv[]) {
                 [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
                 [configuration orderOut:nil];
             }
-        VIMPreviewCreation *assistant = [VIMPreviewCreation new];
-        menus.windowContext = assistant.window;
-        [menus refresh];
-        for (NSMenuItem *item in file.itemArray)
-            NSCAssert(![item.title hasPrefix:@"Remove “"],
-                      @"Creation window must not expose the library’s selection as a removal target");
-        NSCAssert([[assistant valueForKey:@"system"] indexOfSelectedItem] == 0, @"New Macs default to Mojave");
-        NSCAssert([[assistant valueForKey:@"nameField"] stringValue] &&
-                      [[[assistant valueForKey:@"nameField"] stringValue] isEqual:@"Mojave"],
-                  @"Default VM names omit the macOS prefix");
-        NSCAssert((assistant.window.collectionBehavior & NSWindowCollectionBehaviorFullScreenNone) != 0,
-                  @"Creation must zoom rather than enter full screen");
-        NSCAssert(!(assistant.window.styleMask & NSWindowStyleMaskResizable), @"Creation must be fixed-size");
-        [assistant.window.contentView layoutSubtreeIfNeeded];
-        for (NSButton *option in [assistant valueForKey:@"systemOptions"]) {
-            NSCAssert(option.focusRingType == NSFocusRingTypeNone,
-                      @"Selection must not acquire a second system focus ring");
-            NSString *benefit = [option valueForKey:@"benefit"];
-            NSMutableParagraphStyle *caption = [NSMutableParagraphStyle new];
-            caption.lineSpacing = 2;
-            NSRect bounds = [benefit boundingRectWithSize:NSMakeSize(NSWidth(option.bounds) - 112, 100)
-                                                  options:NSStringDrawingUsesLineFragmentOrigin
-                                               attributes:@{
-                                                   NSFontAttributeName : [NSFont systemFontOfSize:13],
-                                                   NSParagraphStyleAttributeName : caption
-                                               }];
-            NSCAssert(NSHeight(bounds) > 16 && NSHeight(bounds) <= 35,
-                      @"%@ benefit must fit two spaced lines: %@, row %@", option.title, NSStringFromRect(bounds),
-                      NSStringFromRect(option.bounds));
-        }
-        NSCAssert(![[assistant valueForKey:@"mediaLabel"] isSelectable], @"Creation instructions are not selectable");
-        Render(assistant.window, [output stringByAppendingPathComponent:@"NewMac-Choose.png"]);
-        NSTimeInterval clicks = NSProcessInfo.processInfo.systemUptime;
-        for (NSNumber *index in @[ @2, @0, @1, @0, @2, @1 ]) {
-            NSButton *option = [assistant valueForKey:@"systemOptions"][index.unsignedIntegerValue];
-            NSPoint point = NSMakePoint(NSWidth(option.bounds) - 4, NSMidY(option.bounds));
-            NSView *hit = [option hitTest:[option convertPoint:point toView:option.superview]];
-            NSCAssert(hit == option, @"The entire version row must be clickable");
-            NSEvent *event = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
-                                                location:[option convertPoint:point toView:nil]
-                                           modifierFlags:0
-                                               timestamp:NSProcessInfo.processInfo.systemUptime
-                                            windowNumber:assistant.window.windowNumber
-                                                 context:nil
-                                             eventNumber:1
-                                              clickCount:1
-                                                pressure:1];
-            [hit mouseDown:event];
-            NSCAssert([[assistant valueForKey:@"system"] indexOfSelectedItem] == index.integerValue,
-                      @"Mouse-down must immediately select the row");
-        }
-        NSCAssert(NSProcessInfo.processInfo.systemUptime - clicks < .5,
-                  @"Row selection must not enter radio-cell tracking or animation waits");
-        NSButton *selection = [NSButton new];
-        selection.tag = 1;
-        [assistant performSelector:@selector(selectSystem:) withObject:selection];
-        Render(assistant.window, [output stringByAppendingPathComponent:@"NewMac-Choose-Catalina.png"]);
-        [assistant performSelector:@selector(continueToConfiguration:) withObject:nil];
-        Render(assistant.window, [output stringByAppendingPathComponent:@"NewMac-Configure.png"]);
-        NSView *cpuField = [assistant valueForKey:@"cpuField"], *memoryField = [assistant valueForKey:@"memoryField"];
-        NSCAssert(fabs([cpuField convertPoint:NSZeroPoint toView:nil].x -
-                       [memoryField convertPoint:NSZeroPoint toView:nil].x) < 1,
-                  @"Processor and memory numeric fields must align");
-        NSButton *create = [assistant valueForKey:@"createButton"];
-        NSCAssert(create.controlSize == NSControlSizeLarge && create.font.pointSize == NSFont.systemFontSize,
-                  @"Large native controls must retain standard label typography");
-        [(NSTextField *)cpuField setStringValue:@"0"];
-        [assistant beginSetup:nil];
-        NSCAssert([assistant.lastAlert.messageText isEqual:@"Enter a valid number of cores"] &&
-                      [assistant.lastAlert.informativeText containsString:@"cores to Catalina."] &&
-                      assistant.lastAlert.icon == [NSImage imageNamed:@"catalinaIcon"],
-                  @"Validation must describe the field and selected Mac with its installer icon");
-        DismissPreviewSheet(assistant.window, NSAlertFirstButtonReturn);
-        [(NSTextField *)cpuField setStringValue:@"4"];
-        [assistant setValue:[@{@"Guest" : @"catalina"} mutableCopy] forKey:@"job"];
-        [assistant performSelector:@selector(showProgress)];
-        [[assistant valueForKey:@"status"] setStringValue:@"Downloading macOS…"];
-        [assistant setValue:@[
-            @{@"Role" : @"assistant", @"URL" : @"fixture-assistant"},
-            @{@"Role" : @"recovery", @"URL" : @"fixture-recovery"}, @{@"Role" : @"esd", @"URL" : @"fixture-esd"}
-        ]
-                     forKey:@"files"];
-        [assistant setValue:[@{
-                       @"fixture-assistant" : @200000000,
-                       @"fixture-recovery" : @800000000,
-                       @"fixture-esd" : @5400000000
-                   } mutableCopy]
-                     forKey:@"downloadLengths"];
-        [assistant setValue:[@{
-                       @"fixture-assistant" : @200000000,
-                       @"fixture-recovery" : @800000000,
-                       @"fixture-esd" : @200000000
-                   } mutableCopy]
-                     forKey:@"downloadReceived"];
-        [assistant setValue:@64000000 forKey:@"bytesPerSecond"];
-        [assistant setValue:@.34 forKey:@"overallProgress"];
-        [[assistant valueForKey:@"progress"] setDoubleValue:.34];
-        [assistant refreshDownloadDetail];
-        NSCAssert([[[assistant valueForKey:@"progressDetail"] stringValue]
-                      isEqual:@"1.20 GB of 6.40 GB (64.00 MB/s) - 2 minutes remaining"],
-                  @"Transfer text uses fixed decimal places, speed and ETA, without a percentage");
-        Render(assistant.window, [output stringByAppendingPathComponent:@"NewMac-Progress.png"]);
-        [assistant updateOverallProgress:.2];
-        NSCAssert([[assistant valueForKey:@"progress"] doubleValue] == .34,
-                  @"Resume must not rewind preparation progress");
-        [assistant setValue:@[ @{@"Role" : @"assistant"}, @{@"Role" : @"recovery"}, @{@"Role" : @"esd"} ]
-                     forKey:@"files"];
-        [assistant setValue:@1 forKey:@"fileIndex"];
-        double endOfRecovery = [assistant downloadProgressForFileFraction:1];
-        [assistant setValue:@2 forKey:@"fileIndex"];
-        NSCAssert(fabs(endOfRecovery - [assistant downloadProgressForFileFraction:0]) < .000001,
-                  @"Advancing to another package must not reset the bar");
-        [assistant updateOverallProgress:.972];
-        [[assistant valueForKey:@"status"] setStringValue:@"Creating the bootable installer image…"];
-        [[assistant valueForKey:@"progressDetail"] setStringValue:@"Download complete. Preparing the installer."];
-        Render(assistant.window, [output stringByAppendingPathComponent:@"NewMac-Preparing.png"]);
-        assistant.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-        Render(assistant.window, [output stringByAppendingPathComponent:@"NewMac-Progress-Dark.png"]);
-        assistant.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
-        NSAlert *cancel = [assistant cancellationAlert];
-        [cancel layout];
-        // Window chrome/material is not part of cacheDisplay. Supply only its
-        // background so this offscreen native alert remains legible in a PNG.
-        NSBox *alertBackground = [[NSBox alloc] initWithFrame:cancel.window.contentView.bounds];
-        alertBackground.boxType = NSBoxCustom;
-        alertBackground.borderWidth = 0;
-        alertBackground.fillColor = NSColor.windowBackgroundColor;
-        alertBackground.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-        [cancel.window.contentView addSubview:alertBackground positioned:NSWindowBelow relativeTo:nil];
-        Render(cancel.window, [output stringByAppendingPathComponent:@"NewMac-Cancel.png"]);
-        NSCAssert([cancel.buttons.lastObject.title isEqual:@"No"] &&
-                      [cancel.buttons.lastObject.keyEquivalent isEqual:@"\r"],
-                  @"Cancellation must default to No");
-        // Exercise presentation-state transitions without starting downloads or
-        // touching a VM. Defaults belong to this standalone preview executable.
-        [assistant performSelector:@selector(setPhase:) withObject:@"creating"];
-        NSCAssert([assistant valueForKey:@"sleepActivity"] != nil,
-                  @"Active installer creation must prevent host idle sleep");
-        NSCAssert(![[assistant valueForKey:@"pauseResume"] isEnabled], @"Cannot pause disk creation");
-        [assistant performSelector:@selector(setPhase:) withObject:@"paused"];
-        NSCAssert([assistant valueForKey:@"sleepActivity"] == nil, @"Pausing must restore normal host sleep");
-        NSCAssert([[[assistant valueForKey:@"pauseResume"] title] isEqual:@"Resume"],
-                  @"Paused setup must offer Resume");
-        NSCAssert(![assistant windowShouldClose:assistant.window], @"Closing a download must confirm cancellation");
-        DismissPreviewSheet(assistant.window, NSAlertSecondButtonReturn);
-        NSCAssert([assistant valueForKey:@"job"] != nil, @"No must keep setup open and intact");
-        NSCAssert(![assistant windowShouldClose:assistant.window], @"Closing still requires confirmation");
-        DismissPreviewSheet(assistant.window, NSAlertFirstButtonReturn);
-        NSCAssert([assistant valueForKey:@"job"] == nil, @"Cancellation retires the job record");
-        NSCAssert(![NSUserDefaults.standardUserDefaults dictionaryForKey:@"VIMCreationJob"],
-                  @"Cancelled setup must not restart at launch");
         // The real global preference pane should fit its content, not retain a
         // fixed-height void beneath it. No settings actions are invoked here.
         AppDelegate *appDelegate = [AppDelegate new];

@@ -3,7 +3,7 @@
 #import "VIMLibraryLocation.h"
 #import "VIMDownload.h"
 #import "VIMInstallerAssembly.h"
-#import "VIMNewMachineWindow.h"
+#import "Light_Click-Swift.h"
 #import "VIMAlerts.h"
 #import <CommonCrypto/CommonDigest.h>
 @interface VIMInstallerWindow ()
