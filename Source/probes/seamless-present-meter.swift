@@ -3,6 +3,7 @@
 //
 //     seamless-present-meter WINDOW_ID SECONDS [--times]
 import AVFoundation
+import AppKit
 import CoreMedia
 @preconcurrency import ScreenCaptureKit
 
@@ -43,6 +44,7 @@ guard arguments.count >= 3, let id = CGWindowID(arguments[1]), let seconds = Dou
     exit(64)
 }
 let meter = Meter()
+_ = NSApplication.shared  // ScreenCaptureKit needs a window server connection.
 Task {
     do {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
