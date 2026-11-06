@@ -61,6 +61,7 @@ static void sendToGuest(const uint8_t *bytes, size_t size) {
 @property NSSize points;
 @property NSInteger buttons;
 @property uint32_t order, margin;
+@property NSPoint guestOrigin;
 @property int layer_;
 @property(copy) NSString *label;
 - (void)sendKind:(uint8_t)kind button:(uint8_t)button event:(NSEvent *)event;
@@ -320,6 +321,7 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
     window.hasShadow = NO;
     window.alphaValue = w->alpha / 65536.0;
     view.margin = w->margin;
+    view.guestOrigin = NSMakePoint(w->x, w->y);
     view.layer_ = w->layer;
     BOOL reordered = view.order != w->order || !window.visible;
     view.order = w->order;
@@ -391,17 +393,23 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
     exit(self.framesShown ? 0 : 1);
 }
 - (void)sendTestInput:(GuestWindow *)window {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    // In a tree the demo's schedule leaves only its first seconds for this, and the window can't be addressed: all
+    // events are in guest screen points.
+    uint64_t pause = treeMode ? NSEC_PER_SEC : 3 * NSEC_PER_SEC;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, pause), dispatch_get_main_queue(), ^{
       uint8_t out[64];
-      int32_t x = (int32_t)(testClick.x * 16), y = (int32_t)(testClick.y * 16);
-      struct SWMPointer move = {window.guestID, SWM_MOVE, 0, 0, x, y, 0};
+      GuestView *view = (GuestView *)window.contentView;
+      uint32_t target = treeMode ? 0 : window.guestID;
+      int32_t x = (int32_t)((testClick.x + (treeMode ? view.guestOrigin.x : 0)) * 16),
+              y = (int32_t)((testClick.y + (treeMode ? view.guestOrigin.y : 0)) * 16);
+      struct SWMPointer move = {target, SWM_MOVE, 0, 0, x, y, 0};
       sendToGuest(out, swm_put_pointer(out, sizeof(out), &move));
-      struct SWMPointer down = {window.guestID, SWM_DOWN, 0, 1, x, y, 0};
+      struct SWMPointer down = {target, SWM_DOWN, 0, 1, x, y, 0};
       sendToGuest(out, swm_put_pointer(out, sizeof(out), &down));
-      struct SWMPointer up = {window.guestID, SWM_UP, 0, 1, x, y, 0};
+      struct SWMPointer up = {target, SWM_UP, 0, 1, x, y, 0};
       sendToGuest(out, swm_put_pointer(out, sizeof(out), &up));
       puts("# sent the test click");
-      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, pause), dispatch_get_main_queue(), ^{
         uint8_t bytes[32];
         struct SWMKey press = {0, 1, 0}; // The A key.
         sendToGuest(bytes, swm_put_key(bytes, sizeof(bytes), &press));
@@ -515,8 +523,12 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
                 shooting = YES;
                 [self performSelector:@selector(takeScreenshot) withObject:nil afterDelay:1];
             }
-            if (testClick.x >= 0)
+            // Only once: a tree's later windows aren't what the click is aimed at.
+            static BOOL tested;
+            if (testClick.x >= 0 && !tested) {
+                tested = YES;
                 [self sendTestInput:window];
+            }
             if (exitAfter > 0)
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(exitAfter * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{

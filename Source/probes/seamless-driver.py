@@ -153,16 +153,21 @@ def input_live(seconds):
     save(output)
 
 
-def tree(seconds):
-    print(f'== Every window of a demo app, for {seconds} s', flush=True)
-    guest = stage(guest_tool)
+def tree(seconds, guest=None, hook=False):
+    label = 'with the hook' if hook else 'by capture'
+    print(f'== Every window of a demo app, {label}, for {seconds} s', flush=True)
+    guest = guest or stage(guest_tool)
     port = free_port()
-    prefix = results/f'{tag}-window'
-    for old in results.glob(f'{tag}-window-*.png'):
+    name = f'{tag}-hook' if hook else tag
+    prefix = results/f'{name}-window'
+    for old in list(results.glob(f'{name}-window-*.png')) + list(results.glob(f'{name}-screen-*.png')):
         old.unlink()
     viewer = subprocess.Popen([str(results/'seamless-viewer'), '--tree', '--port', str(port), '--exit-after', str(seconds + 5),
-                               '--png', str(prefix), '--screenshots', str(results/f'{tag}-screen')], stdout=subprocess.PIPE, text=True)
-    status, _ = run(guest, ['program-tree', '--port', str(port), '--seconds', str(seconds)])
+                               '--png', str(prefix), '--screenshots', str(results/f'{name}-screen'),
+                               # The demo's Anchor button, on a 10.9 title bar: it adds "clicked" to the title.
+                               '--test-input', '365,156'],
+                              stdout=subprocess.PIPE, text=True)
+    status, _ = run(guest, ['program-tree', '--port', str(port), '--seconds', str(seconds)] + (['--hook'] if hook else []))
     print(f'# guest exit {status}', flush=True)
     try:
         report, _ = viewer.communicate(timeout=30)
@@ -171,27 +176,25 @@ def tree(seconds):
         report, _ = viewer.communicate()
     print(f'== Viewer on the host, exit {viewer.returncode}')
     print(report)
-    print(f'# Each window is in {prefix}-<id>.png. Look for the shadow around the document window, the popover past its '
-          'edge, the panel, the menu and the sheet.')
+    print(f'# Each window is in {prefix}-<id>.png, and composed views in {name}-screen-*.png.', flush=True)
 
 
-def ws_probe():
+def install_hook():
     # Uses a reboot, since launchd only reads a job's environment when it loads. This is a clone, so the edit goes with it.
-    print('== Read-only probe inside WindowServer', flush=True)
     version = request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60).get('Stdout', '')
     if not version.startswith('13.'):
-        raise SystemExit(f'This probe is for 10.9, with its symbol names; this is Darwin {version.strip()}.')
-    staged = stage(results/'seamless-ws-probe.dylib')
+        raise SystemExit(f'The hook is for 10.9, with its symbol names; this is Darwin {version.strip()}.')
+    staged = stage(results/'seamless-ws-hook.dylib')
     plist = '/System/Library/LaunchDaemons/com.apple.WindowServer.plist'
-    install = ('set -e; cp "$1" /var/tmp/seamless-ws-probe.dylib; chmod 755 /var/tmp/seamless-ws-probe.dylib; '
+    install = ('set -e; cp "$1" /var/tmp/seamless-ws-hook.dylib; chmod 755 /var/tmp/seamless-ws-hook.dylib; '
                'rm -f /var/tmp/seamless-ws-probe.log; '
                f'/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" {plist} || true; '
                f'/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string '
-               f'/var/tmp/seamless-ws-probe.dylib" {plist}; /usr/bin/plutil -lint {plist}')
+               f'/var/tmp/seamless-ws-hook.dylib" {plist}; /usr/bin/plutil -lint {plist}')
     result = request({'Executable': '/bin/sh', 'Arguments': ['-c', install, 'sh', staged]}, 120)
     print(result.get('Stdout', ''), result.get('Stderr', ''), flush=True)
     if result.get('ExitCode') != 0:
-        raise SystemExit('Could not install the probe')
+        raise SystemExit('Could not install the hook')
     print('# Rebooting the clone', flush=True)
     # In the background, so the agent can answer before it goes.
     request({'Executable': '/bin/sh', 'Arguments': ['-c', '(sleep 5; /sbin/reboot) >/dev/null 2>&1 &']}, 60)
@@ -206,17 +209,22 @@ def ws_probe():
             print(f'# waiting: {stuck}', flush=True)
             continue
         log = result.get('Stdout') or ''
-        if log.count('-- sample') >= 4:
+        if log.count('-- sample') >= 2 or 'refusing' in log or 'not calling any' in log:
             break
         time.sleep(15)
-    target = results/f'{tag}.log'
-    target.write_text(log)
+    (results/f'{tag}.log').write_text(log)
     state = request({'Executable': '/usr/bin/pgrep', 'Arguments': ['-lx', 'WindowServer']}, 60)
     print(f'# WindowServer: {state.get("Stdout", "").strip() or "NOT RUNNING"}')
-    print(f'# {len(log.splitlines())} lines in {target}. First lines:')
-    print('\n'.join(log.splitlines()[:30]))
-    size = capture(f'{tag}-frame.png')
-    print(f'# frame {size}: does the desktop still look right?')
+    print('\n'.join(log.splitlines()[:6]))
+
+
+def hook(seconds):
+    install_hook()
+    print(f'# frame {capture(f"{tag}-frame.png")}: does the desktop still look right?', flush=True)
+    # The staging folder doesn't survive a reboot.
+    guest = stage(guest_tool)
+    tree(seconds, guest)
+    tree(seconds, guest, hook=True)
 
 
 def diag():
@@ -256,7 +264,7 @@ elif arguments[0] == 'input-live':
     input_live(int(arguments[1]) if len(arguments) > 1 else 60)
 elif arguments[0] == 'tree':
     tree(int(arguments[1]) if len(arguments) > 1 else 22)
-elif arguments[0] == 'ws-probe':
-    ws_probe()
+elif arguments[0] == 'hook':
+    hook(int(arguments[1]) if len(arguments) > 1 else 22)
 else:
     display(arguments[1:] or default_ladder)

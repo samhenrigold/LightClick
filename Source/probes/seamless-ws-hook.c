@@ -1,6 +1,7 @@
-// First step inside WindowServer, on 10.9 only (13F34's CoreGraphics). Loaded with DYLD_INSERT_LIBRARIES by
-// probes/seamless-driver.py on a throwaway clone. Read-only: it proves injection and symbol lookup work, and records
-// how each window's backing and shadow really look, to /var/tmp/seamless-ws-probe.log. It draws and changes nothing.
+// Runs inside WindowServer, on 10.9 only (13F34's CoreGraphics). Loaded with DYLD_INSERT_LIBRARIES by
+// probes/seamless-driver.py on a throwaway clone. It logs each window's backing and shadow to
+// /var/tmp/seamless-ws-probe.log, and publishes the backing stores of windows seamless-guest asks for through
+// seamless-ws-table.h, so reading a window no longer means a capture. It changes nothing WindowServer does.
 //
 // WindowServer's main loop isn't a run loop, so a timer can't reach its thread. It calls mach_msg from
 // CGXRunOneServicesPass, between requests, and that's when its structures are safe to read. So this interposes
@@ -9,7 +10,9 @@
 // Offsets are from a disassembly of 13F34: a window keeps its backing at 0x108 and a no-shadow flag at 0x9d, a backing
 // its accelerated-surface pointer at 0x88. Local symbols aren't in the shared cache's symbol table, so they come from
 // the CoreGraphics file on disk, and are refused if its UUID isn't the loaded image's.
+#include "seamless-ws-table.h"
 #include <fcntl.h>
+#include <mach/mach_time.h>
 #include <mach-o/dyld.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
@@ -57,7 +60,9 @@ static void *resolved[9];
 static const struct mach_header_64 *loaded_coregraphics(void) {
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
         const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "/CoreGraphics.framework/"))
+        // Not just anything under the framework: its Resources hold more libraries.
+        size_t length = name ? strlen(name) : 0;
+        if (length > 13 && !strcmp(name + length - 13, "/CoreGraphics"))
             return (const struct mach_header_64 *)_dyld_get_image_header(i);
     }
     return NULL;
@@ -103,8 +108,9 @@ static int resolve_symbols(void) {
     }
     const uint8_t *file_uuid = image_uuid(header), *memory_uuid = image_uuid(loaded);
     if (!file_uuid || !memory_uuid || memcmp(file_uuid, memory_uuid, 16)) {
-        note("CoreGraphics on disk isn't the loaded image; refusing\n");
-        return 0;
+        // The guest's setup may have patched the file after the shared cache was built, so also accept a match of the
+        // code itself, checked below for every symbol this uses.
+        note("CoreGraphics on disk has a different UUID from the loaded image, comparing code instead\n");
     }
     const struct symtab_command *symtab = NULL;
     const struct load_command *c = (const void *)(header + 1);
@@ -127,6 +133,10 @@ static int resolve_symbols(void) {
                 // The file's __TEXT starts at 0, so a text symbol's value is its offset from the header. Text keeps
                 // its layout in the shared cache.
                 resolved[w] = (char *)loaded + symbols[i].n_value;
+                if (memcmp(resolved[w], (const char *)header + symbols[i].n_value, 16)) {
+                    note("%s isn't the same code on disk and in memory; refusing\n", name);
+                    return 0;
+                }
                 found++;
             }
     }
@@ -191,9 +201,66 @@ static void sample(void) {
     note("%u windows\n", count);
 }
 
+static struct SWSTable *table;
+
+// Compares each wanted window's backing with the last copy row by row, and copies only what changed. Runs at most once
+// per 8 ms of WindowServer's main thread, between requests, where its structures are consistent. This assumes
+// nothing about what changed, so it costs a read of the window; a flush-seed check would avoid that.
+static void publish(void) {
+    static uint64_t next;
+    uint64_t now = mach_absolute_time();
+    if (now < next)
+        return;
+    next = now + 8000000ull * table->ticks_denom / table->ticks_numer;
+    table->passes++;
+    for (int i = 0; i < SWS_SLOTS; i++) {
+        struct SWSEntry *e = &table->slots[i];
+        if (!e->id)
+            continue;
+        char *window = window_by_id(e->id);
+        void *backing = window ? *(void **)(window + 0x108) : NULL;
+        e->present = backing != NULL;
+        if (!backing)
+            continue;
+        e->accelerated = backing_is_accelerated(backing) != 0;
+        uint32_t width = backing_width(backing), height = backing_height(backing), row = backing_row_bytes(backing, 1);
+        const uint8_t *data = backing_data(backing, 1, 0);
+        if (e->accelerated || !data || !width || !height || row < width * 4 || backing_bits(backing) != 32)
+            continue;
+        uint64_t size = (uint64_t)width * height * 4;
+        if (e->width != width || e->height != height) {
+            // shortcut: wraps over older windows' rows, which then read wrong until they change. Fine for a demo's few
+            // windows in 512 MB; a real one frees and reuses.
+            if (size > SWS_ARENA)
+                continue;
+            if (table->arena_used + size > SWS_ARENA)
+                table->arena_used = 0;
+            e->offset = table->arena_used;
+            table->arena_used += size;
+            e->width = width;
+            e->height = height;
+            e->sequence++;
+        }
+        uint8_t *dest = table->arena + e->offset;
+        int changed = 0;
+        for (uint32_t y = 0; y < height; y++) {
+            uint8_t *to = dest + (size_t)y * width * 4;
+            const uint8_t *from = data + (size_t)y * row;
+            if (memcmp(to, from, width * 4)) {
+                memcpy(to, from, width * 4);
+                changed = 1;
+                e->copy_rows++;
+            }
+        }
+        if (changed)
+            e->sequence++;
+    }
+    table->ticks_spent += mach_absolute_time() - now;
+}
+
 static pthread_t main_thread;
 static time_t next_sample;
-static int ready, samples_left = 6, in_sample, reached;
+static int ready, samples_left = 2, in_sample, reached;
 
 static void between_requests(void) {
     if (!pthread_equal(pthread_self(), main_thread) || in_sample)
@@ -210,6 +277,8 @@ static void between_requests(void) {
         next_sample = now + 15;
         sample();
     }
+    if (ready && table)
+        publish();
     in_sample = 0;
 }
 
@@ -239,6 +308,23 @@ __attribute__((constructor)) static void start(void) {
     main_thread = pthread_self();
     next_sample = time(NULL) + 60;
     // Only WindowServer: launchd's environment can reach other programs on this clone.
-    if (!strcmp(getprogname(), "WindowServer"))
+    if (!strcmp(getprogname(), "WindowServer")) {
         ready = resolve_symbols();
+        unlink(SWS_PATH);
+        int fd = open(SWS_PATH, O_RDWR | O_CREAT, 0666);
+        if (fd >= 0 && !fchmod(fd, 0666) && !ftruncate(fd, sizeof(struct SWSTable))) {
+            void *mapped = mmap(NULL, sizeof(struct SWSTable), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            if (mapped != MAP_FAILED) {
+                table = mapped;
+                mach_timebase_info_data_t timebase;
+                mach_timebase_info(&timebase);
+                table->ticks_numer = timebase.numer;
+                table->ticks_denom = timebase.denom;
+                table->magic = SWS_MAGIC;
+            }
+        }
+        if (fd >= 0)
+            close(fd);
+        note("table %s\n", table ? "mapped" : "NOT mapped");
+    }
 }

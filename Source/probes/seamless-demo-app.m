@@ -1,16 +1,28 @@
 // A guest app with the awkward window kinds a seamless host must reproduce: a popover past its window's edge, a child
-// panel, a translucent window, a real menu and a sheet. It shows each on a schedule, so a run needs no input.
+// panel, a translucent window, a real menu and a sheet. It shows each on a schedule, so a run needs no input. A counter
+// keeps changing, to measure a live window; a click on its button and typing into its field show in its title.
 // Built into seamless-guest as `seamless-guest demo-app`.
 #import <Cocoa/Cocoa.h>
 
-@interface SeamlessDemo : NSObject <NSApplicationDelegate>
+@interface SeamlessDemo : NSObject <NSApplicationDelegate, NSTextFieldDelegate>
 @property(retain) NSWindow *window;
 @property(retain) NSPopover *popover;
 @property(retain) NSView *anchor;
 @property(retain) NSMenu *menu;
+@property(retain) NSTextField *counter;
+@property unsigned ticks;
 @end
 
 @implementation SeamlessDemo
+- (void)tick {
+    self.counter.stringValue = [NSString stringWithFormat:@"Frame %u", ++self.ticks];
+}
+- (void)clicked:(id)sender {
+    self.window.title = [self.window.title stringByAppendingString:@" clicked"];
+}
+- (void)controlTextDidChange:(NSNotification *)note {
+    self.window.title = [self.window.title stringByAppendingString:@" typed"];
+}
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(300, 300, 420, 260)
                                                    styleMask:NSTitledWindowMask | NSClosableWindowMask |
@@ -28,9 +40,22 @@
     anchor.title = @"Anchor";
     anchor.bezelStyle = NSRoundedBezelStyle;
     [window.contentView addSubview:anchor];
+    anchor.target = self;
+    anchor.action = @selector(clicked:);
     self.anchor = anchor;
+    NSTextField *counter = [[NSTextField alloc] initWithFrame:NSMakeRect(20, 20, 200, 24)];
+    counter.bezeled = NO;
+    counter.editable = NO;
+    counter.drawsBackground = NO;
+    [window.contentView addSubview:counter];
+    self.counter = counter;
+    [NSTimer scheduledTimerWithTimeInterval:1.0 / 30 target:self selector:@selector(tick) userInfo:nil repeats:YES];
+    NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(20, 160, 200, 24)];
+    field.delegate = self;
+    [window.contentView addSubview:field];
     self.window = window;
     [window makeKeyAndOrderFront:nil];
+    [window makeFirstResponder:field];
     [NSApp activateIgnoringOtherApps:YES];
     [self performSelector:@selector(showPopover) withObject:nil afterDelay:3];
     [self performSelector:@selector(showPanels) withObject:nil afterDelay:6];

@@ -8,14 +8,15 @@
 #     scripts/seamless-try input-live <app> <machine> [SECONDS]  The same with your own trackpad, in a host window.
 #     scripts/seamless-try tree <app> <machine> [SECONDS]      Every window of a demo app as its own host window: shadow,
 #                                                              alpha, popover, panel, menu and sheet.
-#     scripts/seamless-try ws-probe <app> <machine>            Loads a read-only probe into a 10.9 clone's WindowServer.
+#     scripts/seamless-try hook <app> <machine> [SECONDS]      The same tree, by capture and then through a hook loaded
+#                                                              into a 10.9 clone's WindowServer, to compare them.
 #
 # `display` needs an app built from this branch, for its display-request diagnostic. `stream` works with any recent one.
 set -euo pipefail
 source_root=${0:A:h:h}
-mode=${1:?usage: seamless-try stream|display|tree|ws-probe|input|input-live <app> <machine> [arguments]}
-app=${2:?usage: seamless-try stream|display|tree|ws-probe|input|input-live <app> <machine> [arguments]}
-machine=${3:?usage: seamless-try stream|display|tree|ws-probe|input|input-live <app> <machine> [arguments]}
+mode=${1:?usage: seamless-try stream|display|tree|hook|input|input-live <app> <machine> [arguments]}
+app=${2:?usage: seamless-try stream|display|tree|hook|input|input-live <app> <machine> [arguments]}
+machine=${3:?usage: seamless-try stream|display|tree|hook|input|input-live <app> <machine> [arguments]}
 shift 3
 "$source_root/scripts/build-seamless-probes" "$source_root/Build/seamless" 2>/dev/null
 driver_arguments=(--driver-arg "$mode")
