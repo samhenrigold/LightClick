@@ -304,7 +304,7 @@ Not done: dark appearance, as `defaults` reads back Dark and apps stay light in 
 | WindowServer | 6.2% | 7.4% |
 | Safari's own, the app | 5.3% | 5.0% |
 | Viewer | | 1.8% |
-| Behind TextEdit, frames/s | 13.9 | 13.3 |
+| Behind TextEdit, frames/s | 13.9 | 13.5 |
 
 So there's no difference to speak of, one run each. A page behind another app's window slows down whether or not this is on. Turning it off brought Safari back on the display whole. With the mode on, the host doesn't run the display's draws, each window gets all of what changed, and every window behind is drawn too, as nothing stops at an opaque one. A window drawn in part has no shadow drawn, and one drawn whole starts clear, or the shadow builds up. On 10.9 the injector borrows zeroed memory as a thread with `_pthread_set_self`, as `pthread_create_from_mach_thread` isn't there, and new[]'s lazy pointer in `CoreGraphics` gives the layers' owners, with no interposing.
 
