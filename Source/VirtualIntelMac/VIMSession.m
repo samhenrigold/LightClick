@@ -981,16 +981,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             *error = VIMSessionError(@"The Mojave shader compiler repair resource is missing.");
         return NO;
     }
-    // Keep the lock file in place: unlinking it would allow two processes to
-    // lock different inodes for the same package. Do not follow a planted link.
     NSURL *lockURL = [self.machine.URL URLByAppendingPathComponent:@"State/Session.lock"];
-    self.machineLock = open(lockURL.fileSystemRepresentation, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
-    struct stat lockInfo;
-    if (self.machineLock < 0 || fstat(self.machineLock, &lockInfo) || !S_ISREG(lockInfo.st_mode) ||
-        lockInfo.st_nlink != 1 || flock(self.machineLock, LOCK_EX | LOCK_NB)) {
-        if (self.machineLock >= 0)
-            close(self.machineLock);
-        self.machineLock = -1;
+    self.machineLock = [VIMLaunchMedia acquireSessionLockAtPath:lockURL.path];
+    if (self.machineLock < 0) {
         if (error)
             *error = VIMSessionError(@"This Mac is already in use, or its session lock could not be opened. Close its "
                                      @"other session before starting it here.");
@@ -1218,89 +1211,41 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.retinaEnabled = ![self.displayMode isEqual:@"scaled"];
     self.observedDisplayMode = nil;
     self.state.networkLinkConnected = !config[@"NetworkConnected"] || [config[@"NetworkConnected"] boolValue];
-    NSString *firmwareRoot =
-        root.length ? [root stringByAppendingPathComponent:@"Build/DevelopmentFirmware"]
-                    : [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Runtime/Firmware"];
-    NSString *commonFirmware = [firmwareRoot stringByAppendingPathComponent:@"Common"];
+    NSArray *launchArguments = NSProcessInfo.processInfo.arguments;
+    VIMLaunchOptions *options = [[VIMLaunchOptions alloc] initWithArguments:launchArguments
+                                                               appleSilicon:appleSilicon
+                                                              researchGuest:self.machine.openGLResearchGuest
+                                                                      error:error];
+    if (!options) {
+        [self cleanUp];
+        return NO;
+    }
     BOOL packageResearchFirmware =
         self.machine.openGLResearchGuest && ![config[@"FirmwareSource"] isEqual:@"application"];
-    firmwareRoot =
-        [firmwareRoot stringByAppendingPathComponent:packageResearchFirmware ? @"mojave" : self.machine.guest];
-    // One immutable EFI per OS. OpenCore reads these eight bytes once through
-    // QEMU fw_cfg, after OpenCore's baseline and before macOS starts.
-    // No generated EFI, copied template or separate policy variable in NVRAM.
-    NSString *firmwareCode = [firmwareRoot stringByAppendingPathComponent:@"CODE.fd"];
-    if (![NSFileManager.defaultManager fileExistsAtPath:firmwareCode])
-        firmwareCode = [commonFirmware stringByAppendingPathComponent:@"CODE.fd"];
-    NSString *firmwareEFI = [commonFirmware stringByAppendingPathComponent:@"EFI.img"];
-    if (![NSFileManager.defaultManager fileExistsAtPath:firmwareEFI])
-        firmwareEFI = [firmwareRoot stringByAppendingPathComponent:@"EFI.img"];
+    // Old research guests retain their own known-compatible OpenCore and CODE
+    // files. Never apply the supported guests' EFI boot policy or root patches.
+    NSString *efiOverride =
+        options.guestEFI
+            ?: (packageResearchFirmware ? [self.machine.URL.path stringByAppendingPathComponent:config[@"BootMedia"]]
+                                        : nil);
+    VIMLaunchFirmware *firmware = [[VIMLaunchFirmware alloc]
+        initWithDirectory:root.length
+                              ? [root stringByAppendingPathComponent:@"Build/DevelopmentFirmware"]
+                              : [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Runtime/Firmware"]
+           guestDirectory:packageResearchFirmware ? @"mojave" : self.machine.guest
+                bootMedia:efiOverride
+                    error:error];
+    if (!firmware) {
+        [self cleanUp];
+        return NO;
+    }
     BOOL signatureOnly =
         [VIMGuestBootPolicy readyAtURL:[self.machine.URL URLByAppendingPathComponent:@"State/BootPolicy.plist"]
                                  guest:self.machine.guest
                             identifier:config[@"Identifier"]];
-    // Old research guests retain their own known-compatible OpenCore and CODE
-    // files. Never apply the supported guests' EFI boot policy or root patches.
-    NSString *efiOverride =
-        packageResearchFirmware ? [self.machine.URL.path stringByAppendingPathComponent:config[@"BootMedia"]] : nil;
-    NSArray *launchArguments = NSProcessInfo.processInfo.arguments;
-    NSUInteger overrideIndex = [launchArguments indexOfObject:@"--guest-efi"];
-    if (overrideIndex != NSNotFound) {
-        efiOverride = overrideIndex + 1 < launchArguments.count ? launchArguments[overrideIndex + 1] : nil;
-        int fd = efiOverride.isAbsolutePath
-                     ? open(efiOverride.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-                     : -1;
-        char signature[8] = {0};
-        struct stat information;
-        BOOL valid = fd >= 0 && !fstat(fd, &information) && S_ISREG(information.st_mode) &&
-                     pread(fd, signature, 8, 512) == 8 && !memcmp(signature, "EFI PART", 8);
-        if (fd >= 0)
-            close(fd);
-        if (!valid) {
-            if (error)
-                *error = VIMSessionError(@"--guest-efi requires an absolute path to a regular GPT EFI disk image. The "
-                                         @"VM’s firmware was not changed.");
-            [self cleanUp];
-            return NO;
-        }
-    }
-    for (NSString *file in @[ firmwareCode, efiOverride ?: firmwareEFI ])
-        if (![NSFileManager.defaultManager fileExistsAtPath:file]) {
-            if (error)
-                *error = VIMSessionError(@"This app is missing its firmware. Rebuild or reinstall the complete app.");
-            [self cleanUp];
-            return NO;
-        }
     NSString * (^machinePath)(NSString *) = ^NSString *(NSString *key) {
       return [self.machine.URL.path stringByAppendingPathComponent:config[key]];
     };
-    NSUInteger openGLCPUOption = [launchArguments indexOfObject:@"--opengl-cpu-model"];
-    NSString *researchCPUModel = nil;
-    if (openGLCPUOption != NSNotFound) {
-        NSString *model = openGLCPUOption + 1 < launchArguments.count ? launchArguments[openGLCPUOption + 1] : @"";
-        if (appleSilicon || !self.machine.openGLResearchGuest || ![@[ @"penryn", @"haswell" ] containsObject:model]) {
-            if (error)
-                *error = VIMSessionError(@"--opengl-cpu-model requires an Intel-host research Mac and penryn or "
-                                         @"haswell. The Mac was not started.");
-            [self cleanUp];
-            return NO;
-        }
-        researchCPUModel = model;
-        [self logNote:@"Research CPU comparison: %@", model];
-    }
-    NSUInteger diskOption = [launchArguments indexOfObject:@"--system-disk-interface"];
-    NSString *systemDiskInterface = nil;
-    if (diskOption != NSNotFound) {
-        NSString *interface = diskOption + 1 < launchArguments.count ? launchArguments[diskOption + 1] : @"";
-        if (![@[ @"sata", @"nvme" ] containsObject:interface]) {
-            if (error)
-                *error = VIMSessionError(@"--system-disk-interface requires sata or nvme. The Mac was not started.");
-            [self cleanUp];
-            return NO;
-        }
-        systemDiskInterface = interface;
-        [self logNote:@"Development system disk interface: %@", interface];
-    }
     self.task = [NSTask new];
     self.task.executableURL = [NSURL fileURLWithPath:qemu];
     // Interactive VM execution is user-initiated work, not a maintenance job.
@@ -1309,25 +1254,21 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.task.qualityOfService = NSQualityOfServiceUserInitiated;
     if (self.networkClient.socket)
         self.task.standardInput = self.networkClient.socket;
-    NSString *optical = config[@"OpticalMedia"];
-    NSError *opticalFailure = nil;
-    NSString *opticalFormat = optical.length ? VIMOpticalImageFormat(optical, &opticalFailure) : nil;
-    NSMutableDictionary<NSNumber *, NSString *> *unavailableImages = [NSMutableDictionary new];
-    if (optical.length && !opticalFormat) {
-        // Removable media can disappear when a library moves to another Mac.
-        // Boot with an empty drive and forget the unavailable optional image
-        // below. This never applies to the system disk or required installer.
-        if ([opticalFailure.domain isEqual:NSPOSIXErrorDomain] &&
-            (opticalFailure.code == ENOENT || opticalFailure.code == ENOTDIR)) {
-            unavailableImages[@0] = optical;
-            optical = nil;
-        } else {
-            if (error)
-                *error = VIMFriendlyDiscImageError(optical, opticalFailure);
-            [self cleanUp];
-            return NO;
-        }
+    NSMutableArray<NSString *> *savedImages = [NSMutableArray new];
+    for (NSUInteger slot = 0; slot < VIMImageSlotCount; slot++)
+        [savedImages addObject:VIMImageSlotPath(config, slot)];
+    VIMLaunchMedia *media = [[VIMLaunchMedia alloc] initWithPaths:savedImages
+                                                          inspect:^id(NSString *path) {
+                                                            NSError *failure = nil;
+                                                            return VIMOpticalImageFormat(path, &failure) ?: failure;
+                                                          }];
+    if (media.refusal) {
+        if (error)
+            *error = VIMFriendlyDiscImageError(media.refusedPath, media.refusal);
+        [self cleanUp];
+        return NO;
     }
+    NSDictionary<NSNumber *, NSString *> *unavailableImages = media.unavailable;
     self.imageDrives = [[VIMImageDrives alloc] initWithControl:self.control
                                                            bus:VIMImageUSBBus(self.machine.guest)
                                                       basePort:(NSInteger)VIMImageUSBPort(self.machine.guest, 0)
@@ -1335,27 +1276,17 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.imageDrives.describeFailure = ^NSError *(NSString *path, NSError *failure) {
       return VIMFriendlyDiscImageError(path, failure);
     };
-    if (optical.length)
-        [self.imageDrives startWithImage:optical format:opticalFormat slot:0];
+    NSString *optical = nil, *opticalFormat = nil;
     NSMutableArray<LaunchImage *> *additionalImages = [NSMutableArray new];
-    for (NSUInteger slot = 1; slot < VIMImageSlotCount; slot++) {
-        NSString *path = VIMImageSlotPath(config, slot);
-        NSError *failure = nil;
-        NSString *format = path.length ? VIMOpticalImageFormat(path, &failure) : nil;
-        if (failure) {
-            if ([failure.domain isEqual:NSPOSIXErrorDomain] && (failure.code == ENOENT || failure.code == ENOTDIR)) {
-                unavailableImages[@(slot)] = path;
-                path = @"";
-            } else {
-                if (error)
-                    *error = VIMFriendlyDiscImageError(path, failure);
-                [self cleanUp];
-                return NO;
-            }
-        }
-        if (path.length) {
-            [self.imageDrives startWithImage:path format:format slot:(NSInteger)slot];
-            [additionalImages addObject:[[LaunchImage alloc] initWithSlot:(NSInteger)slot path:path format:format]];
+    for (VIMLaunchMediaImage *image in media.images) {
+        [self.imageDrives startWithImage:image.path format:image.format slot:image.slot];
+        if (image.slot) {
+            [additionalImages addObject:[[LaunchImage alloc] initWithSlot:image.slot
+                                                                     path:image.path
+                                                                   format:image.format]];
+        } else {
+            optical = image.path;
+            opticalFormat = image.format;
         }
     }
     NSString *setupMedia = nil;
@@ -1373,26 +1304,17 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     }
     NSMutableDictionary<NSNumber *, NSString *> *audioDeviceNames = [NSMutableDictionary new];
     for (NSNumber *input in @[ @NO, @YES ]) {
-        NSString *uid = VIMAudioSelection(config, input.boolValue);
-        if ([@[ @"default", @"disabled" ] containsObject:uid])
-            continue;
-        NSArray *devices = VIMHostAudioDevices(input.boolValue);
-        NSDictionary *choice = nil;
-        for (NSDictionary *device in devices)
-            if ([device[@"UID"] isEqual:uid])
-                choice = device;
-        NSUInteger matches = 0;
-        for (NSDictionary *device in devices)
-            if ([device[@"Name"] isEqual:choice[@"Name"]])
-                matches++;
-        if (!choice || matches != 1) {
-            if (error)
-                *error = VIMSessionError(@"The selected sound device is unavailable or has a duplicate name. Choose "
-                                         @"Default or another device in Sound settings.");
+        NSString *name = [VIMLaunchMedia audioDeviceNameForSelection:VIMAudioSelection(config, input.boolValue)
+                                                             devices:^NSArray * {
+                                                               return VIMHostAudioDevices(input.boolValue);
+                                                             }
+                                                               error:error];
+        if (!name) {
             [self cleanUp];
             return NO;
         }
-        audioDeviceNames[input] = choice[@"Name"];
+        if (name.length)
+            audioDeviceNames[input] = name;
     }
     LaunchInput *launch = [LaunchInput new];
     launch.guest = self.machine.guest;
@@ -1410,9 +1332,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     launch.bootPolicySignatureOnly = signatureOnly;
     launch.bootMediaOverridden = efiOverride != nil;
     launch.biosPath = bios;
-    launch.firmwarePath = packageResearchFirmware ? machinePath(@"Firmware") : firmwareCode;
+    launch.firmwarePath = packageResearchFirmware ? machinePath(@"Firmware") : firmware.codePath;
     launch.nvramPath = machinePath(@"NVRAM");
-    launch.bootMediaPath = efiOverride ?: firmwareEFI;
+    launch.bootMediaPath = firmware.bootMediaPath;
     launch.diskPath = machinePath(@"Disk");
     if (config[@"InstallerMedia"])
         launch.installerPath =
@@ -1434,8 +1356,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     launch.legacyDisplayRefreshMS = [NSUserDefaults.standardUserDefaults integerForKey:@"VIMLegacyDisplayRefreshMS"];
     launch.networkMode = VIMNetworkMode(config);
     launch.macAddress = VIMNetworkMACAddress(config);
-    launch.researchCPUModel = researchCPUModel;
-    launch.systemDiskInterface = systemDiskInterface;
+    launch.researchCPUModel = options.researchCPUModel;
+    launch.systemDiskInterface = options.systemDiskInterface;
     launch.audioOutputSelection = VIMAudioSelection(config, NO);
     launch.audioInputSelection = VIMAudioSelection(config, YES);
     launch.audioOutputRate = (NSInteger)VIMHostOutputSampleRate(VIMAudioSelection(config, NO));
@@ -1617,19 +1539,11 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         BOOL forgotten = !settings.count || [self.machine saveSettings:settings error:&failure];
         if (settings.count)
             [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
+        VIMUnavailableImagesNotice *notice = [[VIMUnavailableImagesNotice alloc] initWithImages:unavailableImages
+                                                                                      forgotten:forgotten];
         NSAlert *alert = [NSAlert new];
-        alert.messageText = forgotten ? (unavailableImages.count == 1 ? @"An unavailable image was disconnected"
-                                                                      : @"Unavailable images were disconnected")
-                                      : @"An image couldn’t be found";
-        NSMutableArray *names = [NSMutableArray new];
-        for (NSNumber *slot in [unavailableImages.allKeys sortedArrayUsingSelector:@selector(compare:)])
-            [names addObject:[unavailableImages[slot] lastPathComponent]];
-        alert.informativeText = [NSString
-            stringWithFormat:
-                @"Your virtual Mac started without %@. %@", [names componentsJoinedByString:@", "],
-                forgotten ? @"To reconnect an image, choose its current location when its file or drive is available."
-                          : @"Its saved selection couldn’t be cleared. You can still disconnect it from CD/DVD or "
-                            @"choose it again when its drive is available."];
+        alert.messageText = notice.title;
+        alert.informativeText = notice.detail;
         [alert addButtonWithTitle:@"OK"];
         [alert addButtonWithTitle:@"Connect Image…"];
         VIMPresentAlert(alert, self.window, ^(NSModalResponse response) {
