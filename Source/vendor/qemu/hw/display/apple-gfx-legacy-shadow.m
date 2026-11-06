@@ -7,6 +7,8 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <IOSurface/IOSurface.h>
+#include <mach/mach.h>
+#include <servers/bootstrap.h>
 #include <os/lock.h>
 #include <stdint.h>
 #include <string.h>
@@ -79,6 +81,46 @@ static id capture_library_data(id self, SEL cmd, dispatch_data_t data, NSError *
 /* Research, off unless VIM_SEAMLESS_PVG_DIR is set: what the guest renders to, as the host sees it. Each second, a line
  * per render target in <dir>/passes.txt, and how many frames the display asked to show. */
 static const char *seamless_pvg_dir;
+/* A guest IOSurface a render pass finishes in is a host IOSurface here, so it goes to VIM_SEAMLESS_PVG_SERVICE as it is,
+ * as probes/seamless-gpu-viewer.m takes it. shortcut: the display's own surfaces are told apart only by their size in
+ * VIM_SEAMLESS_PVG_SKIP (WxH), and the sender says nothing of which window it is. A hook's own surfaces would say. */
+#define SEAMLESS_FRAME_MESSAGE 0x53474652
+struct SeamlessFrameMessage {
+    mach_msg_header_t header;
+    mach_msg_body_t body;
+    mach_msg_port_descriptor_t surface;
+    uint32_t window, frame, width, height;
+    int32_t x, y;
+};
+static void seamless_send_surface(IOSurfaceRef surface)
+{
+    static mach_port_t port;
+    static uint32_t sent;
+    if (!port) {
+        const char *service = getenv("VIM_SEAMLESS_PVG_SERVICE");
+        if (!service || bootstrap_look_up(bootstrap_port, service, &port)) {
+            port = 0;
+            return;
+        }
+    }
+    mach_port_t capability = IOSurfaceCreateMachPort(surface);
+    struct SeamlessFrameMessage m;
+    memset(&m, 0, sizeof(m));
+    m.header.msgh_bits = MACH_MSGH_BITS_COMPLEX | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    m.header.msgh_size = sizeof(m);
+    m.header.msgh_remote_port = port;
+    m.header.msgh_id = SEAMLESS_FRAME_MESSAGE;
+    m.body.msgh_descriptor_count = 1;
+    m.surface.name = capability;
+    m.surface.disposition = MACH_MSG_TYPE_COPY_SEND;
+    m.surface.type = MACH_MSG_PORT_DESCRIPTOR;
+    m.window = (uint32_t)IOSurfaceGetWidth(surface) * 4096 + (uint32_t)IOSurfaceGetHeight(surface);
+    m.frame = ++sent;
+    m.width = (uint32_t)IOSurfaceGetWidth(surface);
+    m.height = (uint32_t)IOSurfaceGetHeight(surface);
+    mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, 0, 0, 0);
+    mach_port_deallocate(mach_task_self(), capability);
+}
 static uint64_t seamless_frames;
 void apple_gfx_seamless_frame(void) { __atomic_fetch_add(&seamless_frames, 1, __ATOMIC_RELAXED); }
 static void seamless_note_pass(MTLRenderPassDescriptor *pass)
@@ -114,7 +156,23 @@ static void seamless_note_pass(MTLRenderPassDescriptor *pass)
 static id preserving_render_encoder(id self, SEL cmd, MTLRenderPassDescriptor *pass)
 {
     MTLRenderPassDescriptor *adjusted = nil;
-    if (seamless_pvg_dir && guest_render_depth) seamless_note_pass(pass);
+    if (seamless_pvg_dir && guest_render_depth) {
+        seamless_note_pass(pass);
+        id<MTLTexture> target = pass.colorAttachments[0].texture;
+        IOSurfaceRef surface = target.iosurface;
+        const char *skip = getenv("VIM_SEAMLESS_PVG_SKIP");
+        int skip_width = 0, skip_height = 0;
+        if (skip) sscanf(skip, "%dx%d", &skip_width, &skip_height);
+        if (surface && target.width > 256 && target.height > 256 &&
+            !((int)target.width == skip_width && (int)target.height == skip_height)) {
+            CFRetain(surface);
+            [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> done) {
+                (void)done;
+                seamless_send_surface(surface);
+                CFRelease(surface);
+            }];
+        }
+    }
     if (guest_render_depth) {
         for (NSUInteger i = 0; i < 8; i++) {
             MTLRenderPassColorAttachmentDescriptor *a = pass.colorAttachments[i];

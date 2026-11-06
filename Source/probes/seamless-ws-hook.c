@@ -49,25 +49,27 @@ static uint32_t (*backing_row_bytes)(void *, uint64_t);
 static uint32_t (*backing_width)(void *), (*backing_height)(void *), (*backing_bits)(void *);
 static char (*backing_has_alpha)(void *);
 static void *(*backing_data)(void *, uint64_t, uint64_t);
-static const char *const wanted[] = {"_CGXWindowByID",
-                                     "_CGXWindowHasShadow",
-                                     "_CGXBackingStoreIsAccelerated",
-                                     "_CGXBackingStoreRowBytes",
-                                     "_CGXBackingStoreWidth",
-                                     "_CGXBackingStoreHeight",
-                                     "_CGXBackingStoreBitsPerPixel",
-                                     "_CGXBackingStoreHasAlpha",
-                                     "_CGXBackingStoreDataIndexed",
-                                     "_WSGetVisibleWindowArray",
-                                     "_CGXWindowArraySubArray",
-                                     "_CGXWindowArrayEnumeratorSubArray",
-                                     "_CGXWindowArrayEnumeratorNext",
-                                     "_WSWindowGetScreenRect",
-                                     "_CGXGetShadowMarginForWindow",
-                                     "_CGXGetCurrentSessionWindowData",
-                                     "_CGXGLGetContext",
-                                     "_redraw_window",
-                                     "_gl_composite_layer"};
+static const char *const wanted[] = {
+    "_CGXWindowByID",
+    "_CGXWindowHasShadow",
+    "_CGXBackingStoreIsAccelerated",
+    "_CGXBackingStoreRowBytes",
+    "_CGXBackingStoreWidth",
+    "_CGXBackingStoreHeight",
+    "_CGXBackingStoreBitsPerPixel",
+    "_CGXBackingStoreHasAlpha",
+    "_CGXBackingStoreDataIndexed",
+    "_WSGetVisibleWindowArray",
+    "_CGXWindowArraySubArray",
+    "_CGXWindowArrayEnumeratorSubArray",
+    "_CGXWindowArrayEnumeratorNext",
+    "_WSWindowGetScreenRect",
+    "_CGXGetShadowMarginForWindow",
+    "_CGXGetCurrentSessionWindowData",
+    "_CGXGLGetContext",
+    "_redraw_window",
+    "_gl_composite_layer",
+};
 static void *resolved[19];
 static void *(*session_data)(void);
 static void **(*server_gl)(void);
@@ -361,11 +363,12 @@ static void walk_windows(void) {
 static int tree_in_gl;
 static uint64_t marks, unmarked;
 
-// For a host that draws each window on its own GPU (PassthroughOpenGL/seamless-gpu-replay-host.c), which window each layer
-// of a composite belongs to. redraw_window builds a window's layers, all allocated with new[], and gl_composite_layer later
-// draws them, so a layer is known by its address. Before each one's draws goes that window's ID and bounds, as glPassThrough
-// tokens in WindowServer's own GL stream: a no-op in GL, and in order with its draws. Whole numbers below 2^24, which a
-// float holds exactly. Only with /var/tmp/seamless-ws-gl-tree present. Their entries are patched, as both are local symbols.
+// For a host that draws each window on its own GPU (PassthroughOpenGL/seamless-gpu-replay-host.c), which window each
+// layer of a composite belongs to. redraw_window builds a window's layers, all allocated with new[], and
+// gl_composite_layer later draws them, so a layer is known by its address. Before each one's draws goes that window's
+// ID and bounds, as glPassThrough tokens in WindowServer's own GL stream: a no-op in GL, and in order with its draws.
+// Whole numbers below 2^24, which a float holds exactly. Only with /var/tmp/seamless-ws-gl-tree present. Their entries
+// are patched, as both are local symbols.
 #define LAYER_SLOTS 8192
 static struct {
     const void *layer;
@@ -396,7 +399,7 @@ __attribute__((used)) void seamless_redraw_window(void *state, char *window) {
     (void)state;
     if (layers_used)
         forget_layers();
-    marked_window = NULL;
+    marked_window = (char *)-1; // Nothing marked yet, so the first layer is told, even with no owner.
     building_window = window;
 }
 __attribute__((used)) void seamless_composite_layer(const void *layer) {
@@ -410,11 +413,16 @@ __attribute__((used)) void seamless_composite_layer(const void *layer) {
             break;
         }
     owner ? marks++ : unmarked++;
-    // CoreGraphics calls GL through its own context record, as CGLMacro does: the renderer first, then the dispatch table,
-    // whose slots are the wire's opcodes. glDeleteTextures, slot 59, at +0x1e0 in _CGXGLDeleteTexture shows it.
+    // CoreGraphics calls GL through its own context record, as CGLMacro does: the renderer first, then the dispatch
+    // table, whose slots are the wire's opcodes. glDeleteTextures, slot 59, at +0x1e0 in _CGXGLDeleteTexture shows it.
     void **gl = server_gl();
     if (!gl || owner == marked_window)
         return;
+    if (!owner) {
+        static unsigned shown;
+        if (shown++ < 12)
+            note("layer %p has no known window\n", layer);
+    }
     marked_window = owner;
     float tokens[9] = {11184809.0f};
     const uint8_t *state = owner ? *(const uint8_t **)(owner + 0xe0) : NULL;
@@ -457,8 +465,8 @@ extern char seamless_redraw_entry[], seamless_layer_entry[];
 // Sends a function's entry to `entry`, and returns where to continue it. Both functions start with the same 20 bytes of
 // pushes and a stack adjustment, which can run anywhere. Refuses anything else.
 static void *patch_entry(uint8_t *function, const void *entry) {
-    static const uint8_t prologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-                                       0x41, 0x54, 0x53, 0x48, 0x81, 0xec};
+    static const uint8_t prologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
+                                       0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xec};
     if (memcmp(function, prologue, sizeof(prologue))) {
         note("refusing to patch %p: its entry isn't the expected one\n", (void *)function);
         return NULL;
@@ -586,8 +594,9 @@ static void between_requests(void) {
         else
             sample_unknown_build();
     }
-    if (ready && table && build->full)
+    if (ready && table && build->full) {
         publish();
+    }
     in_sample = 0;
 }
 

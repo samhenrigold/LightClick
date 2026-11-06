@@ -30,11 +30,11 @@ static void DGSeamlessTraceDraw(struct DGHostContext *c, struct DGMessage *m) {
     glGetIntegerv(GL_BLEND_SRC_ALPHA, &srca);
     glGetIntegerv(GL_BLEND_DST_ALPHA, &dsta);
     fprintf(dg_seamless_trace,
-            " fbo=%d/%d colorfbo=%u drawable=%u:%dx%d vp=%d,%d,%d,%d sc=%d:%d,%d,%d,%d prog=%d blend=%d:%x,%x,%x,%x", draw,
-            read, c->framebuffer, c->drawable ? c->drawable->name : 0, c->drawable ? c->drawable->width : 0,
+            " fbo=%d/%d colorfbo=%u drawable=%u:%dx%d vp=%d,%d,%d,%d sc=%d:%d,%d,%d,%d prog=%d blend=%d:%x,%x,%x,%x",
+            draw, read, c->framebuffer, c->drawable ? c->drawable->name : 0, c->drawable ? c->drawable->width : 0,
             c->drawable ? c->drawable->height : 0, viewport[0], viewport[1], viewport[2], viewport[3],
-            glIsEnabled(GL_SCISSOR_TEST), scissor[0], scissor[1], scissor[2], scissor[3], program, glIsEnabled(GL_BLEND),
-            src, dst, srca, dsta);
+            glIsEnabled(GL_SCISSOR_TEST), scissor[0], scissor[1], scissor[2], scissor[3], program,
+            glIsEnabled(GL_BLEND), src, dst, srca, dsta);
     for (GLint unit = 0; unit < 4 && unit < c->texture_units; ++unit) {
         GLint rect = 0, flat = 0;
         glActiveTexture(GL_TEXTURE0 + unit);
@@ -56,7 +56,8 @@ static void DGSeamlessTraceDraw(struct DGHostContext *c, struct DGMessage *m) {
     struct DGVertexArray *arrays = n && n <= DG_VERTEX_SLOTS ? DGHostPointer(m, 6, n * sizeof(*arrays)) : NULL;
     for (uint64_t i = 0; arrays && i < n; ++i) {
         const struct DGVertexArray *a = &arrays[i];
-        fprintf(dg_seamless_trace, " [slot=%u sz=%d t=%x st=%d buf=%u", a->slot, a->size, a->type, a->stride, a->buffer);
+        fprintf(dg_seamless_trace, " [slot=%u sz=%d t=%x st=%d buf=%u", a->slot, a->size, a->type, a->stride,
+                a->buffer);
         if (!a->buffer && a->type == GL_FLOAT && a->pointer && a->pointer - 1 + a->bytes <= m->bytes) {
             const char *base = (const char *)(m + 1) + a->pointer - 1;
             size_t stride = a->stride ? (size_t)a->stride : (size_t)a->size * 4;
@@ -87,8 +88,8 @@ static void DGSeamlessObserve(struct DGInterpreter *s, struct DGMessage *m) {
     }
     if (dg_seamless_trace && dg_seamless_trace_budget) {
         dg_seamless_trace_budget--;
-        fprintf(dg_seamless_trace, "%llu %p c%u op=%x b=%u f=%x a=%llx,%llx,%llx,%llx,%llx,%llx",
-                (unsigned long long)mach_absolute_time(), (void *)s, m->context, m->op, m->bytes, m->flags,
+        fprintf(dg_seamless_trace, "%llu %p c%u op=%x b=%u f=%x w=%u a=%llx,%llx,%llx,%llx,%llx,%llx",
+                (unsigned long long)mach_absolute_time(), (void *)s, m->context, m->op, m->bytes, m->flags, sg_layer.id,
                 (unsigned long long)m->args[0], (unsigned long long)m->args[1], (unsigned long long)m->args[2],
                 (unsigned long long)m->args[3], (unsigned long long)m->args[4], (unsigned long long)m->args[5]);
         struct DGHostContext *c = m->context && m->context < s->next ? &s->contexts[m->context] : NULL;

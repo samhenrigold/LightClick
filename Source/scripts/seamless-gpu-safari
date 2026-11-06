@@ -42,6 +42,7 @@ print "guest after:  $g1"
 print "rates begin: $(cat "$results/rates-begin.txt")"
 print "rates end:   $(cat "$results/rates-end.txt")"
 "$gpu" capture "$work" "$results/frame.png" || true
+"$gpu" run "$work" /bin/cat /var/tmp/seamless-ws-probe.log 2>/dev/null | grep -E "patched|asked|no known|marked|refus" | tail -8 || true
 if [[ -n $viewer ]]; then
     kill $viewer
     wait $viewer || true

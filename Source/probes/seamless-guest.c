@@ -2021,12 +2021,16 @@ int main(int argc, char **argv) {
         if (!window || !connection || !hw)
             return 1;
         double seconds = atof(option(argc, argv, "--seconds", "20")), started = now();
+        double hz = atof(option(argc, argv, "--hz", "0"));
         unsigned made = 0;
         while (now() - started < seconds) {
             CFArrayRef images = hw(connection(), &window, 1, 0x1);
             if (images)
                 CFRelease(images);
             made++;
+            double ahead = hz ? started + made / hz - now() : 0;
+            if (ahead > 0)
+                usleep((useconds_t)(ahead * 1000000));
         }
         printf("hw_loop %u composites, %.1f/s, %.1f ms each\n", made, made / (now() - started),
                (now() - started) * 1000 / made);

@@ -7,13 +7,15 @@
  *
  * shortcut: only what WindowServer draws arrives, so a covered part of a window stays stale until it's uncovered.
  * shortcut: a frame is sent once its fence has passed, seen at the next publish, so one frame later than it could be,
- * and a last frame waits for the next publish. A worker waiting on fences, as direct-display-sender-host.c does, fixes it.
+ * and a last frame waits for the next publish. A worker waiting on fences, as direct-display-sender-host.c does, fixes
+ * it.
  */
 #include <mach/mach.h>
 #include <math.h>
 #include <servers/bootstrap.h>
 #define SG_LAYER_MAGIC 11184809.0f
 #define SG_LAYER_FIELDS 8
+#define SG_MARGIN_POINTS 96 // As probes/seamless-viewer.m found: an active window's shadow fits in this.
 #define SG_BUFFERS 3
 #define SG_FRAME_MESSAGE 0x53474652
 struct SGFrameMessage {
@@ -41,6 +43,7 @@ struct SGWindow {
 };
 static struct DGHostContext *sg_display;
 static uint32_t sg_primary;
+static int64_t sg_primary_area;
 static struct SGTreeEntry sg_layer;
 static float sg_tokens[SG_LAYER_FIELDS], sg_scale = 1;
 static int sg_token_count = -1;
@@ -73,9 +76,9 @@ static void SGToken(float value) {
     const float *f = sg_tokens;
     // One scale for the display: a window with no backing says 1 whatever the display is.
     sg_scale = fmaxf(sg_scale, f[7] / 16);
-    sg_layer = (struct SGTreeEntry){(uint32_t)f[0],             (int)f[1] - 1,              (int)(f[6] * sg_scale),
-                                    (f[2] - 16384) * sg_scale, (f[3] - 16384) * sg_scale, f[4] * sg_scale,
-                                    f[5] * sg_scale};
+    sg_layer = (struct SGTreeEntry){
+        (uint32_t)f[0],  (int)f[1] - 1,  (int)(f[6] * sg_scale), (f[2] - 16384) * sg_scale, (f[3] - 16384) * sg_scale,
+        f[4] * sg_scale, f[5] * sg_scale};
     ++sg_marks;
 }
 
@@ -159,16 +162,46 @@ static struct SGWindow *SGWindowFor(struct DGHostContext *c, const struct SGTree
         w->next = sg_windows;
         sg_windows = w;
     }
-    int width = (int)ceilf(t->width) + 2 * t->margin, height = (int)ceilf(t->height) + 2 * t->margin;
+    // A shadow's margin grows when a window becomes active, with nothing else redrawn, so the room for one is fixed.
+    int margin = t->margin ? (int)(SG_MARGIN_POINTS * sg_scale) : 0;
+    int width = (int)ceilf(t->width) + 2 * margin, height = (int)ceilf(t->height) + 2 * margin;
+    int x = (int)floorf(t->x) - margin, y = (int)floorf(t->y) - margin;
     if (width < 1 || height < 1 || width > 8192 || height > 8192)
         return NULL;
     if (!w->surface[0] || w->width != width || w->height != height) {
-        SGFreeWindowStorage(w);
+        // WindowServer draws only what changed, so what's there already has to come along. Nothing else will redraw it.
+        struct SGWindow old = *w;
+        memset(w->surface, 0, sizeof(w->surface));
+        memset(w->texture, 0, sizeof(w->texture));
+        memset(w->framebuffer, 0, sizeof(w->framebuffer));
+        w->drawn = w->dirty = w->pending = 0;
+        w->front = 0;
         if (!SGMakeWindowStorage(c, w, width, height))
             return NULL;
+        if (old.drawn) {
+            GLint draw = 0, read = 0;
+            GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING_EXT, &draw);
+            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING_EXT, &read);
+            if (scissor)
+                glDisable(GL_SCISSOR_TEST);
+            int dx = old.x - x, dy = old.y - y;
+            glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, old.framebuffer[old.front]);
+            glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, w->framebuffer[0]);
+            glBlitFramebufferEXT(0, 0, old.width, old.height, dx, dy, dx + old.width, dy + old.height,
+                                 GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, (GLuint)draw);
+            glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, (GLuint)read);
+            if (scissor)
+                glEnable(GL_SCISSOR_TEST);
+            w->drawn = 1;
+        }
+        // shortcut: a frame still being shown from the old storage keeps its surface through the viewer's own
+        // reference.
+        SGFreeWindowStorage(&old);
     }
-    w->x = (int)floorf(t->x) - t->margin;
-    w->y = (int)floorf(t->y) - t->margin;
+    w->x = x;
+    w->y = y;
     return w;
 }
 
@@ -243,8 +276,8 @@ static void SGRestore(struct SGWindow *w, const struct SGSaved *saved) {
 }
 
 // Called by DGHostDraw once its arrays are set and its draw has run.
-static void DGSeamlessDrawn(struct DGHostContext *c, struct DGMessage *m, const struct DGVertexArray *arrays, unsigned n,
-                            uint64_t vertices, GLenum type, const void *indices) {
+static void DGSeamlessDrawn(struct DGHostContext *c, struct DGMessage *m, const struct DGVertexArray *arrays,
+                            unsigned n, uint64_t vertices, GLenum type, const void *indices) {
     if (!sg_replay_enabled || c != sg_display || m->op != DG_DRAW || !c->drawable)
         return;
     uint64_t began = mach_absolute_time();
@@ -365,8 +398,8 @@ static void SGWriteRates(void) {
             sg_spent * sg_timebase.numer / sg_timebase.denom / 1000, sg_blits, sg_marks, sg_in_use, sg_odd);
     for (struct SGWindow *w = sg_windows; w; w = w->next)
         if (w->frames)
-            fprintf(sg_rates, " w%u:%dx%d@%d,%d:frames=%llu,sent=%llu,drops=%llu,draws=%llu", w->id, w->width, w->height,
-                    w->x, w->y, w->frames, w->sent, w->drops, w->draws);
+            fprintf(sg_rates, " w%u:%dx%d@%d,%d:frames=%llu,sent=%llu,drops=%llu,draws=%llu", w->id, w->width,
+                    w->height, w->x, w->y, w->frames, w->sent, w->drops, w->draws);
     fputc('\n', sg_rates);
     fflush(sg_rates);
 }
@@ -387,8 +420,11 @@ static void DGSeamlessBefore(struct DGInterpreter *s, struct DGMessage *m) {
     if (m->op == DG_SURFACE_SEALED_REGIONS) {
         ++sg_sealed;
         sg_display = c;
-        if (c->drawable)
-            sg_primary = c->drawable->name; // What's published is the display.
+        // What's published is the display, though a smaller scratch drawable can be current when it happens.
+        if (c->drawable && (int64_t)c->drawable->width * c->drawable->height >= sg_primary_area) {
+            sg_primary = c->drawable->name;
+            sg_primary_area = (int64_t)c->drawable->width * c->drawable->height;
+        }
         // The stream's own order keeps this context current or next to be, and it isn't inside a Begin here.
         if ((CGLGetCurrentContext() == c->cgl || !CGLSetCurrentContext(c->cgl)) && !c->inside_begin) {
             uint64_t began = mach_absolute_time();
