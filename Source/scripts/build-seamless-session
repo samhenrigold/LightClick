@@ -9,9 +9,10 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 "$source_root/scripts/build-seamless-probes" "$work" >/dev/null
 "$source_root/scripts/build-seamless-integration" "$work" >/dev/null
-swift build -c release --package-path "$source_root/Packages/SeamlessIntegration" \
-  --scratch-path "$source_root/Build/seamless-integration-universal" --arch arm64 --arch x86_64 --product SeamlessProxy >&2
-cp "$source_root/Build/seamless-integration-universal/apple/Products/Release/SeamlessProxy" "$output/SeamlessProxy"
+universal=(swift build -c release --package-path "$source_root/Packages/SeamlessIntegration"
+  --scratch-path "$source_root/Build/seamless-integration-universal" --arch arm64 --arch x86_64)
+"${universal[@]}" --product SeamlessProxy >&2
+cp "$("${universal[@]}" --show-bin-path)/SeamlessProxy" "$output/SeamlessProxy"
 for program in seamless-guest seamless-ws-hook.dylib seamless-integration-guest; do
   cp "$work/$program" "$output/"
 done
