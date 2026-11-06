@@ -1320,7 +1320,9 @@ static void test_hlt_poll(void) {
 
 // A second vCPU joins through the C API, as an application processor does under QEMU: it takes fallbacks and kicks here
 // while the first works on, with blocks shared between them.
-static volatile u64 second_count, second_done, second_direct_reads;
+static volatile u64 second_count, second_done, second_direct_reads, second_code_va, second_code_frame;
+static volatile u32 *volatile second_code_done;
+static bool second_joined;
 static u8 second_stack[16384] __attribute__((aligned(16)));
 
 void second_vcpu(void) {
@@ -1339,6 +1341,21 @@ void second_vcpu(void) {
         u64 now = *(volatile u64 *)PHYS(0xC0000000ULL);
         CHECK(now == 0x0123456789ABCDEFULL || now == 0xC0000000ULL * 3);
         second_direct_reads++;
+        if (second_code_va) { // the first vCPU sits in 32-bit code meanwhile, and what is translated here is still 64-bit
+            volatile u8 *p = (volatile u8 *)PHYS(second_code_frame);
+            u64 (*f)(u32) = (u64 (*)(u32))second_code_va;
+            p[0] = 0xB1; // mov $i, %cl; movslq %edi, %rax; ret
+            p[2] = 0x48;
+            p[3] = 0x63;
+            p[4] = 0xC7;
+            p[5] = 0xC3;
+            for (int i = 0; i < 200; i++) {
+                p[1] = (u8)i;
+                CHECK(f(0xFFFFFFFFu) == ~0ULL);
+            }
+            second_code_va = 0;
+            *second_code_done = 1;
+        }
     }
 }
 
@@ -1349,6 +1366,7 @@ static void test_second_vcpu(u64 root) {
     command(18);
     if (!MAILBOX[1])
         return;
+    second_joined = 1;
     for (u64 turns = 0; !second_done; turns++) {
         u64 rbx = 0;
         __asm__ volatile("mov $1, %%r13\n mov $5, %%r14\n .byte 0x66, 0x0F, 0x38, 0x41, 0xC1\n"
@@ -1633,6 +1651,9 @@ extern char compat_back[];
 
 static void test_compat(u64 root) {
     static const u8 code[] = {
+        0x8B, 0x05, 0x00, 0x10, 0x00, 0x40, // 1: mov eax, [0x40001000], until the second vCPU has done
+        0x85, 0xC0, // test eax, eax
+        0x74, 0xF6, // je 1b
         0xB8, 0x11, 0x22, 0x33, 0x44, // mov eax, 0x44332211
         0x27, // daa: the host checks 32-bit state, and sets eax and a top half in edx
         0x8D, 0x3A, // lea edi, [edx]
@@ -1653,6 +1674,16 @@ static void test_compat(u64 root) {
     *pte_of(root, va) = f | PRESENT_RW | 4;
     for (unsigned i = 0; i < sizeof code; i++)
         ((volatile u8 *)&PHYS(f)[0])[i] = code[i];
+    u64 flag = frame();
+    *pte_of(root, va + 0x1000) = flag | PRESENT_RW | 4;
+    volatile u32 *done_flag = (volatile u32 *)PHYS(flag);
+    *done_flag = !second_joined;
+    if (second_joined) {
+        second_code_frame = frame();
+        second_code_done = done_flag;
+        *pte_of(root, TEST_VA + 0x40800000) = second_code_frame | PRESENT_RW;
+        second_code_va = TEST_VA + 0x40800000;
+    }
     __asm__ volatile("wrmsr" : : "c"(0x174), "a"(0x08), "d"(0));
     __asm__ volatile("wrmsr" : : "c"(0x176), "a"((u32)(u64)compat_back), "d"((u32)((u64)compat_back >> 32)));
     __asm__ volatile("mov $11, %%r13\n mov $1, %%r14\n call _compat_ride"

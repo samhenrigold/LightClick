@@ -31,7 +31,7 @@ void tr_init(const TrConfig *config);
 
 // Translates x86 `rip` in the given view. `cr3` and `cpl` describe the view. With `single` the block is exactly one
 // instruction, never registered for lookup: it runs once after a self-modifying write.
-TrResult tr_translate(int view, uint64_t cr3, int cpl, uint64_t rip, bool single);
+TrResult tr_translate(int view, uint64_t cr3, int cpl, bool compat, uint64_t rip, bool single);
 
 // Patches an exit stub: site is the guest VA reported in the request, kind the svc number, arm the linked target.
 void tr_link(uint64_t site, int kind, uint64_t arm, int key);

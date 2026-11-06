@@ -542,7 +542,6 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     walk_cr3 = cr3;
     walk_cpl = cpl;
     tr_cpl = cpl;
-    tr_compat = ctx_ptr->compat;
     if (tr_needs_flush()) {
         flush_everything();
         res.flushed = true;
@@ -1114,7 +1113,8 @@ void tr_init(const TrConfig *config) {
     page_head = calloc(PAGE_HEADS, sizeof(u32));
 }
 
-TrResult tr_translate(int view, uint64_t cr3, int cpl, uint64_t rip, bool single) {
+TrResult tr_translate(int view, uint64_t cr3, int cpl, bool compat, uint64_t rip, bool single) {
+    tr_compat = compat; // the asking vCPU's: ctx_ptr is the first vCPU's, whatever it is running
     if (view > view_high)
         view_high = view;
     int key = block_key(view, cr3, cpl, rip);
