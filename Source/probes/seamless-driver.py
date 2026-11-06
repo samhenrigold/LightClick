@@ -2,6 +2,7 @@
 # stage and tag, and has already booted the clone.
 import base64
 import os
+from pathlib import Path
 import re
 import shutil
 import signal
@@ -358,17 +359,173 @@ def placement():
 
 
 def windowed(seconds):
-    # The bar: frames the same page gets through windowed mode's own path, counted where they reach the app.
+    # The bar: the same page and clicks as the seamless side of scripts/seamless-compare, through windowed mode's own path.
     guest = stage(guest_tool)
     print(run(guest, ['open-app', '--app', 'Safari'])[0], flush=True)
     time.sleep(15)
+    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+    app_pid = next((row.split()[0] for row in listing.splitlines() if f'Build/bench/{tag}/' in row and 'Contents/MacOS/Light Click' in row), '0')
+    windows = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
+    window = next((re.search(r'id=(\d+)', row).group(1) for row in windows.splitlines() if f'pid={app_pid} ' in row and 'title="Clone of' in row), None)
+    meter = str(results/'seamless-present-meter')
+    if window:
+        clicks = results/f'{tag}-clicks.txt'
+        for _ in range(2):
+            request({'Action': 'test-click'}, 60)
+            time.sleep(1)
+        clicks.write_text('')
+        timing = subprocess.Popen([meter, window, '16', '--clicks', str(clicks)], stdout=subprocess.PIPE, text=True)
+        for _ in range(15):
+            at = request({'Action': 'test-click'}, 60).get('At')
+            with clicks.open('a') as file:
+                file.write(f'{at}\n')
+            time.sleep(1)
+        print('windowed_' + timing.communicate()[0].strip().replace('\n', '\nwindowed_'), flush=True)
+        time.sleep(7)
+    # And over the frames, what its window really shows, by that one window's ID.
+    presenting = subprocess.Popen([meter, window, str(seconds)], stdout=subprocess.PIPE, text=True) if window else None
     first = request({'Action': 'display-frames'}, 60)
     started = time.time()
     time.sleep(seconds)
     last = request({'Action': 'display-frames'}, 60)
     spent = time.time() - started
     print(f'windowed_frames {(last.get("Arrived", 0) - first.get("Arrived", 0)) / spent:.1f} /s', flush=True)
+    if presenting:
+        print('windowed_' + presenting.communicate()[0].strip(), flush=True)
     print(f'windowed_distinct {(last.get("Distinct", 0) - first.get("Distinct", 0)) / spent:.1f} /s', flush=True)
+
+
+def desktop():
+    # The Seamless button, on a running machine: press, the apps' windows appear and the machine's goes, a click reaches one, press,
+    # and the machine's window is back.
+    guest = stage(guest_tool)
+    for app in ('TextEdit', 'Safari'):
+        run(guest, ['open-app', '--app', app])
+    time.sleep(12)
+    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+    app_pid = next((row.split()[0] for row in listing.splitlines() if f'Build/bench/{tag}/' in row and 'Contents/MacOS/Light Click' in row), '0')
+    meter = str(results/'seamless-present-meter')
+
+    def rows():
+        return subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout.splitlines()
+
+    def machine_window():
+        # AppKit's word: with the Mac's display asleep, WindowServer's list still says a hidden window's on screen.
+        return request({'Action': 'seamless-state'}, 60).get('WindowVisible')
+
+    def proxy_windows():
+        running = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
+        pids = {row.split()[0] for row in running if 'Seamless Apps/' in row}
+        return [row for row in rows() if re.search(r'pid=(\d+)', row).group(1) in pids and ' 0x0' not in row]
+
+    checks = []
+
+    def check(what, passed):
+        checks.append(passed)
+        print(f'{"PASS" if passed else "FAIL"} {what}', flush=True)
+
+    def proxy_pid(name):
+        found = next((row for row in proxy_windows() if f'owner="{name}' in row), '')
+        match = re.search(r'pid=(\d+)', found)
+        return int(match.group(1)) if match else 0
+
+    check('the machine window shows before the press', bool(machine_window()))
+    print(next(iter(rows()), ''), flush=True)
+    pressed = time.time()
+    request({'Action': 'seamless-toggle'}, 60)
+    windows = []
+    first = None
+    while time.time() - pressed < 180 and (len(windows) < 2 or machine_window()):
+        windows = proxy_windows()
+        if windows and first is None:
+            first = time.time() - pressed
+        time.sleep(0.1)
+    print(f'first window after {first} s, machine window gone after {time.time() - pressed:.1f} s', flush=True)
+    for row in windows:
+        print(row[:150], flush=True)
+    check('windows appear for each app', len(windows) >= 2)
+    for _ in range(3):
+        print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
+        time.sleep(1)
+    check('the machine window hides', not machine_window())
+    for row in windows:
+        window = re.search(r'id=(\d+)', row).group(1)
+        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-{window}.png')])
+    clicks = results/f'{tag}-clicks.txt'
+    safari = proxy_pid('Safari')
+    window = next((re.search(r'id=(\d+)', row).group(1) for row in windows if 'Safari' in row), None)
+    if safari and window:
+        for _ in range(2):
+            os.kill(safari, signal.SIGUSR1)
+            time.sleep(1)
+        clicks.write_text('')
+        timing = subprocess.Popen([meter, window, '8', '--clicks', str(clicks)], stdout=subprocess.PIPE, text=True)
+        for _ in range(6):
+            os.kill(safari, signal.SIGUSR1)
+            time.sleep(1)
+        said = timing.communicate()[0]
+        print(said, flush=True)
+        check('input reaches a window', re.search(r'median \d+ ms', said) is not None)
+    else:
+        check('input reaches a window', False)
+    time.sleep(6)
+    for _ in range(4):
+        print('bounds', time.time() - pressed, next((row[-40:] for row in rows() if f'id={window} ' in row), ''), flush=True)
+        time.sleep(2)
+    moving = subprocess.run([meter, window or '0', '8'], capture_output=True, text=True).stdout
+    print('moving', moving, flush=True)
+    # Moved on the host, past where the machine's window was: the guest's doesn't follow, it still moves, and a click still lands.
+    def place(of):
+        row = next((row for row in rows() if f'id={of} ' in row), '')
+        print('at', time.time() - pressed, row[-40:], flush=True)
+        found = re.search(r'bounds=(-?[\d.]+),(-?[\d.]+)', row)
+        return (float(found.group(1)), float(found.group(2))) if found else None
+    if safari and window:
+        before = place(window)
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(2)
+        after = place(window)
+        print('moved from', before, 'to', after, flush=True)
+        check('a window moves on the host', before is not None and after is not None and before != after)
+        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-moved.png')])
+        clicks.write_text('')
+        timing = subprocess.Popen([meter, window, '5', '--clicks', str(clicks)], stdout=subprocess.PIPE, text=True)
+        for _ in range(4):
+            os.kill(safari, signal.SIGUSR1)
+            time.sleep(1)
+        said = timing.communicate()[0]
+        print(said, flush=True)
+        check('input still reaches it there', re.search(r'median \d+ ms', said) is not None)
+        check('it stayed there', place(window) == after)
+        frame = capture(f'{tag}-desktop-frame.png')
+        print('guest frame', frame, flush=True)
+    pressed = time.time()
+    request({'Action': 'seamless-toggle'}, 60)
+    while time.time() - pressed < 30 and (not machine_window() or proxy_windows()):
+        time.sleep(0.1)
+    print(f'back after {time.time() - pressed:.1f} s', flush=True)
+    check('the machine window comes back', bool(machine_window()))
+    check('the windows go', not proxy_windows())
+    # A second go, which should be quick, since the tools are staged and the apps made.
+    pressed = time.time()
+    request({'Action': 'seamless-toggle'}, 60)
+    while time.time() - pressed < 60 and machine_window():
+        time.sleep(0.1)
+    print(f'second press hid the window after {time.time() - pressed:.1f} s', flush=True)
+    check('a second press works', not machine_window())
+    request({'Action': 'seamless-toggle'}, 60)
+    while time.time() - pressed < 120 and not machine_window():
+        time.sleep(0.1)
+    # The guest's Dock back, once it's had time to restart.
+    time.sleep(20)
+    capture(f'{tag}-desktop-after.png')
+    said = request({'Executable': '/bin/sh', 'Arguments': ['-c', 'cat /tmp/seamless-leap-restore.log; /bin/ps -axo pid,ppid,pgid,command | /usr/bin/grep -E "/tmp/sg/" | /usr/bin/cut -c1-100']}, 60)
+    print('restore log:', said.get('Stdout'), said.get('Error'), flush=True)
+    check('the guest\'s Dock and shadows are put back', 'dock: 0' in (said.get('Stdout') or ''))
+    # Generated apps shouldn't stay known to the Mac after a clone's gone.
+    for bundle in (source/'Build/bench'/tag).glob('**/Seamless Apps/*/*/*.app'):
+        subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', str(bundle)])
+    print('PASS seamless button' if all(checks) and machine_window() else 'FAIL seamless button', flush=True)
 
 
 def capture_bench():
@@ -461,6 +618,8 @@ if arguments[0] == 'capture-bench':
     capture_bench()
 elif arguments[0] == 'placement':
     placement()
+elif arguments[0] == 'desktop':
+    desktop()
 elif arguments[0] == 'windowed':
     windowed(int(arguments[1]) if len(arguments) > 1 else 22)
 elif arguments[0] == 'mojave':

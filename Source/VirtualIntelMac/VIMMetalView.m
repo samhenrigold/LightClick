@@ -760,6 +760,19 @@ static CGEventRef VIMCapturedKey(CGEventTapProxy proxy, CGEventType type, CGEven
     if (self.inputHandler)
         self.inputHandler(events);
 }
+- (NSRect)presentationFrame {
+    return NSRectFromCGRect(self.presentationLayer.frame);
+}
+- (NSTimeInterval)testClick {
+    NSTimeInterval at = NSDate.date.timeIntervalSince1970;
+    [self emit:@[
+        @{@"type" : @"abs", @"data" : @{@"axis" : @"x", @"value" : @16384}},
+        @{@"type" : @"abs", @"data" : @{@"axis" : @"y", @"value" : @16384}},
+        @{@"type" : @"btn", @"data" : @{@"button" : @"left", @"down" : @YES}}
+    ]];
+    [self emit:@[ @{@"type" : @"btn", @"data" : @{@"button" : @"left", @"down" : @NO}} ]];
+    return at;
+}
 - (void)keyDown:(NSEvent *)event {
     // Typing into a newly focused guest also counts as entering it. After the
     // release shortcut the view no longer owns first responder, so typing is

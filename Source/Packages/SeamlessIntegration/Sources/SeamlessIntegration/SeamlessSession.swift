@@ -25,6 +25,15 @@ public struct SeamlessGuestRun: Sendable {
     }
 }
 
+/// Where a guest window's own pixels come from, when something has them. Without one, or when it answers nil, a window is
+/// cropped from the display's frames, which is the fallback. A source calls `windowPixelsChanged` on the session or desktop
+/// when a window's surface has something new, which is the only damage it needs to report.
+@MainActor
+public protocol SeamlessPixelSource: AnyObject {
+    /// `window` is the guest's window number, `size` its size in guest pixels. The surface is shown whole, alpha and all.
+    func surface(forWindow window: UInt32, size: CGSize) -> IOSurfaceRef?
+}
+
 /// One guest app as a host app. Listens for its proxy and for the tool it starts in the guest, shows each of the guest's
 /// windows as a layer the proxy hosts, and passes everything else across. The design is `probes/seamless-apps-design.md`.
 @MainActor
@@ -50,6 +59,12 @@ public final class SeamlessSession {
         let layer: CALayer
         var image: CGImage?
         var cropped = false
+        /// Its shape is `image`'s alpha, rather than a rectangle with the host's corners.
+        var overlay = false
+        /// The parts of a covered window nothing's in front of, live, over `image`.
+        var pieces: [CALayer] = []
+        /// Where the user dragged it to, relative to the guest's window, once they have. The guest's window stays put.
+        var hostOffset: NSPoint?
         init(window: SessionWire.Window, context: NSObject, layer: CALayer) {
             self.window = window
             self.context = context
@@ -66,7 +81,22 @@ public final class SeamlessSession {
     private var guestDescriptor: Int32 = -1
     private var everConnected = false
     private var port: UInt16 = 0
-    private var guestOffset: NSPoint?
+    /// Added to a guest window's position to get its place on the host. If it's not set, the first window goes mid-screen.
+    public var guestOffset: NSPoint?
+    /// Whether this runs its own program in the guest, or something else starts one on `guestPort`.
+    public var drivesGuest = true
+    public var guestPort: UInt16 { port }
+    public var windowCount: Int { surfaces.count }
+    /// A menu item and Dock menu item with this title calls `onLeave`, rather than going to the guest, and so does asking the proxy to quit.
+    public var leaveTitle: String?
+    public var onLeave: (() -> Void)?
+    public var onWindowsChanged: (() -> Void)?
+    /// Whether the guest app had gone first.
+    public var onProxyClosed: ((Bool) -> Void)?
+    public var onGuestGone: (() -> Void)?
+    private var appGone = false
+    private var stopped = false
+    private var activateWhenConnected = false
     private var lastMenu: [GuestMenuItem]?
     private var nextDocument: UInt32 = 0
     private var documentPaths: [UInt32: String] = [:]
@@ -75,13 +105,13 @@ public final class SeamlessSession {
     private var guestDragFiles: [String] = []
     private var logHandle: FileHandle?
     public var test: SeamlessSessionTest?
+    public weak var pixelSource: (any SeamlessPixelSource)?
     /// Crop each window from the frames windowed mode shows, rather than capture it. Set before `start`.
     public var usesDisplayFrames = false
     /// For measuring: quit the guest app this long after its first window.
     public var stopAfter: Double?
     private var frame: (surface: IOSurfaceRef, width: Int, height: Int)?
-    private var copies: [IOSurfaceRef] = []
-    private var copyIndex = 0
+    private var copies = FrameCopies()
     private var arrived = 0
     private var measuring: (started: CFAbsoluteTime, arrived: Int, distinct: Int)?
     public var distinctFrames: (() -> Int)?
@@ -103,7 +133,24 @@ public final class SeamlessSession {
             finished()
             return
         }
-        Task { await self.drive() }
+        if drivesGuest { Task { await self.drive() } }
+    }
+
+    /// shortcut: the threads waiting on the listeners stay, blocked, with no session to deliver to: two per app per Seamless press,
+    /// until something needs them gone.
+    public func stop() {
+        stopped = true
+        proxy?.send(SessionCommand.terminate)
+        if guestDescriptor >= 0 { shutdown(guestDescriptor, SHUT_RDWR) }
+        surfaces = [:]
+    }
+
+    public func activateProxy() {
+        if let proxy {
+            proxy.send(SessionCommand.activate)
+        } else {
+            activateWhenConnected = true
+        }
     }
 
     public func note(_ text: String) {
@@ -176,7 +223,7 @@ public final class SeamlessSession {
 
     /// Copies the tools somewhere stable, and grants Accessibility for reading and pressing the app's menu. 10.9 asks TCC
     /// about the responsible process, and from a daemon that's the agent.
-    private static var setupScript: String {
+    static var setupScript: String {
         let clients = [
             "/private/tmp/sg/ig", "/tmp/sg/ig", "/private/tmp/sg/g", "/usr/bin/sudo", "/usr/bin/env", "/bin/launchctl",
             "/Library/Application Support/Virtual Intel Mac/GuestTools/opengl-install-bootstrap"
@@ -247,6 +294,10 @@ public final class SeamlessSession {
         guestDescriptor = -1
         for id in surfaces.keys { proxy?.send(SessionCommand.removeSurface(id: Int(id))) }
         surfaces = [:]
+        if !stopped {
+            onWindowsChanged?()
+            onGuestGone?()
+        }
     }
 
     /// One message off the wire, with the pixels already made into an image so the main thread doesn't copy them.
@@ -323,6 +374,10 @@ public final class SeamlessSession {
         case .frame(let frame):
             guard let surface = surfaces[frame.window], let image else { return }
             surface.image = image
+            if surface.cropped, self.frame != nil {
+                showCrops(of: [surface])
+                return
+            }
             surface.cropped = false
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -331,20 +386,22 @@ public final class SeamlessSession {
             surface.layer.cornerRadius = 0
             CATransaction.commit()
             CATransaction.flush()
-        case .crop(let id):
-            surfaces[id]?.cropped = true
-            if let surface = surfaces[id], let frame {
-                CATransaction.begin()
-                CATransaction.setDisableActions(true)
-                crop(surface, from: frame)
-                CATransaction.commit()
-                CATransaction.flush()
-            }
+        case .crop(let id), .overlay(let id):
+            guard let surface = surfaces[id] else { return }
+            surface.cropped = true
+            if case .overlay = message { surface.overlay = true } else { surface.overlay = false }
+            showCrops(of: [surface])
         case .gone(let id):
             surfaces[id] = nil
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
+            onWindowsChanged?()
         case .menu(let json):
-            guard let items = try? JSONDecoder().decode([GuestMenuItem].self, from: json) else { return }
+            guard var items = try? JSONDecoder().decode([GuestMenuItem].self, from: json) else { return }
+            // In the app's own menu, above Quit.
+            if let leaveTitle, !items.isEmpty, var children = items[0].children {
+                children.insert(GuestMenuItem(title: leaveTitle), at: max(0, children.count - 1))
+                items[0].children = children
+            }
             lastMenu = items
             proxy?.send(SessionCommand.setMenuBar(items))
             startTestOnce()
@@ -353,6 +410,7 @@ public final class SeamlessSession {
         case .appState(let json): applyAppState(json)
         case .appGone:
             note("# the guest app has exited")
+            appGone = true
             proxy?.send(SessionCommand.terminate)
         }
     }
@@ -382,8 +440,10 @@ public final class SeamlessSession {
         }
         surface.window = window
         tellProxy(surface)
+        onWindowsChanged?()
         if let stopAfter, measuring == nil {
             measuring = (CFAbsoluteTimeGetCurrent(), arrived, distinctFrames?() ?? 0)
+            note("# first window")
             // Past the window's opening, then over the same time windowed mode was measured for.
             DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter - 22) {
                 MainActor.assumeIsolated {
@@ -447,7 +507,12 @@ public final class SeamlessSession {
                 x: screen.midX - (Double(window.x) + Double(window.width) / 2),
                 y: primary - screen.midY - (Double(window.y) + Double(window.height) / 2))
         }
-        let offset = guestOffset ?? .zero
+        // What pops up from a window goes where that window has been dragged.
+        let parent = surfaces.values.filter { $0.hostOffset != nil && $0.window.group == window.group }
+            .min { $0.window.order < $1.window.order }
+        let front = surfaces.values.filter { $0.hostOffset != nil && !$0.overlay && !$0.window.title.isEmpty }
+            .min { $0.window.order < $1.window.order }
+        let offset = surface.hostOffset ?? parent?.hostOffset ?? (surface.overlay ? front?.hostOffset : nil) ?? guestOffset ?? .zero
         let side = Double(window.margin)
         let width = Double(window.width) + 2 * side
         let height = Double(window.height) + 2 * side
@@ -456,9 +521,9 @@ public final class SeamlessSession {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         surface.layer.frame = CGRect(x: 0, y: 0, width: width, height: height)
-        if let frame, surface.cropped { crop(surface, from: frame) }
         CATransaction.commit()
-        CATransaction.flush()
+        // Its place may have covered or uncovered others.
+        showCrops(of: Array(surfaces.values))
         proxy?.send(
             SessionCommand.showSurface(
                 id: Int(window.id),
@@ -473,7 +538,7 @@ public final class SeamlessSession {
     /// One frame of the guest's display, as windowed mode gets it. Everything shows the same surface, each through its own crop.
     public func frameArrived(surface: IOSurfaceRef?, bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) {
         arrived += 1
-        guard usesDisplayFrames, let current = surface ?? copy(bytes, width: width, height: height, stride: stride)
+        guard usesDisplayFrames, let current = surface ?? copies.copy(bytes, width: width, height: height, stride: stride)
         else { return }
         frame = (current, width, height)
         guard !surfaces.isEmpty else { return }
@@ -484,44 +549,114 @@ public final class SeamlessSession {
         CATransaction.flush()
     }
 
-    private func crop(_ surface: Surface, from frame: (surface: IOSurfaceRef, width: Int, height: Int)) {
-        let window = surface.window
-        let scale = window.width > 0 ? Double(window.pixelWidth) / Double(window.width) : 1
-        let fullWidth = Double(frame.width)
-        let fullHeight = Double(frame.height)
-        surface.layer.contents = frame.surface
-        // contentsRect counts up from the bottom of the surface, and guest windows down from the top of the display.
-        surface.layer.contentsRect = CGRect(
-            x: Double(window.x) * scale / fullWidth,
-            y: (fullHeight - (Double(window.y) + Double(window.height)) * scale) / fullHeight,
-            width: Double(window.width) * scale / fullWidth, height: Double(window.height) * scale / fullHeight)
-        // shortcut: the same corners all round, where a window's own differ a little, until they're read from its shape.
-        surface.layer.cornerRadius = 5
-        surface.layer.masksToBounds = true
-        // A surface a producer has drawn into again is the same object, which on its own wouldn't refresh.
-        surface.layer.perform(NSSelectorFromString("setContentsChanged"))
+    public func windowPixelsChanged(_ id: UInt32) {
+        if let surface = surfaces[id] { showCrops(of: [surface]) }
     }
 
-    /// The display path that hands over shared memory rather than a surface: two surfaces, so one is never being read as it's written.
-    private func copy(_ bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) -> IOSurfaceRef? {
-        guard let bytes else { return nil }
-        if copies.first.map({ IOSurfaceGetWidth($0) != width || IOSurfaceGetHeight($0) != height }) ?? true {
-            let properties: [CFString: Any] = [
-                kIOSurfaceWidth: width, kIOSurfaceHeight: height, kIOSurfaceBytesPerElement: 4,
-                kIOSurfacePixelFormat: 0x4247_5241
-            ]
-            copies = (0..<2).compactMap { _ in IOSurfaceCreate(properties as CFDictionary) }
-        }
-        guard copies.count == 2 else { return nil }
-        copyIndex = 1 - copyIndex
-        let target = copies[copyIndex]
-        IOSurfaceLock(target, [], nil)
-        let row = IOSurfaceGetBytesPerRow(target)
-        let base = IOSurfaceGetBaseAddress(target)
-        for y in 0..<height { memcpy(base + y * row, bytes + y * stride, min(row, stride)) }
-        IOSurfaceUnlock(target, [], nil)
-        return target
+    private func showCrops(of list: [Surface]) {
+        guard let frame else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for surface in list where surface.cropped { crop(surface, from: frame) }
+        CATransaction.commit()
+        CATransaction.flush()
     }
+
+    private func crop(_ surface: Surface, from frame: (surface: IOSurfaceRef, width: Int, height: Int)) {
+        let window = surface.window
+        let side = Double(window.margin)
+        let whole = CGRect(x: 0, y: 0, width: Double(window.width) + 2 * side, height: Double(window.height) + 2 * side)
+        let scale = whole.width > 0 ? Double(window.pixelWidth) / whole.width : 1
+        let fullWidth = Double(frame.width)
+        let fullHeight = Double(frame.height)
+        // contentsRect counts up from the bottom of the surface, and guest windows down from the top of the display.
+        func place(_ part: CGRect) -> CGRect {
+            CGRect(
+                x: (Double(window.x) - side + part.minX) * scale / fullWidth,
+                y: (fullHeight - (Double(window.y) - side + part.maxY) * scale) / fullHeight,
+                width: part.width * scale / fullWidth, height: part.height * scale / fullHeight)
+        }
+        let layer = surface.layer
+        if let own = pixelSource?.surface(forWindow: window.id, size: CGSize(width: Double(window.pixelWidth), height: Double(window.pixelHeight))) {
+            setPieces(of: surface, to: [], from: own, place: place, height: whole.height)
+            layer.mask = nil
+            layer.contents = own
+            layer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+            layer.cornerRadius = 0
+            layer.masksToBounds = false
+            layer.perform(NSSelectorFromString("setContentsChanged"))
+            return
+        }
+        // One guest pixel to one host pixel takes none of its neighbours' at the edges.
+        let filter: CALayerContentsFilter = scale == (NSScreen.main?.backingScaleFactor ?? 0) ? .nearest : .linear
+        layer.magnificationFilter = filter
+        layer.minificationFilter = filter
+        let covers = surfaces.values.filter {
+            $0.window.order < window.order && $0.window.level == 0 && !$0.window.title.isEmpty && $0.window.group != window.group
+        }.map { CGRect(x: Double($0.window.x - window.x), y: Double($0.window.y - window.y), width: Double($0.window.width), height: Double($0.window.height)) }
+        let visible = surface.overlay ? [whole] : SeamlessSession.uncovered(whole, by: covers)
+        if visible == [whole] {
+            layer.contents = frame.surface
+            layer.contentsRect = place(whole)
+            setPieces(of: surface, to: [], from: frame.surface, place: place, height: whole.height)
+        } else {
+            layer.contents = surface.image ?? (frame.surface as Any)
+            layer.contentsRect = surface.image == nil ? place(whole) : CGRect(x: 0, y: 0, width: 1, height: 1)
+            setPieces(of: surface, to: visible, from: frame.surface, place: place, height: whole.height)
+        }
+        if surface.overlay {
+            let mask = layer.mask ?? CALayer()
+            mask.frame = whole
+            mask.contents = surface.image
+            layer.mask = mask
+            layer.cornerRadius = 0
+            layer.masksToBounds = false
+        } else {
+            layer.mask = nil
+            // shortcut: the same corners all round, where a window's own differ a little, until they're read from its shape.
+            layer.cornerRadius = 5
+            layer.masksToBounds = true
+        }
+        // A surface a producer has drawn into again is the same object, which on its own wouldn't refresh.
+        layer.perform(NSSelectorFromString("setContentsChanged"))
+    }
+
+    private func setPieces(
+        of surface: Surface, to parts: [CGRect], from frame: IOSurfaceRef, place: (CGRect) -> CGRect, height: Double
+    ) {
+        while surface.pieces.count > parts.count { surface.pieces.removeLast().removeFromSuperlayer() }
+        while surface.pieces.count < parts.count {
+            let piece = CALayer()
+            piece.edgeAntialiasingMask = []
+            piece.magnificationFilter = surface.layer.magnificationFilter
+            piece.minificationFilter = surface.layer.minificationFilter
+            surface.layer.addSublayer(piece)
+            surface.pieces.append(piece)
+        }
+        for (piece, part) in zip(surface.pieces, parts) {
+            piece.frame = CGRect(x: part.minX, y: height - part.maxY, width: part.width, height: part.height)
+            piece.contents = frame
+            piece.contentsRect = place(part)
+            piece.perform(NSSelectorFromString("setContentsChanged"))
+        }
+    }
+
+    /// What's left of `rect` with `covers` taken out, as rectangles that don't overlap.
+    nonisolated static func uncovered(_ rect: CGRect, by covers: [CGRect]) -> [CGRect] {
+        covers.reduce([rect]) { parts, cover in
+            parts.flatMap { part -> [CGRect] in
+                let cut = part.intersection(cover)
+                guard !cut.isEmpty else { return [part] }
+                return [
+                    CGRect(x: part.minX, y: part.minY, width: part.width, height: cut.minY - part.minY),
+                    CGRect(x: part.minX, y: cut.maxY, width: part.width, height: part.maxY - cut.maxY),
+                    CGRect(x: part.minX, y: cut.minY, width: cut.minX - part.minX, height: cut.height),
+                    CGRect(x: cut.maxX, y: cut.minY, width: part.maxX - cut.maxX, height: cut.height)
+                ].filter { !$0.isEmpty }
+            }
+        }
+    }
+
 
     // MARK: The proxy's side
 
@@ -560,11 +695,19 @@ public final class SeamlessSession {
             guard let event = try? JSONDecoder().decode(ProxyEvent.self, from: line) else { return }
             self?.handle(event)
         }
-        socket.onClose = { [weak self] in self?.proxy = nil }
+        socket.onClose = { [weak self] in
+            self?.proxy = nil
+            if let self, !self.stopped { self.onProxyClosed?(self.appGone) }
+        }
         socket.start()
         proxy = socket
         for surface in surfaces.values { tellProxy(surface) }
         if let lastMenu { socket.send(SessionCommand.setMenuBar(lastMenu)) }
+        if let leaveTitle { socket.send(SessionCommand.setDockMenu([GuestMenuItem(title: leaveTitle)])) }
+        if activateWhenConnected {
+            activateWhenConnected = false
+            socket.send(SessionCommand.activate)
+        }
     }
 
     private func handle(_ event: ProxyEvent) {
@@ -578,8 +721,14 @@ public final class SeamlessSession {
             if let id = surfaces.values.min(by: { $0.window.order < $1.window.order })?.window.id {
                 sendToGuest(SessionWire.value(.focus, id))
             }
+        case .surfaceMoved(let id, let x, let y):
+            guard let surface = surfaces[UInt32(clamping: id)] else { return }
+            surface.hostOffset = NSPoint(x: x - Double(surface.window.x), y: y - Double(surface.window.y))
+            tellProxy(surface)
+        case .menuChosen(let path, _) where path.last == leaveTitle && leaveTitle != nil: onLeave?()
         case .menuChosen(let path, _): sendToGuest(SessionWire.text(.menuPress, path.joined(separator: "/")))
         case .openDocuments(let paths): for path in paths { sendDocument(path, flags: 0) }
+        case .quit where onLeave != nil: onLeave?()
         case .quit:
             if guestDescriptor >= 0 {
                 sendToGuest(SessionWire.value(.quitApp))
@@ -850,5 +999,31 @@ public struct SeamlessSessionTest: Sendable {
         dragOutFolder = parts[2]
         screenshot = parts[3]
         cancelFirst = parts[4] == "cancel"
+    }
+}
+
+/// The display path that hands over shared memory rather than a surface: two surfaces, so one is never being read as it's written.
+struct FrameCopies {
+    private var copies: [IOSurfaceRef] = []
+    private var copyIndex = 0
+
+    mutating func copy(_ bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) -> IOSurfaceRef? {
+        guard let bytes else { return nil }
+        if copies.first.map({ IOSurfaceGetWidth($0) != width || IOSurfaceGetHeight($0) != height }) ?? true {
+            let properties: [CFString: Any] = [
+                kIOSurfaceWidth: width, kIOSurfaceHeight: height, kIOSurfaceBytesPerElement: 4,
+                kIOSurfacePixelFormat: 0x4247_5241
+            ]
+            copies = (0..<2).compactMap { _ in IOSurfaceCreate(properties as CFDictionary) }
+        }
+        guard copies.count == 2 else { return nil }
+        copyIndex = 1 - copyIndex
+        let target = copies[copyIndex]
+        IOSurfaceLock(target, [], nil)
+        let row = IOSurfaceGetBytesPerRow(target)
+        let base = IOSurfaceGetBaseAddress(target)
+        for y in 0..<height { memcpy(base + y * row, bytes + y * stride, min(row, stride)) }
+        IOSurfaceUnlock(target, [], nil)
+        return target
     }
 }

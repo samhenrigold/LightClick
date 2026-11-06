@@ -1,0 +1,14 @@
+#!/bin/zsh
+# The Seamless button, in a clone: press, the guest apps' windows appear and the machine's hides, a click reaches a window,
+# press, the machine's window is back.
+#
+#     scripts/seamless-desktop-try <app built by build-app> <machine.vintelmac>
+set -e
+root=${0:A:h:h}
+tag=seamless-desktop-${${2:t:r}%% *}
+tag=${tag:l}
+clicks=$root/Build/seamless/$tag-clicks.txt
+: > "$clicks"
+# The app's, and from it the proxies': guest-bench's --env is only for QEMU.
+export LC_SEAMLESS_QUIET=1 LC_SEAMLESS_CLICK_LOG=$clicks
+exec "$root/scripts/guest-bench" "$1" "$2" "$tag" --driver "$root/probes/seamless-driver.py" --driver-arg desktop --env LC_HVDBT=1

@@ -8,6 +8,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     private var socket: LineSocket?
     private var pending: [ProxyEvent] = []
     private var didAskToBoot = false
+    private var connectTries = 0
     private let dockMenu = NSMenu()
     private lazy var mirror = GuestMenuMirror(target: self, action: #selector(menuChosen(_:)))
     private var windows: [Int: NSWindow] = [:]
@@ -19,6 +20,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     private var socketPath: String { info[ProxyBundle.sessionSocketKey] as? String ?? "" }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        armTestClicks()
+        armTestMoves()
         NSApp.mainMenu = NSMenu()
         // The Dock draws an icon from a bundle inside a system tile on current macOS. Set at run time it doesn't.
         if let icon = Bundle.main.url(forResource: "GuestApp", withExtension: "icns").flatMap(NSImage.init(contentsOf:))
@@ -33,6 +36,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     private func connectToSession() {
         guard let connected = LineSocket.connect(path: socketPath) else {
             bootMachineOnce()
+            // One generated for a Seamless press has nothing to start, if opened afterward by hand.
+            connectTries += 1
+            if (info[ProxyBundle.machinePathKey] as? String ?? "").isEmpty, connectTries > 10 { NSApp.terminate(nil) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.connectToSession() }
             return
         }
@@ -194,11 +200,47 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     /// A borderless window can't normally take keys, and a guest window's frame is in its pixels.
     private final class SurfaceWindow: NSWindow {
         var observer: ProxyDropView?
+        /// Set for a window with a title bar in its pixels. Told when a drag of it on the host has ended.
+        var movedByUser: (() -> Void)?
+        private(set) var isBeingDragged = false
         override var canBecomeKey: Bool { true }
         override var canBecomeMain: Bool { true }
         override func sendEvent(_ event: NSEvent) {
             observer?.observe(event)
+            guard event.type == .leftMouseDown, movedByUser != nil, isInTitleBar(event) else {
+                super.sendEvent(event)
+                return
+            }
+            // The guest gets a click whichever this turns out to be, which raises its window, and is all a double click or a
+            // press on the title needs. If it becomes a drag, the host does it, so it isn't limited to the guest's display.
             super.sendEvent(event)
+            let start = NSEvent.mouseLocation
+            while let next = nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
+                if next.type == .leftMouseUp {
+                    super.sendEvent(next)
+                    return
+                }
+                let now = NSEvent.mouseLocation
+                if hypot(now.x - start.x, now.y - start.y) >= 3 { break }
+            }
+            if let up = NSEvent.mouseEvent(
+                with: .leftMouseUp, location: event.locationInWindow, modifierFlags: event.modifierFlags,
+                timestamp: event.timestamp, windowNumber: windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                pressure: 0)
+            {
+                super.sendEvent(up)
+            }
+            isBeingDragged = true
+            performDrag(with: event)
+            isBeingDragged = false
+            movedByUser?()
+        }
+
+        /// shortcut: the top 22 points past the traffic lights and the button at the far right. A tall title bar's lower part,
+        /// or a toolbar's blank space, still drags in the guest, within its display, until there's a hit test for it from the guest.
+        private func isInTitleBar(_ event: NSEvent) -> Bool {
+            let place = event.locationInWindow
+            return frame.height - place.y <= 22 && place.x >= 70 && place.x <= frame.width - 28
         }
     }
 
@@ -207,9 +249,12 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         var host: CALayer
         var input: NSView
         var order: Int
+        var offset = NSPoint.zero
     }
 
     private var surfaces: [Int: Surface] = [:]
+    private var clickSignal: DispatchSourceSignal?
+    private var moveSignal: DispatchSourceSignal?
 
     private func showSurface(
         id: Int, contextID: UInt32, frame: NSRect, margin: Double, level: Int, alpha: Double, order: Int, title: String,
@@ -219,9 +264,10 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         let surface = surfaces[id] ?? makeSurface(id: id, frame: frame)
         surface.host.setValue(contextID, forKey: "contextId")
         let window = surface.window
+        let dragging = (window as? SurfaceWindow)?.isBeingDragged ?? false
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if window.frame != frame { window.setFrame(frame, display: false) }
+        if window.frame != frame, !dragging { window.setFrame(frame, display: false) }
         surface.host.frame = CGRect(origin: .zero, size: frame.size)
         CATransaction.commit()
         window.level = NSWindow.Level(rawValue: level)
@@ -229,13 +275,22 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         // Cropped from the guest's display there's no guest shadow to show, so the window gets the host's own.
         window.hasShadow = margin == 0
         window.title = title
-        SeamlessInputViewSetGuestOffset(surface.input, offset)
+        if !dragging { SeamlessInputViewSetGuestOffset(surface.input, offset) }
         setEventShape(of: window, margin: margin, size: frame.size)
+        // A window with a title bar in its pixels moves on the host. What's in its layer doesn't care where it is.
+        (window as? SurfaceWindow)?.movedByUser = margin == 0 && level == 0 && !title.isEmpty ? { [weak self] in
+            self?.surfaceMoved(id)
+        } : nil
         var updated = surface
         updated.order = order
+        if !dragging { updated.offset = offset }
         surfaces[id] = updated
         let frontToBack = surfaces.values.sorted { $0.order < $1.order }
-        for other in frontToBack.reversed() { other.window.orderFront(nil) }
+        let quiet = ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil
+        for other in frontToBack.reversed() {
+            // A measurement's windows stay behind what whoever's at the Mac is using, where their pointer can't reach them.
+            if quiet { other.window.orderBack(nil) } else { other.window.orderFront(nil) }
+        }
         if NSApp.keyWindow == nil, let first = frontToBack.first(where: { $0.window.level == .normal }) {
             first.window.makeKey()
             first.window.makeFirstResponder(first.input)
@@ -244,9 +299,49 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         if isFirstSurface && ProcessInfo.processInfo.environment["LC_SEAMLESS_QUIET"] == nil { NSApp.activate() }
     }
 
+    private func surfaceMoved(_ id: Int) {
+        guard let surface = surfaces[id], let primary = NSScreen.screens.first?.frame.height else { return }
+        let frame = surface.window.frame
+        send(.surfaceMoved(windowID: id, x: frame.minX, y: primary - frame.maxY))
+    }
+
+    /// Each SIGUSR2 moves the front window by a screen's worth of the way as a host drag would, for a test with no pointer to drag.
+    private func armTestMoves() {
+        guard ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil else { return }
+        signal(SIGUSR2, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let front = self.surfaces.min(by: { $0.value.order < $1.value.order }) else { return }
+                let screen = front.value.window.screen?.visibleFrame ?? .zero
+                front.value.window.setFrameOrigin(NSPoint(x: screen.maxX - front.value.window.frame.width, y: screen.minY))
+                self.surfaceMoved(front.key)
+            }
+        }
+        source.resume()
+        moveSignal = source
+    }
+
+    /// Each SIGUSR1 is one click, noted in LC_SEAMLESS_CLICK_LOG, for measuring input to the window changing.
+    private func armTestClicks() {
+        guard let path = ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] else { return }
+        signal(SIGUSR1, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let file = fopen(path, "a") else { return }
+                fputs("\(Date().timeIntervalSince1970)\n", file)
+                fclose(file)
+                self.testClick()
+            }
+        }
+        source.resume()
+        clickSignal = source
+    }
+
     /// Real NSEvents through the real input view, from the window's middle. It doesn't exercise WindowServer's delivery,
     /// but it needs no permission and doesn't touch the host's pointer.
-    private func testInput() {
+    private func testClick() {
         guard let surface = surfaces.values.min(by: { $0.order < $1.order }) else { return }
         let window = surface.window
         let place = NSPoint(x: window.frame.width / 2, y: window.frame.height / 2)
@@ -262,6 +357,12 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                 surface.input.mouseUp(with: event)
             }
         }
+    }
+
+    private func testInput() {
+        guard let surface = surfaces.values.min(by: { $0.order < $1.order }) else { return }
+        let window = surface.window
+        testClick()
         // A real scroll event through the trackpad's path. The other gestures can't be made without a trackpad.
         if let scroll = CGEvent(
             scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -40, wheel2: 0, wheel3: 0),
