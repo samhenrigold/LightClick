@@ -40,9 +40,11 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
             guard let command = try? JSONDecoder().decode(SessionCommand.self, from: line) else { return }
             self?.handle(command)
         }
+        // shortcut: the session is gone, and with it every window, so this quits, until a session can come back to a proxy.
         connected.onClose = { [weak self] in
             self?.socket = nil
-            self?.connectToSession()
+            self?.quitting = true
+            NSApp.terminate(nil)
         }
         connected.start()
         socket = connected
@@ -55,18 +57,35 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         pending = []
     }
 
-    /// The session process isn't up, so nobody is running this machine. Ask the app once; the tile stays bouncing as an
-    /// ordinary launching app until a window appears. `--open-vm` is the app's existing way in, and shows the machine's
-    /// window until a headless mode exists.
+    /// The session process isn't up, so nobody is running this machine. Ask the app once, as its own instance so the user's
+    /// open library is left alone, to run the machine with no window and start the session on this socket. The tile stays
+    /// bouncing as an ordinary launching app until a window appears.
     private func bootMachineOnce() {
         guard !didAskToBoot, let machine = info[ProxyBundle.machinePathKey] as? String, !machine.isEmpty,
-            let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "gold.samhenri.LightClick")
+            let guestPath = info[ProxyBundle.guestPathKey] as? String,
+            let app = (info[ProxyBundle.hostAppKey] as? String).map({ URL(fileURLWithPath: $0) })
+                ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: "gold.samhenri.LightClick")
         else { return }
         didAskToBoot = true
         let configuration = NSWorkspace.OpenConfiguration()
-        configuration.arguments = ["--open-vm", machine]
+        configuration.arguments = [
+            "--open-vm", machine, "--guest-diagnostics-root", socketPath + ".channel", "--seamless-session", socketPath,
+            "--seamless-app", URL(fileURLWithPath: guestPath).deletingPathExtension().lastPathComponent
+        ]
         configuration.activates = false
-        NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, _ in }
+        configuration.createsNewApplicationInstance = true
+        // A test's private home has to reach the app, and what it wants of the session.
+        configuration.environment = ProcessInfo.processInfo.environment.filter {
+            ["CFFIXED_USER_HOME", "LC_SEAMLESS_VIEWER_ARGS"].contains($0.key)
+        }
+        NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, error in
+            guard let error else { return }
+            DispatchQueue.main.async {
+                let alert = NSAlert(error: error)
+                alert.runModal()
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     func send(_ event: ProxyEvent) {
@@ -90,7 +109,6 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         case .activate: NSApp.activate()
         case .terminate:
             quitting = true
-            NSApp.reply(toApplicationShouldTerminate: true)
             NSApp.terminate(nil)
         case .beginDragOut(let names, let image):
             NSApp.keyWindow.flatMap { window in dropViews.first { $0.value.window === window }?.value }?
@@ -180,6 +198,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         id: Int, contextID: UInt32, frame: NSRect, margin: Double, level: Int, alpha: Double, order: Int, title: String,
         offset: NSPoint
     ) {
+        let isFirstSurface = surfaces.isEmpty
         let surface = surfaces[id] ?? makeSurface(frame: frame)
         surface.host.setValue(contextID, forKey: "contextId")
         let window = surface.window
@@ -202,7 +221,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
             first.window.makeKey()
             first.window.makeFirstResponder(first.input)
         }
-        NSApp.activate()
+        if isFirstSurface { NSApp.activate() }
     }
 
     /// Real NSEvents through the real input view, from the window's middle. It doesn't exercise WindowServer's delivery,
@@ -217,7 +236,11 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                     with: type, location: place, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
                     context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
             else { continue }
-            if type == .leftMouseDown { surface.input.mouseDown(with: event) } else { surface.input.mouseUp(with: event) }
+            if type == .leftMouseDown {
+                surface.input.mouseDown(with: event)
+            } else {
+                surface.input.mouseUp(with: event)
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             for type in [NSEvent.EventType.keyDown, .keyUp] {
@@ -252,7 +275,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
 
     /// The window's pixels include its shadow, which mustn't take clicks. Only the guest window itself does.
     private func setEventShape(of window: NSWindow, margin: Double, size: NSSize) {
-        typealias NewRegion = @convention(c) (UnsafePointer<CGRect>, UnsafeMutablePointer<UnsafeMutableRawPointer?>) -> Int32
+        typealias NewRegion =
+            @convention(c) (UnsafePointer<CGRect>, UnsafeMutablePointer<UnsafeMutableRawPointer?>) -> Int32
         typealias SetShape = @convention(c) (Int32, UInt32, UnsafeMutableRawPointer?) -> Int32
         typealias Connection = @convention(c) () -> Int32
         guard let sky = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
@@ -317,11 +341,13 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? { dockMenu }
 
-    /// Quitting belongs to the guest app, which may ask to save. The session answers with `.terminate`.
+    /// Quitting belongs to the guest app, which may ask to save, and may be told Cancel. The session answers with
+    /// `.terminate`. Not `.terminateLater`, which would hold this app in a modal run loop while that sheet needs its input.
+    /// shortcut: a logout or restart of the host sees a cancelled quit, until there's a reply it can wait for.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if quitting || socket == nil { return .terminateNow }
         send(.quit)
-        return .terminateLater
+        return .terminateCancel
     }
 
     @objc private func menuChosen(_ sender: NSMenuItem) {

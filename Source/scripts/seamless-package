@@ -1,0 +1,18 @@
+#!/bin/zsh
+# Puts the seamless session's programs in a built app, and signs it again, so its proxies can start a session.
+# shortcut: a step after scripts/build-app rather than part of it, so a release has none of this until it's ready to ship.
+#
+#     VIM_CODESIGN_IDENTITY=<sha1> scripts/seamless-package <app>
+set -euo pipefail
+source_root=${0:A:h:h}
+app=${1:?usage: seamless-package <app>}
+identity=${VIM_CODESIGN_IDENTITY:?set VIM_CODESIGN_IDENTITY to the identity the app is signed with}
+"$source_root/scripts/build-seamless-probes" "$source_root/Build/seamless" 2>/dev/null
+"$source_root/scripts/build-seamless-integration" "$source_root/Build/seamless" 2>/dev/null
+destination="$app/Contents/Resources/Seamless"
+mkdir -p "$destination"
+for program in seamless-viewer seamless-guest seamless-ws-hook.dylib seamless-integration-guest SeamlessProxy SeamlessMakeProxy; do
+  cp "$source_root/Build/seamless/$program" "$destination/"
+done
+codesign --force --preserve-metadata=identifier,entitlements,flags,runtime --sign "$identity" "$app"
+codesign --verify --strict "$app"

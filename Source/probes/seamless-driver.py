@@ -157,6 +157,15 @@ def input_live(seconds):
     save(output)
 
 
+def windowserver_seconds():
+    text = request({'Executable': '/bin/ps', 'Arguments': ['-axco', 'time=,command=']}, 60).get('Stdout', '')
+    for line in text.splitlines():
+        if line.split()[1:] == ['WindowServer']:
+            minutes, seconds = line.split()[0].split(':')
+            return int(minutes) * 60 + float(seconds)
+    return 0
+
+
 def tree(seconds, guest=None, hook=False, command=None):
     label = 'with the hook' if hook else 'by capture'
     print(f'== Every window of a demo app, {label}, for {seconds} s', flush=True)
@@ -171,8 +180,12 @@ def tree(seconds, guest=None, hook=False, command=None):
                                # The demo's Anchor button, on a 10.9 title bar: it adds "clicked" to the title.
                                '--test-input', '365,156', '--test-motion'],
                               stdout=subprocess.PIPE, text=True)
+    time.sleep(1)  # A busy host takes a moment to bind, and a guest that arrives first measures nothing.
+    server_before = windowserver_seconds()
+    started = time.time()
     status, _ = run(guest, (command or ['program-tree']) + ['--port', str(port), '--seconds', str(seconds)] +
                     (['--hook'] if hook else []))
+    print(f'windowserver_cpu {(windowserver_seconds() - server_before) / (time.time() - started) * 100:.0f} %')
     print(f'# guest exit {status}', flush=True)
     try:
         report, _ = viewer.communicate(timeout=30)
