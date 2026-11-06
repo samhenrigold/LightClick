@@ -28,6 +28,7 @@
 
 static int connectionFD = -1; // Main thread.
 static BOOL selfTest;
+static NSString *screenshotPrefix;
 static BOOL treeMode;
 static NSPoint guestOffset; // Host top-left-origin screen point = guest point + this.
 static BOOL haveGuestOffset;
@@ -325,6 +326,21 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
     if (reordered)
         [self reorderWindows];
 }
+// What the host's screen really shows around these windows, against whatever is behind them. Needs Screen Recording.
+- (void)takeScreenshot {
+    NSRect all = NSZeroRect;
+    CGFloat primary = NSScreen.screens.firstObject.frame.size.height;
+    for (GuestWindow *window in self.windows.allValues)
+        all = NSIsEmptyRect(all) ? window.frame : NSUnionRect(all, window.frame);
+    static unsigned shot;
+    if (!NSIsEmptyRect(all)) {
+        NSString *path = [screenshotPrefix stringByAppendingFormat:@"-%02u.png", shot++];
+        NSString *region = [NSString stringWithFormat:@"%d,%d,%d,%d", (int)NSMinX(all), (int)(primary - NSMaxY(all)),
+                                                      (int)all.size.width, (int)all.size.height];
+        [NSTask launchedTaskWithLaunchPath:@"/usr/sbin/screencapture" arguments:@[ @"-x", @"-R", region, path ]];
+    }
+    [self performSelector:@selector(takeScreenshot) withObject:nil afterDelay:3];
+}
 // Prints what the guest sent, keeps its last pixels, and exits.
 - (void)finishRun {
     double seconds = self.framesShown ? CACurrentMediaTime() - self.firstFrame : 0;
@@ -467,6 +483,11 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
             view.label = owner;
             if (selfTest)
                 [self selfTestWindow:window];
+            static BOOL shooting;
+            if (screenshotPrefix && !shooting) {
+                shooting = YES;
+                [self performSelector:@selector(takeScreenshot) withObject:nil afterDelay:1];
+            }
             if (testClick.x >= 0)
                 [self sendTestInput:window];
             if (exitAfter > 0)
@@ -601,6 +622,8 @@ int main(int argc, const char **argv) {
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--self-test"))
                 selfTest = YES;
+            else if (!strcmp(argv[i], "--screenshots") && i + 1 < argc)
+                screenshotPrefix = @(argv[++i]);
             else if (!strcmp(argv[i], "--tree"))
                 treeMode = YES;
             else if (!strcmp(argv[i], "--exit-after") && i + 1 < argc)

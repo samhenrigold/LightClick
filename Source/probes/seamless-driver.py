@@ -161,7 +161,7 @@ def tree(seconds):
     for old in results.glob(f'{tag}-window-*.png'):
         old.unlink()
     viewer = subprocess.Popen([str(results/'seamless-viewer'), '--tree', '--port', str(port), '--exit-after', str(seconds + 5),
-                               '--png', str(prefix)], stdout=subprocess.PIPE, text=True)
+                               '--png', str(prefix), '--screenshots', str(results/f'{tag}-screen')], stdout=subprocess.PIPE, text=True)
     status, _ = run(guest, ['program-tree', '--port', str(port), '--seconds', str(seconds)])
     print(f'# guest exit {status}', flush=True)
     try:
@@ -219,7 +219,36 @@ def ws_probe():
     print(f'# frame {size}: does the desktop still look right?')
 
 
-if arguments[0] == 'stream':
+def diag():
+    guest = stage(guest_tool)
+    copy = ('mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp "$1" /tmp/sg/g; chmod 755 /tmp/sg/g')
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', copy, 'sh', guest]}, 120)
+    time.sleep(90)
+    finder = request({'Executable': '/usr/bin/pgrep', 'Arguments': ['-x', 'Finder']}, 60).get('Stdout', '').strip()
+    login = request({'Executable': '/usr/bin/pgrep', 'Arguments': ['-x', 'loginwindow']}, 60).get('Stdout', '').strip()
+    print(f'# Finder {finder} loginwindow {login}')
+    session = ['/bin/launchctl', 'bsexec', finder, '/usr/bin/sudo', '-S', '-u', '#501']
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', ' '.join(session[:4]) + " /usr/bin/sudo -S -u '#501' /tmp/sg/g demo-app </dev/null >/tmp/sg/demo.log 2>&1 &"]}, 60)
+    time.sleep(60)
+    tries = [
+        ['/bin/ps', '-axo', 'pid,user,comm'],
+        ['/usr/bin/tail', '-n', '30', '/var/log/system.log'],
+        session + ['/tmp/sg/g', 'diag'],
+        ['/bin/launchctl', 'bsexec', finder, '/tmp/sg/g', 'diag'],
+        session + ['/usr/sbin/screencapture', '-x', '/tmp/sg/s.png'],
+        ['/bin/ls', '-la', '/tmp/sg'],
+        ['/bin/cat', '/tmp/sg/demo.log'],
+    ]
+    for t in tries:
+        print('>>', ' '.join(t), flush=True)
+        r = request({'Executable': '/bin/sh', 'Arguments': ['-c', 'exec "$@" </dev/null', 'sh', *t]}, 120)
+        print('  exit', r.get('ExitCode'), (r.get('Stdout') or '').strip()[:5000], '| err:', (r.get('Stderr') or r.get('Error') or '').strip(), flush=True)
+    print(capture(f'{tag}-frame.png'))
+
+
+if arguments[0] == 'diag':
+    diag()
+elif arguments[0] == 'stream':
     stream(int(arguments[1]) if len(arguments) > 1 else 20)
 elif arguments[0] == 'input':
     input_probe()

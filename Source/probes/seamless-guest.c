@@ -22,7 +22,9 @@
 #include <ApplicationServices/ApplicationServices.h>
 #include <IOKit/IOKitLib.h>
 #include <arpa/inet.h>
+#include <bsm/audit.h>
 #include <copyfile.h>
+#include <servers/bootstrap.h>
 #include <errno.h>
 #include <mach-o/dyld.h>
 #include <netinet/in.h>
@@ -71,6 +73,29 @@ static CGRect bounds_for(CFDictionaryRef d) {
     if (v)
         CGRectMakeWithDictionaryRepresentation((CFDictionaryRef)v, &r);
     return r;
+}
+
+static CFIndex visible_windows(void) {
+    CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+    CFIndex count = windows ? CFArrayGetCount(windows) : -1;
+    if (windows)
+        CFRelease(windows);
+    return count;
+}
+
+// On 10.9 a plain tool's window list stays empty until something opens its connection to WindowServer. This says which
+// step did it, so a guest that differs is visible in the output.
+static void connect_window_server(void) {
+    extern signed char NSApplicationLoad(void);
+    printf("# windows visible: at start %ld", (long)visible_windows());
+    CGDisplayBounds(CGMainDisplayID());
+    printf(", after CGMainDisplayID %ld", (long)visible_windows());
+    CGEventRef event = CGEventCreate(NULL);
+    if (event)
+        CFRelease(event);
+    printf(", after CGEventCreate %ld", (long)visible_windows());
+    NSApplicationLoad();
+    printf(", after NSApplicationLoad %ld (uid %d)\n", (long)visible_windows(), getuid());
 }
 
 static int list_windows(void) {
@@ -818,18 +843,22 @@ static uint32_t tree_group(CGWindowID id) {
     return lowest;
 }
 
-static int tree_wants(CFDictionaryRef d, const char *app) {
+static int tree_wants(CFDictionaryRef d, const char *app, pid_t pid) {
     char owner[256];
     text_for(d, kCGWindowOwnerName, owner, sizeof(owner));
     CGRect bounds = bounds_for(d);
     if (bounds.size.width < 1 || bounds.size.height < 1 || int_for(d, kCGWindowLayer) < 0)
         return 0;
+    if (pid > 0)
+        return int_for(d, kCGWindowOwnerPID) == pid;
     if (app)
         return !strcmp(owner, app);
     return strcmp(owner, "Window Server") && strcmp(owner, "Dock") && strcmp(owner, "SystemUIServer");
 }
 
-static int stream_tree(struct Stream *s, const char *app, double fps, double seconds) {
+// With `pid`, only that process's windows. The clock starts at the first window, since an app can take a long time to
+// start under emulation, and a run that sees none says what it did see.
+static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps, double seconds) {
     tree_connection = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
     tree_flush_seed = guest_symbol("CGSGetWindowFlushSeed", "SLSGetWindowFlushSeed");
     tree_associated = guest_symbol("CGSCopyAssociatedWindows", "SLSCopyAssociatedWindows");
@@ -837,10 +866,20 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
     struct TreeWindow windows[TREE_MAX_WINDOWS];
     memset(windows, 0, sizeof(windows));
     unsigned skipped = 0, roster = 0, seed_answers = 0;
+    double first_window = 0;
     double started = now();
     for (;;) {
         double tick = now();
-        if (seconds > 0 && tick - started > seconds)
+        if (!roster && tick - started > 180) {
+            puts("# ERROR no matching window in 180 s. Everything on screen:");
+            list_windows();
+            if (pid > 0) {
+                int status = 0;
+                printf("# the app %s\n", waitpid(pid, &status, WNOHANG) == pid ? "has exited" : "is still running");
+            }
+            break;
+        }
+        if (seconds > 0 && roster && tick - first_window > seconds)
             break;
         CFArrayRef list = CGWindowListCopyWindowInfo(
             kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
@@ -849,7 +888,7 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
         uint32_t order = 0;
         for (CFIndex i = 0; list && i < CFArrayGetCount(list); i++) {
             CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
-            if (!tree_wants(d, app))
+            if (!tree_wants(d, app, pid))
                 continue;
             CGWindowID id = (CGWindowID)int_for(d, kCGWindowNumber);
             struct TreeWindow *w = NULL;
@@ -932,6 +971,8 @@ static int stream_tree(struct Stream *s, const char *app, double fps, double sec
                 w->previous = s->previous;
                 s->previous = NULL;
                 if (fresh) {
+                    if (!roster)
+                        first_window = tick;
                     roster++;
                     printf("# window %u layer %d %s \"%s\" %gx%g group %u at %.1f s\n", id, layer, owner, title,
                            bounds.size.width, bounds.size.height, s->group, tick - started);
@@ -1016,6 +1057,28 @@ int main(int argc, char **argv) {
     const char *command = argc >= 2 ? argv[1] : "";
     int in_session = flag(argc, argv, "--in-session");
     const char *app = option(argc, argv, "--app", "TextEdit");
+    if (!strcmp(command, "diag")) {
+        printf("# uid %d euid %d\n", getuid(), geteuid());
+        CFDictionaryRef session = CGSessionCopyCurrentDictionary();
+        printf("# session dictionary %s\n", session ? "present" : "NULL");
+        if (session)
+            CFRelease(session);
+        mach_port_t port = MACH_PORT_NULL;
+        kern_return_t active = bootstrap_look_up(bootstrap_port, "com.apple.windowserver.active", &port);
+        kern_return_t server = bootstrap_look_up(bootstrap_port, "com.apple.windowserver", &port);
+        printf("# look_up active %d, server %d\n", active, server);
+        auditinfo_addr_t audit;
+        memset(&audit, 0, sizeof(audit));
+        getaudit_addr(&audit, sizeof(audit));
+        printf("# audit session %d\n", audit.ai_asid);
+        connect_window_server();
+        int (*main_connection)(void) = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
+        CGRect bounds = CGDisplayBounds(CGMainDisplayID());
+        printf("# connection %d, display %u, %gx%g\n", main_connection ? main_connection() : -1, CGMainDisplayID(),
+               bounds.size.width, bounds.size.height);
+        list_windows();
+        return 0;
+    }
     if (!strcmp(command, "list"))
         return list_windows();
     if (!strcmp(command, "demo-app")) {
@@ -1030,6 +1093,7 @@ int main(int argc, char **argv) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
         alarm(600);
+        connect_window_server();
         pid_t child = 0;
         if (demo) {
             char self[PATH_MAX];
@@ -1039,7 +1103,6 @@ int main(int argc, char **argv) {
                 execl(self, "seamless-guest", "demo-app", (char *)NULL);
                 _exit(127);
             }
-            sleep(3);
         }
         struct Stream s;
         memset(&s, 0, sizeof(s));
@@ -1051,8 +1114,8 @@ int main(int argc, char **argv) {
             swm_put_u32_message(hello, sizeof(hello), SWM_HELLO, SWM_VERSION);
             send_all(s.fd, hello, sizeof(hello));
         }
-        const char *target = flag(argc, argv, "--all") ? NULL : demo ? "seamless-guest" : app;
-        int result = stream_tree(&s, target, atof(option(argc, argv, "--fps", "30")),
+        const char *target = flag(argc, argv, "--all") ? NULL : app;
+        int result = stream_tree(&s, target, demo ? child : 0, atof(option(argc, argv, "--fps", "30")),
                                  atof(option(argc, argv, "--seconds", "20")));
         if (child > 0)
             kill(child, SIGTERM);
@@ -1068,6 +1131,7 @@ int main(int argc, char **argv) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
         alarm(600); // Partial results beat the agent timing out and losing them all.
+        connect_window_server();
         if (!strcmp(command, "program"))
             return program(app, option(argc, argv, "--host", "10.0.2.2"), atoi(option(argc, argv, "--port", "7654")),
                            atof(option(argc, argv, "--fps", "30")), atof(option(argc, argv, "--seconds", "20")));
@@ -1083,6 +1147,7 @@ int main(int argc, char **argv) {
     if (!strcmp(command, "place")) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 0);
+        connect_window_server();
         const char *slot = option(argc, argv, "--slot", NULL);
         if (!slot && !(option(argc, argv, "--x", NULL) && option(argc, argv, "--y", NULL)))
             return 64;
