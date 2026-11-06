@@ -671,6 +671,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                     return;
                                 session.networkStarting = NO;
                                 if (!failure && [session launch:&failure]) {
+                                    [session continueFromSession:existing];
                                     [session recordOpened:cleanupError];
                                     return;
                                 }
@@ -686,6 +687,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             [session showStoppedScreen];
         return NO;
     }
+    [session continueFromSession:existing];
     if (existing) {
         existing.window = nil;
         session.window.windowController = session;
@@ -694,6 +696,15 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     sessions[key] = session;
     [session recordOpened:cleanupError];
     return YES;
+}
+/// A relaunch can get here after a Rosetta check, once the old session's exit handler has moved on, so what the new
+/// session needs waits on the old one until it has started.
+- (void)continueFromSession:(VIMSession *)previous {
+    self.recentGuestReboots = previous.recentGuestReboots;
+    self.pendingHostConnectionURL = previous.pendingHostConnectionURL;
+    self.pendingHostConnectionCompletion = previous.pendingHostConnectionCompletion;
+    previous.pendingHostConnectionURL = nil;
+    previous.pendingHostConnectionCompletion = nil;
 }
 /// A session has started, whichever way it got there.
 - (void)recordOpened:(NSError *)cleanupError {
@@ -1433,7 +1444,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           session.stateLabel.stringValue = exitPlan.stateText;
           session.statePanel.hidden = NO;
           session.stateAction.hidden = NO;
-          session.recentGuestReboots = exitPlan.recentGuestReboots;
+          // For the session that replaces this one to carry on with: see continueFromSession.
+          session.recentGuestReboots = exitPlan.guestReboot ? exitPlan.recentGuestReboots : nil;
           NSURL *waitingURL = relaunch ? session.pendingHostConnectionURL : nil;
           void (^waitingCompletion)(NSError *) = relaunch ? session.pendingHostConnectionCompletion : nil;
           if (relaunch) {
@@ -1470,12 +1482,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
               // The new session chooses its own safe display hardware. A valid
               // setup/privacy restart must also work before graphics publishing;
               // requiring acceleration here strands an otherwise bootable VM.
+              session.pendingHostConnectionURL = waitingURL;
+              session.pendingHostConnectionCompletion = waitingCompletion;
               if (fresh && [VIMSession openMachine:fresh error:&failure]) {
                   VIMSession *replacement = sessions[SessionKey(fresh)];
-                  replacement.pendingHostConnectionURL = waitingURL;
-                  replacement.pendingHostConnectionCompletion = waitingCompletion;
-                  if (exitPlan.guestReboot)
-                      replacement.recentGuestReboots = exitPlan.recentGuestReboots;
                   [replacement.window setFrame:previousFrame display:YES];
                   if (replacement.window != previousWindow)
                       [previousWindow close];
@@ -1484,6 +1494,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                       failure.localizedDescription ?: @"Restart paused: graphics installation needs recovery.";
                   VIMFailCreateGuest(session.guestStatus.stringValue);
                   [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
+                  session.pendingHostConnectionURL = nil;
+                  session.pendingHostConnectionCompletion = nil;
                   if (waitingCompletion)
                       waitingCompletion(
                           failure ?: VIMSessionError(@"The virtual Mac couldn’t restart to open the connection."));
