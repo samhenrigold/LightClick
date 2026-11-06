@@ -1,5 +1,5 @@
 #import <AVFoundation/AVFoundation.h>
-#import "VIMSession.h"
+#import "VIMSessionPrivate.h"
 #import "VIMGuestFiles.h"
 #import "VIMGuestProfile.h"
 #import "VIMSymbolImages.h"
@@ -13,7 +13,6 @@
 #import "VIMGuestPreparation.h"
 #import "VIMSMBService.h"
 #import "VIMHostUSB.h"
-#import "VIMUSBClient.h"
 #import "VIMLibraryLocation.h"
 #import "VIMGuestInstallation.h"
 #import "VIMInstallerAssembly.h"
@@ -225,10 +224,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 }
 @end
 @interface VIMSession () <NSWindowDelegate, NSMenuItemValidation, NSMenuDelegate, NSToolbarDelegate>
-@property VIMMachine *machine;
 @property(readonly) VIMGuestSessionState *state;
 - (void)logNote:(NSString *)format, ... NS_FORMAT_FUNCTION(1, 2);
-@property NSTask *task;
 @property NSFileHandle *log;
 @property VIMMetalView *displayView;
 @property VIMDisplayConnection *displayConnection;
@@ -266,7 +263,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property VIMInstallationActivity *sleepActivity;
 @property NSString *lastGuestMessage;
 @property NSTextField *status;
-@property NSString *runtimeDirectory;
 @property NSButton *shutdownButton;
 @property NSTimer *resizeTimer;
 @property NSSize lastRequestedSize;
@@ -284,7 +280,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property NSString *clipboardFailure;
 @property NSString *clipboardConfiguredBoot;
 @property NSDate *clipboardRetryAfter;
-@property NSMutableDictionary<NSString *, NSString *> *usbAttached;
 @property NSArray<NSDictionary *> *audioOutputChoices;
 @property NSArray<NSDictionary *> *audioInputChoices;
 @property BOOL audioChoicesPending;
@@ -298,9 +293,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property NSTimer *controlRetryTimer;
 @property NSTimer *controlStallTimer;
 @property BOOL controlStallShown;
-@property VIMUSBClient *usbClient;
-- (void)ensureUSBClient;
-@property BOOL usbOperationPending;
+@property(readonly) VIMUSBDevices *usbDevices;
 @property int machineLock;
 @property NSStackView *statePanel;
 @property NSTextField *stateLabel;
@@ -373,6 +366,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     if ((self = [super initWithWindow:window])) {
         _machineLock = -1;
         _state = [VIMGuestSessionState new];
+        _usbDevices = [[VIMUSBDevices alloc] initWithSession:self];
         [NSNotificationCenter.defaultCenter addObserver:self
                                                selector:@selector(refreshUSBToolbar:)
                                                    name:@"VIMHostUSBChanged"
@@ -380,6 +374,16 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         VIMStartHostUSBNotifications();
     }
     return self;
+}
+- (id)controlConnection {
+    return self.control;
+}
++ (NSArray<NSURL *> *)machineURLs {
+    NSMutableArray *URLs = [NSMutableArray new];
+    for (VIMSession *session in sessions.allValues)
+        if (session.machine.URL)
+            [URLs addObject:session.machine.URL];
+    return URLs;
 }
 + (void)showMachineWindow:(VIMMachine *)machine {
     NSAssert(NSThread.isMainThread, @"Session UI is main-thread owned");
@@ -1139,7 +1143,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       VIMQMPEvent *qmp = [[VIMQMPEvent alloc] initWithEvent:event];
       switch (qmp.kind) {
           case VIMQMPEventKindDeviceDeleted:
-              [session.usbClient deviceWasDeleted:event[@"data"][@"device"] control:session.control];
+              [session.usbDevices deviceWasDeleted:event[@"data"][@"device"]];
               [session.imageDrives deviceDeleted:qmp.device];
               break;
           case VIMQMPEventKindReset:
@@ -2036,10 +2040,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         });
         return;
     }
-    if ([command[@"Action"] isEqual:@"usb-devices"]) {
-        finish(@{@"Devices" : VIMHostUSBDevices(), @"Attached" : self.usbAttached ?: @{}});
+    if ([self.usbDevices handleDiagnostic:command finish:finish])
         return;
-    }
     if ([command[@"Action"] isEqual:@"menu-state"]) {
         if ([command[@"Context"] isEqual:@"library"])
             [(id)NSApp.delegate showLibrary:nil];
@@ -2065,127 +2067,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
               state[name] = @{@"Present" : @(root != nil), @"Hidden" : @(root.hidden), @"Items" : items};
           }
           finish(state);
-        });
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"usb-storage-access"]) {
-        NSDictionary *selected = nil;
-        for (NSDictionary *device in VIMHostUSBDevices())
-            if ([device[@"LocationID"] isEqual:command[@"LocationID"]])
-                selected = device;
-        if (!selected) {
-            finish(@{@"Error" : @"The requested physical USB device is not connected."});
-            return;
-        }
-        NSMutableArray *protected = [NSMutableArray new];
-        for (VIMSession *session in sessions.allValues)
-            if (session.machine.URL)
-                [protected addObject:session.machine.URL];
-        VIMHostRequestUSBStorageAccess(selected, protected, ^(NSError *error) {
-          finish(error ? @{@"Error" : error.localizedDescription}
-                       : @{@"PreflightCompleted" : @YES,
-                           @"CaptureVerified" : @NO});
-        });
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"usb-interface-policy"]) {
-        NSDictionary *selected = nil;
-        for (NSDictionary *device in VIMHostUSBDevices())
-            if ([device[@"LocationID"] isEqual:command[@"LocationID"]])
-                selected = device;
-        if (!selected) {
-            finish(@{@"Error" : @"The requested physical USB device is not connected."});
-            return;
-        }
-        [self ensureUSBClient];
-        [self.usbClient checkStorageInterface:selected
-                                inUserSession:[command[@"UserSession"] isEqual:@YES]
-                                   completion:^(NSDictionary *result, NSError *error) {
-                                     finish(error ? @{@"Error" : error.localizedDescription} : result);
-                                   }];
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"usb-connect"] || [command[@"Action"] isEqual:@"usb-disconnect"]) {
-        if (!self.task.running || self.usbOperationPending) {
-            finish(@{@"Error" : @"USB is not ready for another operation."});
-            return;
-        }
-        NSDictionary *selected = nil;
-        for (NSDictionary *device in VIMHostUSBDevices())
-            if ([device[@"LocationID"] isEqual:command[@"LocationID"]])
-                selected = device;
-        if (!selected) {
-            finish(@{@"Error" : @"The requested physical USB device is not connected."});
-            return;
-        }
-        [self ensureUSBClient];
-        NSString *identifier = selected[@"Identifier"];
-        self.usbOperationPending = YES;
-        void (^done)(NSError *) = ^(NSError *error) {
-          self.usbOperationPending = NO;
-          if (!error) {
-              if ([command[@"Action"] isEqual:@"usb-disconnect"])
-                  [self.usbAttached removeObjectForKey:identifier];
-              else {
-                  if (!self.usbAttached)
-                      self.usbAttached = [NSMutableDictionary new];
-                  self.usbAttached[identifier] = selected[@"Name"];
-              }
-          }
-          finish(error ? @{@"Error" : error.localizedDescription} : @{@"Attached" : self.usbAttached ?: @{}});
-        };
-        if ([command[@"Action"] isEqual:@"usb-disconnect"]) {
-            [self.usbClient disconnectDevice:identifier control:self.control completion:done];
-            return;
-        }
-        NSMutableArray *protected =
-            [NSMutableArray arrayWithObjects:NSBundle.mainBundle.bundleURL, VIMLibraryLocation.rootURL, nil];
-        for (VIMSession *session in sessions.allValues)
-            if (session.machine.URL)
-                [protected addObject:session.machine.URL];
-        NSError *error = nil;
-        NSDictionary *storage = VIMHostUSBStorageInfo(selected, protected, &error);
-        if (!storage || [storage[@"Protected"] boolValue]) {
-            done(error ?: VIMSessionError(@"The selected USB device contains the app or a virtual Mac library."));
-            return;
-        }
-        void (^connect)(void) = ^{
-          [self.usbClient prepareWithCompletion:^(NSError *failure) {
-            if (failure) {
-                done(failure);
-                return;
-            }
-            [self.usbClient connectDevice:selected
-                                processID:self.task.processIdentifier
-                                directory:self.runtimeDirectory
-                                  control:self.control
-                               completion:done];
-          }];
-        };
-        BOOL mounted = [storage[@"MountedVolumes"] count] > 0;
-        if (mounted && ![command[@"Unmount"] isEqual:@YES]) {
-            done(VIMSessionError(@"Explicit normal-unmount confirmation is required."));
-            return;
-        }
-        VIMHostRequestUSBStorageAccess(selected, protected, ^(NSError *failure) {
-          if (failure) {
-              done(failure);
-              return;
-          }
-          if (!self.task.running) {
-              done(VIMSessionError(@"This virtual Mac has stopped."));
-              return;
-          }
-          // Developer harness can confirm only normal unmount, never force.
-          if (mounted)
-              VIMHostReleaseUSBDisks(selected, protected, NO, ^(NSError *error) {
-                if (error)
-                    done(error);
-                else
-                    connect();
-              });
-          else
-              connect();
         });
         return;
     }
@@ -3635,158 +3516,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [menu removeAllItems];
     WithToolbarMenuTitle(menu, toolbarTitle);
     [self addItems:[VIMDeviceMenus usbMenuWithDevices:VIMHostUSBDevices()
-                                             attached:self.usbAttached
-                                              pending:self.usbOperationPending]
+                                             attached:self.usbDevices.attached
+                                              pending:self.usbDevices.operationPending]
             toMenu:menu];
 }
-- (void)ensureUSBClient {
-    if (!self.usbClient) {
-        self.usbClient = [VIMUSBClient new];
-        self.usbClient.useUSB2Storage = VIMGuestHasTrait(self.machine.guest, VIMGuestTraitUSB2StoragePassthrough);
-    }
-}
 - (void)toggleUSBDevice:(NSMenuItem *)sender {
-    if (self.usbOperationPending || !self.task.running)
-        return;
-    NSDictionary *device = sender.representedObject;
-    NSString *identifier = device[@"Identifier"];
-    if (!self.usbAttached)
-        self.usbAttached = [NSMutableDictionary dictionary];
-    __weak VIMSession *weakSelf = self;
-    if (self.usbAttached[identifier]) {
-        self.usbOperationPending = YES;
-        [self.usbClient disconnectDevice:identifier
-                                 control:self.control
-                              completion:^(NSError *error) {
-                                weakSelf.usbOperationPending = NO;
-                                if (error)
-                                    VIMPresentError(error, weakSelf.window);
-                                else
-                                    [weakSelf.usbAttached removeObjectForKey:identifier];
-                              }];
-        return;
-    }
-    NSMutableArray *protected =
-        [NSMutableArray arrayWithObjects:NSBundle.mainBundle.bundleURL, VIMLibraryLocation.rootURL, nil];
-    for (VIMSession *session in sessions.allValues)
-        if (session.machine.URL)
-            [protected addObject:session.machine.URL];
-    NSError *failure = nil;
-    NSDictionary *storage = VIMHostUSBStorageInfo(device, protected, &failure);
-    if (!storage || [storage[@"Protected"] boolValue]) {
-        VIMPresentError(failure
-                            ?: VIMSessionError(@"This device contains Light Click, a virtual Mac, or its library and "
-                                               @"cannot be unmounted. Move those files to another drive first."),
-                        self.window);
-        return;
-    }
-    void (^connect)(void) = ^{
-      VIMSession *session = weakSelf;
-      if (!session.task.running)
-          return;
-      session.usbOperationPending = YES;
-      [session ensureUSBClient];
-      [session.usbClient prepareWithCompletion:^(NSError *error) {
-        if (error || !weakSelf.task.running) {
-            weakSelf.usbOperationPending = NO;
-            if (error)
-                VIMPresentError(error, weakSelf.window);
-            return;
-        }
-        [weakSelf.usbClient connectDevice:device
-                                processID:weakSelf.task.processIdentifier
-                                directory:weakSelf.runtimeDirectory
-                                  control:weakSelf.control
-                               completion:^(NSError *captureError) {
-                                 weakSelf.usbOperationPending = NO;
-                                 if (captureError)
-                                     VIMPresentError(captureError, weakSelf.window);
-                                 else
-                                     weakSelf.usbAttached[identifier] = device[@"Name"];
-                               }];
-      }];
-    };
-    void (^requestAccess)(void (^)(void)) = ^(void (^next)(void)) {
-      weakSelf.usbOperationPending = YES;
-      VIMHostRequestUSBStorageAccess(device, protected, ^(NSError *error) {
-        weakSelf.usbOperationPending = NO;
-        if (error) {
-            VIMPresentError(error, weakSelf.window);
-            return;
-        }
-        if (weakSelf.task.running)
-            next();
-      });
-    };
-    if (![storage[@"MountedVolumes"] count]) {
-        requestAccess(connect);
-        return;
-    }
-    NSAlert *alert = [NSAlert new];
-    alert.messageText = [NSString stringWithFormat:@"Connect “%@” to this virtual Mac?", device[@"Name"]];
-    alert.informativeText = @"Its disks must first be unmounted from this Mac. Save your work on this device before "
-                            @"continuing. They’ll be available to the virtual Mac instead.";
-    [alert addButtonWithTitle:@"Unmount and Connect"];
-    [alert addButtonWithTitle:@"Cancel"];
-    [alert addButtonWithTitle:@"Force Unmount…"];
-    VIMPresentAlert(alert, self.window, ^(NSModalResponse response) {
-      if (response == NSAlertSecondButtonReturn)
-          return;
-      void (^unmount)(BOOL) = ^(BOOL force) {
-        requestAccess(^{
-          weakSelf.usbOperationPending = YES;
-          [weakSelf releaseUSBDisks:device
-                          protected:protected
-                              force:force
-                         completion:^{
-                           connect();
-                         }];
-        });
-      };
-      if (response == NSAlertFirstButtonReturn) {
-          unmount(NO);
-          return;
-      }
-      NSAlert *confirm = [NSAlert new];
-      confirm.messageText = [NSString stringWithFormat:@"Force unmount “%@”?", device[@"Name"]];
-      confirm.informativeText = @"Unsaved changes on this device may be lost. Close apps using it first if possible.";
-      [confirm addButtonWithTitle:@"Force Unmount and Connect"];
-      [confirm addButtonWithTitle:@"Cancel"];
-      VIMPresentAlert(confirm, weakSelf.window, ^(NSModalResponse answer) {
-        if (answer == NSAlertFirstButtonReturn)
-            unmount(YES);
-      });
-    });
-}
-- (void)releaseUSBDisks:(NSDictionary *)device
-              protected:(NSArray *)protected
-                  force:(BOOL)force
-             completion:(void (^)(void))completion {
-    __weak VIMSession *weakSelf = self;
-    VIMHostReleaseUSBDisks(device, protected, force, ^(NSError *error) {
-      VIMSession *session = weakSelf;
-      session.usbOperationPending = NO;
-      if (!error) {
-          completion();
-          return;
-      }
-      if (force) {
-          VIMPresentError(error, session.window);
-          return;
-      }
-      NSAlert *alert = [NSAlert new];
-      alert.messageText = [NSString stringWithFormat:@"“%@” couldn’t be unmounted", device[@"Name"]];
-      alert.informativeText = @"Close apps using this device and try again, or force unmount it to connect it to the "
-                              @"virtual Mac. Forcing an unmount can lose unsaved changes on the device.";
-      [alert addButtonWithTitle:@"Cancel"];
-      [alert addButtonWithTitle:@"Force Unmount and Connect"];
-      VIMPresentAlert(alert, session.window, ^(NSModalResponse answer) {
-        if (answer == NSAlertSecondButtonReturn && weakSelf.task.running) {
-            weakSelf.usbOperationPending = YES;
-            [weakSelf releaseUSBDisks:device protected:protected force:YES completion:completion];
-        }
-      });
-    });
+    [self.usbDevices toggle:sender.representedObject];
 }
 - (void)releaseGuestKeys {
     [self.displayView releasePressedKeys];
@@ -4853,10 +4588,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [self.networkClient stop];
     self.networkClient = nil;
     self.guestIPAddresses = nil;
-    [self.usbClient stop];
-    self.usbClient = nil;
-    self.usbOperationPending = NO;
-    self.usbAttached = nil;
+    [self.usbDevices stop];
     [self.smbService stop];
     self.smbService = nil;
     [self.clipboard stop];

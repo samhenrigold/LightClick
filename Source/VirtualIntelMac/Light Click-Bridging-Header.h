@@ -4,13 +4,15 @@
 #import "VIMAutomaticSetup.h"
 #import "VIMHostAudio.h"
 #import "VIMHostSupport.h"
+#import "VIMHostUSB.h"
 #import "VIMImageSlots.h"
 #import "VIMInstallerAssembly.h"
 #import "VIMMachine.h"
 #import "VIMNetworkDefaults.h"
 #import "VIMSMBService.h"
-#import "VIMSession.h"
+#import "VIMSessionPrivate.h"
 #import "VIMSettingsIcon.h"
+#import "VIMUSBClient.h"
 
 @interface NSTextField (VIMGuestPasswordAutofill)
 - (void)_setPasswordAutofillEnabled:(BOOL)enabled;
