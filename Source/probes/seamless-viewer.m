@@ -1,12 +1,16 @@
 // Host side of the seamless-window demo: one borderless NSWindow per guest window, fed by seamless-guest, with pointer
 // and keys sent back. Listens on loopback only; a guest reaches that as 10.0.2.2 over QEMU's user network.
 //
-//     seamless-viewer [--port 7654] [--self-test] [--exit-after SECONDS] [--png PATH] [--test-input X,Y]
+//     seamless-viewer [--port 7654] [--self-test] [--exit-after SECONDS] [--png PATH] [--test-input X,Y] [--tree]
 //
 // --self-test clicks and types into the first window, confirms on-screen pixels changed each time, and exits 0 or 1.
 // --exit-after stops that long after the first window appears, or when the guest disconnects, prints what arrived,
 // writes the window's last pixels to --png, and exits 0 if any frame came. --test-input clicks at X,Y (window points)
 // and types one key, a few seconds into the run, over the same path as real input.
+//
+// --tree shows the guest's whole window tree: each window where the guest has it, relative to the others, at its level
+// and order, with the shadow and alpha in its pixels, and pointer events sent as guest screen coordinates. --png then
+// names a prefix, and each window's last pixels are saved when it goes away, so menus survive to be looked at.
 //
 // shortcut: any local process can connect, and nothing authenticates it; a real design uses a private virtio port.
 // shortcut: one process, so one Dock tile; generated per-app proxies are phase 2, see seamless-apps-design.md.
@@ -15,6 +19,7 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #include "seamless-wire.h"
 #include <arpa/inet.h>
+#include <dlfcn.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdlib.h>
@@ -23,6 +28,9 @@
 
 static int connectionFD = -1; // Main thread.
 static BOOL selfTest;
+static BOOL treeMode;
+static NSPoint guestOffset; // Host top-left-origin screen point = guest point + this.
+static BOOL haveGuestOffset;
 static double exitAfter;
 static NSString *pngPath;
 static NSPoint testClick = {-1, -1};
@@ -51,6 +59,9 @@ static void sendToGuest(const uint8_t *bytes, size_t size) {
 @property BOOL dirty;
 @property NSSize points;
 @property NSInteger buttons;
+@property uint32_t order, margin;
+@property int layer_;
+@property(copy) NSString *label;
 - (void)sendKind:(uint8_t)kind button:(uint8_t)button event:(NSEvent *)event;
 @end
 @implementation GuestView
@@ -78,7 +89,14 @@ static void sendToGuest(const uint8_t *bytes, size_t size) {
 }
 - (void)sendKind:(uint8_t)kind button:(uint8_t)button event:(NSEvent *)event {
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    struct SWMPointer e = {self.guestID,
+    uint32_t target = self.guestID;
+    if (treeMode) {
+        NSPoint screen = NSEvent.mouseLocation;
+        p = NSMakePoint(screen.x - guestOffset.x,
+                        NSScreen.screens.firstObject.frame.size.height - screen.y - guestOffset.y);
+        target = 0;
+    }
+    struct SWMPointer e = {target,
                            kind,
                            button,
                            (uint8_t)MIN(event.type == NSEventTypeMouseMoved ? 0 : event.clickCount, 255),
@@ -97,7 +115,7 @@ static void sendToGuest(const uint8_t *bytes, size_t size) {
     // window and the pointer would never appear to move. Let the host's window manager run it, as RDP's local
     // move-resize does. 22 points tall, skipping the traffic lights; correct for Aqua on 10.9 only, which is all this
     // demo claims.
-    if (p.y < 22 && p.x > 70) {
+    if (!treeMode && p.y < 22 && p.x > 70) {
         [self.window performWindowDragWithEvent:event];
         return;
     }
@@ -191,6 +209,8 @@ static void sendToGuest(const uint8_t *bytes, size_t size) {
 @property int port;
 @property NSUInteger framesShown, bytesShown;
 @property CFTimeInterval firstFrame;
+- (void)applyTreeWindow:(GuestWindow *)window message:(const struct SWMWindow *)w;
+- (void)saveWindow:(GuestWindow *)window;
 @property NSMutableArray<NSString *> *seenTitles;
 @end
 
@@ -235,6 +255,76 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
     fprintf(stderr, "self-test FAILED: %s\n", why);
     exit(1);
 }
+- (void)saveWindow:(GuestWindow *)window {
+    GuestView *view = (GuestView *)window.contentView;
+    if (!pngPath || !view.layer.contents || !treeMode)
+        return;
+    // Partly transparent pixels are the shadow and any glass: the proof that alpha survived the whole path.
+    const uint8_t *pixels = view.pixels.bytes;
+    size_t total = (size_t)view.pixelWidth * view.pixelHeight, clear = 0, partial = 0;
+    for (size_t i = 0; i < total; i++) {
+        uint8_t a = pixels[i * 4 + 3];
+        clear += !a;
+        partial += a && a != 255;
+    }
+    NSString *path = [pngPath stringByAppendingFormat:@"-%u.png", window.guestID];
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:(__bridge CGImageRef)view.layer.contents];
+    [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES];
+    printf("window %u layer %d %s: %ux%u, %.0f%% clear, %.1f%% partial alpha, %s\n", window.guestID, view.layer_,
+           view.label.UTF8String, view.pixelWidth, view.pixelHeight, total ? 100.0 * clear / total : 0,
+           total ? 100.0 * partial / total : 0, path.UTF8String);
+    fflush(stdout);
+}
+- (void)reorderWindows {
+    NSArray<GuestWindow *> *sorted =
+        [self.windows.allValues sortedArrayUsingComparator:^NSComparisonResult(GuestWindow *a, GuestWindow *b) {
+          uint32_t x = ((GuestView *)a.contentView).order, y = ((GuestView *)b.contentView).order;
+          return x > y ? NSOrderedAscending : x < y ? NSOrderedDescending : NSOrderedSame;
+        }];
+    for (GuestWindow *window in sorted)
+        [window orderFront:nil];
+}
+- (void)applyTreeWindow:(GuestWindow *)window message:(const struct SWMWindow *)w {
+    GuestView *view = (GuestView *)window.contentView;
+    CGFloat primary = NSScreen.screens.firstObject.frame.size.height;
+    if (!haveGuestOffset) {
+        // Keeps this first window's guest position on the host's screen, near the middle.
+        NSRect screen = NSScreen.mainScreen.visibleFrame;
+        guestOffset =
+            NSMakePoint(NSMidX(screen) - (w->x + w->width / 2.0), primary - NSMidY(screen) - (w->y + w->height / 2.0));
+        haveGuestOffset = YES;
+    }
+    CGFloat side = w->margin, width = w->width + 2 * side, height = w->height + 2 * side;
+    NSRect frame =
+        NSMakeRect(w->x - side + guestOffset.x, primary - (w->y - side + guestOffset.y) - height, width, height);
+    if (!NSEqualRects(window.frame, frame)) {
+        [window setFrame:frame display:NO];
+        // Only the window itself takes clicks, or its invisible shadow would block whatever is behind it.
+        static int (*newRegion)(const CGRect *, void **);
+        static int (*eventShape)(int, CGWindowID, void *);
+        static int (*connection)(void);
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+          void *sky = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY);
+          newRegion = dlsym(RTLD_DEFAULT, "CGSNewRegionWithRect");
+          eventShape = sky ? dlsym(sky, "SLSSetWindowEventShape") : NULL;
+          connection = sky ? dlsym(sky, "SLSMainConnectionID") : NULL;
+        });
+        void *region = NULL;
+        CGRect content = CGRectMake(side, side, w->width, w->height);
+        if (newRegion && eventShape && connection && !newRegion(&content, &region))
+            eventShape(connection(), (CGWindowID)window.windowNumber, region);
+    }
+    window.level = w->layer;
+    window.hasShadow = NO;
+    window.alphaValue = w->alpha / 65536.0;
+    view.margin = w->margin;
+    view.layer_ = w->layer;
+    BOOL reordered = view.order != w->order || !window.visible;
+    view.order = w->order;
+    if (reordered)
+        [self reorderWindows];
+}
 // Prints what the guest sent, keeps its last pixels, and exits.
 - (void)finishRun {
     double seconds = self.framesShown ? CACurrentMediaTime() - self.firstFrame : 0;
@@ -244,8 +334,10 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
     printf("viewer_windows %lu count\n", (unsigned long)self.seenTitles.count);
     for (NSString *line in self.seenTitles)
         printf("# %s\n", line.UTF8String);
+    for (GuestWindow *window in self.windows.allValues)
+        [self saveWindow:window];
     GuestView *view = (GuestView *)self.windows.allValues.firstObject.contentView;
-    if (pngPath && view.layer.contents) {
+    if (pngPath && view.layer.contents && !treeMode) {
         NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:(__bridge CGImageRef)view.layer.contents];
         BOOL saved = [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:pngPath
                                                                                              atomically:YES];
@@ -364,9 +456,15 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
             view.pixelHeight = w->pixel_height;
             view.pixels = [NSMutableData dataWithLength:(NSUInteger)w->pixel_width * w->pixel_height * 4];
         }
-        if (created) {
+        if (treeMode)
+            [self applyTreeWindow:window message:w];
+        else if (created)
             [window makeKeyAndOrderFront:nil];
+        if (created) {
+            if (treeMode && NSApp.keyWindow == nil)
+                [window makeKeyWindow];
             [window makeFirstResponder:view];
+            view.label = owner;
             if (selfTest)
                 [self selfTestWindow:window];
             if (testClick.x >= 0)
@@ -395,6 +493,7 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
         self.bytesShown += row * f->height;
     } else if (m->type == SWM_GONE) {
         GuestWindow *window = self.windows[@(m->u.window_id)];
+        [self saveWindow:window];
         [self.windows removeObjectForKey:@(m->u.window_id)];
         [window close];
     } else if (m->type == SWM_HELLO && m->u.version != SWM_VERSION)
@@ -502,6 +601,8 @@ int main(int argc, const char **argv) {
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--self-test"))
                 selfTest = YES;
+            else if (!strcmp(argv[i], "--tree"))
+                treeMode = YES;
             else if (!strcmp(argv[i], "--exit-after") && i + 1 < argc)
                 exitAfter = atof(argv[++i]);
             else if (!strcmp(argv[i], "--png") && i + 1 < argc)

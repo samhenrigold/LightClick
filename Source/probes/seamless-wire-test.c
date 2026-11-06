@@ -29,13 +29,14 @@ static void round_trips(void) {
     swm_parse(out, n, &m, &used);
     assert(m.type == SWM_HELLO && m.u.version == SWM_VERSION);
 
-    struct SWMWindow w = {7, 99, -3, -20, 30, 640, 480, 1280, 960, 5, 8, "Title", "TextEdit"};
+    struct SWMWindow w = {7, 99, -3, -20, 30, 640, 480, 1280, 960, 5, 8, "Title", "TextEdit", 3, 6, 0x8000, 48};
     n = swm_put_window(out, sizeof(out), &w);
     every_prefix_needs_more(out, n);
     swm_parse(out, n, &m, &used);
     assert(m.type == SWM_WINDOW && m.u.window.window == 7 && m.u.window.pid == 99 && m.u.window.layer == -3);
     assert(m.u.window.x == -20 && m.u.window.y == 30 && m.u.window.width == 640 && m.u.window.pixel_height == 960);
     assert(!memcmp(m.u.window.title, "Title", 5) && !memcmp(m.u.window.owner, "TextEdit", 8));
+    assert(m.u.window.order == 3 && m.u.window.group == 6 && m.u.window.alpha == 0x8000 && m.u.window.margin == 48);
     assert(swm_put_window(out, n - 1, &w) == 0);
 
     struct SWMFrame f = {7, 3, 16, 8, 2, 4, 3, 2, NULL};
@@ -242,7 +243,7 @@ static void rejects_lies(void) {
     assert(swm_parse(out, SWM_HEADER_SIZE, &m, &used) == SWM_BAD);
 
     // Text lengths that disagree with the payload length.
-    struct SWMWindow w = {1, 1, 0, 0, 0, 10, 10, 10, 10, 0, 0, "", ""};
+    struct SWMWindow w = {1, 1, 0, 0, 0, 10, 10, 10, 10, 0, 0, "", "", 0, 0, 0x10000, 0};
     size_t n = swm_put_window(out, sizeof(out), &w);
     swm_w16(out + SWM_HEADER_SIZE + 36, 1);
     assert(swm_parse(out, n, &m, &used) == SWM_BAD);
@@ -252,6 +253,12 @@ static void rejects_lies(void) {
     assert(swm_parse(out, n, &m, &used) == SWM_BAD);
     n = swm_put_window(out, sizeof(out), &w);
     swm_w32(out + SWM_HEADER_SIZE + 28, SWM_MAX_DIMENSION + 1);
+    assert(swm_parse(out, n, &m, &used) == SWM_BAD);
+    n = swm_put_window(out, sizeof(out), &w); // Alpha above one, and an impossible margin.
+    swm_w32(out + SWM_HEADER_SIZE + 48, 0x10001);
+    assert(swm_parse(out, n, &m, &used) == SWM_BAD);
+    n = swm_put_window(out, sizeof(out), &w);
+    swm_w32(out + SWM_HEADER_SIZE + 52, SWM_MAX_MARGIN + 1);
     assert(swm_parse(out, n, &m, &used) == SWM_BAD);
 
     struct SWMPointer e = {1, SWM_DRAG + 1, 0, 0, 0, 0, 0};
@@ -280,7 +287,7 @@ static void rejects_lies(void) {
 static void fuzz(void) {
     srand(1);
     uint8_t valid[256], data[256];
-    struct SWMWindow w = {1, 2, 0, 0, 0, 10, 10, 20, 20, 3, 3, "abc", "def"};
+    struct SWMWindow w = {1, 2, 0, 0, 0, 10, 10, 20, 20, 3, 3, "abc", "def", 0, 0, 0x10000, 0};
     size_t valid_size = swm_put_window(valid, sizeof(valid), &w);
     for (int round = 0; round < 2000000; round++) {
         size_t n = (size_t)rand() % sizeof(data);

@@ -1,39 +1,95 @@
 # Seamless guest apps
 
-Goal: a guest app appears on the host as a normal app, with its own Dock icon, Cmd-Tab entry and one `NSWindow` per guest
-window, like Parallels Coherence.
+Goal: a guest app is indistinguishable from a host app. Its own Dock icon and Cmd-Tab entry, one `NSWindow` per guest window with the
+real shadow and alpha, popovers past the window's edge, sheets, menus, gestures, force click, drag and drop, and no visible VM. "It has
+to be perfect" is the requirement, and it rules out designs that are only nearly right.
 
-**Nothing here has run on a guest.** No VM was booted. Host claims come from probes on macOS 27.2 (M4 Max, ProMotion,
-SIP on). Guest claims come from reading stock Mavericks (13F34) and Mojave (18G103) binaries, read-only. No other OS version
-was inspected.
+**No guest has run any of this yet.** Host claims come from probes on macOS 27.2 (M4 Max, ProMotion, SIP on). Guest claims come from
+reading stock Mavericks (13F34) and Mojave (18G103) binaries, read-only, without Hopper (`nm`, `otool`). No other OS version was
+inspected.
 
-Labels: **[measured]** by a probe here. **[read]** seen in code or a binary. **[source]** public documentation or code,
-linked. **[inferred]** reasoned, untested. **[memory]** recalled and not checked here; verify before relying on it.
+Labels: **[measured]** by a probe here. **[read]** seen in code or a binary. **[source]** public documentation or code, linked.
+**[inferred]** reasoned, untested. **[memory]** recalled, unchecked; verify before relying on it.
 
 ## Answer
 
-It looks feasible on every generation, and **SIP doesn't block anything the recommended design needs**. SIP stops you
-changing other apps' windows, so the design only changes its own. The real risks are in the guest: whether a very large
-guest display works, and whether windows can be kept from overlapping there. Phase 2 tests both, and either could force a
-compositor hook on some versions.
+Feasible as far as can be seen without a boot, and the guest's own window tree is the design, not the framebuffer.
 
-The recommended design has three parts:
+1. **The guest's window tree goes to the host as separate surfaces with alpha**, in display order, with level, group, shape and shadow.
+   Every window kind then works the same way: a popover is just a window. This now runs on real windows on this Mac: a real shadow, the
+   popover's shape with its arrow, a child panel, a translucent window, a real menu and a sheet each arrived as their own host window with
+   per-pixel alpha, and the popover's opening animation came through live [measured].
+2. **WindowServer is the source.** First through its client interface, which needs no patch and works today; then a hook inside it for
+   damage, GPU-side per-window composites and running headless. Both generations have the internal function that this needs: Mission
+   Control's live thumbnails use it [read].
+3. **A generated `.app` per guest app** owns the Dock tile, the windows and the menu, showing layers rendered by the VM's process through
+   `CALayerHost`, which works across processes at 120 Hz with SIP on [measured].
 
-1. **Pixels:** crop each window out of the guest framebuffer that already reaches the host, with no new capture path.
-2. **Occlusion:** a guest agent keeps windows apart on an oversized guest display, so a crop is never covered.
-3. **Identity:** a generated, ad-hoc-signed `.app` per guest app owns the Dock tile and the `NSWindow`s, and shows layers
-   rendered by the VM's process through `CALayerHost`.
-
-Per-window capture in the guest, which is what phase 1 demonstrates, stays as the fallback for windows that can't be placed
-that way, and as the source of alpha masks. A WindowServer hook is held in reserve.
+SIP doesn't block anything this needs on the host, because each proxy only changes its own windows. The largest unknowns: the cost of
+per-window capture under emulation, which `scripts/seamless-try tree` measures; and how a composite in the guest reaches the host without a
+CPU copy, which is different for vmware-svga and PVG. Cropping the framebuffer into slots is kept only as a possible quick path; it can't
+do real shadows, overlap or alpha, so it can't be the end state.
 
 | Generation | Display path | Feasible? | What's specific to it |
 | --- | --- | --- | --- |
-| Tiger (10.4) | vmware-svga | Probably, with less | `CGWindowList` arrived in 10.5 [memory], so listing needs private API or AX. No Retina. Not inspected |
-| Leopard to Mountain Lion | vmware-svga, PassthroughOpenGL | Likely | Public window list. No Spaces trouble before Lion's full-screen Spaces [memory]. Not inspected |
-| Mavericks to High Sierra | vmware-svga, PassthroughOpenGL | Likely; Mavericks is the demo target | GL compositor with local symbols [read]. SIP is off in the guest where it exists [read] |
-| Mojave | PVG | Likely | SIP and AMFI off in guest [read]. Synthetic events need a TCC grant [memory], which the design avoids by using the existing tablet path |
-| Catalina, Big Sur | PVG | Likely, least certain | Window titles need Screen Recording from 10.15 [memory]; a root agent can grant it in TCC.db with SIP off [inferred]. Big Sur's sealed volume and shared cache make binary patching harder, so the hook fallback costs more. Not inspected |
+| Tiger | vmware-svga | Unknown, least likely to be perfect | `CGWindowList` arrived in 10.5 [memory]. Not inspected |
+| Leopard to Mountain Lion | vmware-svga | Likely | Not inspected. Client interface expected to work; hook per version |
+| Mavericks to High Sierra | vmware-svga, PassthroughOpenGL | Likely; Mavericks is the prototype | GL compositor, local symbols present. Its GL already runs on the host GPU |
+| Mojave | PVG | Likely | `WSCompositeWindowToDestination` exists; SIP and AMFI off in the guest, SkyLight already patched [read] |
+| Catalina, Big Sur | PVG | Likely, least certain | Titles need Screen Recording from 10.15 [memory]. Big Sur's shared cache makes the hook much costlier. Not inspected |
+
+## Requirements
+
+**Status words:** *proven* means measured on this host through the real code; nothing is proven on a guest. "A" marks what changes the
+architecture now. "Input" and "Integration" name the parallel work; see [Interfaces](#interfaces-for-the-parallel-work).
+
+### Windows and pixels
+
+| Requirement | Mechanism | Host API | Proven | Unknown |
+| --- | --- | --- | --- | --- |
+| **A** One surface per window, in order, overlapping | Window tree from `CGWindowListCopyWindowInfo`, or the hook | `NSWindow` per guest window, ordered and at the guest's level | Multi-window stream with order, level, group [measured] | Capture cost under TCG |
+| **A** Drop shadows, real alpha | `CGWindowListCreateImage` of the bounds grown by a margin includes the shadow, on transparent. Host `hasShadow` off | Non-opaque window; `SLSSetWindowEventShape` so the shadow doesn't take clicks | Pixels and the event hole [measured]. On a run, 13-55% of pixels were partial alpha | Whether a Mavericks shadow fits the 48-point margin |
+| **A** Popovers, sheets, menus, tooltips, panels, drag images | All are guest windows with the same owner; `CGSCopyAssociatedWindows` groups them with their parent. Host places them by guest position, so they extend past the parent by themselves | Same; `addChildWindow:` once a proxy moves groups | Popover, panel, menu (layer 101), sheet [measured]. Tooltips and drag images not tried | Drag images may be owned by another process |
+| Window animations | Bounds and alpha sent as they change; the popover's growth arrived frame by frame [measured]. Transforms: `CGSGetWindowTransform` | Frame, alpha, layer transform | Size and alpha only | Genie and Mission-style transforms under capture; hook composites them |
+| Vibrancy | Guest material samples the guest's backdrop | `NSVisualEffectView` behind a punched-out region, if the hook can separate it | No | Mojave `WSBackdrop*` layers exist [read]; separating them needs the hook |
+| Resize at 120 Hz | Host resizes first and stretches the last frame, guest follows; host present path can do 120 Hz | `CAMetalLayer`, `CALayerHost` | Present rate only, 8.33 ms median [measured] | Guest redraw rate, 60 Hz modes (`gpu-performance-notes.md`) |
+| Retina, 1x apps | Per-window scale: pixel size against point size; a 1x window is scaled by the layer | `contentsScale` | 400x240 pixels for 200x120 points [measured] | Filter choice for 1x on 2x |
+| **A** Multi-monitor, mixed DPI, moving between screens | Windows are independent, so a host window can sit anywhere. A guest window's backing scale stays what the guest made | `NSWindow` | No | Guest has one scale; a window on a 1x and 2x pair is resampled |
+| **A** Color management | Guest sRGB or display profile to host. `CGSCopyWindowColorSpace` per window [read]; tag the surface | `CAMetalLayer.colorspace`, IOSurface color tags | No. The probe saw magenta converted to display color, so the path isn't neutral | Which space WindowServer's composite is in |
+| Full screen, Spaces, Mission Control | Host owns these; proxies are normal windows. A guest full-screen request becomes a host full-screen window | `collectionBehavior` | `Foreground` type in `lsappinfo` only [measured] | Must be looked at by eye. Guest full-screen Spaces (Lion on) take windows off the list |
+| **A** Host screenshots and capture of proxy windows | Normal windows capture normally. `CALayerHost` content was read back by ScreenCaptureKit in the proxy [measured] | | Own-process SCK [measured] | Whole-screen `screencapture` by eye |
+
+### Input (parallel work)
+
+| Requirement | Mechanism | Host API | Proven | Unknown |
+| --- | --- | --- | --- | --- |
+| Pointer | Guest screen points, `window = 0` on the wire; host window position maps host to guest | `NSEvent` | Wire, mapping, viewer. Real events only reach `CGEventPost` on a guest | That `CGEventPost` works in the session on 10.9 |
+| Trackpad gestures, force click, pressure stages, momentum | Input work: Apple's RFB `0x17` per `guest-capabilities.md`, or direct injection | `NSEvent` phases, `pressure`, `stage` | No | Whole area, per OS |
+| Cmd-Tab, Cmd-Q, Cmd-W, IME, dead keys | Host keeps Cmd-Tab. Proxy's menu takes Cmd-Q and Cmd-W and acts on the guest app. No event tap needed | `NSTextInputClient`, proxy `NSMenu` | No | Input work |
+| Focus | Host key window to guest raise and activate; first key waits for confirmation | `windowDidBecomeKey` | `SWM_FOCUS` sent | Stalls under TCG |
+
+### Life of the VM (architecture changes now)
+
+| Requirement | Mechanism | Host API | Proven | Unknown |
+| --- | --- | --- | --- | --- |
+| **A** Invisible VM: launch boots or resumes, suspend on last quit, host sleep and wake | A session process that owns QEMU with no window. A fast resume needs a snapshot (`savevm`/`loadvm` to fast storage, or a mapped RAM file) rather than a 40 s boot | `NSWorkspace` sleep notifications | No | Whether QEMU snapshots work across PVG and passthrough GL state; probably not without device work. **Largest lifecycle risk** |
+| **A** Windows with no owning app: SecurityAgent, Keychain, crash reports, Software Update, loginwindow, assistants | The tree is "everything except an exclusion list" (`--all`: not Dock, Window Server, SystemUIServer). A window with no matching proxy gets a generic "Mac OS X" proxy | Fallback proxy | `--all` filter written, not tried | Secure-input windows may refuse capture; `CGSSetWindowSharingState` blocks (tag `kCGSWindowSharingNone`); the hook bypasses this |
+| **A** Guest crash, panic or reboot with apps open | Session sees the agent or QEMU go; proxies stay with their last frames and a dialog, and are told "relaunch" or "close" | | No | State across reboot |
+| **A** Several VMs at once | Each proxy bound to a machine by bundle ID; each session has its own offset and socket | Identity carries machine ID | No | RAM and battery; ports already clash (`boot-clone` knows) |
+| **A** Fallback when no hook for a build | Layered: hook, else client interface, else a plain windowed VM. Chosen by build at start | Existing window | Client interface runs with no hook | Which builds lack which client calls |
+| **A** Battery and idle cost | Guest idle cost is the main term; hook damage instead of polling | | `CGSGetWindowFlushSeed` errors for another process's windows on macOS 27 [measured: `seed_answers 0`], and its code looks windows up in a client-side table on 10.9 too [read]. So damage needs the hook | The VM's idle CPU under TCG; `capture_share` reports the probe's cost |
+
+### App identity and integration (parallel work)
+
+| Requirement | Mechanism | Host API | Proven | Unknown |
+| --- | --- | --- | --- | --- |
+| Dock tile, Cmd-Tab identity | Generated `.app` from the guest's `Info.plist` and icon | LaunchServices | Ad-hoc bundle, `Foreground`, own bundle ID [measured] | By eye |
+| Badges, bouncing, Dock menus | Integration work: `NSDockTile`, `requestUserAttention`; source in guest unknown | | No | Guest Dock's data |
+| Host menu bar | AX menu tree to `NSMenu`; item selection to `AXPress` | `NSMenu`, `menuNeedsUpdate:` | `ax-menu-response.c` exists | AX cost under TCG; root's AX grant |
+| File drag in, drag onto icon, drag out, Open With | Integration work, `guest-capabilities.md`. Document types from guest `Info.plist` | `application:openURLs:`, `NSDraggingDestination` | `openURLs:` on a generated bundle [measured] | Write-back; drag out |
+| Notifications, Services, Quick Look | Integration work | | No | |
+| **A** VoiceOver and Accessibility | Guest AX tree bridged: proxy exposes an `NSAccessibilityElement` tree mirrored from guest AX | `NSAccessibility` | No | Cost; this is a big piece of its own, name a separate owner |
+| Clipboard | `VIMClipboardBridge`: text only | | Existing | Images, files |
 
 ## What SIP blocks
 
@@ -80,251 +136,176 @@ Also works with SIP on [measured]:
 | Hosted cross-process | 354 | 8.33 ms | 16.67 ms |
 | In-process window | 350 | 8.33 ms | 16.67 ms |
 
-**Not verified on the host:** I only read `lsappinfo`, and didn't look at the Dock, Cmd-Tab or Mission Control. Stage Manager
+**Not verified on the host:** this only read `lsappinfo`, and didn't look at the Dock, Cmd-Tab or Mission Control. Stage Manager
 is off on this Mac. A `Foreground` app with normal windows should take part in all of them [inferred], but someone needs to
 look. Whether AppKit's shadow follows a hosted layer's alpha is also untested.
 
 ## Architecture
 
 ```
- Guest                                          Host
- ┌────────────────────────────┐   framebuffer   ┌───────────────────────────────┐
- │ Apps ─► WindowServer       ├────────────────►│ Light Click session process   │
- │ (oversized display;        │  (existing path)│  one shared frame             │
- │  windows never overlap)    │                 │  per-window layers, cropped   │
- │                            │   metadata      │  CAContext per window         │
- │ seamless agent             ├────────────────►│                               │
- │  window list, AX, placement│◄────────────────┤  QMP tablet + keyboard        │
- │  menus, launch             │   commands      └───────┬───────────────────────┘
- └────────────────────────────┘                  contextId, events (private socket)
-                                                 ┌──────┴───────────────────────┐
-                                                 │ TextEdit (Mavericks).app     │
-                                                 │  generated, ad-hoc signed    │
-                                                 │  Dock tile, NSMenu           │
-                                                 │  NSWindow + CALayerHost each │
-                                                 └──────────────────────────────┘
+ Guest                                                       Host
+ ┌─────────────────────────────────────┐                     ┌─────────────────────────────────────┐
+ │ Apps ─► WindowServer                │                     │ Session process (no window)         │
+ │          │ window tree, surfaces    │  surfaces, order,   │  owns QEMU                          │
+ │          ▼                          ├────────────────────►│  a CAContext + layer per surface    │
+ │ seamless agent                      │  metadata           │  maps host points to guest points   │
+ │  source: client API, or hook inside │◄────────────────────┤  input to QMP or agent              │
+ │  WindowServer                       │  focus, input       └───────┬─────────────────────────────┘
+ │                                     │                  contextId, │ events, on a private socket
+ │  AX menus, launch, activation       │                             ▼
+ └─────────────────────────────────────┘                     ┌─────────────────────────────────────┐
+                                                             │ TextEdit (Mavericks).app            │
+                                                             │  generated, ad-hoc signed           │
+                                                             │  Dock tile, NSMenu, document types  │
+                                                             │  NSWindow + CALayerHost per window  │
+                                                             └─────────────────────────────────────┘
 ```
 
-### Pixels: crop the existing frame
+**Geometry.** One offset per VM maps guest screen to host screen, so everything lands where the guest would put it, and popovers and menus
+need no special handling: this is what `--tree` does. Pointer coordinates are guest screen points, and there's no feedback loop in guest
+title-bar drags, unlike window-relative coordinates [measured in the design of the viewer; not run on a guest]. Host-native drag comes
+later: moving a group changes only that group's offset, which needs the guest to know, or windows are moved in the guest to match. Which of
+those is open.
 
-The guest already composites and sends a whole frame: `VIMDisplayConnection` into `VIMMetalView` through a shared buffer
-(`installFrameDescriptor:`, 8192x8192x4) or an IOSurface (`presentSurface:`) [read]. Both generations end up there, so a
-single host path covers vmware-svga and PVG. Per window, the host either blits a rect into that window's `CAMetalLayer`, or
-sets `contentsRect` on a layer over the shared surface, which the probe proved works across processes.
+**Occlusion** no longer matters: capture and the hook read a window whether or not it's covered.
 
-What this gets: no capture cost under TCG, no WindowServer changes, GPU-accelerated guest content (GL, Metal, video) included
-automatically, and the same presentation path the rest of the app already measures. It's also the established approach:
-VMware Unity sends window metadata over RPC and converts updates to VNC rectangles, with PNG window contents only for
-snapshots [source: `unityCommon.h`, linked below, the crop itself inferred], and Parallels' patents describe masking the guest
-desktop out of its buffer [source; they don't prove what ships].
+**The desktop.** Exclude it, don't kill it: Dock also owns Mission Control and Spaces [memory]. Only the tree is shown, so wallpaper and
+menu bar are never seen. Headless means not paying to composite them; see below.
 
-### Occlusion: never let guest windows overlap
+## WindowServer, per generation
 
-Cropping's flaw is that a window covered in the guest has no pixels. Syncing z-order, which Unity appears to do, only helps the
-front window: two host windows side by side can't both be right if they overlap in the guest.
+### Mavericks (13F34): `CoreGraphics`, GL compositor
 
-Instead, the agent gives the guest a display far larger than the host's, and places each new window in its own slot with AX
-(`kAXPositionAttribute`), with gaps wider than a shadow. Host position then has nothing to do with guest position:
+WindowServer is a 2-symbol executable calling `CGXServer` in `CoreGraphics` [read]. `CoreGraphics` keeps its local symbols: 16,242 in `nm`.
+No library validation, no `__RESTRICT`, no sandbox noticed, so `DYLD_INSERT_LIBRARIES` from the launchd plist should load [read, not run].
 
-- **Host drags don't touch the guest.** The title-bar drag runs in the host's window manager, as RDP's
-  [local move-resize](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdperp/348a2e91-3ea5-415d-ad67-348d96c3f1bd)
-  does [source]. That also gives native tiling and Mission Control behavior. The demo does this already.
-- **Input maps trivially:** host point minus window origin, plus slot origin, normalized to the existing tablet's 0-32767
-  (`VIMMetalView mouseMoved:`). At 8192 pixels, that's about 0.25 pixel of resolution.
-- **Menus, sheets and tooltips** are guest windows too. The agent reports each one, and the host shows it as a child window at
-  the same offset from its parent. A menu that would run off the slot stays inside the guest's large display.
-- **The guest's Dock, menu bar and wallpaper are never cropped**, so there's no need to kill them. Keep slots away from screen
-  edges so nothing triggers auto-hide or hot corners. This also avoids disturbing the session: killing Dock also removes
-  Spaces and Mission Control, which live there [memory].
+- **Main loop:** `CGXServer` → `CGXRunOneServicesPass` → `mach_msg`. No run loop, so a timer can't reach its thread. `WSRunMainThreadTimerPass`
+  runs from the pass, and `CGXUpdateDisplay` is called from it.
+- **A window's backing:** `CGXWindow+0x108` is the backing store [read: `__CGXAccessWindowBackingStore`, `CGXWindowBackingGet`]. Backing `+0x74` is row
+  bytes, `+0x88` is non-null if accelerated. `CGXBackingStoreDataAccess`, `CGXBackingStoreDataCopy`, `CGXBackingStoreShmemID`, `CGXGetShmemSize`,
+  `CGSBackingROStateGetSynchronizeSeedPtr` read it. Software backing is shared memory with the app.
+- **Shadow:** `CGXWindow+0x9d` non-zero means no shadow; `+0x134`, `+0x13c` feed the margin. `CGXWindowShadowGet` returns a cached object,
+  `CGXGetShadowMarginForWindow` its margin, `insertWindowShadowLayers` adds it as a layer. `CGXGLCreateShadowTexture` uploads it.
+- **Composite:** `CGXUpdateDisplay` → `get_update_display_region`, `WSGetVisibleWindowArray`, `CGXWindowArraySubArray`, then per window
+  `redraw_window` (shape, motion, tracking) and `redraw_window_surfaces`/`CGXNextSurface` for GL and CA surfaces, building layers, then
+  `CGLayerComposite` → `CGXGLAccelComposite` → `gl_prepare_layers`, `gl_composite_layers`. `CGXGLAccelComposite` has no direct callers: it's reached
+  through a table (`CGLayerKitGetVTable`).
+- **One window to one destination, already there:** `CGXRedrawWindowToLayer(...)` → `redraw_window` + `CGLayerComposite`, called by `windowPluginRender`,
+  which backs a CA plug-in layer of type `com.apple.WindowServer.CGSWindow`. That's how a live window appears inside another layer tree [read]. Many
+  windows to one destination: `WSRedrawSpecifiedWindowsToDisplayAndRegion`, used by capture passes and Magic Zoom, adding shadows.
+- **Capture inside the server:** `CGXHWCaptureWindowList` → `CGXConstructVirtualFramebufferFromDevice`, `WSRedrawCapturedWindows`, `mach_vm_remap` to the client.
+- **To an IOSurface:** `CGXGLCaptureDeviceToIOSurface`, `CGXGLAccelCaptureIOSurface`, `cglsTexImageIOSurface2D` exist.
+- **Headless:** `WSCurrentSessionDrawsToFramebuffer`, `WSDisplayUpdatesAreDisabled` are checked by `CGXUpdateDisplay`.
 
-Alpha: crops include whatever is behind a window's rounded corners. Take a one-shot `CGWindowListCreateImage` per window on
-each resize and use its alpha as a host mask layer, keeping all capture cost out of the frame path. `CGSCopyWindowShape` is
-the cheaper first try: exported on Mavericks, and on Mojave through SkyLight [read].
+**Client interface already gives more than the public API**, with no injection [read: `T` in `nm`]: `CGSWindowDirtyRegionSeed`, `CGSCopyWindowAlphaShape`, `CGSCopyAssociatedWindows`,
+`CGSGetParentWindowList`, `CGSCopyWindowGroup`, `CGSGetWindowTransform`, `CGSGetCatenatedWindowTransform`, `CGSGetWindowShadowAndRimParameters`,
+`CGSCopyWindowColorSpace`, `CGSGetWindowSharingState`. `CGSGetWindowFlushSeed` is exported too, but reads a client-side window table, so it answers for this process's own windows only [read; measured on macOS 27]: damage for other apps needs the hook. Also `__CGXCopyWindowBackingStore` looks up any window by ID with no owner check in the part read,
+returning its backing as out-of-line VM; its client stub is a local symbol. Copy-on-write per-window pixels with no compositor, for windows without
+surfaces [read, not run].
 
-Shadow: the host draws it, from `hasShadow`. Guest shadows are inside the slot gap and never cropped. The guest's
-`kCGSDisableShadowTagBit` exists on both versions [read] but isn't needed.
+### Mojave (18G103): `SkyLight`, Metal compositor
 
-### Identity: a generated bundle per guest app
+`SkyLight` has 5,514 local text symbols and 1,395 exports, `CoreGraphics` re-exports CGS names to it [read]. WindowServer has `library-validation` and a boot
+sandbox denying `/tmp` [read], and the guest boots with `amfi_get_out_of_my_way=1`, csr 0x67 [read]. `tools/guest-mojave-sky.h` already patches `SkyLight` with
+symbol and branch validation, and `PVGMetalCompat` runs inside WindowServer [read].
 
-Each guest app gets a real `.app` in the library folder, generated from the guest bundle's `Info.plist` and icon, with a stable
-bundle ID derived from the machine and the guest bundle ID. Its executable is one small shared host binary, ad-hoc signed
-locally. This matches what is publicly visible of Parallels: `~/Applications (Parallels)/…app/Contents/MacOS/WinAppHelper`
-[source: a forum crash report; lower confidence] and its patent's "stubs" [source]. WinApps' `.desktop` file per app is the same
-idea on Linux [source].
+- **Update:** `update_display_callback` → `CGXUpdateDisplay` → `generate_layers_for_window(CGXRedrawState*, CGXWindow*)`, composited through `Compositor`.
+- **One window to one destination:** `WSCompositeWindowToDestination`, called by `CaptureSurfaceMetal::Populate(CGXWindow*, region)`, `CaptureSurfaceGL::Populate`, and
+  `windowPluginRenderMetal`, using `generate_layers_for_window`. This is the hook's target: it takes one window and a destination.
+- **Destinations:** `WSCompositeDestinationCreateWithMetalTexture`, `WSCompositeDestinationCreateWithIOSurface`.
+- **Shadow:** `insertWindowShadowLayers`, `WSShadowGetCache`, `WSWindowShadowRadius`, `WSWindowShadowWantsRenderAbove`.
+- **Backing:** `MetalBacking` C++ class; `WSCALayerBacking*`; `metal_core_animation_detach_layer` for direct layers.
+- **Backdrops:** `WSBackdrop*`, `process_layer_backdrops`, `MetalCompositeBackdrops`: vibrancy is separable here.
+- Same client exports under `SLS*`, including `SLSGetWindowFlushSeed`, `SLSCopyWindowAlphaShape`, `SLSHWCaptureWindowListInRect`, `SLSAccessWindowBackingStore`.
 
-The proxy holds the `NSWindow`s, `NSMenu`, document handling and activation, and forwards everything to the session process
-over a private socket. Pixels stay in the session process: the proxy just sets `CALayerHost.contextId`. Key handling is simple
-because seamless mode doesn't need the current event tap: Cmd-Tab should go to the host, and a key window gets ordinary keys.
+`SLSGetWindowFlushSeed` reads `+0xcc` of a structure on Mojave, where Mavericks goes through `+0x40` and an accessor: layouts move, so offsets must not be hard-coded.
 
-Launching a proxy with no VM running must boot the machine without its window. That's the slowest part of the experience, since
-a TCG boot and login isn't quick; phase 4 should look at suspending the VM rather than shutting it down.
+### The hook, in order
 
-### Metadata and control
+1. **Prove injection** (`probes/seamless-ws-probe.c`, built; `seamless-try ws-probe`): read-only. Loads by `DYLD_INSERT_LIBRARIES`, interposes `mach_msg` to run between requests on
+   the main thread, resolves local symbols from the on-disk `CoreGraphics` guarded by `LC_UUID`, and logs each window's backing, shadow flag and raw struct bytes. Nothing is
+   drawn. The unknowns it answers: does injection work at all, does interposition reach a shared-cache caller, and are the offsets right.
+2. **Damage:** read flush seeds and the update's dirty region, instead of polling.
+3. **Per-window composite in the server**, Mojave `WSCompositeWindowToDestination`, Mavericks `CGXRedrawWindowToLayer` or the capture pass, into an IOSurface per window, on the GPU.
+4. **Hand that surface to the host** without a CPU copy (below).
+5. **Headless:** skip the framebuffer composite with `WSDisplayUpdatesAreDisabled` or by returning early once all windows are delivered.
 
-The agent runs in the Aqua session, reusing the launchd and token pattern of `guest-clipboard`.
+### A CA plug-in layer may need no hook
 
-| Need | Source | Evidence |
-| --- | --- | --- |
-| Windows, bounds, layer, owner, title | `CGWindowListCopyWindowInfo` | Works under Rosetta here, and the existing `probes/opengl-window-list.c` uses it on Mavericks [read] |
-| Change notifications | `CGSRegisterConnectionNotifyProc`, `CGSRegisterNotifyProc` (`SLS*` on Mojave) | Exported on both [read]; event numbers not determined. Polling at 10 Hz is the fallback |
-| Shape | `CGSCopyWindowShape` | Exported on both [read] |
-| Spaces | `CGSCopySpacesForWindows`, `SLSCopyManagedDisplaySpaces` | Exported [read] |
-| Tags, levels | `CGSGetWindowTags`, `CGSGetWindowLevel` | Both on Mavericks, levels on Mojave; tags not checked there [read] |
-| App identity, icon | PID to bundle path to `Info.plist` | Standard |
-| Menus | AX `kAXMenuBarAttribute` tree | `probes/ax-menu-response.c` exists [read] |
-| Launching and focus | `open`, `SetFrontProcess`, `AXRaise` | Standard; `probes/opengl-window-activate.m` exists [read] |
+`com.apple.WindowServer.CGSWindow` is a CA plug-in type [read]. A client layer of that type shows a live window, wherever it's placed, whether covered or not; WindowServer composites it
+with its own surfaces. An agent with one top-level window could lay out plug-in layers for every guest window and let the existing framebuffer carry them, and the host crops. Opaque framebuffer
+loses alpha, so it'd need a second pass on another background to recover it. Untried; it's the cheapest way to fix capture cost if capture turns out slow, and needs no per-build
+offsets. Whether a normal client may make that layer is unknown.
 
-**Menu bar:** rebuild the app's AX menu tree as an `NSMenu` in the proxy, refreshed in `menuNeedsUpdate:`, with item selection
-sent back as `AXPress`. The guest's menu bar is never shown. Injecting `NSMenu` into guest apps isn't needed and wouldn't reach
-Carbon apps. AX needs enabling in the guest: `TCC.db` from Mavericks on, and the `.AccessibilityAPIEnabled` file before that
-[memory]. The repo doesn't do either today [read]. AX under TCG may be slow, so cache and watch for `AXMenuOpened`-style staleness.
+### Surviving several builds
 
-**Transport:** this is low-rate data, so use QEMU slirp's `guestfwd` into a private Unix socket, keeping it off any host TCP port.
-It doesn't work when `networkMode` isn't `shared`, since there is no slirp then; pre-Metal guests would then multiplex on the
-authenticated clipboard COM port. Metadata and pixels are deliberately not synchronized, which a SPICE reviewer called out as the
-source of glitches in its seamless series [source], so tag metadata with a frame sequence, or tolerate one frame of skew.
+- **Names, not addresses:** local symbols exist on both generations inspected. Offsets are per-build, so derive them from accessor code at load (`movq 0x108(%rax), %rdi` in
+  `__CGXAccessWindowBackingStore`) and refuse if the pattern is missing. `tools/guest-mojave-core.h` has that matching.
+- **A manifest per `LC_UUID`** generated by a tool from a disk image, as `guest-mojave-sky.h` does. The set of guest builds is finite: what the installers ship.
+- **Three layers at runtime:** hook; else client interface; else a plain windowed VM. An unknown build loses speed, not function.
+- **Worst case:** Big Sur moves system libraries into the shared cache and strips locals [memory]. Client interface only, unless someone extracts them.
+- **Effort:** the tree source and host don't change per build. Only the hook does, and probably one family per compositor generation: GL (up to about 10.13), Metal (10.14 up). Not
+  verified for any version between.
 
-### Input
+## Transport
 
-`seamless-input.md` supersedes this section where they differ: gestures need a guest helper, and a click has to reach the guest before
-focus does.
+| Stage | Path | Copies | Status |
+| --- | --- | --- | --- |
+| Now | TCP over slirp to host loopback (`10.0.2.2`) | Capture, kernel, slirp, viewer | Works on this host; unproven from a guest [memory] |
+| Next | `guestfwd` into a private Unix socket | Same | Off any host port; needs a launch-plan change; requires shared networking |
+| vmware-svga | Hook composites through PassthroughOpenGL, so the texture is **already on the host GPU**. Host exports an IOSurface per window to the app through the existing `VIMSurfaceFrameMessage` capability transport and `presentSurface:` | None | [inferred]; `display-surface-message.h`, `passthrough-opengl-surfaces-host.c` exist. Needs a window identity marked in the GL stream or the guest IOSurface name |
+| PVG | Hook composites to a Metal texture in the guest; host sees it inside `apple-gfx` only as commands | Unknown | **Open.** Options: guest-RAM-backed shared buffer that the helper's gather (`gpu-performance-notes.md`) imports without copy; or a blit to a shared buffer, per window, in a region the helper maps. Needs a real read of `apple-gfx-helper.m` |
+| Fallback | Shared guest memory: wired pages with a physical list through the driver, host reads them | One | [inferred]; `gather` proves the host half for PVG |
 
-The final design uses the existing QMP tablet and USB keyboard, with no `CGEventPost`, so Mojave's event-posting permission never
-arises [memory]. Virtual keycodes need no table beyond the existing one.
-
-- **Focus:** when a host window becomes key, the agent raises that guest window and activates its app, and the host waits for
-  confirmation before sending keys, or the first keystroke goes astray.
-- **Clicks on inactive windows:** `acceptsFirstMouse:` sends them through as a click, which matches guest behavior.
-- **Cursor:** already reported by the guest and shown as a native `NSCursor` [read].
-- **IME:** phase 1 and 3 send raw keys, so the guest's own IME works and the host's doesn't. Host IME needs
-  `NSTextInputClient` on the proxy view, and the agent would post the text with `CGEventKeyboardSetUnicodeString`.
-- **Drags:** guest-internal drags between two guest windows need care: during a drag, pointer coordinates are in slot space, so
-  crossing into another host window has to map to that window's slot. Doable, as each event is mapped by the window under it.
-- **Scroll:** the existing wheel path carries over.
-
-### Other integration
-
-- **Clipboard:** `VIMClipboardBridge` already bridges text. Images and files aren't covered.
-- **Opening documents from Finder:** the proxy's `CFBundleDocumentTypes` comes from the guest app's, and `openURLs:` is proven
-  above. The file must reach the guest: copy in through the existing staging path, watch it, and copy back on save. SMB in the
-  other direction exists only as guest-to-host (`FileSharingPort`) [read]. Write-back races are the hard part.
-- **Host-to-guest drag and drop:** copy in and then synthesize a guest drag from the agent. Guest-to-host drag is hard; leave it.
-- **Retina:** the guest's 2x mode already exists (`opengl-display-agent.m`), and `contentsScale` handles 1x guests.
-- **120 Hz:** the host side is proven above, but the guest's clock is the limit: PVG's mode is a fixed 60 Hz
-  (`apple-gfx-helper.m`, per `gpu-performance-notes.md` [read]). Try a mode at the host's rate, as that note already suggests.
-
-## Alternatives rejected
+## Rejected, now
 
 | Alternative | Why not |
 | --- | --- |
-| Per-window capture as the main path (`CGWindowListCreateImage`, `CGSHWCaptureWindowList`) | Every frame costs emulated CPU plus a guest-to-host copy per window. On PVG, the capture lands in a guest IOSurface that the host can't reach without another copy. Kept as a fallback, and for masks. Its cost needs measuring: phase 1 prints it |
-| Sync z-order with crops only | Two visible host windows can't both be correct when they overlap in the guest, and background windows go stale |
-| One transparent full-screen host window | SPICE's series did this and the maintainer called the design the obstacle [source]. No per-window Mission Control or Dock |
-| WindowServer plug-in | No plug-in interface found: a string search of `CoreGraphics` and `SkyLight` turned up only `WSTouchBarEventPlugin` and CA plugin-layer names, nothing that loads third-party code [read; not exhaustive] |
-| QuartzCore or AppKit shim in apps | Doesn't see Carbon or GL-only windows, and needs injection into every app. On Mojave, it also needs library validation handled in each one |
-| Reading window backing stores from guest RAM | Fragmented guest pages need a kext for addresses, and it misses GPU-backed windows. Mavericks' `WSWindowGetBackingInfo` and Mojave's `SLSAccessWindowBackingStore` exist [read] |
-| A separate headless login session | WindowServer has one console session drawing at a time, and it doesn't address occlusion [inferred] |
-| One process with many Dock tiles | No API found. A tile follows a registered process. `_RegisterApplication` exists [measured], but nothing suggests one process can hold two registrations; not tried |
-| Renaming one process, bundle-less proxies | Works [measured], but no persistence in the Dock and no document handling, and the Dock tooltip reportedly comes from the bundle's name [source: vphone-cli]. Fine for a demo |
-| `LSUIElement` | No Dock tile and no Cmd-Tab, which is the point of the feature |
-| IOSurface over Mach ports to proxies | Sound, and Chromium's fallback [source]. `CALayerHost` is less code and carries live `CAMetalLayer`s; keep as the fallback if Apple breaks hosting |
-| Host SIP off, or Dock injection | Unneeded, and unshippable |
+| Framebuffer crop into slots as the end state | No real alpha or shadow, needs huge guest displays and windows held apart. Kept only as a quick path; `seamless-try display` still measures its limit |
+| One transparent full-screen host window | SPICE tried, and its maintainer called the design the obstacle [source]. No per-window Mission Control or Dock |
+| QuartzCore or AppKit shim in apps | Misses Carbon and GL, and is per-app. Hook is one place |
+| A separate headless login session | One console session draws at a time [inferred] |
+| One process with many Dock tiles, `LSUIElement`, bundle-less proxies | No API for the first, no tile for the second; the third works [measured] but has no Dock persistence or document handling |
+| Host SIP off, Dock injection | Unneeded and unshippable |
 
-## In reserve: a compositor hook
+## Interfaces for the parallel work
 
-If slots fail, WindowServer can render windows separately. This would give true per-window surfaces, which RDP's
-[enhanced RemoteApp](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/e34e1d5e-5682-4ff0-af3f-f4baf697d198)
-shows is the eventual clean design [source].
+Stable now: `probes/seamless-wire.h`. Numbers 32-47 are reserved for input, 48-63 for integration; add a case in `swm_parse` and a test in `seamless-wire-test.c`.
 
-- **Guest permission is available.** Boot policy sets `csr-active-config` 0x67 and `amfi_get_out_of_my_way=0x1`
-  (`scripts/qemu-opencore.py`, `scripts/build-opengl-firmware.py`), and `tools/guest-mojave-sky.h` already patches SkyLight with
-  symbol and branch validation [read].
-- **Mojave:** local symbols include `WSCompositeWindowToDestination`, `WSCompositeDestinationCreateWithIOSurface` and
-  `WSRedrawWindowsToDestinationAndRegion`, and strings name `WSCompositorCreateCaptureSurface` and
-  `metal_core_animation_detach_layer` [read].
-  WindowServer has `library-validation` and a boot sandbox [read]. `PVGMetalCompat` shows compat code already runs in it [read].
-- **Mavericks:** `CGXGLAccelComposite`, `CGXGLCreateBackingTexture`, `WSGetVisibleWindowArray`, `CGXRedrawWindowToLayer`,
-  `captureWindowList`, all inside `CoreGraphics` with local symbols; `WindowServer` has no library validation flag [read]. No
-  function named like `WSCompositeWindowToDestination` exists, so it's a different hook on each generation, and likely on each
-  version in between.
-- **Mavericks-specific idea:** WindowServer's GL goes to the host through PassthroughOpenGL (`cgs-drawable.c`) [read], so window
-  textures may already be in host GL. Marking composite calls in the guest and redirecting those draws host-side could give
-  zero-copy per-window surfaces. Untested and invasive.
-
-Cost is high: per-build symbols across a dozen OS versions. Only do it for versions where slots fail.
-
-## Risks
-
-**Could make the recommended design impossible on a version**
-
-| Risk | Versions | Test |
-| --- | --- | --- |
-| WindowServer or the driver won't take a large mode, or composites badly | All; vmware-svga VRAM and PVG mode limits are unknown | Phase 2's first step. Fallback is overlap-tolerant capture |
-| Large frame costs too much: PVG copies the whole frame per update [read] | Mojave up | Measure at 2x the host's size. Rate implies about 1 ms per 100 MB [from measured GPU memcpy rates; inferred], but hops and memory matter more |
-| Apps fight AX moves, or refuse them (Carbon, full-screen games, Java) | All; varies by app | Those windows use capture, or full-display mode |
-| Full-screen Spaces take a window out of the slot layout | Lion up | Intercept, or disable in the agent. Unknown cost |
-| Windows from AX and CGWindowList can't be matched | All | `_AXUIElementGetWindow` [memory]; check it exists per version |
-| No window list on Tiger | Tiger | Not inspected. Could fall back to a full-display window there |
-
-**Could break it later on the host:** `CALayerHost`/`CAContext` are private, though Chromium depends on them [source]; IOSurface
-hosting is the fallback. Ad-hoc proxies depend on Gatekeeper leaving locally created, unquarantined bundles alone. macOS 28 and
-Rosetta's removal are deferred.
-
-**Quality risks that don't stop it**
-
-- Behind-window blur shows the guest's backdrop, not the host's (Mojave up, Yosemite up in theory) [inferred].
-- Guest-side animations run at guest speed; minimize and sheet effects would look old, by design.
-- Guest apps' assumptions about one small screen: restored window positions, and "center on screen" go to the wrong place. The
-  agent re-places new windows regardless.
-- Host focus and guest focus can disagree during TCG stalls; dropped first keystrokes are the visible symptom.
-- TCG speed: the app itself is still emulated. Seamless windows make slowness look like a slow native app, not a slow VM. This
-  may be the biggest perception risk, and it isn't fixable here. See `gpu-performance-notes.md`.
+- **Input** adds host-to-guest messages (gesture, pressure, scroll). Addressing: guest screen points times 16 with `window = 0`, as `SWMPointer`. Guest side lands in `drain_input` in `seamless-guest.c`; host side
+  in `GuestView` in `seamless-viewer.m`, which sees every `NSEvent` for a window, so gesture and pressure handlers go beside `sendKind:`.
+- **Integration** gets from `SWM_WINDOW`: `window`, `pid`, `owner`, `title`, `layer`, `order`, `group`. Each app is identified by `pid` and `owner` until a proxy exists. Proxy-to-session control isn't defined; I'll define
+  it when proxies arrive, and until then a message from the host to the guest for "open this file in this app" belongs in 48-63.
+- **Both:** the design has one session process and one proxy per app. `GuestView` is the stand-in for a proxy's window.
 
 ## Plan
 
-**Phase 1 (built): one guest window as its own host window, with clicks.** Uses capture for now, since this needs no app or guest
-image change and answers: what does per-window capture cost under TCG, and do the input semantics work? See below.
-
-**Phase 2: crop instead of capture.** In the app, behind a flag.
-
-1. Try a guest display at 2x the host size, on Mavericks and Mojave. If it fails, stop and rethink: this decides the design.
-2. Agent places one window in a slot. Host shows it as a `contentsRect` crop in its own `NSWindow`, in-process.
-3. Tablet coordinates mapped per window. Mask from one-shot capture.
-4. Measure latency against the full-window path using the existing `VIM_DISPLAY_TIMING`.
-
-**Phase 3: real windows.** All of an app's windows, child windows for menus and sheets, resize, close, title, focus handshake,
-host drag. AX menu mirror.
-
-**Phase 4: real apps.** Generated proxies with `CALayerHost`. Launching from the Dock boots the machine without a window. Icons,
-Cmd-Tab, Mission Control and Stage Manager checked by eye. Document types with copy-in and write-back.
-
-**Phase 5: the rest of the generations and the long tail.** Tiger to Mountain Lion and Catalina to Big Sur, one at a time. Host
-IME, file clipboard, drag and drop. Compositor hook only where a version needs it.
+1. **Measure capture on a guest:** `seamless-try stream` and `tree`. Decides how urgent the hook is.
+2. **`seamless-try ws-probe`:** proves injection and offsets.
+3. **Hook damage and per-window composite on Mavericks**, with surfaces to the viewer by TCP. Compare with capture.
+4. **Zero-copy for vmware-svga**, through PassthroughOpenGL.
+5. **Proxies:** `CALayerHost`, generated bundles, session process, invisible VM.
+6. **Mojave hook**, and the PVG transport.
+7. **Real integration and input** from the parallel work; snapshot and resume; multiple VMs; AX bridge; then the versions between, one at a time.
 
 ## Running with nobody at the guest
 
-`scripts/seamless-try` boots a throwaway clone through `scripts/guest-bench`, staging `seamless-guest` over the guest agent, which
-re-enters the console session as `probes/gpu-bench.m` does. Results print and go to `Build/seamless/`.
+`scripts/seamless-try` boots a throwaway clone through `scripts/guest-bench`, staging tools over the guest agent, which re-enter the console session as `probes/gpu-bench.m` does. Results print and go to `Build/seamless/`. From `Source/`:
 
-    # Phase 1: opens TextEdit, streams it to a host window, sends a test click and key.
-    scripts/seamless-try stream "$PWD/Build/Products/Current/Light Click.app" \
-        "$HOME/Library/Application Support/Virtual Intel Mac/Machines/Mavericks.vintelmac"
+    M="$HOME/Library/Application Support/Virtual Intel Mac/Machines/Mavericks.vintelmac"
+    A="$PWD/Build/Products/Current/Light Click.app"
 
-    # The deciding step for slots. Needs an app built from this branch, for its display-request diagnostic.
-    scripts/seamless-try display <app> <machine> [WxH ...]
+    scripts/seamless-try tree "$A" "$M"       # The demo: every window of a demo app, as its own host window.
+    scripts/seamless-try stream "$A" "$M"     # One TextEdit window, with a test click and key.
+    scripts/seamless-try ws-probe "$A" "$M"   # A read-only probe inside WindowServer. Reboots the clone.
+    scripts/seamless-try display <app> "$M"   # Largest guest display. Needs an app built from this branch.
 
-`stream` reports `capture_mean`, `capture_rate`, `frames_sent_rate`, `click_changed_bounds` and `key_changed_title` from the guest,
-and frames, title and a PNG from the viewer. If `10.0.2.2` can't be reached it still measures capture and says so. `display` walks
-sizes up to 8192x8192: the host offers each with `display-request`, the guest selects it, places TextEdit in the far corner by
-Accessibility, moves it 20 times to time that, and the host saves its whole frame. It stops at the first failure, or if
-WindowServer restarts.
+**`tree`:** the guest prints each window as it appears, `capture_mean`, `capture_rate`, `capture_share`, `captures_skipped_by_seed` and `seed_answers`. Host windows appear live, and the viewer saves each to
+`Build/seamless/seamless-tree-window-<id>.png` with its alpha statistics. Look for: the document window's shadow, the popover's arrow past its edge at 3 s, the panel and translucent square at 6 s, the menu at 9 s, the sheet at 13 s.
 
-`seamless-guest place` is slot placement: `--x --y`, or `--slot N` from `probes/seamless-slots.h`. It runs as root in the session on
-a guest, assuming root needs no Accessibility grant there, which is unverified [memory]. On this host, with a grant, a real window
-moved in 6 ms and 8.4 ms per later move, and `CGWindowList` agreed [measured]. That says nothing about guest speed.
+**`display`** walks up to 8192x8192: the host offers a size, the guest selects it, moves TextEdit to the far corner by Accessibility, and the host saves its frame. `seamless-guest place` is slot placement (`probes/seamless-slots.h`).
 
-**Not run on a guest yet.** `probes/seamless-driver.py` has only run against a fake guest agent, and the `display-request` action in
-`VIMSession.m` hasn't been compiled. The guest tool's new imports haven't been rechecked against the Mavericks image.
+**Unverified:** every guest step. `seamless-driver.py` has only run against a fake agent, `ws_probe` not even that, and the `display-request` action in `VIMSession.m` hasn't been compiled. `place` assumes root in the session needs no Accessibility grant [memory]. `CGEventPost` from the console user on 10.9 is assumed to work.
 
 ## Trying phase 1 by hand
 

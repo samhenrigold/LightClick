@@ -4,6 +4,7 @@ import re
 import shutil
 import socket
 import subprocess
+import time
 
 results = source/'Build/seamless'
 guest_tool = results/'seamless-guest'
@@ -152,11 +153,81 @@ def input_live(seconds):
     save(output)
 
 
+def tree(seconds):
+    print(f'== Every window of a demo app, for {seconds} s', flush=True)
+    guest = stage(guest_tool)
+    port = free_port()
+    prefix = results/f'{tag}-window'
+    for old in results.glob(f'{tag}-window-*.png'):
+        old.unlink()
+    viewer = subprocess.Popen([str(results/'seamless-viewer'), '--tree', '--port', str(port), '--exit-after', str(seconds + 5),
+                               '--png', str(prefix)], stdout=subprocess.PIPE, text=True)
+    status, _ = run(guest, ['program-tree', '--port', str(port), '--seconds', str(seconds)])
+    print(f'# guest exit {status}', flush=True)
+    try:
+        report, _ = viewer.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        viewer.terminate()
+        report, _ = viewer.communicate()
+    print(f'== Viewer on the host, exit {viewer.returncode}')
+    print(report)
+    print(f'# Each window is in {prefix}-<id>.png. Look for the shadow around the document window, the popover past its '
+          'edge, the panel, the menu and the sheet.')
+
+
+def ws_probe():
+    # Uses a reboot, since launchd only reads a job's environment when it loads. This is a clone, so the edit goes with it.
+    print('== Read-only probe inside WindowServer', flush=True)
+    version = request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60).get('Stdout', '')
+    if not version.startswith('13.'):
+        raise SystemExit(f'This probe is for 10.9, with its symbol names; this is Darwin {version.strip()}.')
+    staged = stage(results/'seamless-ws-probe.dylib')
+    plist = '/System/Library/LaunchDaemons/com.apple.WindowServer.plist'
+    install = ('set -e; cp "$1" /var/tmp/seamless-ws-probe.dylib; chmod 755 /var/tmp/seamless-ws-probe.dylib; '
+               'rm -f /var/tmp/seamless-ws-probe.log; '
+               f'/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" {plist} || true; '
+               f'/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string '
+               f'/var/tmp/seamless-ws-probe.dylib" {plist}; /usr/bin/plutil -lint {plist}')
+    result = request({'Executable': '/bin/sh', 'Arguments': ['-c', install, 'sh', staged]}, 120)
+    print(result.get('Stdout', ''), result.get('Stderr', ''), flush=True)
+    if result.get('ExitCode') != 0:
+        raise SystemExit('Could not install the probe')
+    print('# Rebooting the clone', flush=True)
+    # In the background, so the agent can answer before it goes.
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', '(sleep 5; /sbin/reboot) >/dev/null 2>&1 &']}, 60)
+    time.sleep(90)
+    # The agent comes back after the reboot; any failure until then just means not yet.
+    deadline = time.time() + 600
+    log = ''
+    while time.time() < deadline:
+        try:
+            result = request({'Executable': '/bin/cat', 'Arguments': ['/var/tmp/seamless-ws-probe.log']}, 120)
+        except SystemExit as stuck:
+            print(f'# waiting: {stuck}', flush=True)
+            continue
+        log = result.get('Stdout') or ''
+        if log.count('-- sample') >= 4:
+            break
+        time.sleep(15)
+    target = results/f'{tag}.log'
+    target.write_text(log)
+    state = request({'Executable': '/usr/bin/pgrep', 'Arguments': ['-lx', 'WindowServer']}, 60)
+    print(f'# WindowServer: {state.get("Stdout", "").strip() or "NOT RUNNING"}')
+    print(f'# {len(log.splitlines())} lines in {target}. First lines:')
+    print('\n'.join(log.splitlines()[:30]))
+    size = capture(f'{tag}-frame.png')
+    print(f'# frame {size}: does the desktop still look right?')
+
+
 if arguments[0] == 'stream':
     stream(int(arguments[1]) if len(arguments) > 1 else 20)
 elif arguments[0] == 'input':
     input_probe()
 elif arguments[0] == 'input-live':
     input_live(int(arguments[1]) if len(arguments) > 1 else 60)
+elif arguments[0] == 'tree':
+    tree(int(arguments[1]) if len(arguments) > 1 else 22)
+elif arguments[0] == 'ws-probe':
+    ws_probe()
 else:
     display(arguments[1:] or default_ladder)

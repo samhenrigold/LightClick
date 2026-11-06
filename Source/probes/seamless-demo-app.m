@@ -1,0 +1,111 @@
+// A guest app with the awkward window kinds a seamless host must reproduce: a popover past its window's edge, a child
+// panel, a translucent window, a real menu and a sheet. It shows each on a schedule, so a run needs no input.
+// Built into seamless-guest as `seamless-guest demo-app`.
+#import <Cocoa/Cocoa.h>
+
+@interface SeamlessDemo : NSObject <NSApplicationDelegate>
+@property(retain) NSWindow *window;
+@property(retain) NSPopover *popover;
+@property(retain) NSView *anchor;
+@property(retain) NSMenu *menu;
+@end
+
+@implementation SeamlessDemo
+- (void)applicationDidFinishLaunching:(NSNotification *)note {
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(300, 300, 420, 260)
+                                                   styleMask:NSTitledWindowMask | NSClosableWindowMask |
+                                                             NSMiniaturizableWindowMask | NSResizableWindowMask
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO];
+    window.title = @"Seamless demo";
+    NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(20, 200, 380, 24)];
+    label.stringValue = @"A popover, a panel, a menu and a sheet are coming.";
+    label.bezeled = NO;
+    label.editable = NO;
+    label.drawsBackground = NO;
+    [window.contentView addSubview:label];
+    NSButton *anchor = [[NSButton alloc] initWithFrame:NSMakeRect(320, 110, 90, 32)];
+    anchor.title = @"Anchor";
+    anchor.bezelStyle = NSRoundedBezelStyle;
+    [window.contentView addSubview:anchor];
+    self.anchor = anchor;
+    self.window = window;
+    [window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    [self performSelector:@selector(showPopover) withObject:nil afterDelay:3];
+    [self performSelector:@selector(showPanels) withObject:nil afterDelay:6];
+    [self performSelector:@selector(showMenu) withObject:nil afterDelay:9];
+    [self performSelector:@selector(showSheet) withObject:nil afterDelay:13];
+}
+// Opens to the right of a button near the window's right edge, so most of it is past the window.
+- (void)showPopover {
+    NSViewController *controller = [[NSViewController alloc] init];
+    NSTextField *text = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 140)];
+    text.stringValue = @"Popover past the window's edge";
+    text.bezeled = NO;
+    text.editable = NO;
+    text.drawsBackground = NO;
+    text.alignment = NSCenterTextAlignment;
+    controller.view = text;
+    NSPopover *popover = [[NSPopover alloc] init];
+    popover.contentViewController = controller;
+    popover.behavior = NSPopoverBehaviorApplicationDefined;
+    popover.contentSize = NSMakeSize(260, 140);
+    self.popover = popover;
+    [popover showRelativeToRect:self.anchor.bounds ofView:self.anchor preferredEdge:NSMaxXEdge];
+}
+- (void)showPanels {
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(60, 60, 200, 110)
+                                                styleMask:NSTitledWindowMask | NSUtilityWindowMask
+                                                  backing:NSBackingStoreBuffered
+                                                    defer:NO];
+    panel.title = @"Child panel";
+    panel.floatingPanel = YES;
+    [self.window addChildWindow:panel ordered:NSWindowAbove];
+    [panel orderFront:nil];
+    NSWindow *glass = [[NSWindow alloc] initWithContentRect:NSMakeRect(780, 60, 160, 160)
+                                                  styleMask:NSBorderlessWindowMask
+                                                    backing:NSBackingStoreBuffered
+                                                      defer:NO];
+    glass.opaque = NO;
+    glass.backgroundColor = [NSColor colorWithCalibratedRed:0.1 green:0.4 blue:0.9 alpha:0.45];
+    glass.hasShadow = YES;
+    glass.title = @"Translucent";
+    [glass orderFront:nil];
+}
+- (void)cancelMenu {
+    [self.menu cancelTracking];
+}
+- (void)showMenu {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Demo"];
+    for (NSString *title in @[ @"First item", @"Second item", @"Third item", @"Fourth item" ])
+        [menu addItemWithTitle:title action:NULL keyEquivalent:@""];
+    self.menu = menu;
+    [self performSelector:@selector(cancelMenu)
+               withObject:nil
+               afterDelay:3
+                  inModes:@[ NSEventTrackingRunLoopMode, NSDefaultRunLoopMode ]];
+    [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(20, 180) inView:self.window.contentView];
+}
+- (void)endSheet:(NSWindow *)sheet {
+    [NSApp endSheet:sheet];
+    [sheet orderOut:nil];
+}
+- (void)showSheet {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"A sheet, attached to its window";
+    [alert beginSheetModalForWindow:self.window modalDelegate:nil didEndSelector:NULL contextInfo:NULL];
+    [self performSelector:@selector(endSheet:) withObject:alert.window afterDelay:3];
+}
+@end
+
+int seamless_demo_app_main(void) {
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+        SeamlessDemo *demo = [[SeamlessDemo alloc] init];
+        app.delegate = demo;
+        [app run];
+    }
+    return 0;
+}

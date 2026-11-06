@@ -6,8 +6,12 @@ output=${1:?Usage: build-seamless-probes OUTPUT_DIRECTORY}
 mkdir -p "$output"
 # Only public CoreGraphics and HIServices, so the current SDK's x86_64 stubs are fine for 10.9.
 xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -Wall -Wextra -Wno-deprecated-declarations \
-  -framework ApplicationServices -framework IOKit "$source_root/probes/seamless-guest.c" -o "$output/seamless-guest"
+  -fno-objc-arc -framework Cocoa -framework ApplicationServices -framework IOKit \
+  "$source_root/probes/seamless-guest.c" "$source_root/probes/seamless-demo-app.m" -o "$output/seamless-guest"
 codesign --force --sign - "$output/seamless-guest"
+xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O1 -g -Wall -Wextra -dynamiclib \
+  "$source_root/probes/seamless-ws-probe.c" -o "$output/seamless-ws-probe.dylib"
+codesign --force --sign - "$output/seamless-ws-probe.dylib"
 xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations \
   -framework AppKit -framework QuartzCore -framework ScreenCaptureKit \
   "$source_root/probes/seamless-viewer.m" -o "$output/seamless-viewer"
