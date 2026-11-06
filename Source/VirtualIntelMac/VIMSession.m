@@ -253,17 +253,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property BOOL resizeArmed;
 @property NSString *sleepDisabledBoot;
 @property NSString *mavericksSMBCheckedBoot;
-@property VIMClipboardBridge *clipboard;
-@property VIMClipboardBridge *powerBridge;
-@property NSString *powerConfiguredBoot;
-@property NSDate *powerRetryAfter;
 @property VIMSMBService *smbService;
 @property VIMNetworkClient *networkClient;
 @property BOOL networkStarting;
-@property BOOL clipboardSharingEnabled;
-@property NSString *clipboardFailure;
-@property NSString *clipboardConfiguredBoot;
-@property NSDate *clipboardRetryAfter;
 @property NSArray<NSDictionary *> *audioOutputChoices;
 @property NSArray<NSDictionary *> *audioInputChoices;
 @property BOOL audioChoicesPending;
@@ -275,6 +267,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property NSTimer *controlStallTimer;
 @property BOOL controlStallShown;
 @property(readonly) VIMUSBDevices *usbDevices;
+@property(readonly) VIMGuestHelpers *guestHelpers;
 @property int machineLock;
 @property(nonatomic) BOOL retinaEnabled;
 @property(nonatomic) NSString *displayMode;
@@ -344,6 +337,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         _machineLock = -1;
         _state = [VIMGuestSessionState new];
         _usbDevices = [[VIMUSBDevices alloc] initWithSession:self];
+        _guestHelpers = [[VIMGuestHelpers alloc] initWithSession:self];
         [NSNotificationCenter.defaultCenter addObserver:self
                                                selector:@selector(refreshUSBToolbar:)
                                                    name:@"VIMHostUSBChanged"
@@ -1844,8 +1838,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             @"Pending" : @(self.state.displayModePending),
             @"FullScreen" : @((self.window.styleMask & NSWindowStyleMaskFullScreen) != 0),
             @"Frame" : self.displayView.frameDiagnostics ?: @{},
-            @"PowerObserver" :
-                @{@"Connected" : @(self.powerBridge.connected), @"Transport" : self.powerBridge.diagnosticState ?: @{}},
+            @"PowerObserver" : self.guestHelpers.displayPowerDiagnostics,
             @"LastVerifiedSelection" : self.observedDisplayMode ?: @{},
             @"MenuItems" : items
         });
@@ -2035,18 +2028,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         }
         if (enabled)
             [self updateClipboardForBoot:self.state.usernameBoot];
-        finish(@{
-            @"Enabled" : @(!self.machine.editableConfiguration[@"ClipboardEnabled"] ||
-                           [self.machine.editableConfiguration[@"ClipboardEnabled"] isEqual:@YES]),
-            @"Connected" : @(self.clipboard.isConnected),
-            @"ExchangeAllowed" : @(self.clipboard.exchangeAllowed && self.clipboard.exchangeAllowed()),
-            @"ApplicationActive" : @(NSApp.active),
-            @"WindowKey" : @(self.window.keyWindow),
-            @"DisplaySleeping" : @(self.displayView.displaySleeping),
-            @"Provisioning" : @(self.state.clipboardPending),
-            @"Failure" : self.clipboardFailure ?: @"",
-            @"Transport" : self.clipboard.diagnosticState ?: @{}
-        });
+        finish(self.guestHelpers.clipboardDiagnostics);
         return;
     }
     [self.diagnostics handleCommand:command finish:finish];
@@ -2497,11 +2479,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     };
     NSArray *previousAddresses = self.guestIPAddresses;
     if (policy().consoleUserChanged) {
-        [self.clipboard stop];
-        self.clipboard = nil;
-        self.clipboardConfiguredBoot = nil;
+        [self.guestHelpers forgetClipboard];
         self.state.consoleUID = policy().reportedConsoleUID;
-        self.clipboardRetryAfter = nil;
         self.state.usernameBoot = nil;
         // Preserve an explicitly entered Remote Login account while no
         // console user is known; a fresh valid observation replaces it.
@@ -2727,7 +2706,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             self.guestStatus.stringValue = claimError.localizedDescription;
     }
     if (policy().needsDisplayPowerBridge)
-        [self updateBridgeForBoot:boot displayPowerOnly:YES];
+        [self.guestHelpers updateDisplayPowerWithBoot:boot];
     if (policy().needsConsoleUsername) {
         // Remote Login needs the guest account's short name. Learn it from the
         // signed-in console user once per boot/session; invalidate it when
@@ -3553,161 +3532,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [session updateClipboardForBoot:session.state.usernameBoot];
 }
 - (void)updateClipboardForBoot:(NSString *)boot {
-    [self updateBridgeForBoot:boot displayPowerOnly:YES];
-    [self updateBridgeForBoot:boot displayPowerOnly:NO];
+    [self.guestHelpers updateWithBoot:boot];
 }
-- (void)updateBridgeForBoot:(NSString *)boot displayPowerOnly:(BOOL)powerOnly {
-    // Installer VGA's legacy wire reader does not implement PVG power requests.
-    // Do not send them into that unaccelerated producer.
-    if (powerOnly && (self.displayView.softwareCursor || self.machine.preMetalGuest))
-        return;
-    NSDictionary *settings = self.machine.editableConfiguration;
-    BOOL enabled = !settings[@"ClipboardEnabled"] || [settings[@"ClipboardEnabled"] isEqual:@YES];
-    if (!powerOnly)
-        self.clipboardSharingEnabled = enabled;
-    if (!powerOnly && !enabled) {
-        [self.clipboard stop];
-        self.clipboard = nil;
-        self.clipboardConfiguredBoot = nil;
-        self.clipboardRetryAfter = nil;
-        return;
-    }
-    if (!boot.length || (!powerOnly && !self.state.consoleUID) || !self.guestSessionState.mayProvisionHelpers)
-        return;
-    VIMClipboardBridge *current = powerOnly ? self.powerBridge : self.clipboard;
-    if (current.isConnected && [boot isEqual:powerOnly ? self.powerConfiguredBoot : self.clipboardConfiguredBoot])
-        return;
-    if ((powerOnly ? self.powerRetryAfter : self.clipboardRetryAfter).timeIntervalSinceNow > 0)
-        return;
-    NSError *failure = nil;
-    if (!current) {
-        current = [VIMClipboardBridge new];
-        current.displayPowerOnly = powerOnly;
-        if (powerOnly)
-            self.powerBridge = current;
-        else
-            self.clipboard = current;
-        __weak VIMSession *weakSelf = self;
-        // This is evaluated by the 200 ms pasteboard timer and every receive.
-        // Settings changes explicitly call updateClipboardForBoot; never read
-        // PendingConfiguration.plist from a removable disk in this hot path.
-        current.exchangeAllowed = ^BOOL {
-          VIMSession *session = weakSelf;
-          return !powerOnly && session && session.task.running && NSApp.active && session.window.keyWindow &&
-                 !session.displayView.displaySleeping && session.clipboardSharingEnabled;
-        };
-        current.displayPowerChanged = ^(BOOL sleeping) {
-          if (powerOnly)
-              [weakSelf.displayConnection requestDisplaySleeping:sleeping];
-        };
-        __weak VIMClipboardBridge *bridge = current;
-        current.connectionLost = ^{
-          VIMSession *session = weakSelf;
-          if (!session.task.running || !bridge || (powerOnly ? session.powerBridge : session.clipboard) != bridge)
-              return;
-          [bridge stop];
-          if (powerOnly) {
-              session.powerBridge = nil;
-              session.powerConfiguredBoot = nil;
-              session.powerRetryAfter = [NSDate dateWithTimeIntervalSinceNow:60];
-              [session.displayConnection requestDisplaySleeping:NO];
-          } else {
-              session.clipboard = nil;
-              session.clipboardConfiguredBoot = nil;
-              session.clipboardRetryAfter = [NSDate dateWithTimeIntervalSinceNow:60];
-          }
-          if (!powerOnly) {
-              session.state.consoleUID = nil;
-              session.state.usernameBoot = nil;
-          }
-          // Re-observe the console before provisioning: after logout, the
-          // old UID/token is not authority to restart a GUI helper.
-          [session refreshGuestStatus];
-        };
-    }
-    if (![current startWithSocketPath:[self.runtimeDirectory
-                                          stringByAppendingPathComponent:powerOnly ? @"displaypower" : @"clipboard"]
-                                error:&failure]) {
-        [current stop];
-        if (powerOnly) {
-            self.powerBridge = nil;
-            self.powerRetryAfter = [NSDate dateWithTimeIntervalSinceNow:60];
-        } else {
-            self.clipboard = nil;
-            self.clipboardRetryAfter = [NSDate dateWithTimeIntervalSinceNow:60];
-        }
-        return;
-    }
-    NSString *token = current.token, *configName = powerOnly ? @"DisplayPower.json" : @"Clipboard.json";
-    NSData *data = [NSJSONSerialization dataWithJSONObject:@{
-        @"UID" : self.state.consoleUID ?: @0,
-        @"Transport" : self.machine.preMetalGuest ? @"isa-serial" : @"virtio-serial",
-        @"Token" : token,
-        @"DisplayPowerOnly" : @(powerOnly)
-    }
-                                                   options:0
-                                                     error:NULL];
-    NSURL *configuration = [NSURL fileURLWithPath:[self.runtimeDirectory stringByAppendingPathComponent:configName]];
-    if (![data writeToURL:configuration options:NSDataWritingAtomic error:NULL])
-        return;
-    [NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions : @0600}
-                                   ofItemAtPath:configuration.path
-                                          error:NULL];
-    NSURL *tools = VIMGuestFileURL(
-        self.machine.preMetalGuest ? [@"OpenGLGuests/" stringByAppendingString:self.machine.guest] : @"GuestTools");
-    self.state.clipboardPending = YES;
-    if (powerOnly)
-        self.powerRetryAfter = [NSDate dateWithTimeIntervalSinceNow:60];
-    else
-        self.clipboardRetryAfter = [NSDate dateWithTimeIntervalSinceNow:60];
-    __weak VIMSession *weakSelf = self;
-    void (^finish)(NSString *) = ^(NSString *failedStep) {
-      VIMSession *session = weakSelf;
-      session.state.clipboardPending = NO;
-      VIMClipboardBridge *bridge = powerOnly ? session.powerBridge : session.clipboard;
-      if (![bridge.token isEqual:token])
-          return;
-      if (!failedStep) {
-          if (powerOnly)
-              session.powerConfiguredBoot = boot;
-          else {
-              session.clipboardFailure = nil;
-              session.clipboardConfiguredBoot = boot;
-          }
-          [bridge awaitGuestHandshake];
-          // Let the independent clipboard provision after display setup releases
-          // ownership; do not wait another minute or race the guest-agent channel.
-          if (powerOnly)
-              [session updateBridgeForBoot:boot displayPowerOnly:NO];
-          else
-              [session restoreDisplaySelectionForBoot:boot];
-          return;
-      }
-      NSString *message = [NSString stringWithFormat:@"Guest %@ %@ did not finish.",
-                                                     powerOnly ? @"display-power observer" : @"clipboard", failedStep];
-      if (![session.clipboardFailure isEqual:message])
-          [session logNote:@"%@", message];
-      [bridge stop];
-      if (powerOnly)
-          session.powerBridge = nil;
-      else {
-          session.clipboardFailure = message;
-          session.clipboard = nil;
-      }
-    };
-    if (self.machine.preMetalGuest) {
-        [self.guestAgent provisionInstalledHelperWithConfiguration:data completion:finish];
-        return;
-    }
-    [self.guestAgent provisionHelper:[tools URLByAppendingPathComponent:@"guest-clipboard"]
-                       configuration:configuration
-                               named:configName
-                         stillWanted:^BOOL {
-                           VIMSession *session = weakSelf;
-                           return session.task.running &&
-                                  [(powerOnly ? session.powerBridge : session.clipboard).token isEqual:token];
-                         }
-                          completion:finish];
+- (void)requestGuestDisplaySleeping:(BOOL)sleeping {
+    [self.displayConnection requestDisplaySleeping:sleeping];
 }
 + (void)setNetworkConnected:(BOOL)connected machine:(VIMMachine *)machine completion:(void (^)(NSError *))completion {
     VIMSession *session = sessions[SessionKey(machine)];
@@ -4243,14 +4071,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [self.usbDevices stop];
     [self.smbService stop];
     self.smbService = nil;
-    [self.clipboard stop];
-    self.clipboard = nil;
-    self.state.clipboardPending = NO;
-    self.clipboardConfiguredBoot = nil;
-    [self.powerBridge stop];
-    self.powerBridge = nil;
-    self.powerConfiguredBoot = nil;
-    self.powerRetryAfter = nil;
+    [self.guestHelpers stop];
     self.sleepActivity = nil;
     self.state.displaySelectedBoot = nil;
     self.state.displaySelectionRetryAfter = nil;

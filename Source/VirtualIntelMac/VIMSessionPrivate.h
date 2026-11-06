@@ -27,6 +27,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nullable) NSURL *pendingHostConnectionURL;
 @property(nullable, copy) void (^pendingHostConnectionCompletion)(NSError *_Nullable);
 - (void)noteGuestRebootExpected;
+- (void)requestGuestDisplaySleeping:(BOOL)sleeping;
 - (void)cleanUp;
 - (void)showStoppedScreen;
 + (nullable VIMSession *)sessionForMachine:(VIMMachine *)machine NS_SWIFT_NAME(session(for:));

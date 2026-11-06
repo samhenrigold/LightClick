@@ -2,6 +2,7 @@
 // generated header: Swift gets those classes from the package itself, under their Swift names.
 #import "VIMAlerts.h"
 #import "VIMAutomaticSetup.h"
+#import "VIMClipboardBridge.h"
 #import "VIMGuestFiles.h"
 #import "VIMHostAudio.h"
 #import "VIMHostSupport.h"
