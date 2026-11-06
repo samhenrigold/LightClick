@@ -7,7 +7,7 @@ long engine_monitor_macho_size(void);
 extern const unsigned long long engine_sym_mon_init, engine_sym_mon_vectors, engine_sym_mon_enter_guest;
 
 static const uint64_t kPrivIPA = PRIV_IPA, kPrivVA = PRIV_VA, kPrivSize = PRIV_SIZE, kRamAliasVA = RAM_ALIAS_VA;
-static const uint64_t kOffMonText = OFF_MON_TEXT, kOffMonData = OFF_MON_DATA, kOffStubs = OFF_STUBS, kOffCC = OFF_CC, kCCSize = CC_SIZE;
+static const uint64_t kOffMonText = OFF_MON_TEXT, kOffMonData = OFF_MON_DATA, kOffStubs = OFF_STUBS, kOffStubs2 = OFF_STUBS2, kOffCC2 = OFF_CC2, kOffCC = OFF_CC, kCCSize = CC_SIZE;
 static const uint64_t kOffCtx = OFF_CTX, kOffRStacks = OFF_RSTACKS, kOffHash = OFF_HASH, kOffBlocks = OFF_BLOCKS, kOffPT = OFF_PT;
 static const uint64_t kOffPcMap = OFF_PCMAP, kOffPageInfo = OFF_PAGEINFO, kOffShadowMeta = OFF_SHADOW_META;
 static const uint64_t kOffMonCPU = OFF_MON_CPU, kCtxSlot = CTX_SLOT;

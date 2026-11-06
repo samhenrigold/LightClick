@@ -963,6 +963,58 @@ static void test_shared_region(u64 root) {
     }
 }
 
+// A program's direct call into the shared region can't link, so it looks its target up, and that must keep up with the target.
+static void test_call_between_keys(u64 root) {
+    u64 directory = frame(), table = frame(), starter = frame(), callee = frame(), callee2 = frame();
+    u64 own = frame(), own_table = frame(), caller = frame(), stack = frame(), third_a, third_b;
+    for (int i = 0; i < 512; i++) {
+        PHYS(directory)[i] = PHYS(table)[i] = PHYS(own)[i] = PHYS(own_table)[i] = 0;
+    }
+    PHYS(directory)[0] = table | PRESENT_RW | 4;
+    PHYS(table)[0] = starter | PRESENT_RW | 4;
+    PHYS(table)[1] = callee | PRESENT_RW | 4;
+    shared_code(starter, 1);
+    static const u8 ret_value[] = {0xBB, 7, 0, 0, 0, 0xC3}; // mov $7, %ebx; ret
+    volatile u8 *c1 = (volatile u8 *)PHYS(callee), *c2 = (volatile u8 *)PHYS(callee2);
+    for (u32 i = 0; i < sizeof ret_value; i++)
+        c1[i] = c2[i] = ret_value[i];
+    c2[1] = 8;
+    u64 a = shared_root_copy(root, directory, &third_a), b = shared_root_copy(root, directory, &third_b);
+    for (int i = 0; i < 3; i++) { // two address spaces on one directory: it counts as shared from here
+        CHECK(shared_run(a, root) == 1);
+        CHECK(shared_run(b, root) == 1);
+    }
+    // In a directory of a's own, the page just below: mov $50, %ecx; 1: call SHARED_VA + 4096; dec %ecx; jnz 1b; mov $exit, %eax; syscall
+    u64 at = SHARED_VA - 4096;
+    PHYS(third_a)[509] = own | PRESENT_RW | 4;
+    PHYS(own)[511] = own_table | PRESENT_RW | 4;
+    PHYS(own_table)[511] = caller | PRESENT_RW | 4;
+    PHYS(own_table)[510] = stack | PRESENT_RW | 4;
+    static const u8 calls[] = {0xB9, 50, 0, 0, 0, 0xE8, 0, 0, 0, 0, 0xFF, 0xC9, 0x75, 0xF7, 0xB8, 0x01, 0x00, 0x00, 0x02, 0x0F, 0x05};
+    volatile u8 *to = (volatile u8 *)PHYS(caller);
+    for (u32 i = 0; i < sizeof calls; i++)
+        to[i] = calls[i];
+    *(volatile u32 *)(to + 6) = (u32)(SHARED_VA + 4096 - (at + 10));
+    u64 value;
+    #define RUN_CALLER() do { \
+        write_cr3(a); \
+        __asm__ volatile("call _enter_user" : "=b"(value) : "D"(at), "S"(at) : "rax", "rcx", "rdx", "rbp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "memory"); \
+        write_cr3(root); \
+    } while (0)
+    RUN_CALLER();
+    CHECK(value == 7);
+    RUN_CALLER();
+    CHECK(value == 7);
+    // The target moves to another frame, for everyone.
+    PHYS(table)[1] = callee2 | PRESENT_RW | 4;
+    RUN_CALLER();
+    CHECK(value == 8);
+    // And is written.
+    c2[1] = 9;
+    RUN_CALLER();
+    CHECK(value == 9);
+}
+
 // A return needs no lookup: a process that leaves the directory mid-call must not come back to the shared translation
 // of its caller. shared page: call helper; mov $value, %ebx; mov $exit, %eax; syscall
 static void shared_caller(u64 page, u32 value) {
@@ -2032,6 +2084,7 @@ void kmain(void) {
     test_second_vcpu(root);
     test_process_log(root);
     test_shared_region(root);
+    test_call_between_keys(root);
     test_shared_return(root);
     test_view_churn(root);
     test_compat(root);

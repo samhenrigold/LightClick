@@ -51,6 +51,12 @@
 #define SHADOW_POOL_BYTES (256ULL << 20)
 #define OFF_SHADOW_META (512ULL << 20) // EL1 rw: shadow page descriptors, hash, rmap
 #define OFF_PAGEINFO (768ULL << 20) // EL1 rw, one byte per guest page frame (4 GB of RAM per MB)
+// The code cache's second part, for blocks of one view: as far as this is from the first, so with stubs of its own in reach, and tables of its own.
+#define OFF_STUBS2 (816ULL << 20)
+#define OFF_CC2 (818ULL << 20)
+#define OFF_BLOCKS2 (936ULL << 20)
+#define OFF_PCMAP2 (952ULL << 20)
+#define CC_PART2_WORD ((OFF_CC2 - OFF_CC) / 4)
 #define OFF_RSTACKS_MORE (800ULL << 20) // EL0 rw: as OFF_RSTACKS, 2 MB each, for vCPUs above 0
 static inline uint64_t engine_off_rstacks(uint32_t cpu) { return cpu ? OFF_RSTACKS_MORE + (uint64_t)(cpu - 1) * (2ULL << 20) : OFF_RSTACKS; }
 
@@ -165,6 +171,7 @@ enum {
     HC_YIELD, // a lock has been held a long time: let the host run something else
     HC_PARK, // out of the code cache for a moment, in case another vCPU is resetting it
     HC_VIEW_FORGET, // a[0] view: empty its lookup table, as a slot above a shared directory changed
+    HC_CALL_TAIL, // a[0] the bl of a direct call into another key, a[1] its x86 target: from now on it looks that up without leaving translated code
 };
 
 // Stop reasons for HC_STOP.
@@ -269,7 +276,7 @@ typedef struct {
     uint64_t stat_apic_timer, stat_ipi_self;
 
     // Blocks, published by the host.
-    uint64_t block_count;
+    uint64_t block_count, block_count_private; // the code cache's two parts: see "code cache" in translate.c
     uint64_t tsc_offset;
 
     // Statistics, read by the host.

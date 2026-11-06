@@ -203,7 +203,7 @@ public final class Engine {
         }
         gate.condition.unlock()
         os_unfair_lock_lock(translatorLock)
-        if tr_needs_flush() { tr_flush_parked() }
+        if tr_needs_flush() { tr_flush_parked(false) }
         for engine in gate.engines { engine.ctx.pointee.tr_flushed = 1 }
         os_unfair_lock_unlock(translatorLock)
         gate.condition.lock()
@@ -220,6 +220,8 @@ public final class Engine {
         let bytes = Array(UnsafeBufferPointer(start: engine_monitor_macho_ptr(), count: engine_monitor_macho_size()))
         let image = try MachOImage(bytes: bytes)
         image.copy(to: priv, origin: kPrivVA)
+        memcpy(priv + Int(kOffStubs2), priv + Int(kOffStubs), Int(kOffCC - kOffStubs)) // position independent, for the code cache's second part to reach
+        sys_icache_invalidate(priv + Int(kOffStubs2), Int(kOffCC - kOffStubs))
 
         // Static tables for the private slots, 2 MB blocks, shared by every shadow root.
         var next = kOffPT
@@ -254,12 +256,12 @@ public final class Engine {
             var attrs: UInt64
             switch off {
             case kOffMonText..<kOffMonData: attrs = apEL1RO | uxn  // monitor text: EL1 execute
-            case kOffStubs..<(kOffCC + kCCSize): attrs = apEL1RW | pxn  // stubs and code: EL0 execute-only
+            case kOffStubs..<(kOffCC + kCCSize), kOffStubs2..<(kOffCC2 + kCCSize): attrs = apEL1RW | pxn  // stubs and code: EL0 execute-only
             case kOffCtx..<kOffRStacks: attrs = apRW | uxn | pxn
             case kOffHash..<kOffBlocks: attrs = apRO | uxn | pxn
             default: attrs = apEL1RW | uxn | pxn
             }
-            if off == kOffStubs { attrs = apEL1RO | pxn }
+            if off == kOffStubs || off == kOffStubs2 { attrs = apEL1RO | pxn }
             slot(privL2, Int(off >> 21)).pointee = ipa(off) | block | attrs
             off += 2 << 20
         }
@@ -488,7 +490,7 @@ public final class Engine {
     private func hostCall(_ code: Int) throws -> RunOutcome? {
         let c = ctx
         // The translator's tables are one set for the VM. Taken here, in the slow path of a host exit that costs far more.
-        let translating = code == Int(HC_TRANSLATE) || code == Int(HC_SMC) || code == Int(HC_VIEW_INVALIDATE_VA) || code == Int(HC_VIEW_FORGET) || code == Int(HC_VIEW_DROP)
+        let translating = code == Int(HC_TRANSLATE) || code == Int(HC_SMC) || code == Int(HC_VIEW_INVALIDATE_VA) || code == Int(HC_VIEW_FORGET) || code == Int(HC_VIEW_DROP) || code == Int(HC_CALL_TAIL)
         var cacheWasReset = false
         if code == Int(HC_TRANSLATE) && severalVCPUs {
             lockTranslator()
@@ -543,6 +545,8 @@ public final class Engine {
         case Int(HC_PARK):
             gate.leave()
             gate.enter()
+        case Int(HC_CALL_TAIL):
+            if !tr_needs_flush() { tr_call_tail(c.pointee.req_a.0, c.pointee.req_a.1) }
         case Int(HC_VIEW_FORGET):
             tr_view_forget(Int32(c.pointee.req_a.0))
         case Int(HC_VIEW_DROP):
@@ -748,7 +752,7 @@ public final class Engine {
 
     public func forgetAll() {
         os_unfair_lock_lock(translatorLock)
-        tr_flush_parked()
+        tr_flush_parked(true)
         gate.condition.lock()
         for engine in gate.engines {
             engine.ctx.pointee.tr_flushed = 1
