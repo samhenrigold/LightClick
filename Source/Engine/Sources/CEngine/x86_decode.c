@@ -755,7 +755,15 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
         } else if (opc == 0x32) {
             in->op = OP_RDMSR;
         } else if (opc == 0x38 || opc == 0x3A) {
-            if (opc == 0x38 && p[0] == 0xF0 && mand != 0xF2 && mand != 0xF3) { // movbe
+            if (opc == 0x38 && (p[0] == 0xF0 || p[0] == 0xF1) && last_mand == 0xF2) {
+                bool byte = p[0] == 0xF0;
+                p++;
+                MODRM();
+                in->op = OP_CRC32;
+                in->srcsz = byte ? 1 : 0;
+                if (byte && !has_rex && in->rm_reg && in->rm >= 4 && in->rm <= 7)
+                    in->high_rm = true;
+            } else if (opc == 0x38 && p[0] == 0xF0 && mand != 0xF2 && mand != 0xF3) { // movbe
                 p++;
                 MODRM();
                 in->op = OP_MOVBE;

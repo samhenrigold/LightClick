@@ -77,6 +77,7 @@ enum {
     OP_TZCNT,
     OP_LZCNT,
     OP_POPCNT,
+    OP_CRC32,
     OP_BSWAP,
     OP_CBW, // cbw, cwde, cdqe per size
     OP_CWD, // cwd, cdq, cqo per size

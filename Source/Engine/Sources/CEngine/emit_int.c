@@ -1840,6 +1840,17 @@ void emit_int(const Insn *in, int live) {
                 E(0x38606800u | S0 << 16 | 3 << 5 | S0); // ldrb w16, [x3, x16]
             bfi(1, 0, S0, 0, 8);
             break;
+        case OP_CRC32: {
+            int width = in->srcsz ? in->srcsz : sz, src = S0;
+            if (in->rm_reg)
+                src = gpr_read(in->rm, width, in->high_rm, S0);
+            else
+                ldst(1, width, S0, addr_prepare(in, width));
+            int size = width == 1 ? 0 : width == 2 ? 1 : width == 4 ? 2 : 3;
+            E((width == 8 ? 0x9AC05000u : 0x1AC05000u) | (u32)src << 16 | (u32)size << 10 | (u32)in->reg << 5 | S2); // crc32c, which is the polynomial x86's crc32 uses
+            gpr_write(in->reg, 4, false, S2);
+            break;
+        }
         case OP_MOVBE: {
             if (in->rm_reg) {
                 emit_ud();

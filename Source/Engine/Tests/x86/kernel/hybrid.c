@@ -1304,6 +1304,70 @@ static void test_forget_all(u64 root) {
     CHECK(f() == 6);
 }
 
+static u32 crc32c_soft(u32 crc, u64 value, int bytes) {
+    for (int i = 0; i < bytes; i++) {
+        crc ^= (u8)(value >> (i * 8));
+        for (int b = 0; b < 8; b++)
+            crc = crc & 1 ? crc >> 1 ^ 0x82F63B78u : crc >> 1;
+    }
+    return crc;
+}
+
+static void test_crc32(void) {
+    volatile u64 from_memory = 0x123456789ABCDEF0ULL;
+    u64 v = 0x0FEDCBA987654321ULL;
+    u64 r = 0xFFFFFFFF00000005ULL; // the top half goes
+    __asm__ volatile("crc32q %1, %0" : "+r"(r) : "r"(v));
+    CHECK(r == crc32c_soft(5, v, 8));
+    u32 d = 7;
+    __asm__ volatile("crc32l %1, %0" : "+r"(d) : "r"((u32)v));
+    CHECK(d == crc32c_soft(7, v, 4));
+    d = 9;
+    __asm__ volatile("crc32w %1, %0" : "+r"(d) : "r"((u16)v));
+    CHECK(d == crc32c_soft(9, v, 2));
+    d = 11;
+    __asm__ volatile("crc32b %b1, %0" : "+r"(d) : "q"((u8)v));
+    CHECK(d == crc32c_soft(11, v, 1));
+    d = 13;
+    __asm__ volatile("mov $0x4142, %%eax\n crc32b %%ah, %0" : "+r"(d) : : "rax");
+    CHECK(d == crc32c_soft(13, 0x41, 1));
+    r = 15;
+    __asm__ volatile("crc32q %1, %0" : "+r"(r) : "m"(from_memory));
+    CHECK(r == crc32c_soft(15, from_memory, 8));
+    d = 17;
+    __asm__ volatile("crc32b %1, %0" : "+r"(d) : "m"(*(volatile u8 *)&from_memory));
+    CHECK(d == crc32c_soft(17, from_memory, 1));
+}
+
+// The locked forms a kernel updates PTEs with, on a tracked table: the value lands, and so does the change of mapping.
+static void test_locked_pte(u64 root) {
+    u64 a = frame(), b = frame(), va = TEST_VA + 0x40A00000;
+    PHYS(a)[0] = 0xAAAA;
+    PHYS(b)[0] = 0xBBBB;
+    volatile u64 *pte = pte_of(root, va);
+    *pte = a | PRESENT_RW;
+    __asm__ volatile("invlpg (%0)" : : "r"(va));
+    CHECK(*(volatile u64 *)va == 0xAAAA); // the table is tracked now
+    __asm__ volatile("lock andq %1, %0" : "+m"(*pte) : "r"(~2ULL)); // no longer writable
+    __asm__ volatile("invlpg (%0)" : : "r"(va));
+    CHECK(!(*pte & 2));
+    CHECK(*(volatile u64 *)va == 0xAAAA);
+    __asm__ volatile("lock orq %1, %0" : "+m"(*pte) : "r"(2ULL));
+    CHECK(*pte == (a | PRESENT_RW | 0x60ULL) || (*pte & ~0x60ULL) == (a | PRESENT_RW));
+    __asm__ volatile("lock xorq %1, %0" : "+m"(*pte) : "r"(a ^ b)); // now the other frame
+    __asm__ volatile("invlpg (%0)" : : "r"(va));
+    CHECK(*(volatile u64 *)va == 0xBBBB);
+    __asm__ volatile("lock xorq %1, %0" : "+m"(*pte) : "r"(a ^ b));
+    __asm__ volatile("invlpg (%0)" : : "r"(va));
+    CHECK(*(volatile u64 *)va == 0xAAAA);
+    __asm__ volatile("lock addq %1, %0" : "+m"(*pte) : "r"(b - a));
+    __asm__ volatile("invlpg (%0)" : : "r"(va));
+    CHECK(*(volatile u64 *)va == 0xBBBB);
+    u64 old = 0;
+    __asm__ volatile("lock xaddq %0, %1" : "+r"(old), "+m"(*pte));
+    CHECK((old & 0x000FFFFFFFFFF000ULL) == b);
+}
+
 // An interrupt raised just after a hlt ends it, polled in the monitor or through TCG if the host is slow, and the handler
 // returns past the hlt.
 static void test_hlt_poll(void) {
@@ -1963,6 +2027,8 @@ void kmain(void) {
     test_calls_link();
     test_icr();
     test_forget_all(root);
+    test_crc32();
+    test_locked_pte(root);
     test_second_vcpu(root);
     test_process_log(root);
     test_shared_region(root);

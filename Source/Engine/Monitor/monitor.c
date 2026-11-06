@@ -1191,7 +1191,7 @@ static void zap_entry(u64 *e, const ShadowDesc *d) {
         }
     } else if (v & 1) {
         bool kernel_slot = d->level == 3 && (((u64)e & 0xfff) >> 3) >= 256;
-        if ((kernel_slot || (d->level == 2 && pte_va(e, d) == SHARED_USER_BASE)) && views[d->view].sees_shared && !evicting) { // what its lookups mean may have changed
+        if ((kernel_slot || (d->level == 2 && pte_va(e, d) >= SHARED_USER_BASE && pte_va(e, d) < SHARED_USER_END)) && views[d->view].sees_shared && !evicting) { // what its lookups mean may have changed
             views[d->view].sees_shared = 0;
             c->req_a[0] = d->view;
             hostcall(HC_VIEW_FORGET);
@@ -1756,6 +1756,26 @@ static void handle_data_abort(bool lower) {
                 if (rs != 31)
                     c->x[rs] = old;
             } else if (rt != 31)
+                c->x[rt] = old;
+            c->elr += 4;
+            mon_unlock();
+            return;
+        }
+        // lock and, or, xor and add, as LSE: Mojave's pmap clears PTE bits this way. Under the lock, and every store to this frame traps, so it stays atomic.
+        if ((word & 0xBF20CC00u) == 0xB8200000u && !(far & ((word >> 30) & 1 ? 7 : 3))) {
+            bool wide = (word >> 30) & 1;
+            u32 rs = (word >> 16) & 31, rt = word & 31, op = (word >> 12) & 3;
+            u64 *slot8 = (u64 *)RAM(w.gpa);
+            u32 *slot4 = (u32 *)RAM(w.gpa);
+            u64 old = wide ? *slot8 : *slot4;
+            u64 v = rs == 31 ? 0 : c->x[rs];
+            u64 next = op == 0 ? old + v : op == 1 ? old & ~v : op == 2 ? old ^ v : old | v;
+            if (wide)
+                *slot8 = next;
+            else
+                *slot4 = (u32)next;
+            pt_slot_changed(w.gpa & ~7ULL);
+            if (rt != 31)
                 c->x[rt] = old;
             c->elr += 4;
             mon_unlock();

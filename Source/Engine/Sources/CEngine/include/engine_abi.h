@@ -38,7 +38,7 @@
 #define HASH_ENTRIES (1ULL << 16)
 #define HASH_BYTES (HASH_ENTRIES * 16)
 // The gigabyte that XNU nests its shared libraries into from one page directory, whatever process maps it. Elsewhere, or under another OS, nothing is shared.
-#define SHARED_USER_BASE 0x7FFF80000000ULL
+#define SHARED_USER_BASE 0x7FFF00000000ULL // Mavericks' shared region starts at 0x7FFF80000000, and Mojave's lower
 #define SHARED_USER_END 0x7FFFC0000000ULL
 #define SHARED_USER_DIRS 4
 #define MAX_VIEWS 64 // two per x86 address space. shortcut: no recycling yet, a real guest needs LRU eviction

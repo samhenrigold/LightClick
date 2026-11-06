@@ -1,5 +1,5 @@
 // How throughput scales with threads, which single-threaded lc-bench can't show. Each test runs for a fixed time at 1, 2
-// and 4 threads (pairs of threads for pipe_pingpong), and prints total throughput and its ratio to one. Seconds per run:
+// 4 and 8 threads (pairs of threads for pipe_pingpong), and prints total throughput and its ratio to one. Seconds per run:
 // argv[1], LC_SCALE_SECONDS or 2. Each thread's memory fits in cache, except chase's shared 64 MB. Run it under Rosetta
 // for a comparison.
 #include <errno.h>
@@ -18,7 +18,7 @@
 #ifndef SCALE_SECONDS
 #define SCALE_SECONDS 2
 #endif
-#define MAX_THREADS 8 // both ends of four pairs
+#define MAX_THREADS 16 // both ends of eight pairs
 #define CHASE_NODES (1u << 20) // of 64 bytes each
 
 typedef struct {
@@ -286,14 +286,14 @@ int main(int argc, char **argv) {
     sysctlbyname("hw.ncpu", &cpus, &size, NULL, 0);
     printf("# lc-scale cpus=%d seconds=%.1f\n# test N throughput unit ratio-to-N=1\n", cpus, seconds);
     chase_build();
-    static const int counts[] = {1, 2, 4};
+    static const int counts[] = {1, 2, 4, 8};
     for (size_t t = 0; t < sizeof tests / sizeof *tests; t++) {
 #ifdef SCALE_ONLY
         if (strcmp(tests[t].name, SCALE_ONLY))
             continue;
 #endif
         double one = 0;
-        for (int c = 0; c < 3; c++) {
+        for (int c = 0; c < 4; c++) {
             double rate = run(&tests[t], counts[c], seconds);
             if (!c)
                 one = rate;
