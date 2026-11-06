@@ -16,6 +16,16 @@ extension GuestAgentBridge: @retroactive GuestCommandRunning {
     }
 }
 
+extension GuestProgress: @retroactive GuestSetupWindow {
+    public var setupReceipt: [String: PropertyListValue] {
+        receipt.mapValues(PropertyListValue.init(foundationObject:))
+    }
+
+    public func update(mode: String, fraction: Double, message: String) {
+        update(mode: mode, fraction: fraction, message: message, completion: nil)
+    }
+}
+
 /// A session and the report a graphics installation step started from.
 @MainActor
 private final class SessionInstallationHost: GuestInstallationHost {
@@ -71,20 +81,12 @@ private final class SessionInstallationHost: GuestInstallationHost {
     func prepareGuestFiles(
         allowHeadlessRepair: Bool, progress: @escaping @MainActor (String) -> Void
     ) async -> (receipt: [String: PropertyListValue]?, failure: (any Error)?) {
-        await withCheckedContinuation { continuation in
-            VIMGuestPreparation.prepare(
-                withAgent: agent as Any, report: report,
-                runtime: Bundle.main.resourceURL!.appendingPathComponent("Runtime"),
-                journal: machineURL.appendingPathComponent("State/GuestPreparation.plist"),
-                control: session.controlConnection as Any, allowHeadlessRepair: allowHeadlessRepair,
-                progress: { message in MainActor.assumeIsolated { progress(message) } },
-                completion: { receipt, failure in
-                    continuation.resume(
-                        returning: (
-                            (receipt as? [String: Any])?.mapValues(PropertyListValue.init(foundationObject:)), failure
-                        ))
-                })
-        }
+        await GuestPreparationRun(
+            environment: self, report: GuestReport(foundationObject: report) ?? GuestReport(values: [:]),
+            runtime: Bundle.main.resourceURL!.appendingPathComponent("Runtime"),
+            journal: machineURL.appendingPathComponent("State/GuestPreparation.plist"),
+            headlessRepair: allowHeadlessRepair, progress: progress
+        ).run()
     }
 
     func connectGuestProgress(receipt: PropertyListValue?) {
@@ -121,6 +123,79 @@ private final class SessionInstallationHost: GuestInstallationHost {
     }
     func handOffToGraphics() { session.handoffToGraphics() }
     func offerGraphicsRestart() { session.offerGraphicsRestart() }
+}
+
+extension SessionInstallationHost: GuestPreparationEnvironment {
+    func run(_ path: String, arguments: [String], timeout: TimeInterval) async throws -> GuestCommandResult {
+        try await agent!.run(path, arguments: arguments, timeout: timeout)
+    }
+
+    private func execute(_ command: String, _ arguments: [String: Any]) async throws {
+        let control = session.controlConnection as! QMPConnectionBridge
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            control.execute(command, arguments: arguments) { _, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    func insertSupportDisc(at url: URL) async throws {
+        try await execute(
+            "blockdev-change-medium",
+            ["id": "setup-support-device", "filename": url.path, "format": "raw", "read-only-mode": "read-only"])
+    }
+
+    func ejectSupportDisc(force: Bool) async throws {
+        try await execute("eject", ["id": "setup-support-device", "force": force])
+    }
+
+    func stageBootstrapTools(guest: String) async throws -> String {
+        let tools = VIMGuestFileURL("GuestTools")!
+        let files = [
+            "guest-macho": tools.appendingPathComponent("guest-macho"),
+            "guest-progress": tools.appendingPathComponent("guest-progress"),
+            "SupportIcon.png": tools.appendingPathComponent(guest + "-support-icon.png")
+        ]
+        return try await withCheckedThrowingContinuation { continuation in
+            agent!.stageInstallationFiles(files, progress: nil) { receipt, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: receipt?["Directory"] as? String ?? "")
+                }
+            }
+        }
+    }
+
+    func openSetupWindow(staging directory: String) async throws -> any GuestSetupWindow {
+        try await withCheckedThrowingContinuation { continuation in
+            GuestProgress.start(agent: agent!, staging: directory) { progress, error in
+                if let progress {
+                    continuation.resume(returning: progress)
+                } else {
+                    continuation.resume(throwing: error ?? CancellationError())
+                }
+            }
+        }
+    }
+
+    func collectStatus() async throws -> GuestReport {
+        let tool = (try? Data(contentsOf: VIMGuestFileURL("GuestTools/guest-status")!)) ?? Data()
+        return try await withCheckedThrowingContinuation { continuation in
+            agent!.collectStatus(tool: tool) { report, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(
+                        returning: GuestReport(foundationObject: report) ?? GuestReport(values: [:]))
+                }
+            }
+        }
+    }
 }
 
 extension VIMSession {

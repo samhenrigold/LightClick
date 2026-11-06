@@ -1,9 +1,0 @@
-#!/bin/zsh
-set -euo pipefail
-root=${0:A:h:h}
-mkdir -p "$root/Build/Probes"
-"$root/scripts/clang-with-swift-packages" GuestControl MachineKit -- -fobjc-arc -fmodules -Wall -mmacosx-version-min=15.0 \
-    -I "$root/VirtualIntelMac" -framework Foundation \
-    "$root/probes/app-guest-prepare.m" "$root/VirtualIntelMac/VIMGuestPreparation.m" \
-    -o "$root/Build/Probes/app-guest-prepare"
-exec "$root/Build/Probes/app-guest-prepare" "${@:?Provide unowned agent socket, QMP socket, packaged Runtime directory, and journal path}"

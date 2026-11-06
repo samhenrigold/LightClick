@@ -26,7 +26,6 @@ mkdir -p "$source_dir/Build/UIReview"
   "$source_dir/VirtualIntelMac/VIMPlayButton.m" \
   "$source_dir/VirtualIntelMac/VIMMetalView.m" \
   "$source_dir/VirtualIntelMac/VIMDisplayConnection.m" \
-  "$source_dir/VirtualIntelMac/VIMGuestPreparation.m" \
   -framework Cocoa -framework AVFoundation -framework UniformTypeIdentifiers \
   -framework Metal -framework QuartzCore -o "$source_dir/Build/ui-previews"
 "$source_dir/Build/ui-previews" "$source_dir" "$source_dir/Build/UIReview"

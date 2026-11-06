@@ -10,7 +10,6 @@
 #import "VIMDisplayConnection.h"
 #import "VIMQMPConnection.h"
 #import "VIMGuestAgent.h"
-#import "VIMGuestPreparation.h"
 #import "VIMSMBService.h"
 #import "VIMHostUSB.h"
 #import "VIMLibraryLocation.h"

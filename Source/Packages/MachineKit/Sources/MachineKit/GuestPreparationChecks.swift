@@ -1,7 +1,7 @@
 import Foundation
 import InstallerKit
 
-/// What each step of guest preparation must have heard from the guest before the next may start. VIMGuestPreparation
+/// What each step of guest preparation must have heard from the guest before the next may start. `GuestPreparationRun`
 /// runs the steps and owns the journal. A check throws a message for the user, and its caller prefers any transport
 /// error it already has.
 public struct GuestPreparationChecks: Sendable {
