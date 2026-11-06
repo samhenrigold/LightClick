@@ -82,6 +82,12 @@ struct SWSTable {
     volatile uint32_t gpu_no_shadow;
     // The tool writes this: how many surface updates to print the layer trees of.
     volatile int32_t gpu_census;
+    // What a census printed as contents, by the index it printed: top row first, 4 bytes a pixel, in the arena.
+    volatile uint32_t gpu_blob_count;
+    struct SWSBlob {
+        uint32_t width, height, row;
+        uint64_t offset;
+    } gpu_blobs[4096];
     // Set by the hook once all its patches are in, for seamless-ws-inject to read.
     volatile int32_t installed_pid;
     uint8_t arena[SWS_ARENA];

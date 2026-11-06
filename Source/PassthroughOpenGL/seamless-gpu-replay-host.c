@@ -8,9 +8,9 @@
  * With the hook's gpu_mode on, a marker says the display is off: the display's own draws don't run, only the window's.
  *
  * shortcut: only what WindowServer draws arrives, so a covered part of a window stays stale until it's uncovered.
- * shortcut: a frame is sent once its fence has passed, seen at the next publish, so one frame later than it could be,
- * and a last frame waits for the next publish. A worker waiting on fences, as direct-display-sender-host.c does, fixes
- * it.
+ * shortcut: a frame's fence is waited for here, for up to 8 ms, which holds up the stream that long at most, as a
+ * repaint with nothing after it has no later publish to be sent from. One that takes longer waits for the next. A
+ * worker waiting on fences, as direct-display-sender-host.c does, would hold nothing up.
  */
 #include <mach/mach.h>
 #include <math.h>
@@ -363,7 +363,7 @@ static void SGSendReady(void) {
             sg_port = 0;
     }
     for (struct SGWindow *w = sg_windows; w; w = w->next) {
-        if (!w->pending || glClientWaitSync(w->pending_sync, 0, 0) == GL_TIMEOUT_EXPIRED)
+        if (!w->pending || glClientWaitSync(w->pending_sync, GL_SYNC_FLUSH_COMMANDS_BIT, 8000000) == GL_TIMEOUT_EXPIRED)
             continue;
         glDeleteSync(w->pending_sync);
         w->pending = 0;
@@ -467,8 +467,8 @@ static void DGSeamlessBefore(struct DGInterpreter *s, struct DGMessage *m) {
         if ((CGLGetCurrentContext() == c->cgl || !CGLSetCurrentContext(c->cgl)) && !c->inside_begin) {
             uint64_t began = mach_absolute_time();
             if (sg_replay_enabled) {
-                SGSendReady();
                 SGEndFrame();
+                SGSendReady();
             }
             SGWriteRates();
             sg_spent += mach_absolute_time() - began;

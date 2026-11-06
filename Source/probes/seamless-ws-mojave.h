@@ -496,6 +496,7 @@ static void update_hook(void *context, double time) {
 // contexts are added, and SkyLight reaches it through a pointer that can be changed at any moment.
 static void *(*copy_region_original)(void *);
 static void (*print_trees)(void *);
+static int census_printing;
 static void (*set_message_function)(void (*)(const char *, va_list, void *), void *);
 static void census_line(const char *format, va_list arguments, void *info) {
     (void)info;
@@ -506,19 +507,117 @@ static void *copy_region_hook(void *update) {
         table->gpu_census--;
         note("== census\n");
         set_message_function(census_line, NULL);
+        census_printing = 1;
         print_trees(update);
+        census_printing = 0;
         set_message_function(NULL, NULL);
     }
     return copy_region_original(update);
 }
+// In a census, the pixels of each layer's contents go to the table's arena, once each, and the tree says which by a
+// line before it. Through IOSurfaces: an image makes one when asked, as CA does for the GPU, and a surface is one.
+enum {
+    image_show_at = 0xdcdc4,
+    x_log_at = 0xe9bad,
+    surface_show_at = 0x1d95e0,
+    image_retain_iosurface_at = 0xddb0c,
+    copy_region_stub = 0x2696f8 // In SkyLight.
+};
+static void *(*image_retain_iosurface)(void *);
+static void *(*surface_lookup)(uint32_t);
+static int (*surface_lock)(void *, uint32_t, void *), (*surface_unlock)(void *, uint32_t, void *);
+static size_t (*surface_width)(void *), (*surface_height)(void *), (*surface_alloc)(void *);
+static void *(*surface_base)(void *);
+static void (*census_log)(int, const char *, ...);
+static const void *census_seen[4096];
+static uint32_t census_seen_seed[4096];
+
+static void census_blob(const void *object, uint32_t seed, void *surface) {
+    uint32_t found = 4096;
+    for (uint32_t i = 0; i < table->gpu_blob_count && i < 4096; i++)
+        if (census_seen[i] == object && census_seen_seed[i] == seed)
+            found = i;
+    if (found == 4096 && table->gpu_blob_count < 4096 && surface && !surface_lock(surface, 1, NULL)) {
+        size_t width = surface_width(surface), height = surface_height(surface);
+        size_t row = height ? (surface_alloc(surface) / height) & ~(size_t)63 : 0;
+        if (row < width * 4)
+            row = width * 4;
+        uint64_t size = (uint64_t)height * row;
+        if (size && table->arena_used + size <= SWS_ARENA) {
+            found = table->gpu_blob_count;
+            memcpy(table->arena + table->arena_used, surface_base(surface), size);
+            table->gpu_blobs[found] =
+                (struct SWSBlob){(uint32_t)width, (uint32_t)height, (uint32_t)row, table->arena_used};
+            table->arena_used += size;
+            census_seen[found] = object;
+            census_seen_seed[found] = seed;
+            table->gpu_blob_count = found + 1;
+        }
+        surface_unlock(surface, 1, NULL);
+    }
+    if (found < 4096)
+        census_log(0, "(blob %u)", found); // Into the stream the tree is being printed to.
+}
+static void (*image_show_original)(void *, unsigned, unsigned);
+static void image_show_hook(void *image, unsigned a, unsigned b) {
+    if (census_printing) {
+        void *surface = image_retain_iosurface(image);
+        census_blob(image, *(uint32_t *)((char *)image + 0x1c), surface);
+        if (surface)
+            cf_release(surface);
+    }
+    image_show_original(image, a, b);
+}
+static void (*surface_show_original)(void *, unsigned, unsigned);
+static void surface_show_hook(void *object, unsigned a, unsigned b) {
+    if (census_printing) {
+        const char *inner = *(const char **)((char *)object + 0x80);
+        void *surface = inner ? surface_lookup(*(const uint32_t *)(inner + 0x10)) : NULL;
+        census_blob(object, *(uint32_t *)((char *)object + 0x1c), surface);
+        if (surface)
+            cf_release(surface);
+    }
+    surface_show_original(object, a, b);
+}
+
 static void gpu_census_install(void) {
-    enum { copy_region_stub = 0x2696f8 }; // In 18G103's SkyLight.
     print_trees = dlsym(RTLD_DEFAULT, "CARenderUpdatePrintTrees");
     copy_region_original = dlsym(RTLD_DEFAULT, "CARenderUpdateCopyRegion");
     set_message_function = dlsym(RTLD_DEFAULT, "CASetMessageFunction");
+    surface_lookup = dlsym(RTLD_DEFAULT, "IOSurfaceLookup");
+    surface_lock = dlsym(RTLD_DEFAULT, "IOSurfaceLock");
+    surface_unlock = dlsym(RTLD_DEFAULT, "IOSurfaceUnlock");
+    surface_width = dlsym(RTLD_DEFAULT, "IOSurfaceGetWidth");
+    surface_height = dlsym(RTLD_DEFAULT, "IOSurfaceGetHeight");
+    surface_alloc = dlsym(RTLD_DEFAULT, "IOSurfaceGetAllocSize");
+    surface_base = dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
     const uint8_t *stub = (const uint8_t *)loaded_image() + copy_region_stub;
-    if (!print_trees || !copy_region_original || stub[0] != 0xff || stub[1] != 0x25) {
+    const uint8_t *quartz = NULL;
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *name = _dyld_get_image_name(i);
+        size_t length = name ? strlen(name) : 0;
+        if (length > 11 && !strcmp(name + length - 11, "/QuartzCore"))
+            quartz = (const uint8_t *)_dyld_get_image_header(i);
+    }
+    static const uint8_t image_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
+                                          0x53, 0x48, 0x81, 0xec, 0xd8, 0x00, 0x00, 0x00};
+    static const uint8_t surface_entry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
+                                            0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0x38, 0x01, 0x00, 0x00};
+    if (!print_trees || !copy_region_original || !set_message_function || !surface_lookup || !surface_lock ||
+        !surface_unlock || !surface_width || !surface_height || !surface_alloc || !surface_base || !quartz ||
+        stub[0] != 0xff || stub[1] != 0x25) {
         note("no census\n");
+        return;
+    }
+    image_retain_iosurface = (void *(*)(void *))(quartz + image_retain_iosurface_at);
+    census_log = (void (*)(int, const char *, ...))(quartz + x_log_at);
+    struct Patch patches[] = {{(uint8_t *)quartz + image_show_at, image_entry, sizeof(image_entry), sizeof(image_entry),
+                               (const void *)image_show_hook, (void **)&image_show_original},
+                              {(uint8_t *)quartz + surface_show_at, surface_entry, sizeof(surface_entry),
+                               sizeof(surface_entry), (const void *)surface_show_hook,
+                               (void **)&surface_show_original}};
+    if (!patches_apply(patches, 2)) {
+        note("no census of contents\n");
         return;
     }
     int32_t offset;
