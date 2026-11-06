@@ -49,37 +49,7 @@ static int ConfigurationLock(NSURL *package, NSError **error) {
     return fd;
 }
 static void RelocatedPackage(NSURL *old, NSURL *new, NSString *identifier) {
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    for (NSString *key in defaults.dictionaryRepresentation.allKeys) {
-        if ([key hasPrefix:@"VIMLibraryOrder-"] || [key isEqual:@"VIMRegisteredPackages"]) {
-            NSArray *paths = [defaults arrayForKey:key];
-            if (![paths containsObject:old.path])
-                continue;
-            NSMutableArray *updated = [paths mutableCopy];
-            for (NSUInteger i = 0; i < updated.count; i++)
-                if ([updated[i] isEqual:old.path])
-                    updated[i] = new.path;
-            [defaults setObject:updated forKey:key];
-        } else if ([key hasPrefix:@"VIMLibraryKnown-"]) {
-            NSMutableDictionary *known = [[defaults dictionaryForKey:key] mutableCopy];
-            if (!known[old.path])
-                continue;
-            known[new.path] = known[old.path];
-            [known removeObjectForKey:old.path];
-            [defaults setObject:known forKey:key];
-        }
-    }
-    NSMutableDictionary *job = [[defaults dictionaryForKey:@"VIMCreationJob"] mutableCopy];
-    if ([job[@"Machine"] isEqual:old.path]) {
-        job[@"Machine"] = new.path;
-        [defaults setObject:job forKey:@"VIMCreationJob"];
-    }
-    NSString *oldKey = [@"VIMGuestUsername-" stringByAppendingString:old.path],
-             *newKey = [@"VIMGuestUsername-" stringByAppendingString:new.path];
-    if ([defaults objectForKey:oldKey]) {
-        [defaults setObject:[defaults objectForKey:oldKey] forKey:newKey];
-        [defaults removeObjectForKey:oldKey];
-    }
+    [VIMMachineFiles updatePreferencesForPackageMovedFrom:old.path to:new.path];
     dispatch_async(dispatch_get_main_queue(), ^{
       [NSNotificationCenter.defaultCenter
           postNotificationName:@"VIMMachineRelocated"
@@ -89,7 +59,6 @@ static void RelocatedPackage(NSURL *old, NSURL *new, NSString *identifier) {
 }
 @interface VIMMachine ()
 @property NSNumber *cachedDiskCapacity;
-- (BOOL)authorizeUpdateRepair:(NSDictionary *)report claim:(BOOL)claim error:(NSError **)error;
 - (nullable NSDictionary *)plist:(NSString *)relativePath;
 @property(readonly) BOOL firmwareSelectsInstaller;
 @end
@@ -121,29 +90,9 @@ static void RelocatedPackage(NSURL *old, NSURL *new, NSString *identifier) {
 - (uint64_t)diskCapacityBytes {
     if (self.cachedDiskCapacity)
         return self.cachedDiskCapacity.unsignedLongLongValue;
-    uint64_t capacity = 0;
-    NSNumber *recorded = self.configuration[@"DiskGiB"];
-    if ([recorded isKindOfClass:NSNumber.class] && recorded.doubleValue > 0 && recorded.doubleValue <= 1048576)
-        capacity = (uint64_t)(recorded.doubleValue * (1ULL << 30));
-    NSString *path = self.configuration[@"Disk"];
-    if (!capacity && [path isKindOfClass:NSString.class] && path.length) {
-        int fd = open([self.URL URLByAppendingPathComponent:path].fileSystemRepresentation,
-                      O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-        struct stat info;
-        unsigned char header[32];
-        if (fd >= 0) {
-            // QCOW2 v2/v3: big-endian virtual size at bytes 24–31. Never read
-            // disk contents, traverse snapshots, or launch a tool to paint a row.
-            if (!fstat(fd, &info) && S_ISREG(info.st_mode) && pread(fd, header, sizeof(header), 0) == sizeof(header) &&
-                !memcmp(header, "QFI\xfb", 4) && header[4] == 0 && header[5] == 0 && header[6] == 0 &&
-                (header[7] == 2 || header[7] == 3)) {
-                uint64_t size;
-                memcpy(&size, header + 24, sizeof(size));
-                capacity = CFSwapInt64BigToHost(size);
-            }
-            close(fd);
-        }
-    }
+    uint64_t capacity = [VIMMachineFiles diskCapacityOfPackage:self.URL
+                                                   recordedGiB:self.configuration[@"DiskGiB"]
+                                                          disk:self.configuration[@"Disk"]];
     self.cachedDiskCapacity = @(capacity);
     return capacity;
 }
@@ -366,113 +315,24 @@ static void RelocatedPackage(NSURL *old, NSURL *new, NSString *identifier) {
     }
 }
 - (BOOL)claimAutomaticInstallationWithGuestReport:(NSDictionary *)report error:(NSError **)error {
-    if (![VIMMachineModel report:report admitsAutomaticInstallationOnConfiguration:self.configuration])
-        return NO;
-    NSFileManager *fm = NSFileManager.defaultManager;
-    for (NSString *name in @[ @"GuestPreparation.plist", @"GuestInstallation.plist", @"AutomaticInstallation.plist" ])
-        if ([fm fileExistsAtPath:[self.URL URLByAppendingPathComponent:[@"State" stringByAppendingPathComponent:name]]
-                                     .path])
-            return NO;
-    if (![VIMMachineModel ownership:[self plist:@"Installation/Ownership.plist"]
-            admitsClaimByConfiguration:self.configuration])
-        return NO;
-    NSDictionary *claim = @{
-        @"FormatVersion" : @1,
-        @"MachineIdentifier" : self.configuration[@"Identifier"],
-        @"Phase" : @"claimed",
-        @"GuestReport" : report,
-        @"StartedAt" : NSDate.date
-    };
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:claim
-                                                              format:NSPropertyListBinaryFormat_v1_0
-                                                             options:0
-                                                               error:error];
-    return data && [data writeToURL:[self.URL URLByAppendingPathComponent:@"State/AutomaticInstallation.plist"]
-                            options:NSDataWritingWithoutOverwriting
-                              error:error];
+    return [VIMMachineFiles claimAutomaticInstallationOfPackage:self.URL
+                                                  configuration:self.configuration
+                                                         report:report
+                                                          error:error];
 }
 - (BOOL)claimAutomaticUpdateRepairWithGuestReport:(NSDictionary *)report error:(NSError **)error {
-    return [self authorizeUpdateRepair:report claim:YES error:error];
+    return [VIMMachineFiles authorizeUpdateRepairOfPackage:self.URL
+                                             configuration:self.configuration
+                                                    report:report
+                                                     claim:YES
+                                                     error:error];
 }
 - (BOOL)canRepairUpdatedSystemWithGuestReport:(NSDictionary *)report error:(NSError **)error {
-    return [self authorizeUpdateRepair:report claim:NO error:error];
-}
-- (BOOL)authorizeUpdateRepair:(NSDictionary *)report claim:(BOOL)claim error:(NSError **)error {
-    // Unlike initial installation, repair must not require Finder: an update may replace the very driver or framework
-    // that permits WindowServer to run. The verified transaction and the exclusive once-per-build claim below remain
-    // mandatory before authorizing any write.
-    if (![VIMMachineModel report:report admitsUpdateRepairForGuest:self.guest])
-        return NO;
-    NSString *build = report[@"ProductBuildVersion"];
-    int lock = ConfigurationLock(self.URL, error);
-    if (lock < 0)
-        return NO;
-    @try {
-        NSURL *journal = [self.URL URLByAppendingPathComponent:@"State/GuestInstallation.plist"];
-        NSDictionary *state = [NSDictionary dictionaryWithContentsOfURL:journal];
-        NSString *identity = state[@"TransactionID"];
-        NSDictionary *verified = state[@"PostBootVerification"] ?: state[@"PreviousPostBootVerification"];
-        // A read-only reconciliation after an update can already have reported
-        // an old-build verification failure. Retain the last proven success;
-        // never treat an unverified/interrupted new write as permission to
-        // retry. A failed read of a completed *old-build* transaction is
-        // different: the retained Metal proof, ID, disk and build must agree.
-        if (![VIMMachineModel verifiedInstallationSuperseded:state report:report])
-            return NO;
-        NSString *previous = verified[@"ProductBuildVersion"];
-        if (!claim)
-            return YES;
-        NSURL *directory = [self.URL URLByAppendingPathComponent:@"State/UpdateRepairs" isDirectory:YES];
-        if (mkdir(directory.fileSystemRepresentation, 0700) && errno != EEXIST)
-            return Fail(error, @"The macOS update’s graphics setup record could not be saved. Make sure the library "
-                               @"drive is connected and writable, then restart the virtual Mac.");
-        struct stat info;
-        if (lstat(directory.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode))
-            return Fail(
-                error,
-                @"The macOS update repair records folder is not a regular folder. No automatic repair was started.");
-        NSURL *claim = [directory URLByAppendingPathComponent:[build stringByAppendingPathExtension:@"plist"]];
-        NSDictionary *record = @{
-            @"FormatVersion" : @1,
-            @"MachineIdentifier" : self.configuration[@"Identifier"],
-            @"Phase" : @"claimed",
-            @"PreviousTransactionID" : identity,
-            @"PreviousBuild" : previous,
-            @"GuestReport" : report,
-            @"StartedAt" : NSDate.date
-        };
-        NSData *data = [NSPropertyListSerialization dataWithPropertyList:record
-                                                                  format:NSPropertyListBinaryFormat_v1_0
-                                                                 options:0
-                                                                   error:error];
-        NSError *writeError = nil;
-        if (data && [data writeToURL:claim options:NSDataWritingWithoutOverwriting error:&writeError])
-            return YES;
-        // Recover only a pre-dispatch failure: the old proven journal is still
-        // present with its original ID and a failed *read*. A dispatched new
-        // installation exclusively creates a new ID/journal after archival,
-        // so it cannot satisfy this condition. Never reuse that new attempt.
-        if (writeError.code == NSFileWriteFileExistsError && [writeError.domain isEqual:NSCocoaErrorDomain]) {
-            NSDictionary *saved = [NSDictionary dictionaryWithContentsOfURL:claim];
-            if (![VIMMachineModel journal:state
-                    allowsRepairRecoveryOfClaim:saved
-                                  configuration:self.configuration
-                                         report:report])
-                return NO;
-            NSMutableDictionary *recovery = [saved mutableCopy];
-            recovery[@"Phase"] = @"preflight-recovered";
-            recovery[@"RecoveredAt"] = NSDate.date;
-            recovery[@"RecoveryGuestReport"] = report;
-            // A separate durable transition bounds this migration to once,
-            // even if preparation subsequently fails or the app restarts.
-            return Save(recovery, claim, error);
-        }
-        if (error && writeError)
-            *error = writeError;
-        return NO;
-    } @finally {
-        close(lock);
-    }
+    return [VIMMachineFiles authorizeUpdateRepairOfPackage:self.URL
+                                             configuration:self.configuration
+                                                    report:report
+                                                     claim:NO
+                                                     error:error];
 }
 - (NSError * (^)(NSString *))passwordRemover {
     return ^NSError *(NSString *identifier) {
