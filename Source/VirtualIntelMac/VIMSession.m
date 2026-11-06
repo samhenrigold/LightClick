@@ -278,7 +278,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property BOOL statusPending;
 @property BOOL runStateQueryFailed;
 @property NSString *lastRunState;
-@property BOOL wakePending;
 @property VIMModernSetup *modernSetup;
 @property NSTimer *controlRetryTimer;
 @property NSTimer *controlStallTimer;
@@ -1622,81 +1621,23 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       session.state.legacyTabletGuest = VIMUsesLegacyTabletCalibration(session.machine.guest);
       session.state.legacyTabletObserved = NO;
       session.tabletTrim = VIMInitialTabletTrim(session.machine.guest, classicInstaller);
-      void (^sendInput)(NSArray *, void (^)(void)) = ^(NSArray *events, void (^answered)(void)) {
-        void (^observer)(CFTimeInterval, NSError *) = weakSelf.displayView.diagnosticInputObserver;
-        CFTimeInterval inputQueued = observer ? CACurrentMediaTime() : 0;
-        [weakSelf.control execute:@"input-send-event"
-                        arguments:@{@"events" : events}
-                       completion:^(id result, NSError *error) {
-                         if (observer)
-                             observer(inputQueued, error);
-                         [weakSelf.displayView noteInputReply];
-                         if (error && weakSelf.task.running)
-                             weakSelf.status.stringValue = error.localizedDescription;
-                         if (answered)
-                             answered();
-                       }];
-      };
-      // VIM_INPUT_COALESCE=0 sends every move as its own round trip again.
-      VIMInputMotionCoalescer *motionCoalescer =
-          [NSProcessInfo.processInfo.environment[@"VIM_INPUT_COALESCE"] isEqualToString:@"0"]
-              ? nil
-              : [[VIMInputMotionCoalescer alloc] initWithSend:sendInput];
-      if (!failure)
-          session.displayView.inputHandler = ^(NSArray *events) {
-            if ([weakSelf.lastRunState isEqual:@"suspended"]) {
-                if (weakSelf.wakePending)
-                    return;
-                weakSelf.wakePending = YES;
-                [weakSelf.control execute:@"system_wakeup"
-                    arguments:@{}
-                    completion:^(id result, NSError *error) {
-                      weakSelf.wakePending = NO;
-                      if (!error) {
-                          weakSelf.lastRunState = nil;
-                          [weakSelf.displayView releasePressedKeys];
-                          [weakSelf refreshRunState];
-                      } else
-                          weakSelf.status.stringValue = error.localizedDescription;
-                    }];
-                return;
-            }
-            events = [VIMTabletCalibration eventsFrom:events trim:(NSInteger)weakSelf.tabletTrim];
-            // Research workloads account for one reply per input they queue.
-            if (motionCoalescer && !weakSelf.displayView.diagnosticInputObserver)
-                [motionCoalescer submitEvents:events];
-            else
-                sendInput(events, nil);
-          };
       if (!failure) {
-          if (config[@"NetworkConnected"] && ![config[@"NetworkConnected"] boolValue])
-              [session.control execute:@"set_link"
-                  arguments:@{
-                      @"name" : @"ethernet",
-                      @"up" : @NO
-                  }
-                  completion:^(id result, NSError *error) {
-                    if (error) {
-                        VIMPresentError(error, session.window);
-                        return;
-                    }
-                    [session.control execute:@"cont"
-                        arguments:@{}
-                        completion:^(id result, NSError *failure) {
-                          if (failure)
-                              VIMPresentError(failure, session.window);
-                        }];
-                  }];
+          VIMSessionInput *input = session.makeInput;
+          session.displayView.inputHandler = ^(NSArray *events) {
+            [input submitEvents:events];
+          };
+      }
+      if (!failure) {
+          // In-process OpenGL starts the emulator paused until its surface endpoint is ready.
+          [session.control
+              beginGuestWithLinkDown:config[@"NetworkConnected"] && ![config[@"NetworkConnected"] boolValue]
+                              resume:openGLInprocess
+                             failure:^(NSError *error) {
+                               VIMPresentError(error, session.window);
+                             }];
           // A newly opened guest accepts typing immediately, without requiring
           // a mouse click on its framebuffer first. Don't steal focus if the
           // user has already switched to another window during startup.
-          if (openGLInprocess && !(config[@"NetworkConnected"] && ![config[@"NetworkConnected"] boolValue]))
-              [session.control execute:@"cont"
-                  arguments:@{}
-                  completion:^(id result, NSError *error) {
-                    if (error)
-                        VIMPresentError(error, session.window);
-                  }];
           if (session.window.isKeyWindow)
               [session.window makeFirstResponder:session.displayView];
           [session refreshRunState];
@@ -1726,6 +1667,46 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       }
     }];
     return YES;
+}
+- (VIMSessionInput *)makeInput {
+    __weak VIMSession *weakSelf = self;
+    VIMSessionInput *input = [[VIMSessionInput alloc]
+        initWithCoalescing:![NSProcessInfo.processInfo.environment[@"VIM_INPUT_COALESCE"] isEqualToString:@"0"]
+                   execute:^(NSString *command, NSDictionary *arguments, void (^done)(id, NSError *)) {
+                     [weakSelf.control execute:command arguments:arguments completion:done];
+                   }];
+    input.isSuspended = ^BOOL {
+      return [weakSelf.lastRunState isEqual:@"suspended"];
+    };
+    input.tabletTrim = ^NSInteger {
+      return (NSInteger)weakSelf.tabletTrim;
+    };
+    // Research workloads account for one reply per input they queue.
+    input.sendsEachBatchAlone = ^BOOL {
+      return weakSelf.displayView.diagnosticInputObserver != nil;
+    };
+    input.woke = ^{
+      weakSelf.lastRunState = nil;
+      [weakSelf.displayView releasePressedKeys];
+      [weakSelf refreshRunState];
+    };
+    input.wakeFailed = ^(NSError *error) {
+      weakSelf.status.stringValue = error.localizedDescription;
+    };
+    input.sendFailed = ^(NSError *error) {
+      if (weakSelf.task.running)
+          weakSelf.status.stringValue = error.localizedDescription;
+    };
+    input.willSend = ^{
+      void (^observer)(CFTimeInterval, NSError *) = weakSelf.displayView.diagnosticInputObserver;
+      CFTimeInterval queued = observer ? CACurrentMediaTime() : 0;
+      return ^(NSError *error) {
+        if (observer)
+            observer(queued, error);
+        [weakSelf.displayView noteInputReply];
+      };
+    };
+    return input;
 }
 - (void)noteControlStall {
     if (!self.guestSessionState.controlStalled)
