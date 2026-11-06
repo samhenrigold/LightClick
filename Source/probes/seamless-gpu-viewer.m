@@ -132,6 +132,16 @@ static void save(void) {
         Seen *s = seen[key];
         if (!s.last)
             continue;
+        if (s.window) {
+            // One window, read from the screen: that its layer shows the surface. Fails with the display asleep.
+            NSString *path = [NSString stringWithFormat:@"%@-%u-screen.png", prefix, key.unsignedIntValue];
+            NSTask *task = [NSTask
+                launchedTaskWithLaunchPath:@"/usr/sbin/screencapture"
+                                 arguments:@[
+                                     @"-x", [NSString stringWithFormat:@"-l%ld", (long)s.window.windowNumber], path
+                                 ]];
+            [task waitUntilExit];
+        }
         IOSurfaceRef surface = s.last;
         printf("surface %u: %zux%zu row %zu alloc %zu format %08x planes %zu elem %zu\n", key.unsignedIntValue,
                IOSurfaceGetWidth(surface), IOSurfaceGetHeight(surface), IOSurfaceGetBytesPerRow(surface),
