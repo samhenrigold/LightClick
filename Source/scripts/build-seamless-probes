@@ -1,0 +1,14 @@
+#!/bin/zsh
+# Builds the seamless-window demo: seamless-guest for a 10.9 guest, seamless-viewer for this host.
+set -euo pipefail
+source_root=${0:A:h:h}
+output=${1:?Usage: build-seamless-probes OUTPUT_DIRECTORY}
+mkdir -p "$output"
+# Only public CoreGraphics and HIServices, so the current SDK's x86_64 stubs are fine for 10.9.
+xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -Wall -Wextra -Wno-deprecated-declarations \
+  -framework ApplicationServices "$source_root/probes/seamless-guest.c" -o "$output/seamless-guest"
+codesign --force --sign - "$output/seamless-guest"
+xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations \
+  -framework AppKit -framework QuartzCore -framework ScreenCaptureKit \
+  "$source_root/probes/seamless-viewer.m" -o "$output/seamless-viewer"
+codesign --force --sign - "$output/seamless-viewer"
