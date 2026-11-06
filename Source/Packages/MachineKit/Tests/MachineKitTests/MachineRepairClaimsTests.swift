@@ -79,6 +79,42 @@ import Testing
         #expect(try !claims.authorizeUpdateRepair(report: updated, claim: true))
     }
 
+    /// The journal an update's failed check leaves, with the old proof still in it.
+    private func writeFailedReadJournal() throws {
+        var state = try #require(GuestInstallationTransaction.record(at: journal))
+        state["Phase"] = "outcome-unknown"
+        state["ReconciliationError"] = "Temporary verifier missing"
+        state["PreviousPostBootVerification"] = state["PostBootVerification"]
+        state["PostBootVerification"] = nil
+        try write(state.mapValues(\.foundationObject), "State/GuestInstallation.plist")
+    }
+
+    private var journal: URL { package.appendingPathComponent("State/GuestInstallation.plist") }
+
+    @Test func aClaimThatFailedBeforeDispatchIsRecoveredOnce() throws {
+        try writeVerifiedJournal()
+        #expect(try claims.authorizeUpdateRepair(report: updated, claim: true))
+        try writeFailedReadJournal()
+        #expect(try claims.authorizeUpdateRepair(report: updated, claim: true))
+        let saved = GuestInstallationTransaction.record(at: claimFile)
+        #expect(saved?["Phase"] == "preflight-recovered")
+        #expect(saved?["RecoveredAt"] != nil)
+        #expect(saved?["RecoveryGuestReport"]?.dictionary?["BootSessionUUID"] == "updated-boot")
+        #expect(saved?["PreviousTransactionID"] == .string(identity), "The original claim's facts stay.")
+        #expect(try !claims.authorizeUpdateRepair(report: updated, claim: true), "Only a claimed record can recover.")
+    }
+
+    @Test func aClaimForAnotherTransactionIsNotRecovered() throws {
+        try writeVerifiedJournal()
+        #expect(try claims.authorizeUpdateRepair(report: updated, claim: true))
+        var saved = try #require(GuestInstallationTransaction.record(at: claimFile))
+        saved["PreviousTransactionID"] = .string(UUID().uuidString)
+        try write(saved.mapValues(\.foundationObject), "State/UpdateRepairs/19H2036.plist")
+        try writeFailedReadJournal()
+        #expect(try !claims.authorizeUpdateRepair(report: updated, claim: true))
+        #expect(GuestInstallationTransaction.record(at: claimFile)?["Phase"] == "claimed")
+    }
+
     @Test func aFileWhereTheFolderBelongsStopsIt() throws {
         try writeVerifiedJournal()
         try Data().write(to: package.appendingPathComponent("State/UpdateRepairs"))
