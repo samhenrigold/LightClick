@@ -1,0 +1,15 @@
+#!/bin/zsh
+# Tests seamless input with no guest: real NSEvents through the host view to the wire, then the x86_64 guest tool under
+# Rosetta, whose injector posts only to its own test windows. Shows two windows for a few seconds. The wire format itself
+# is in scripts/test-seamless-probes.
+set -euo pipefail
+source_root=${0:A:h:h}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+"$source_root/scripts/build-seamless-probes" "$work"
+"$work/seamless-input-host" --self-test
+# Fails on missing events, as far as this host goes: what a guest delivers is measured by scripts/seamless-try input.
+output=$("$work/seamless-input-guest" probe --host-test)
+print -r -- "$output"
+print -r -- "$output" | grep -q '^scroll .* yes'
+print -r -- "$output" | grep -q '^key .* yes'

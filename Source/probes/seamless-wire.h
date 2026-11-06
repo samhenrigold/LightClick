@@ -26,6 +26,10 @@ enum SWMType {
     SWM_POINTER = 16,
     SWM_KEY = 17,
     SWM_FOCUS = 18,
+    // Input beyond a tablet and a keyboard. See seamless-input.md.
+    SWM_GESTURE = 32,
+    SWM_MODIFIERS = 33,
+    SWM_TEXT = 34,
 };
 enum SWMPointerKind { SWM_MOVE = 0, SWM_DOWN = 1, SWM_UP = 2, SWM_DRAG = 3 };
 
@@ -36,6 +40,9 @@ enum SWMPointerKind { SWM_MOVE = 0, SWM_DOWN = 1, SWM_UP = 2, SWM_DRAG = 3 };
 #define SWM_POINTER_SIZE 20u
 #define SWM_KEY_SIZE 8u
 #define SWM_FOCUS_SIZE 4u
+#define SWM_GESTURE_SIZE 36u
+#define SWM_MODIFIERS_SIZE 4u
+#define SWM_TEXT_FIXED 8u
 
 struct SWMWindow {
     uint32_t window, pid;
@@ -62,11 +69,62 @@ struct SWMKey {
     uint8_t down;
     uint32_t flags;
 };
+// One event of a trackpad gesture. Which of a, b and c mean what:
+//   SWG_SCROLL     x, y, z deltas: points if SWG_PRECISE is set, otherwise lines
+//   SWG_MAGNIFY    a = NSEvent.magnification        SWG_ROTATE   a = NSEvent.rotation, degrees
+//   SWG_SWIPE      a, b = NSEvent.deltaX, deltaY
+//   SWG_PRESSURE   a = pressure 0 to 1, b = stageTransition, with `stage`
+//   SWG_BEGIN, SWG_END   the kind (SWG_MAGNIFY, ...) in `stage`
+//   SWG_SMART_MAGNIFY, SWG_QUICK_LOOK   nothing
+enum SWMGestureKind {
+    SWG_SCROLL = 0,
+    SWG_MAGNIFY = 1,
+    SWG_ROTATE = 2,
+    SWG_SWIPE = 3,
+    SWG_SMART_MAGNIFY = 4,
+    SWG_QUICK_LOOK = 5,
+    SWG_PRESSURE = 6,
+    SWG_BEGIN = 7,
+    SWG_END = 8,
+    SWG_KIND_COUNT = 9,
+};
+// The same values on NSEvent's side are 1, 4, 8, 16 and 32, and both directions of that map live in one place each:
+// seamless-input-view.h and the guest's CGEvent fields, which use these.
+enum SWMPhase {
+    SWP_NONE = 0,
+    SWP_BEGAN = 1,
+    SWP_CHANGED = 2,
+    SWP_ENDED = 4,
+    SWP_CANCELLED = 8,
+    SWP_MAY_BEGIN = 128,
+};
+enum SWMMomentum { SWM_MOMENTUM_NONE = 0, SWM_MOMENTUM_BEGAN = 1, SWM_MOMENTUM_CHANGED = 2, SWM_MOMENTUM_ENDED = 3 };
+enum SWMGestureFlag { SWG_PRECISE = 1, SWG_INVERTED = 2 };
+struct SWMGesture {
+    uint32_t window;
+    uint8_t kind, phase, momentum, stage;
+    int32_t x, y; // Window-relative points times 16, as in SWMPointer.
+    float a, b, c;
+    uint32_t flags; // SWMGestureFlag.
+    uint32_t modifiers; // As SWMPointer.flags.
+};
+enum SWMTextKind {
+    SWT_INSERT = 0, // Committed text from the host's input method, for the guest's focused view.
+    SWT_INPUT_SOURCE = 1, // A TIS input source ID the guest should select, such as com.apple.keylayout.French.
+};
+struct SWMText {
+    uint32_t window;
+    uint16_t kind, length;
+    const char *bytes; // UTF-8, not terminated, inside the receive buffer.
+};
 struct SWMMessage {
     uint16_t type;
     union {
         uint32_t version; // SWM_HELLO
         uint32_t window_id; // SWM_GONE, SWM_FOCUS
+        uint32_t modifiers; // SWM_MODIFIERS: every modifier held now, as SWMPointer.flags, for after focus changes.
+        struct SWMGesture gesture;
+        struct SWMText text;
         struct SWMWindow window;
         struct SWMFrame frame;
         struct SWMPointer pointer;
@@ -163,6 +221,55 @@ static inline size_t swm_put_key(uint8_t *out, size_t capacity, const struct SWM
     swm_w32(p + 4, k->flags);
     return SWM_HEADER_SIZE + SWM_KEY_SIZE;
 }
+static inline void swm_wf(uint8_t *p, float v) {
+    uint32_t bits;
+    memcpy(&bits, &v, 4);
+    swm_w32(p, bits);
+}
+static inline float swm_rf(const uint8_t *p) {
+    uint32_t bits = swm_r32(p);
+    float v;
+    memcpy(&v, &bits, 4);
+    return v;
+}
+static inline size_t swm_put_gesture(uint8_t *out, size_t capacity, const struct SWMGesture *g) {
+    if (capacity < SWM_HEADER_SIZE + SWM_GESTURE_SIZE)
+        return 0;
+    swm_header(out, SWM_GESTURE, SWM_GESTURE_SIZE);
+    uint8_t *p = out + SWM_HEADER_SIZE;
+    swm_w32(p, g->window);
+    p[4] = g->kind;
+    p[5] = g->phase;
+    p[6] = g->momentum;
+    p[7] = g->stage;
+    swm_w32(p + 8, (uint32_t)g->x);
+    swm_w32(p + 12, (uint32_t)g->y);
+    swm_wf(p + 16, g->a);
+    swm_wf(p + 20, g->b);
+    swm_wf(p + 24, g->c);
+    swm_w32(p + 28, g->flags);
+    swm_w32(p + 32, g->modifiers);
+    return SWM_HEADER_SIZE + SWM_GESTURE_SIZE;
+}
+static inline size_t swm_put_text(uint8_t *out, size_t capacity, const struct SWMText *t) {
+    size_t length = SWM_TEXT_FIXED + (size_t)t->length;
+    if (t->length > SWM_MAX_TEXT || capacity < SWM_HEADER_SIZE + length)
+        return 0;
+    swm_header(out, SWM_TEXT, (uint32_t)length);
+    uint8_t *p = out + SWM_HEADER_SIZE;
+    swm_w32(p, t->window);
+    swm_w16(p + 4, t->kind);
+    swm_w16(p + 6, t->length);
+    if (t->length)
+        memcpy(p + SWM_TEXT_FIXED, t->bytes, t->length);
+    return SWM_HEADER_SIZE + length;
+}
+// NaN and infinity would go straight into a guest's scroll offset. A float is finite when its exponent isn't all ones.
+static inline int swm_finite(float v) {
+    uint32_t bits;
+    memcpy(&bits, &v, 4);
+    return (bits & 0x7F800000u) != 0x7F800000u;
+}
 
 enum SWMParse { SWM_NEED_MORE = 0, SWM_OK = 1, SWM_BAD = -1 };
 
@@ -201,6 +308,15 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
         case SWM_FOCUS:
             fixed = SWM_FOCUS_SIZE;
             break;
+        case SWM_GESTURE:
+            fixed = SWM_GESTURE_SIZE;
+            break;
+        case SWM_MODIFIERS:
+            fixed = SWM_MODIFIERS_SIZE;
+            break;
+        case SWM_TEXT:
+            fixed = SWM_TEXT_FIXED;
+            break;
         default:
             return SWM_BAD;
     }
@@ -208,6 +324,9 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
         return SWM_BAD;
     if (type == SWM_WINDOW) {
         if (length > SWM_WINDOW_FIXED + 2 * SWM_MAX_TEXT)
+            return SWM_BAD;
+    } else if (type == SWM_TEXT) {
+        if (length > SWM_TEXT_FIXED + SWM_MAX_TEXT)
             return SWM_BAD;
     } else if (type != SWM_FRAME && length != fixed)
         return SWM_BAD;
@@ -224,6 +343,40 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
         case SWM_FOCUS:
             m->u.window_id = swm_r32(p);
             break;
+        case SWM_MODIFIERS:
+            m->u.modifiers = swm_r32(p);
+            break;
+        case SWM_GESTURE: {
+            struct SWMGesture *g = &m->u.gesture;
+            g->window = swm_r32(p);
+            g->kind = p[4];
+            g->phase = p[5];
+            g->momentum = p[6];
+            g->stage = p[7];
+            g->x = (int32_t)swm_r32(p + 8);
+            g->y = (int32_t)swm_r32(p + 12);
+            g->a = swm_rf(p + 16);
+            g->b = swm_rf(p + 20);
+            g->c = swm_rf(p + 24);
+            g->flags = swm_r32(p + 28);
+            g->modifiers = swm_r32(p + 32);
+            if (g->kind >= SWG_KIND_COUNT || g->momentum > SWM_MOMENTUM_ENDED ||
+                (g->phase != SWP_NONE && g->phase != SWP_BEGAN && g->phase != SWP_CHANGED && g->phase != SWP_ENDED &&
+                 g->phase != SWP_CANCELLED && g->phase != SWP_MAY_BEGIN) ||
+                !swm_finite(g->a) || !swm_finite(g->b) || !swm_finite(g->c))
+                return SWM_BAD;
+            break;
+        }
+        case SWM_TEXT: {
+            struct SWMText *t = &m->u.text;
+            t->window = swm_r32(p);
+            t->kind = swm_r16(p + 4);
+            t->length = swm_r16(p + 6);
+            if (t->kind > SWT_INPUT_SOURCE || t->length > SWM_MAX_TEXT ||
+                length != SWM_TEXT_FIXED + (uint32_t)t->length)
+                return SWM_BAD;
+            break;
+        }
         case SWM_KEY: {
             struct SWMKey *k = &m->u.key;
             k->keycode = swm_r16(p);
@@ -290,6 +443,8 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
     *used = SWM_HEADER_SIZE + (size_t)length;
     if (avail < *used)
         return SWM_NEED_MORE;
+    if (type == SWM_TEXT)
+        m->u.text.bytes = (const char *)p + SWM_TEXT_FIXED;
     if (type == SWM_WINDOW) {
         m->u.window.title = (const char *)p + SWM_WINDOW_FIXED;
         m->u.window.owner = m->u.window.title + m->u.window.title_length;
