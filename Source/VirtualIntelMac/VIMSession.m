@@ -1116,40 +1116,47 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       VIMSession *session = eventSession;
       if (!session)
           return;
-      NSString *kind = event[@"event"];
-      if ([kind isEqual:@"DEVICE_DELETED"])
-          [session.usbClient deviceWasDeleted:event[@"data"][@"device"] control:session.control];
-      if ([kind isEqual:@"DEVICE_DELETED"])
-          [session.imageDrives deviceDeleted:event[@"data"][@"device"]];
-      if ([kind isEqual:@"RESET"]) {
-          session.guestIPAddresses = nil;
-          session.displayToolDirectory = nil;
-          session.displayView.displaySleeping = YES;
-          session.displayView.displaySleeping = NO;
-      } else if ([kind isEqual:@"SUSPEND"] || [kind isEqual:@"SHUTDOWN"]) {
-          if ([kind isEqual:@"SHUTDOWN"] &&
-              [@[ @"guest-reset", @"host-qmp-system-reset" ] containsObject:event[@"data"][@"reason"] ?: @""])
-              [session applyLifecycleEvent:VIMSessionEventGuestRebootExpected];
-          session.displayView.displaySleeping = YES;
-          session.statePanel.hidden = YES;
-          if ([kind isEqual:@"SUSPEND"]) {
-              session.lastRunState = @"suspended";
-              session.status.stringValue = @"Sleeping";
+      VIMQMPEvent *qmp = [[VIMQMPEvent alloc] initWithEvent:event];
+      switch (qmp.kind) {
+          case VIMQMPEventKindDeviceDeleted:
+              [session.usbClient deviceWasDeleted:event[@"data"][@"device"] control:session.control];
+              [session.imageDrives deviceDeleted:qmp.device];
+              break;
+          case VIMQMPEventKindReset:
+              session.guestIPAddresses = nil;
+              session.displayToolDirectory = nil;
+              session.displayView.displaySleeping = YES;
+              session.displayView.displaySleeping = NO;
+              break;
+          case VIMQMPEventKindSuspend:
+          case VIMQMPEventKindShutdown:
+              if (qmp.expectsGuestReboot)
+                  [session applyLifecycleEvent:VIMSessionEventGuestRebootExpected];
+              session.displayView.displaySleeping = YES;
+              session.statePanel.hidden = YES;
+              if (qmp.kind == VIMQMPEventKindSuspend) {
+                  session.lastRunState = @"suspended";
+                  session.status.stringValue = @"Sleeping";
+              }
+              break;
+          case VIMQMPEventKindWakeup:
+              session.lastRunState = @"running";
+              session.displayView.displaySleeping = NO;
+              session.statePanel.hidden = YES;
+              session.status.stringValue = @"Running";
+              break;
+          case VIMQMPEventKindTrayOpened: {
+              NSDictionary *removed = [session.imageDrives trayOpenedOnDevice:qmp.device];
+              NSDictionary *settings = VIMImageClearedSelections(session.machine.editableConfiguration, removed);
+              NSError *failure = nil;
+              if (settings.count && ![session.machine saveSettings:settings error:&failure])
+                  VIMPresentError(failure, session.window);
+              if (settings.count)
+                  [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
+              break;
           }
-      } else if ([kind isEqual:@"WAKEUP"]) {
-          session.lastRunState = @"running";
-          session.displayView.displaySleeping = NO;
-          session.statePanel.hidden = YES;
-          session.status.stringValue = @"Running";
-      } else if ([kind isEqual:@"DEVICE_TRAY_MOVED"] && [event[@"data"][@"tray-open"] isEqual:@YES]) {
-          NSDictionary *removed =
-              [session.imageDrives trayOpenedOnDevice:event[@"data"][@"id"] ?: event[@"data"][@"device"]];
-          NSDictionary *settings = VIMImageClearedSelections(session.machine.editableConfiguration, removed);
-          NSError *failure = nil;
-          if (settings.count && ![session.machine saveSettings:settings error:&failure])
-              VIMPresentError(failure, session.window);
-          if (settings.count)
-              [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
+          case VIMQMPEventKindOther:
+              break;
       }
       NSData *json = [NSJSONSerialization dataWithJSONObject:event options:0 error:NULL];
       NSString *line = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
@@ -2394,27 +2401,11 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [self.window makeFirstResponder:self.displayView];
 }
 - (void)showSetupNoticeAutomatic:(BOOL)automatic automaticLogin:(BOOL)automaticLogin restarting:(BOOL)restarting {
-    NSString *title = automatic ? @"Automatic Setup in Progress…" : @"Installing Graphics Drivers…";
-    NSString *detail;
-    if (automatic) {
-        NSString *waiting = self.machine.preMetalGuest
-                                ? @"The language selection screen is expected to stay visible during Automatic Setup."
-                                : @"The first setup screen may stay visible during Automatic Setup.";
-        NSString *restart = automaticLogin ? @"Your virtual Mac will restart and sign in automatically when it’s ready."
-                            : self.machine.preMetalGuest
-                                ? @"Your virtual Mac will restart and sign in automatically this first time."
-                                : @"Your virtual Mac will restart automatically when it’s ready. If you see the login "
-                                  @"screen, sign in with the account you chose.";
-        detail = [NSString
-            stringWithFormat:@"Please do not interact with Setup Assistant. %@\n\n%@ Setup may take up to 30 minutes.",
-                             waiting, restart];
-    } else {
-        detail = restarting ? @"Your virtual Mac will restart to finish installing the graphics drivers. Sign in when "
-                              @"it starts again. This may take up to 30 minutes."
-                            : @"Keep your virtual Mac running while the graphics drivers install. This may take up to "
-                              @"30 minutes. If a restart is needed, you’ll be asked first.";
-    }
-    [self showSetupNoticeWithTitle:title detail:detail];
+    VIMSetupNoticeCopy *copy = [[VIMSetupNoticeCopy alloc] initWithAutomatic:automatic
+                                                              automaticLogin:automaticLogin
+                                                                  restarting:restarting
+                                                               preMetalGuest:self.machine.preMetalGuest];
+    [self showSetupNoticeWithTitle:copy.title detail:copy.detail];
 }
 - (void)showSetupNoticeWithTitle:(NSString *)heading detail:(NSString *)message {
     if (self.previewSetupNotice && (self.setupNotice || self.closedSetupNoticeHeading))
