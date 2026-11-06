@@ -488,7 +488,7 @@ public final class Engine {
     private func hostCall(_ code: Int) throws -> RunOutcome? {
         let c = ctx
         // The translator's tables are one set for the VM. Taken here, in the slow path of a host exit that costs far more.
-        let translating = code == Int(HC_TRANSLATE) || code == Int(HC_SMC) || code == Int(HC_VIEW_INVALIDATE_VA) || code == Int(HC_VIEW_FORGET) || code == Int(HC_VIEW_DROP)
+        let translating = code == Int(HC_TRANSLATE) || code == Int(HC_SMC) || code == Int(HC_VIEW_INVALIDATE_VA) || code == Int(HC_VIEW_FORGET) || code == Int(HC_VIEW_DROP) || code == Int(HC_CALL_TAIL)
         var cacheWasReset = false
         if code == Int(HC_TRANSLATE) && severalVCPUs {
             lockTranslator()
@@ -543,6 +543,8 @@ public final class Engine {
         case Int(HC_PARK):
             gate.leave()
             gate.enter()
+        case Int(HC_CALL_TAIL):
+            if !tr_needs_flush() { tr_call_tail(c.pointee.req_a.0, c.pointee.req_a.1) }
         case Int(HC_VIEW_FORGET):
             tr_view_forget(Int32(c.pointee.req_a.0))
         case Int(HC_VIEW_DROP):

@@ -1151,11 +1151,37 @@ static HostBlock *block_at(u32 word) {
     return lo ? &hblocks[lo - 1] : 0;
 }
 
+// A direct call into another key can't link, as a link is forever and the target's key is only good for some views. So each would take a trip through the monitor,
+// a program calling a system library being the common case. A lookup is right whatever has changed, so send the bl to one, as an indirect call does. Nothing else gets to
+// that code, so it needs no block of its own: an interrupt in it is stepped through, as in the lookup stub.
+void tr_call_tail(uint64_t site, uint64_t target) {
+    u32 *s = cc_host(site), was = *s;
+    if ((was & 0xFC000000u) != 0x94000000u)
+        return;
+    u32 *tail = tr_cc;
+    movimm(S0, target);
+    mov_reg(1, S4, LR);
+    bl_rel((int)((i64)(tr_stub_lookup - tr_cc_va(tr_cc)) / 4));
+    mov_reg(1, LR, S4);
+    br(S2);
+    sys_icache_invalidate(tail, (u8 *)tr_cc - (u8 *)tail);
+    i64 d = tail - s;
+    if (__atomic_compare_exchange_n(s, &was, 0x94000000u | ((u32)d & 0x3ffffff), false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        sys_icache_invalidate(s, 4);
+    stats.call_tails++;
+}
+
 void tr_link(uint64_t site, int kind, uint64_t arm, int key) {
     u32 *s = cc_host(site);
     // A link is forever, so it may only join blocks of one domain: a chain from shared code into one view's code would be wrong in the next.
     HostBlock *from = block_at((u32)(s - cc_base));
     u32 was = *s;
+    if (from && (int)from->view != key && kind == SVC_CALL) {
+        HostBlock *to = block_at((u32)(cc_host(arm) - cc_base));
+        if (to)
+            tr_call_tail(site, to->rip);
+        return;
+    }
     if (!from || (int)from->view != key || site == arm || (kind != SVC_CALL && (was & 0xFFE0001Fu) != 0xD4000001u)) // a dead block's entry may have come back: that site runs on as it is
         return;
     i64 d = ((i64)arm - (i64)site) >> 2;

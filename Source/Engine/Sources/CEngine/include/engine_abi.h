@@ -165,6 +165,7 @@ enum {
     HC_YIELD, // a lock has been held a long time: let the host run something else
     HC_PARK, // out of the code cache for a moment, in case another vCPU is resetting it
     HC_VIEW_FORGET, // a[0] view: empty its lookup table, as a slot above a shared directory changed
+    HC_CALL_TAIL, // a[0] the bl of a direct call into another key, a[1] its x86 target: from now on it looks that up without leaving translated code
 };
 
 // Stop reasons for HC_STOP.

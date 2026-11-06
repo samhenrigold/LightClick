@@ -50,6 +50,7 @@ void tr_view_forget(int view);
 void tr_view_drop(int view);
 // Forgets one whole view.
 void tr_flush_all(void);
+void tr_call_tail(uint64_t site, uint64_t target);
 // Whether the next translation would need the code cache reset. With several vCPUs that takes them all out of the cache first, and then tr_flush_parked.
 bool tr_needs_flush(void);
 void tr_flush_parked(void);
@@ -64,7 +65,7 @@ typedef struct {
     uint64_t killed[KILL_KINDS], killed_unmoved[KILL_KINDS], kill_calls[KILL_KINDS];
     // Cold blocks at a rip and frame some earlier block already covers, live in another view or dead with the frame unchanged:
     // what translations keyed by frame would have saved. Looks at only the first few blocks on the frame, so these are lower bounds.
-    uint64_t again_live, again_dead, reused;
+    uint64_t again_live, again_dead, reused, call_tails;
     uint64_t hash_refills, hash_forgets, cache_resets;
     uint64_t shared_blocks, shared_found; // translated into a shared user domain; found there by a view that had not looked before
 } TrStats;

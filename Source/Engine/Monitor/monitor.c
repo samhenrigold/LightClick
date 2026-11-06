@@ -901,6 +901,12 @@ static inline void code_changed(u32 *word) {
 // tr_link, for a target this view already knows, with no way out of the VM. Half of all host calls in a fork loop did only this.
 static void link_here(u64 site, u32 kind, u64 arm) {
     BlockEntry *from = find_block(site), *to = find_block(arm);
+    if (from && to && from->key != to->key && kind == SVC_CALL) {
+        c->req_a[0] = site;
+        c->req_a[1] = to->rip;
+        hostcall(HC_CALL_TAIL);
+        return;
+    }
     if (!from || !to || from->key != to->key)
         return; // a link is forever, so it may only join blocks of one domain
     u32 *s = (u32 *)site, was = *s;
