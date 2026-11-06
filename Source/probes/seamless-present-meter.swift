@@ -13,11 +13,8 @@ final class Meter: NSObject, SCStreamOutput, @unchecked Sendable {
     var times: [Double] = []
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen,
-            let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-            let status = (attachments.first?[.status] as? Int).flatMap(SCFrameStatus.init(rawValue:)), status == .complete,
-            let pixels = CMSampleBufferGetImageBuffer(sample)
-        else { return }
+        // A frame with nothing new has no image.
+        guard type == .screen, let pixels = CMSampleBufferGetImageBuffer(sample) else { return }
         complete += 1
         CVPixelBufferLockBaseAddress(pixels, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixels, .readOnly) }
