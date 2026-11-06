@@ -22,3 +22,5 @@ clang -target arm64-apple-macos11 -O2 "$here/driver.c" "$out/workload-arm64.o" -
 
 clang -O2 -Wall -Wextra -framework Hypervisor "$here/spike.c" -o "$out/spike"
 codesign --force --sign - --entitlements "$here/spike.entitlements" "$out/spike"
+clang -O2 -Wall -Wextra -march=armv8.6-a -framework Hypervisor "$here/el2.c" "$here/el2guest.s" -o "$out/el2"
+codesign --force --sign - --entitlements "$here/spike.entitlements" "$out/el2"

@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/pvg-events.h"
 #include "qemu/pvg-tcg.h"
+#include "accel/tcg/handoff.h"
 #include "qemu/main-loop.h"
 #include "qemu/target-info.h"
 #include "accel/tcg/cpu-loop.h"
@@ -1595,6 +1596,10 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
 
     trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
 
+    if (unlikely(tcg_handoff)) {
+        tcg_handoff->note_write(ram_addr, size, true);
+    }
+
     if (!physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
         tb_invalidate_phys_range_fast(cpu, ram_addr, size, retaddr);
     }
@@ -1698,7 +1703,15 @@ int probe_access_full_mmu(CPUArchState *env, vaddr addr, int size,
     /* Handle clean RAM pages.  */
     if (unlikely(flags & TLB_NOTDIRTY)) {
         int dirtysize = size == 0 ? 1 : size;
-        notdirty_write(env_cpu(env), addr, dirtysize, *pfull, 0);
+        /*
+         * Page walkers probe every table for store, then set A and D at most.
+         * With a handoff engine every RAM page stays clean so stores can be
+         * seen, and this is not one: it would drop the engine's shadow of each
+         * table walked, and mark it dirty so a real store later goes unseen.
+         */
+        if (likely(!tcg_handoff)) {
+            notdirty_write(env_cpu(env), addr, dirtysize, *pfull, 0);
+        }
         flags &= ~TLB_NOTDIRTY;
     }
 

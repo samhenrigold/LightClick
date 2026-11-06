@@ -36,6 +36,7 @@
 #include "tcg/startup.h"
 #include "tcg-accel-ops.h"
 #include "tcg-accel-ops-mttcg.h"
+#include "accel/tcg/handoff.h"
 #if defined(__APPLE__) && defined(__aarch64__)
 #include <dlfcn.h>
 #include <mach/mach.h>
@@ -132,6 +133,9 @@ static void *mttcg_cpu_thread_fn(void *arg)
                  * Usually cpu->halted is set, but may have already been
                  * reset by another thread by the time we arrive here.
                  */
+                break;
+            case EXCP_HANDOFF:
+                tcg_handoff->run(cpu);
                 break;
             case EXCP_ATOMIC:
                 bql_unlock();

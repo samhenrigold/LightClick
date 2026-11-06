@@ -1,6 +1,7 @@
 // Minimal x86-64 to AArch64 translator running its output inside an HVF VM at EL0.
-// See DESIGN.md. Standalone probe: compile with build.sh, never linked into the app.
+// Standalone probe: compile with build.sh, never linked into the app.
 //
+// The engine grew out of this probe: see Source/Engine/DESIGN.md.
 // x86 regs are pinned: rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi,r8-r15 = x0-x15. x16,x17,x20,x22,x23,x24 are scratch,
 // x19 is the indirect-branch table, x21 holds the last flag-setting result (the cost of lazy PF is paid; no
 // consumer is translated). NZCV is canonical with C = !CF, the polarity ARM's subs produces.
@@ -89,9 +90,11 @@ __asm__(
     "2: str x3, [x0]\n str x3, [x1]\n add x3, x3, #1\n cmp x3, x2\n b.ne 2b\n svc #7\n"
     ".p2align 4\n_guest_lit_reader: mov x3, #0\n mov x5, #0\n"
     "3: ldr x4, [x1]\n ldr x6, [x0]\n cmp x6, x4\n cinc x3, x3, lo\n add x5, x5, #1\n cmp x5, x2\n b.ne 3b\n svc #7\n"
+    // SPIKE_EL2: every exception reaching virtual EL2 goes on to the host as the usual report. HVC at vEL2 would only re-enter vEL2.
+    ".p2align 11\n_guest_vel2_vectors:\n.rept 16\n.p2align 7\nsmc #8\n.endr\n"
     ".p2align 12\n_guest_stubs_end:\n");
 extern char guest_stubs[], guest_stubs_end[], guest_eret[], guest_tlbi_all[], guest_tlbi_va[], guest_cr3tab[],
-    guest_lit_writer[], guest_lit_reader[];
+    guest_lit_writer[], guest_lit_reader[], guest_vel2_vectors[];
 #define STUB_VA(sym) (HOLE_VA + STUBS_OFF + (u64)((sym) - guest_stubs))
 
 static u8 *ram, *priv;
@@ -99,6 +102,7 @@ static hv_vcpu_t vcpu;
 static hv_vcpu_exit_t *vexit;
 static double tick_ns;
 static double now(void) { return mach_absolute_time() * tick_ns; }
+static u64 el2_s2_root; // non-zero under SPIKE_EL2: translated code runs under a guest stage 2 and a stub vEL2
 
 // ---- AArch64 encoders ----
 static u32 *cc_base, *cc;
@@ -1367,6 +1371,14 @@ static void vcpu_setup(hv_vcpu_t v, bool tso) {
     CHECK(hv_vcpu_set_sys_reg(v, HV_SYS_REG_VBAR_EL1, HOLE_VA + STUBS_OFF));
     CHECK(hv_vcpu_set_sys_reg(v, HV_SYS_REG_SCTLR_EL1, 0x30D00800ULL | 1 | 1 << 2 | 1 << 12));
     CHECK(hv_vcpu_set_sys_reg(v, HV_SYS_REG_CPACR_EL1, 3ULL << 20));
+    if (el2_s2_root) {
+        CHECK(hv_vcpu_set_sys_reg(v, HV_SYS_REG_HCR_EL2, 1ULL << 31 | 1));
+        CHECK(hv_vcpu_set_sys_reg(v, HV_SYS_REG_VTCR_EL2,
+                                  25ULL | 1ULL << 6 | 1ULL << 8 | 1ULL << 10 | 3ULL << 12 | 2ULL << 16 | 1ULL << 31));
+        CHECK(hv_vcpu_set_sys_reg(v, HV_SYS_REG_VTTBR_EL2, el2_s2_root | 1ULL << 48));
+        CHECK(hv_vcpu_set_sys_reg(v, HV_SYS_REG_SCTLR_EL2, 0x30C50830)); // MMU off: VBAR_EL2 below is an IPA
+        CHECK(hv_vcpu_set_sys_reg(v, HV_SYS_REG_VBAR_EL2, PRIV_IPA + STUBS_OFF + (u64)(guest_vel2_vectors - guest_stubs)));
+    }
 }
 static void vcpu_enter(hv_vcpu_t v, u64 pc) {
     CHECK(hv_vcpu_set_sys_reg(v, HV_SYS_REG_ELR_EL1, pc));
@@ -1392,7 +1404,7 @@ static u64 run_x86(u64 rip, u64 rsp, const u64 args[6]) {
         if (vexit->reason != HV_EXIT_REASON_EXCEPTION)
             DIE("unexpected VM exit reason %d in %s", vexit->reason, cur_name);
         u64 syn = vexit->exception.syndrome;
-        if ((syn >> 26) != 0x16)
+        if ((syn >> 26) != (el2_s2_root ? 0x17 : 0x16))
             DIE("unexpected EL2 syndrome %llx at va %llx", syn, vexit->exception.virtual_address);
         stat_exits++;
         u64 elr, esr, far, x16, pc = STUB_VA(guest_eret);
@@ -1475,6 +1487,8 @@ static u64 run_x86(u64 rip, u64 rsp, const u64 args[6]) {
             hv_vcpu_get_sys_reg(vcpu, HV_SYS_REG_FAR_EL1, &far2);
             DIE("unhandled exception EC=%x esr=%llx far=%llx elr=%llx in %s", ec, esr, far2, elr, cur_name);
         }
+        if (el2_s2_root) // the report came from vEL2, so drop back to EL1 for the resume ERET
+            CHECK(hv_vcpu_set_reg(vcpu, HV_REG_CPSR, 0x3C5));
         CHECK(hv_vcpu_set_reg(vcpu, HV_REG_PC, pc));
     }
 }
@@ -1551,6 +1565,9 @@ int main(int argc, char **argv) {
     hv_vm_config_t cfg = hv_vm_config_create();
     bool ipa16 = getenv("SPIKE_IPA16") != NULL;
     CHECK(hv_vm_config_set_ipa_granule(cfg, ipa16 ? HV_IPA_GRANULE_16KB : HV_IPA_GRANULE_4KB));
+    bool el2 = getenv("SPIKE_EL2") != NULL;
+    if (el2)
+        CHECK(hv_vm_config_set_el2_enabled(cfg, true));
     CHECK(hv_vm_create(cfg));
     ram = mmap(0, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     priv = mmap(0, PRIV_SIZE, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -1576,6 +1593,12 @@ int main(int argc, char **argv) {
     for (u64 o = 0; o < PT_OFF; o += 2ULL << 20) {
         u64 attrs = o == LIT_OFF ? AP_EL0_RW | PTE_UXN | PTE_PXN : o == HASH_OFF ? AP_RO | PTE_UXN | PTE_PXN : AP_RO;
         ipa_ptr(l2)[((HOLE_VA + o) >> 21) & 0x1ff] = (PRIV_IPA + o) | blk | attrs;
+    }
+    if (el2) { // identity guest stage 2 in 1 GB blocks: IPA 0 and PRIV_IPA
+        el2_s2_root = pt_static();
+        u64 s2_block = 1 | 1ULL << 10 | 3ULL << 8 | 3ULL << 6 | 0xFULL << 2;
+        ipa_ptr(el2_s2_root)[0] = 0 | s2_block;
+        ipa_ptr(el2_s2_root)[1] = PRIV_IPA | s2_block;
     }
     root_init(0);
     root_init(1);

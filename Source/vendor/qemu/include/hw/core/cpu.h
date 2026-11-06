@@ -1099,6 +1099,14 @@ void process_queued_cpu_work(CPUState *cpu);
 void cpu_exec_start(CPUState *cpu);
 
 /**
+ * cpu_exclusive_pending:
+ *
+ * Whether a vCPU is in, or waiting to enter, an exclusive section. For a CPU
+ * emulator outside TCG's loop, that has to stop when it is kicked for one.
+ */
+bool cpu_exclusive_pending(void);
+
+/**
  * cpu_exec_end:
  * @cpu: The CPU for the current thread.
  *

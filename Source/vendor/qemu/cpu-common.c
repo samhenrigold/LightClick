@@ -247,6 +247,11 @@ void end_exclusive(void)
 }
 
 /* Wait for exclusive ops to finish, and begin cpu execution.  */
+bool cpu_exclusive_pending(void)
+{
+    return qatomic_read(&pending_cpus) != 0;
+}
+
 void cpu_exec_start(CPUState *cpu)
 {
     trace_cpu_exec_start(cpu->cpu_index);
