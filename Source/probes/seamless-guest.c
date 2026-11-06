@@ -32,6 +32,7 @@
 #include <netinet/tcp.h>
 #include <signal.h>
 #include <poll.h>
+#include <pwd.h>
 #include <libproc.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2353,17 +2354,35 @@ static void leap_set_guest_shadows(int off) {
     fflush(stdout);
 }
 
+// What the session's launcher leaves in the environment doesn't include this, and the scripts need it.
+static void leap_set_home(void) {
+    struct passwd *user = getpwuid(getuid());
+    if (user)
+        setenv("HOME", user->pw_dir, 1);
+}
+
+static int leap_restore(void) {
+    leap_set_home();
+    printf("# restoring\n");
+    fflush(stdout);
+    leap_set_guest_shadows(0);
+    int dock = system(leap_show_dock);
+    printf("# dock: %d\n", dock);
+    return dock != 0;
+}
+
 static void leap_hide_desktop(void) {
     int ends[2];
     if (pipe(ends))
         return;
+    leap_set_home();
     leap_set_guest_shadows(1);
     system(leap_hide_dock);
     if (fork() == 0) {
         close(ends[1]);
         // Not to keep the agent's run open, nor to go when whatever started this cleans up after it.
         setsid();
-        int out = open("/tmp/sg/leap-restore.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        int out = open("/tmp/seamless-leap-restore.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
         dup2(out, 0);
         dup2(out, 1);
         dup2(out, 2);
@@ -2374,12 +2393,12 @@ static void leap_hide_desktop(void) {
         char byte;
         while (read(ends[0], &byte, 1) > 0) {
         }
-        printf("# restoring\n");
-        fflush(stdout);
-        leap_set_guest_shadows(0);
-        printf("# dock: %d\n", system(leap_show_dock));
-        fflush(stdout);
-        _exit(0);
+        // As a new program, since a connection to WindowServer doesn't survive a fork.
+        char self[PATH_MAX];
+        uint32_t length = sizeof(self);
+        if (!_NSGetExecutablePath(self, &length))
+            execl(self, "seamless-guest", "leap-restore", (char *)NULL);
+        _exit(1);
     }
     close(ends[0]);
     fcntl(ends[1], F_SETFD, FD_CLOEXEC);
@@ -2527,6 +2546,8 @@ int main(int argc, char **argv) {
         extern int seamless_demo_app_main(void);
         return seamless_demo_app_main();
     }
+    if (!strcmp(command, "leap-restore"))
+        return leap_restore();
     if (!strcmp(command, "leap")) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
