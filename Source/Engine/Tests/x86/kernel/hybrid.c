@@ -376,14 +376,14 @@ static void test_cr4(void) {
 // built by an eviction. This did not reproduce that fault, even at 800 tables over 2880 evictions, so it guards
 // eviction in general and not the barrier in view_build.
 static void test_view_churn(u64 root) {
-    static u64 roots[72];
+    static u64 roots[300];
     u64 data = frame();
     for (int i = 0; i < CHURN_TABLES; i++)
         *pte_of(root, CHURN_VA + ((u64)i << 21)) = data | PRESENT_RW;
-    for (int i = 0; i < 72; i++)
+    for (int i = 0; i < 300; i++)
         roots[i] = root_copy(root);
     for (int round = 0; round < CHURN_ROUNDS; round++)
-        for (int i = 0; i < 72; i++) {
+        for (int i = 0; i < 300; i++) {
             write_cr3(roots[i]);
             for (int t = 0; t < CHURN_TABLES; t++)
                 *(volatile u64 *)(CHURN_VA + ((u64)t << 21)) = (u64)t;
@@ -944,7 +944,7 @@ static void test_shared_region(u64 root) {
     // Processes come and go, more than there are views, with a change at each step reaching them all.
     u32 value = 8;
     u64 longer = shared_root_copy(root, directory, 0);
-    for (int i = 0; i < 90; i++) {
+    for (int i = 0; i < 300; i++) {
         u64 third, child = shared_root_copy(root, directory, &third);
         CHECK(shared_run(child, root) == value - 1);
         CHECK(shared_run(longer, root) == value - 1);

@@ -57,7 +57,8 @@ typedef struct {
 _Static_assert(sizeof(MonCpu) <= CTX_SLOT / 2, "the rest of the slot is the stack");
 _Static_assert(sizeof(EngineCtx) <= CTX_SLOT, "EngineCtx outgrew its slot");
 _Static_assert(OFF_MON_CPU + MAX_VCPUS * CTX_SLOT <= OFF_STUBS, "per-vCPU slots run past monitor data");
-_Static_assert(OFF_CTX + MAX_VCPUS * CTX_SLOT <= OFF_RSTACKS, "contexts run past their region");
+_Static_assert(OFF_CTX + MAX_VCPUS * CTX_SLOT <= OFF_CTX_END, "contexts run past their region");
+_Static_assert(OFF_RSTACKS + MAX_VCPUS * MAX_VIEWS * RSTACK_SLOT <= PRIV_SIZE, "return stacks run past private memory");
 #define me ((MonCpu *)((u64)c + (OFF_MON_CPU - OFF_CTX)))
 #define c0 ((EngineCtx *)(PRIV_VA + OFF_CTX)) // what the host publishes once for the VM lives in the first context
 #define cpu_index() ((u32)(((u64)c - (PRIV_VA + OFF_CTX)) / CTX_SLOT))
@@ -193,6 +194,7 @@ typedef struct {
 
 #define POOL_PAGES (SHADOW_POOL_BYTES / 4096)
 #define POOL_VA (PRIV_VA + OFF_PT + PT_STATIC_BYTES)
+_Static_assert(OFF_PT + PT_STATIC_BYTES + SHADOW_POOL_BYTES <= OFF_SHADOW_META, "a full pool would write over its own descriptors");
 static ShadowDesc *const desc = (ShadowDesc *)PRIV(OFF_SHADOW_META);
 #define MIRROR_HEAD_OFF (OFF_SHADOW_META + (16ULL << 20)) // u32 per guest frame
 #define RMAP_HEAD_OFF (OFF_SHADOW_META + (48ULL << 20)) // u32 per guest frame
@@ -663,9 +665,16 @@ static void pool_reclaim(void) {
 }
 
 static View *view_find_locked(u64 cr3_key, u32 cpl) {
+    static u16 hints[1024]; // the last view found under this hash, so that a guest crossing tables at every syscall doesn't scan them all under the lock
+    u16 *hint = &hints[(cr3_key >> 12 ^ cr3_key >> 22 ^ cpl * 37) & 1023];
+    View *hinted = &views[*hint];
+    if (hinted->cr3 == cr3_key && hinted->cpl == cpl && hinted->valid)
+        return hinted;
     for (u32 i = 0; i < view_count; i++)
-        if (views[i].cr3 == cr3_key && views[i].cpl == cpl && views[i].valid)
+        if (views[i].cr3 == cr3_key && views[i].cpl == cpl && views[i].valid) {
+            *hint = (u16)i;
             return &views[i];
+        }
     pool_reclaim();
     u32 idx = MAX_VIEWS;
     for (u32 i = 0; i < view_count; i++)

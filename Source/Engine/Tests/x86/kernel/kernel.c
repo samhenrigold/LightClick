@@ -635,7 +635,7 @@ static void test_pt_churn(u64 root) {
 // More address spaces than the engine keeps views: least recently used ones are rebuilt on return. Kernel code stays translated throughout.
 static void test_many_spaces(u64 home) {
     fault_mode = M_EXIT_ON_FAULT;
-    enum { SPACES = 80 };
+    enum { SPACES = 300 };
     static u64 roots[SPACES];
     u32 blocks0 = inl_port(0xF3);
     u64 t = rdtsc();
