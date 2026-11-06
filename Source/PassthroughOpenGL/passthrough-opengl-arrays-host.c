@@ -334,6 +334,8 @@ static int DGHostDraw(struct DGHostContext *context, struct DGMessage *m) {
             glDrawElements((GLenum)m->args[0], (GLsizei)count, type, indices);
         else
             glDrawArrays((GLenum)m->args[0], (GLint)first, (GLsizei)count);
+        if (dg_seamless_dir)
+            DGSeamlessDrawn(context, m, arrays, (unsigned)n, vertices, type, indices);
         // Native Yosemite ping-pongs disjoint tiles of one rectangle atlas.
         // On the host, submit each recognized producer before the next pass
         // samples its result. A pre-draw flush or another texture barrier did

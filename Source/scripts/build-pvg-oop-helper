@@ -12,7 +12,7 @@ shadow=${PVG_OOP_SHADOW_SOURCE:-$qemu/hw/display/apple-gfx-legacy-shadow.m}
 mkdir -p "${output:h}"
 xcrun clang -arch x86_64 -mmacosx-version-min=11.0 -O2 -Wall -Wextra \
     -I "$qemu/hw/display" \
-    -framework Foundation -framework Metal -framework CoreGraphics \
+    -framework Foundation -framework Metal -framework CoreGraphics -framework IOSurface \
     "$qemu/hw/display/apple-gfx-helper.m" \
     "$shadow" \
     "$root/compat/PVGHostAIRRepair.m" -o "$output"

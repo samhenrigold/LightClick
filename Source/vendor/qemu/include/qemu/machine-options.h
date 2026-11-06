@@ -173,5 +173,11 @@
 #define LC_OPTION_VIM_PVG_SLAB "VIM_PVG_SLAB"
 /* VIM_PVG_TIMING (flag, default off): Print PVG timing lines, at most every 5 s per metric. */
 #define LC_OPTION_VIM_PVG_TIMING "VIM_PVG_TIMING"
+/* VIM_SEAMLESS_PVG_DIR (path, default unset): Research, for seamless: directory of the per-window PVG surface files, including nodisplay. */
+#define LC_OPTION_VIM_SEAMLESS_PVG_DIR "VIM_SEAMLESS_PVG_DIR"
+/* VIM_SEAMLESS_PVG_SERVICE (string, default unset): Research, for seamless: Mach service that receives per-window PVG surfaces. */
+#define LC_OPTION_VIM_SEAMLESS_PVG_SERVICE "VIM_SEAMLESS_PVG_SERVICE"
+/* VIM_SEAMLESS_PVG_SKIP (string, default unset): Research, for seamless: WxH of a surface the sender leaves out. */
+#define LC_OPTION_VIM_SEAMLESS_PVG_SKIP "VIM_SEAMLESS_PVG_SKIP"
 
 #endif

@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 static int logfd = -1;
+static pthread_t main_thread;
 static void note(const char *format, ...) {
     char line[1024];
     va_list arguments;
@@ -48,27 +49,32 @@ static uint32_t (*backing_row_bytes)(void *, uint64_t);
 static uint32_t (*backing_width)(void *), (*backing_height)(void *), (*backing_bits)(void *);
 static char (*backing_has_alpha)(void *);
 static void *(*backing_data)(void *, uint64_t, uint64_t);
-static const char *const wanted[] = {"_CGXWindowByID",
-                                     "_CGXWindowHasShadow",
-                                     "_CGXBackingStoreIsAccelerated",
-                                     "_CGXBackingStoreRowBytes",
-                                     "_CGXBackingStoreWidth",
-                                     "_CGXBackingStoreHeight",
-                                     "_CGXBackingStoreBitsPerPixel",
-                                     "_CGXBackingStoreHasAlpha",
-                                     "_CGXBackingStoreDataIndexed",
-                                     "_WSGetVisibleWindowArray",
-                                     "_CGXWindowArraySubArray",
-                                     "_CGXWindowArrayEnumeratorSubArray",
-                                     "_CGXWindowArrayEnumeratorNext",
-                                     "_WSWindowGetScreenRect",
-                                     "_CGXGetShadowMarginForWindow",
-                                     "_CGXGetCurrentSessionWindowData",
-                                     "_redraw_window",
-                                     "_CGRegionCreateWithRect",
-                                     "_CGRegionRelease"};
-static void *resolved[19];
+static const char *const wanted[] = {
+    "_CGXWindowByID",
+    "_CGXWindowHasShadow",
+    "_CGXBackingStoreIsAccelerated",
+    "_CGXBackingStoreRowBytes",
+    "_CGXBackingStoreWidth",
+    "_CGXBackingStoreHeight",
+    "_CGXBackingStoreBitsPerPixel",
+    "_CGXBackingStoreHasAlpha",
+    "_CGXBackingStoreDataIndexed",
+    "_WSGetVisibleWindowArray",
+    "_CGXWindowArraySubArray",
+    "_CGXWindowArrayEnumeratorSubArray",
+    "_CGXWindowArrayEnumeratorNext",
+    "_WSWindowGetScreenRect",
+    "_CGXGetShadowMarginForWindow",
+    "_CGXGetCurrentSessionWindowData",
+    "_CGXGLGetContext",
+    "_redraw_window",
+    "_gl_composite_layer",
+    "_CGRegionCreateWithRect",
+    "_CGRegionRelease",
+};
+static void *resolved[21];
 static void *(*session_data)(void);
+static void **(*server_gl)(void);
 static void *placement_targets[3];
 struct RectResult {
     double x, y, width, height;
@@ -86,7 +92,17 @@ static void (*shadow_margin)(void *, int *, int *, int *, int *);
 
 // What differs by build, one row per guest build this has been read for. See "Surviving several builds" in
 // seamless-apps-design.md.
-static const char *const wanted_mojave[] = {"_CGXWindowByID"};
+static const char *const wanted_mojave[] = {
+    "_CGXWindowByID",
+    "__ZL26generate_layers_for_windowP14CGXRedrawStateP9CGXWindow",
+    "_window_create_capture_shape",
+    "_WSGetCompositorForDisplayDevice",
+    "_CGXGLDisplayDeviceAccelerator",
+    "_WSWindowGetScreenRect",
+    "__ZL37add_connection_to_update_contributorsP13CGXConnectionP20CGXSessionWindowData",
+    "_WSGetCompositorMetal",
+    "_WSCompositeWindowToDestination",
+    "_CGXCopyScreenOpaqueShapeForWindow"};
 static const struct Build {
     const char *release; // Darwin's, as a prefix.
     const char *suffix, *path; // The image with WindowServer's code, by its name when loaded and on disk.
@@ -191,7 +207,9 @@ static int resolve_symbols(void) {
                 // The file's __TEXT starts at 0, so a text symbol's value is its offset from the header. Text keeps
                 // its layout in the shared cache.
                 resolved[w] = (char *)loaded + symbols[i].n_value;
-                if (memcmp(resolved[w], (const char *)header + symbols[i].n_value, 16)) {
+                // Only up to its first RIP-relative load for this one: the shared cache moves its data.
+                size_t compared = !strcmp(name, "_CGXGLGetContext") ? 7 : 12;
+                if (memcmp(resolved[w], (const char *)header + symbols[i].n_value, compared)) {
                     note("%s isn't the same code on disk and in memory; refusing\n", name);
                     return 0;
                 }
@@ -223,9 +241,10 @@ static int resolve_symbols(void) {
     window_screen_rect = resolved[13];
     shadow_margin = resolved[14];
     session_data = resolved[15];
-    placement_targets[0] = resolved[16];
-    placement_targets[1] = resolved[17];
-    placement_targets[2] = resolved[18];
+    server_gl = resolved[16];
+    placement_targets[0] = resolved[17];
+    placement_targets[1] = resolved[19];
+    placement_targets[2] = resolved[20];
     note("symbols resolved: CGXWindowByID at %p\n", (void *)window_by_id);
     return 1;
 }
@@ -357,6 +376,145 @@ static void walk_windows(void) {
     table->tree_generation++;
 }
 
+static int tree_in_gl;
+static uint64_t marks, unmarked;
+
+// For a host that draws each window on its own GPU (PassthroughOpenGL/seamless-gpu-replay-host.c), which window each
+// layer of a composite belongs to. redraw_window builds a window's layers, all allocated with new[], and
+// gl_composite_layer later draws them, so a layer is known by its address. Before each one's draws goes that window's
+// ID and bounds, as glPassThrough tokens in WindowServer's own GL stream: a no-op in GL, and in order with its draws.
+// Whole numbers below 2^24, which a float holds exactly. Only with /var/tmp/seamless-ws-gl-tree present. Their entries
+// are patched, as both are local symbols.
+#define LAYER_SLOTS 8192
+static struct {
+    const void *layer;
+    char *window;
+} layer_owner[LAYER_SLOTS];
+static char *building_window, *marked_window;
+static int layers_used;
+
+static void forget_layers(void) {
+    memset(layer_owner, 0, sizeof(layer_owner));
+    layers_used = 0;
+}
+void *_Znam(unsigned long);
+static void *hook_new_array(unsigned long size) {
+    // What libc++'s does, without calling it: on 10.14 a call from here comes back here, as dyld coalesces the weak
+    // name.
+    void *memory = malloc(size ? size : 1);
+    if (!memory)
+        abort();
+    if (building_window && pthread_equal(pthread_self(), main_thread)) {
+        size_t slot = ((uintptr_t)memory >> 4) % LAYER_SLOTS;
+        for (int tries = 0; tries < 16; tries++, slot = (slot + 1) % LAYER_SLOTS)
+            if (!layer_owner[slot].layer) {
+                layer_owner[slot].layer = memory;
+                layer_owner[slot].window = building_window;
+                break;
+            }
+    }
+    return memory;
+}
+__attribute__((used)) void seamless_redraw_window(void *state, char *window) {
+    (void)state;
+    if (layers_used)
+        forget_layers();
+    marked_window = (char *)-1; // Nothing marked yet, so the first layer is told, even with no owner.
+    building_window = window;
+}
+__attribute__((used)) void seamless_composite_layer(const void *layer) {
+    building_window = 0;
+    layers_used = 1;
+    char *owner = NULL;
+    size_t slot = ((uintptr_t)layer >> 4) % LAYER_SLOTS;
+    for (int tries = 0; tries < 16; tries++, slot = (slot + 1) % LAYER_SLOTS)
+        if (layer_owner[slot].layer == layer) {
+            owner = layer_owner[slot].window;
+            break;
+        }
+    owner ? marks++ : unmarked++;
+    // CoreGraphics calls GL through its own context record, as CGLMacro does: the renderer first, then the dispatch
+    // table, whose slots are the wire's opcodes. glDeleteTextures, slot 59, at +0x1e0 in _CGXGLDeleteTexture shows it.
+    void **gl = server_gl();
+    if (!gl || owner == marked_window)
+        return;
+    if (!owner) {
+        static unsigned shown;
+        if (shown++ < 12)
+            note("layer %p has no known window\n", layer);
+    }
+    marked_window = owner;
+    float tokens[9] = {11184809.0f};
+    const uint8_t *state = owner ? *(const uint8_t **)(owner + 0xe0) : NULL;
+    if (state) {
+        struct RectResult rect = window_screen_rect(owner);
+        int side[4] = {0, 0, 0, 0};
+        uint32_t margin = 0;
+        if (window_has_shadow(owner)) {
+            shadow_margin(owner, &side[0], &side[1], &side[2], &side[3]);
+            for (int i = 0; i < 4; i++)
+                margin = (uint32_t)abs(side[i]) > margin ? (uint32_t)abs(side[i]) : margin;
+        }
+        int32_t level = *(const int32_t *)(state + 0x10);
+        tokens[1] = (float)*(const uint32_t *)state;
+        tokens[2] = level < 0 ? 0 : (float)(level > 100000 ? 100001 : level + 1);
+        tokens[3] = (float)(16384 + (int)rect.x);
+        tokens[4] = (float)(16384 + (int)rect.y);
+        tokens[5] = (float)(int)rect.width;
+        tokens[6] = (float)(int)rect.height;
+        tokens[7] = (float)margin;
+        tokens[8] = *(const float *)(owner + 0x100) * 16;
+    }
+    void (*pass_through)(void *, float) = (void (*)(void *, float))gl[1 + 190];
+    for (int i = 0; i < 9; i++)
+        pass_through(gl[0], tokens[i]);
+    static unsigned told;
+    if (told++ % 3000 == 0)
+        note("layers marked %llu, unknown %llu\n", marks, unmarked);
+}
+void *seamless_layer_continue;
+__asm__(".text\n"
+        "_seamless_layer_entry:\n"
+        "  pushq %rdi\n  pushq %rsi\n  subq $8, %rsp\n  callq _seamless_composite_layer\n"
+        "  addq $8, %rsp\n  popq %rsi\n  popq %rdi\n  jmpq *_seamless_layer_continue(%rip)\n");
+extern char seamless_layer_entry[];
+
+// Sends a function's entry to `entry`, and returns where to continue it. The bytes moved have to run anywhere, and be
+// at least the 14 of the jump. Refuses anything but the entry it was told of.
+static void *patch_entry_with(uint8_t *function, const void *entry, const uint8_t *prologue, size_t size) {
+    if (memcmp(function, prologue, size)) {
+        note("refusing to patch %p: its entry isn't the expected one\n", (void *)function);
+        return NULL;
+    }
+    uint8_t *island = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (island == MAP_FAILED)
+        return NULL;
+    const uint8_t jump[] = {0xff, 0x25, 0, 0, 0, 0};
+    memcpy(island, function, size);
+    memcpy(island + size, jump, sizeof(jump));
+    void *back = function + size;
+    memcpy(island + size + sizeof(jump), &back, 8);
+    vm_address_t page = (vm_address_t)function & ~(vm_address_t)4095;
+    kern_return_t result = vm_protect(mach_task_self(), page, 8192, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (result) {
+        note("vm_protect failed: %d\n", result);
+        return NULL;
+    }
+    memcpy(function, jump, sizeof(jump));
+    memcpy(function + 6, &entry, 8);
+    vm_protect(mach_task_self(), page, 8192, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    return island;
+}
+// Most entries here: pushes and a stack adjustment.
+static void *patch_entry(uint8_t *function, const void *entry) {
+    static const uint8_t pushes[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
+                                     0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xec};
+    uint8_t prologue[20];
+    memcpy(prologue, pushes, sizeof(pushes));
+    memcpy(prologue + sizeof(pushes), function + sizeof(pushes), 4);
+    return patch_entry_with(function, entry, prologue, sizeof(prologue));
+}
+
 // Copies the rows of each wanted window's backing that changed, for windows whose flush seed moved. Runs at most once
 // per 8 ms of WindowServer's main thread, between requests, where its structures are consistent.
 static void publish(void) {
@@ -448,13 +606,58 @@ static char (*redraw_original)(char *, char *);
 static void *(*region_with_rect)(struct RectResult);
 static void (*region_release_fn)(void *);
 
+// When the host needs all of a window: once its bounds have held for a second, since one that opened by an effect
+// wasn't drawn whole at its final size. With gpu_mode 2, every time, which times a full redraw, and draws a covered
+// window.
+static int whole_window_due(uint32_t id, char *window) {
+    if (table->gpu_mode == 2)
+        return 1;
+    static struct {
+        uint32_t id;
+        int done;
+        uint64_t stable_since;
+        struct RectResult rect;
+    } seen[256];
+    unsigned i = 0;
+    while (i < 256 && seen[i].id && seen[i].id != id)
+        i++;
+    if (i == 256)
+        return 0;
+    uint64_t now = mach_absolute_time();
+    struct RectResult rect = window_screen_rect(window);
+    if (seen[i].id != id || memcmp(&rect, &seen[i].rect, sizeof(rect))) {
+        seen[i].id = id;
+        seen[i].rect = rect;
+        seen[i].stable_since = now;
+        seen[i].done = 0;
+        return 0;
+    }
+    if (seen[i].done || now - seen[i].stable_since < 1000000000ull * table->ticks_denom / table->ticks_numer)
+        return 0;
+    seen[i].done = 1;
+    return 1;
+}
+
 static char redraw_placed(char *state, char *window) {
+    if (tree_in_gl)
+        seamless_redraw_window(state, window);
     const uint8_t *ro = window ? *(const uint8_t **)(window + 0xe0) : NULL;
     uint32_t id = ro ? *(const uint32_t *)ro : 0;
     const struct SWSPlacement *placement = NULL;
     for (int i = 0; id && table && i < SWS_PLACEMENTS; i++)
         if (table->placements[i].id == id)
             placement = (const struct SWSPlacement *)&table->placements[i];
+    if (!placement && tree_in_gl && id && whole_window_due(id, window)) {
+        void *saved_clip = *(void **)(state + 0x18);
+        struct RectResult everywhere = {0, 0, 16384, 16384};
+        void *whole = region_with_rect(everywhere);
+        *(void **)(state + 0x18) = whole;
+        char drew = redraw_original(state, window);
+        *(void **)(state + 0x18) = saved_clip;
+        region_release_fn(whole);
+        table->gpu_composites++;
+        return drew;
+    }
     if (!placement)
         return redraw_original(state, window);
     int saved_x = *(int *)(state + 0x70), saved_y = *(int *)(state + 0x74);
@@ -504,7 +707,8 @@ static void hook_redraw(void *target) {
     note("redraw_window hooked\n");
 }
 
-static pthread_t main_thread;
+#include "seamless-ws-mojave.h"
+
 static time_t next_sample;
 static int ready, in_sample, reached;
 
@@ -526,8 +730,9 @@ static void between_requests(void) {
         else
             sample_unknown_build();
     }
-    if (ready && table && build->full)
+    if (ready && table && build->full) {
         publish();
+    }
     in_sample = 0;
 }
 
@@ -549,6 +754,7 @@ static mach_msg_return_t hook_msg(mach_msg_header_t *msg, mach_msg_option_t opti
                                   mach_msg_size_t receive, mach_port_t port, mach_msg_timeout_t timeout,
                                   mach_port_t notify) {
     between_requests();
+    gpu_compose_damaged(option);
     mach_msg_return_t result = mach_msg(msg, option, send, receive, port, timeout, notify);
     note_request(msg, option, result);
     return result;
@@ -557,6 +763,7 @@ static mach_msg_return_t hook_overwrite(mach_msg_header_t *msg, mach_msg_option_
                                         mach_msg_size_t receive, mach_port_t port, mach_msg_timeout_t timeout,
                                         mach_port_t notify, mach_msg_header_t *rcv, mach_msg_size_t limit) {
     between_requests();
+    gpu_compose_damaged(option);
     mach_msg_return_t result = mach_msg_overwrite(msg, option, send, receive, port, timeout, notify, rcv, limit);
     note_request(rcv ? rcv : msg, option, result);
     return result;
@@ -566,6 +773,7 @@ __attribute__((used)) static struct {
 } interposers[] __attribute__((section("__DATA,__interpose"))) = {
     {(const void *)hook_msg, (const void *)mach_msg},
     {(const void *)hook_overwrite, (const void *)mach_msg_overwrite},
+    {(const void *)hook_new_array, (const void *)_Znam},
 };
 
 // Started before main, while still root: WindowServer drops privileges later, and this keeps the descriptor.
@@ -577,6 +785,12 @@ __attribute__((constructor)) static void start(void) {
     // Only WindowServer: launchd's environment can reach other programs on this clone.
     if (!strcmp(getprogname(), "WindowServer")) {
         ready = resolve_symbols();
+        tree_in_gl = !access("/var/tmp/seamless-ws-gl-tree", F_OK);
+        note("tree in GL: %d\n", tree_in_gl);
+        if (ready && tree_in_gl && build->full) {
+            seamless_layer_continue = patch_entry(resolved[18], seamless_layer_entry);
+            note("patched: %p\n", seamless_layer_continue);
+        }
         unlink(SWS_PATH);
         int fd = open(SWS_PATH, O_RDWR | O_CREAT, 0666);
         if (fd >= 0 && !fchmod(fd, 0666) && !ftruncate(fd, sizeof(struct SWSTable))) {
@@ -593,8 +807,10 @@ __attribute__((constructor)) static void start(void) {
         if (fd >= 0)
             close(fd);
         note("table %s\n", table ? "mapped" : "NOT mapped");
+        if (ready && table && !build->full)
+            gpu_install();
         // Only for trying placement: it rewrites a function WindowServer's update calls, and isn't finished.
-        if (ready && table && build->full && !access("/var/tmp/seamless-ws-placement", F_OK)) {
+        if (ready && table && build->full && (tree_in_gl || !access("/var/tmp/seamless-ws-placement", F_OK))) {
             region_with_rect = (void *(*)(struct RectResult))placement_targets[1];
             region_release_fn = (void (*)(void *))placement_targets[2];
             hook_redraw(placement_targets[0]);

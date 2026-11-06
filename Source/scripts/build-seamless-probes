@@ -9,7 +9,7 @@ xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -Wall -Wextra -Wno-deprec
   -fno-objc-arc -framework Cocoa -framework OpenGL -framework ApplicationServices -framework IOKit \
   "$source_root/probes/seamless-guest.c" "$source_root/probes/seamless-demo-app.m" -o "$output/seamless-guest"
 codesign --force --sign - "$output/seamless-guest"
-xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O1 -g -Wall -Wextra -dynamiclib \
+xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O1 -g -Wall -Wextra -dynamiclib -lc++ -lobjc \
   "$source_root/probes/seamless-ws-hook.c" -o "$output/seamless-ws-hook.dylib"
 codesign --force --sign - "$output/seamless-ws-hook.dylib"
 xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations \

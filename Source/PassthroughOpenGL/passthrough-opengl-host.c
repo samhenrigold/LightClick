@@ -442,6 +442,9 @@ static void DGMarkDrawableDamage(struct DGHostContext *c) {
 #ifdef VIM_GL_DRAW_WITNESS
 #include "passthrough-opengl-draw-witness.c"
 #endif
+static const char *dg_seamless_dir;
+static void DGSeamlessDrawn(struct DGHostContext *, struct DGMessage *, const struct DGVertexArray *, unsigned, uint64_t,
+                            GLenum, const void *);
 #include "passthrough-opengl-arrays-host.c"
 #include "passthrough-opengl-pbo-host.c"
 /* Only retired, unshared allocations may enter this bounded cache. Guest
@@ -1984,6 +1987,7 @@ static int DGInterpreterFastRead(struct DGInterpreter *s, int fd, struct DGMessa
 }
 static int DGInterpret(struct DGInterpreter *, int, struct DGMessage *);
 #include "passthrough-opengl-compact-host.c"
+#include "seamless-gpu-host.c"
 static int DGInterpretCommand(struct DGInterpreter *s, int fd, struct DGMessage *m) {
     uint32_t original_flags = m->flags;
     int observe_errors = !!(original_flags & DG_OBSERVE_ERROR_EMPTY);
@@ -1992,6 +1996,8 @@ static int DGInterpretCommand(struct DGInterpreter *s, int fd, struct DGMessage 
     // scalar traverses the SAME prepared/scoped/error/validation path below.
     if (m->op == DG_COMPACT_SCALARS)
         return DGInterpretCompact(s, fd, m);
+    if (dg_seamless_dir)
+        DGSeamlessObserve(s, m);
     struct DGHostContext *contexts = s->contexts;
     struct DGReply reply = {.bytes = (m->flags & DG_INPUT_ONLY) ? 0 : m->bytes};
     int error = 0;
@@ -2514,6 +2520,8 @@ static int DGInterpretCommand(struct DGInterpreter *s, int fd, struct DGMessage 
     if (!error)
         DGTraceDrawWitness(context, m);
 #endif
+    if (dg_seamless_dir && !error)
+        DGSeamlessAfter(s, m);
     if (dg_diagnostics && context && context->cgl && !context->inside_begin &&
         (m->op < 974 || m->op == DG_DRAW || m->op == DG_DRAW_INSTANCED_ARRAYS)) {
         // Canonical SDK's End opcode; no extra test on the normal hot path.
@@ -2716,6 +2724,7 @@ static void *DGServe(void *opaque) {
     return NULL;
 }
 static int DGConfigureHost(void) {
+    DGSeamlessConfigure();
 #ifdef VIM_PASSTHROUGH_OPENGL_COMMAND_TIMING
     if (getenv("VIM_PASSTHROUGH_OPENGL_COMMAND_TIMING")) {
         if (mach_timebase_info(&dg_command_timebase) != KERN_SUCCESS || !dg_command_timebase.denom)

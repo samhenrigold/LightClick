@@ -357,6 +357,29 @@ Safari on Mavericks has run before the probe reaches it, so its cold is not cold
 
 Launches gain less than that: summed over Mojave's apps, 20.2 s cold before and 20.5 s after in that alternation, 10.7 s warm before and 10.4 s after, which is within the noise. Mavericks warm gains more (Calculator 0.45 to 0.35, Notes 0.50 to 0.38), but those two weren't alternated. So views are kept for the work they save and for sustained use, not for a launch number.
 
+### A long session
+
+`probes/soak.sh`, 4 vCPUs on a clone: 3 to 6 applications at a time opened and closed, i386 included, Safari's JIT at work, memory past the guest's 8 GB every eighth cycle, and arithmetic, file and memory contents checked throughout.
+
+Boots with the `sti` shadow fixed, except where noted:
+
+| Guest, length asked | How it ended | Checks, wrong | Reclaims, full resets, part 2 resets |
+|---|---|---|---|
+| Mavericks, 2400 s (before the `sti` fix) | ran out | about 10,800, 0 | 5658, 5, 415 |
+| Mojave, 200 s, 6 boots | ran out | 0 wrong in the boots read | not read |
+| Mojave, 2400 s | QEMU exited at 880 s, nothing logged, no fault in the tally | no output | not read |
+| Mojave, 2400 s | ran out | 4866, 0 | 1361, 43, 69 |
+| Mojave, 2000 s | guest reset at 1300 s, cause not found | no output | not read |
+| Mojave, 2000 s | ran out | 7776, 0 | 2285, 60, 105 |
+| Mojave, 2000 s | control connection ended at 1149 s, guest still running | no output | not read |
+| Mojave, 2000 s | ran out | 7288, 0 | 2822, 56, 101 |
+
+So three of six long Mojave boots ended early, each differently, and none of the three is explained. Before the `sti` fix, 5 of 8 Mojave boots wedged within minutes.
+
+Launches held steady through two of the completed Mojave boots, and on Mavericks. In the third they and memory pressure slowed 2 to 3 times, with host calls about 8 times slower than in a short boot. Inferred, not shown: load on the host, as the others didn't repeat it.
+
+Not worked out: Chess on Mojave won't quit when asked and once got no window in 60 s, and Keynote '09 sits at a floating chooser it won't quit from. Neither was tried under TCG.
+
 ### A fast hidden start: resuming a snapshot under the engine
 
 The goal is a guest that is at its desktop 1 to 2 s after the app asks, with no boot, for seamless apps. Nothing here has been run. What the code says, and what has to be found out:
