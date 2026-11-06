@@ -2438,7 +2438,7 @@ static const char leap_hide_dock[] =
     "/usr/bin/killall Dock\n";
 static const char leap_show_dock[] =
     "cd; plist=$HOME/" LEAP_RESTORE_PLIST
-    "; [ -f $plist ] && /bin/sh -c \"$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:2' $plist)\"\n";
+    "; [ -f $plist ] && /bin/sh -c \"$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:2' $plist)\"; true\n";
 
 static void leap_set_guest_shadows(int off) {
     typedef int (*SetOptions)(int);
@@ -2493,13 +2493,19 @@ static int leap_restore(void) {
     return dock != 0;
 }
 
-static void leap_hide_desktop(void) {
-    int ends[2];
-    if (pipe(ends))
-        return;
+// For the display's frames: on windows' own surfaces, the Dock and shadows aren't in anything shown. Restarting the Dock there would
+// also bring it new windows the hook wasn't told to skip.
+static void leap_hide_for_frames(void) {
     leap_set_home();
     leap_set_guest_shadows(1);
     system(leap_hide_dock);
+}
+
+// Puts everything back however this process ends, which includes the display, if windows' own surfaces had turned it off.
+static void leap_arrange_restore(void) {
+    int ends[2];
+    if (pipe(ends))
+        return;
     if (fork() == 0) {
         close(ends[1]);
         // Not to keep the agent's run open, nor to go when whatever started this cleans up after it.
@@ -2536,9 +2542,13 @@ static int leap(const char *host, int port, const char *menu_tool, int own_surfa
         printf("# ERROR can't reach the host: %s\n", strerror(errno));
         return 3;
     }
-    leap_hide_desktop();
-    if (own_surfaces && leap_set_own_surfaces(self, 1) && leap_send(fd, "gpu\n"))
-        return 0;
+    leap_arrange_restore();
+    if (own_surfaces && leap_set_own_surfaces(self, 1)) {
+        if (leap_send(fd, "gpu\n"))
+            return 0;
+    } else {
+        leap_hide_for_frames();
+    }
     static char input[1 << 16], listed[1 << 14], last[1 << 14];
     size_t have = 0;
     double said = 0;
@@ -2562,8 +2572,10 @@ static int leap(const char *host, int port, const char *menu_tool, int own_surfa
                     goto done;
                 if (second && !strcmp(line, "run"))
                     leap_run(self, menu_tool, first + 1, second + 1);
-                if (!strcmp(line, "gpu-off"))
+                if (!strcmp(line, "gpu-off")) {
                     leap_set_own_surfaces(self, 0);
+                    leap_hide_for_frames();
+                }
             }
             have -= (size_t)(line - input);
             memmove(input, line, have + 1);
