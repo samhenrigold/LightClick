@@ -38,6 +38,13 @@ public final class GuestSessionStateBridge: NSObject {
         get { state.runState }
         set { state.runState = newValue }
     }
+    public var controlConnected: Bool {
+        get { state.controlConnected }
+        set { state.controlConnected = newValue }
+    }
+    public var controlStalled: Bool { state.controlStalled }
+    public static var controlStallSeconds: TimeInterval { GuestSessionState.controlStallSeconds }
+    public static var controlStallNotice: String { GuestSessionState.controlStallNotice }
     public var mayRunGuestAction: Bool { state.mayRunGuestAction }
     public var guestAgentFree: Bool { state.guestAgentFree }
     public var mayProvisionHelpers: Bool { state.mayProvisionHelpers }

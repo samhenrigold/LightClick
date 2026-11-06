@@ -439,6 +439,12 @@ private let exitCases = [
         return state
     }
 
+    @Test func onlyARunningEmulatorThatHasNotAnsweredIsStalled() {
+        #expect(idle.controlStalled)
+        #expect(!GuestSessionState().controlStalled)
+        #expect(!with { $0.controlConnected = true }.controlStalled)
+    }
+
     @Test func anIdleRunningGuestIsFree() {
         #expect(idle.guestAgentFree)
         #expect(idle.mayRunGuestAction)

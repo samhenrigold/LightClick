@@ -295,6 +295,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property BOOL wakePending;
 @property VIMModernSetup *modernSetup;
 @property NSTimer *controlRetryTimer;
+@property NSTimer *controlStallTimer;
+@property BOOL controlStallShown;
 @property VIMUSBClient *usbClient;
 - (void)ensureUSBClient;
 @property BOOL usbOperationPending;
@@ -1581,10 +1583,17 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         });
     }
     self.resizeArmed = !installerDisplay || (openGLDirectDisplay && !classicInstaller);
+    // Before QMP, QEMU can be stuck in device setup with nothing on the display. Say so, and leave the emulator alone.
+    self.controlStallTimer = [NSTimer scheduledTimerWithTimeInterval:VIMGuestSessionState.controlStallSeconds
+                                                             repeats:NO
+                                                               block:^(NSTimer *timer) {
+                                                                 [weakSelf noteControlStall];
+                                                               }];
     [self connectControlWithCompletion:^(NSError *failure) {
       VIMSession *session = weakSelf;
       if (!session.task.running)
           return;
+      [session noteControlAnswered];
       session.status.stringValue = failure ? failure.localizedDescription : @"Running";
       session.shutdownButton.enabled = failure == nil;
       if (!failure) {
@@ -1700,6 +1709,28 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       }
     }];
     return YES;
+}
+- (void)noteControlStall {
+    if (!self.guestSessionState.controlStalled)
+        return;
+    self.controlStallShown = YES;
+    NSString *notice = VIMGuestSessionState.controlStallNotice;
+    [self logNote:@"QEMU has not answered on its control connection after %.0f seconds.",
+                  VIMGuestSessionState.controlStallSeconds];
+    self.status.stringValue = notice;
+    self.stateLabel.stringValue = notice;
+    self.stateAction.hidden = YES;
+    self.statePanel.hidden = NO;
+}
+- (void)noteControlAnswered {
+    self.state.controlConnected = YES;
+    [self.controlStallTimer invalidate];
+    self.controlStallTimer = nil;
+    if (!self.controlStallShown)
+        return;
+    self.controlStallShown = NO;
+    self.statePanel.hidden = YES;
+    [self logNote:@"QEMU answered on its control connection."];
 }
 - (void)connectControlWithCompletion:(void (^)(NSError *))completion {
     if (!self.task.running)
@@ -4773,6 +4804,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             VIMSessionError(@"The virtual Mac stopped before the connection could open. Start it and try again."));
     [self.controlRetryTimer invalidate];
     self.controlRetryTimer = nil;
+    [self.controlStallTimer invalidate];
+    self.controlStallTimer = nil;
     self.state.bootPolicyPending = NO;
     self.state.bootPolicyCheckedBoot = nil;
     self.networkStarting = NO;

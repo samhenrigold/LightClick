@@ -37,6 +37,9 @@ public struct GuestSessionState: Sendable {
     /// The modern setup failures already shown to the user since the guest last started.
     public var presentedSetupFailures: Set<String> = []
 
+    /// QEMU has answered on its control connection since it started.
+    public var controlConnected = false
+
     public var guestPending = false
     public var diagnosticPending = false
     public var clipboardPending = false
@@ -78,6 +81,16 @@ public struct GuestSessionState: Sendable {
     public var mayForceReset: Bool { running && !lifecycle.resetRequested }
     public var mayStartGraphicsAction: Bool { running && !preparing && !preparationRequested && !relaunchForGraphics }
     public var graphicsActionsEnabled: Bool { mayStartGraphicsAction && !guestPending }
+
+    /// How long a new emulator gets to answer before the window says so. A cold start under load can take a while, so this
+    /// only says what's known, and nothing stops the emulator.
+    public static let controlStallSeconds: TimeInterval = 60
+    public static let controlStallNotice =
+        "This Mac’s emulator has started but isn’t responding yet. It may still finish starting, and this message will "
+        + "go away if it does. If it stays here, use Controls → Force Stop, then start it again."
+
+    /// The emulator is running, and has yet to answer.
+    public var controlStalled: Bool { running && !controlConnected }
 
     /// A one-off user action in the guest, such as turning on Remote Login, may start. The guest may still be asleep.
     public var mayRunGuestAction: Bool {
