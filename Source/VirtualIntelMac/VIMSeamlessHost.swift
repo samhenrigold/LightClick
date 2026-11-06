@@ -150,6 +150,90 @@ final class SeamlessHost: NSObject {
         }
     }
 
+    // MARK: Seamless, from a running machine's window
+
+    private static var desktops: [String: SeamlessDesktop] = [:]
+    private static var windowHidden: Set<String> = []
+
+    @objc static func isActive(for session: VIMSession) -> Bool { desktops[session.machinePath] != nil }
+
+    /// Takes the machine's window away, leaving its guest apps' windows in its place, or puts it back.
+    @objc static func toggle(for session: VIMSession) {
+        let path = session.machinePath
+        if let desktop = desktops[path] {
+            desktop.finish()
+            return
+        }
+        guard let machine = try? VIMMachine.load(URL(fileURLWithPath: path)),
+            let identifier = machine.configuration["Identifier"] as? String
+        else { return }
+        let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let origin = session.seamlessGuestOffset
+        let desktop = SeamlessDesktop(
+            configuration: .init(
+                tools: tools, proxyExecutable: tools.appending(path: "SeamlessProxy"),
+                bundles: home.appending(path: "Library/Caches/Light Click/Seamless Apps/\(identifier)"),
+                savedBundles: home.appending(path: "Applications/Light Click"),
+                machine: .init(identifier: identifier, name: name, path: path),
+                log: FileManager.default.temporaryDirectory.appending(path: "lc-seamless-\(identifier.prefix(8)).log"),
+                guestOffset: NSPoint(x: origin.x, y: origin.y)),
+            guest: AgentGuest(machinePath: path))
+        desktops[path] = desktop
+        session.noteSeamlessChanged()
+        // The window only goes once something's there in its place, and comes back if nothing is.
+        desktop.windowsChanged = { count in
+            if count > 0, !windowHidden.contains(path) {
+                windowHidden.insert(path)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    MainActor.assumeIsolated {
+                        if windowHidden.contains(path) { session.setSeamlessWindowHidden(true) }
+                    }
+                }
+            } else if count == 0, windowHidden.contains(path) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    MainActor.assumeIsolated {
+                        if desktops[path] === desktop, desktop.windowCount == 0 { desktop.finish() }
+                    }
+                }
+            }
+        }
+        desktop.ended = { failure in
+            desktops[path] = nil
+            windowHidden.remove(path)
+            session.setFrameObserver(nil)
+            session.setSeamlessWindowHidden(false)
+            session.noteSeamlessChanged()
+            if let failure { Self.failed(failure) }
+        }
+        session.setFrameObserver { [weak desktop] surface, bytes, width, height, stride in
+            MainActor.assumeIsolated {
+                desktop?.frameArrived(
+                    surface: surface, bytes: bytes, width: Int(width), height: Int(height), stride: Int(stride))
+            }
+        }
+        desktop.start()
+        // If the machine goes away, or there turn out to be no windows to show.
+        Task { [weak desktop] in
+            let started = CFAbsoluteTimeGetCurrent()
+            while let desktop, desktops[path] === desktop {
+                if VIMSession.running(forMachinePath: path) == nil {
+                    desktop.finish()
+                } else if !windowHidden.contains(path), CFAbsoluteTimeGetCurrent() - started > 45 {
+                    desktop.finish("There are no windows in this Mac to show. Log in and open an app, then try again.")
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    /// Whatever else happens to the app, a hidden machine comes back. Says whether there was one.
+    @discardableResult @objc static func leaveAll() -> Bool {
+        let any = !desktops.isEmpty
+        for desktop in desktops.values { desktop.finish() }
+        return any
+    }
+
     // MARK: Making a proxy
 
     /// Machine > Make Dock App…: asks the running guest what it has, and lets the user pick.

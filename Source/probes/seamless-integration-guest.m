@@ -172,6 +172,36 @@ static NSDictionary *describeDocumentType(NSDictionary *type) {
     return result;
 }
 
+static NSDictionary *describeApp(NSString *path) {
+    NSString *name = path.lastPathComponent;
+    NSDictionary *info =
+        [NSDictionary dictionaryWithContentsOfFile:[path stringByAppendingPathComponent:@"Contents/Info.plist"]];
+    NSString *identifier = info[@"CFBundleIdentifier"];
+    if (![identifier isKindOfClass:NSString.class])
+        return nil;
+    NSMutableDictionary *app = [NSMutableDictionary dictionary];
+    app[@"bundleIdentifier"] = identifier;
+    app[@"name"] = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: name.stringByDeletingPathExtension;
+    app[@"guestPath"] = path;
+    if (info[@"CFBundleShortVersionString"])
+        app[@"version"] = info[@"CFBundleShortVersionString"];
+    if (info[@"CFBundleIconFile"])
+        app[@"iconFile"] = info[@"CFBundleIconFile"];
+    if (info[@"LSMinimumSystemVersion"])
+        app[@"minimumSystemVersion"] = info[@"LSMinimumSystemVersion"];
+    NSMutableArray *types = [NSMutableArray array];
+    for (NSDictionary *type in info[@"CFBundleDocumentTypes"])
+        if ([type isKindOfClass:NSDictionary.class])
+            [types addObject:describeDocumentType(type)];
+    app[@"documentTypes"] = types;
+    NSMutableArray *schemes = [NSMutableArray array];
+    for (NSDictionary *type in info[@"CFBundleURLTypes"])
+        if ([type isKindOfClass:NSDictionary.class] && [type[@"CFBundleURLSchemes"] isKindOfClass:NSArray.class])
+            [schemes addObjectsFromArray:type[@"CFBundleURLSchemes"]];
+    app[@"urlSchemes"] = schemes;
+    return app;
+}
+
 static int listApps(void) {
     double start = now();
     NSMutableArray *apps = [NSMutableArray array];
@@ -182,33 +212,9 @@ static int listApps(void) {
              [[manager contentsOfDirectoryAtPath:folder error:NULL] sortedArrayUsingSelector:@selector(compare:)]) {
             if (![name hasSuffix:@".app"])
                 continue;
-            NSString *path = [folder stringByAppendingPathComponent:name];
-            NSDictionary *info = [NSDictionary
-                dictionaryWithContentsOfFile:[path stringByAppendingPathComponent:@"Contents/Info.plist"]];
-            NSString *identifier = info[@"CFBundleIdentifier"];
-            if (![identifier isKindOfClass:NSString.class])
+            NSDictionary *app = describeApp([folder stringByAppendingPathComponent:name]);
+            if (!app)
                 continue;
-            NSMutableDictionary *app = [NSMutableDictionary dictionary];
-            app[@"bundleIdentifier"] = identifier;
-            app[@"name"] = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: name.stringByDeletingPathExtension;
-            app[@"guestPath"] = path;
-            if (info[@"CFBundleShortVersionString"])
-                app[@"version"] = info[@"CFBundleShortVersionString"];
-            if (info[@"CFBundleIconFile"])
-                app[@"iconFile"] = info[@"CFBundleIconFile"];
-            if (info[@"LSMinimumSystemVersion"])
-                app[@"minimumSystemVersion"] = info[@"LSMinimumSystemVersion"];
-            NSMutableArray *types = [NSMutableArray array];
-            for (NSDictionary *type in info[@"CFBundleDocumentTypes"])
-                if ([type isKindOfClass:NSDictionary.class])
-                    [types addObject:describeDocumentType(type)];
-            app[@"documentTypes"] = types;
-            NSMutableArray *schemes = [NSMutableArray array];
-            for (NSDictionary *type in info[@"CFBundleURLTypes"])
-                if ([type isKindOfClass:NSDictionary.class] &&
-                    [type[@"CFBundleURLSchemes"] isKindOfClass:NSArray.class])
-                    [schemes addObjectsFromArray:type[@"CFBundleURLSchemes"]];
-            app[@"urlSchemes"] = schemes;
             [apps addObject:app];
         }
     printJSON(apps);
@@ -761,6 +767,13 @@ int main(int argc, char **argv) {
         double seconds = atof(option(argc, argv, "--seconds", "30"));
         if (!strcmp(command, "apps"))
             return listApps();
+        if (!strcmp(command, "describe")) {
+            NSDictionary *app = describeApp(@(option(argc, argv, "--path", "")));
+            if (!app)
+                return 2;
+            printJSON(app);
+            return 0;
+        }
         if (!strcmp(command, "icon"))
             return printIcon(option(argc, argv, "--path", ""));
         if (!strcmp(command, "menu"))

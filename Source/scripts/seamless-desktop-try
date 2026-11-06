@@ -1,0 +1,21 @@
+#!/bin/zsh
+# The Seamless button, in a clone: press, the guest apps' windows appear and the machine's hides, a click reaches a window,
+# press, the machine's window is back.
+#
+#     scripts/seamless-desktop-try <app built by build-app> <machine.vintelmac>
+set -e
+root=${0:A:h:h}
+tag=seamless-desktop-${${2:t:r}%% *}
+tag=${tag:l}
+clicks=$root/Build/seamless/$tag-clicks.txt
+home=$root/Build/bench/$tag-home
+rm -rf "$home"
+mkdir -p "$home/Library/Caches" "$root/Build/seamless"
+: > "$clicks"
+"$root/scripts/guest-bench" "$1" "$2" "$tag" --driver "$root/probes/seamless-driver.py" --driver-arg desktop \
+    --env LC_HVDBT=1 --env LC_SEAMLESS_QUIET=1 --env "LC_SEAMLESS_CLICK_LOG=$clicks" --env "CFFIXED_USER_HOME=$home" || status=$?
+for bundle in "$home"/Library/Caches/"Light Click"/"Seamless Apps"/*/*.app(N); do
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$bundle"
+done
+rm -rf "$home"
+exit ${status:-0}

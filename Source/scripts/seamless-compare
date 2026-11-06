@@ -116,7 +116,7 @@ def session(label, extra):
     said = ''
     while time.time() < deadline:
         said = log.read_text(errors='replace') if log.exists() else ''
-        if 'guest\'s side ended' in said:
+        if said.count('guest\'s side ended') > said.count('# trying again'):
             break
         if overlays:
             if '# first window' in said and window_rows() and not clicked and time.time() - first_seen(said) > 12:

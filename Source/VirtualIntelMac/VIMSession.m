@@ -454,7 +454,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     // SDL device selection is currently next-start only. Keep it in Sound
     // settings, not among controls that imply a live device change.
     return @[
-        NSToolbarFlexibleSpaceItemIdentifier, @"GuestApps", @"GuestCPU", @"GuestUSB", @"GuestOptical", @"GuestNetwork",
+        NSToolbarFlexibleSpaceItemIdentifier, @"GuestSeamless", @"GuestApps", @"GuestCPU", @"GuestUSB", @"GuestOptical", @"GuestNetwork",
         @"GuestSharing", @"GuestControls", @"GuestSettings"
     ];
 }
@@ -466,6 +466,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     willBeInsertedIntoToolbar:(BOOL)insert {
     NSDictionary *devices = @{
         @"GuestApps" : @[ @"Download Apps…", @"appstore", @"downloadApps:" ],
+        @"GuestSeamless" : @[ @"Seamless", @"macwindow.on.rectangle", @"toggleSeamless:" ],
         @"GuestCPU" : @[ @"CPU & Memory", @"cpu", @"showCPUSettings:" ],
         @"GuestSharing" : @[ @"Shared Folders", @"folder", @"showSharingSettings:" ]
     };
@@ -1988,6 +1989,11 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     }
     if ([command[@"Action"] isEqual:@"display-frames"]) {
         finish(@{@"Arrived" : @(self.displayView.arrivedFrames), @"Distinct" : @(self.displayView.differentFrames)});
+        return;
+    }
+    if ([command[@"Action"] isEqual:@"seamless-toggle"]) {
+        [self toggleSeamless:nil];
+        finish(@{@"Active" : @([VIMSeamlessHost isActiveFor:self])});
         return;
     }
     if ([command[@"Action"] isEqual:@"test-click"]) {
@@ -4105,6 +4111,37 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 }
 - (NSUInteger)distinctFrames {
     return self.displayView.differentFrames;
+}
+- (IBAction)toggleSeamless:(id)sender {
+    if (!self.task.running) {
+        NSBeep();
+        return;
+    }
+    [VIMSeamlessHost toggleFor:self];
+}
+- (NSPoint)seamlessGuestOffset {
+    NSRect frame = [self.displayView convertRect:self.displayView.presentationFrame toView:nil];
+    NSRect screen = [self.window convertRectToScreen:frame];
+    CGFloat primary = NSScreen.screens.firstObject.frame.size.height;
+    return NSMakePoint(NSMinX(screen), primary - NSMaxY(screen));
+}
+- (void)setSeamlessWindowHidden:(BOOL)hidden {
+    if (hidden) {
+        [self.displayView releaseInputCapture];
+        [self.window orderOut:nil];
+    } else {
+        [self.window orderFront:nil];
+        if (!NSProcessInfo.processInfo.environment[@"LC_SEAMLESS_QUIET"]) {
+            [NSApp activateIgnoringOtherApps:YES];
+            [self.window makeKeyAndOrderFront:nil];
+        }
+    }
+}
+- (void)noteSeamlessChanged {
+    for (NSToolbarItem *item in self.window.toolbar.items)
+        if ([item.itemIdentifier isEqual:@"GuestSeamless"])
+            item.label = item.toolTip = [VIMSeamlessHost isActiveFor:self] ? @"Leave Seamless" : @"Seamless";
+    [NSNotificationCenter.defaultCenter postNotificationName:NSMenuDidChangeItemNotification object:nil];
 }
 - (IBAction)makeDockApp:(id)sender {
     [VIMSeamlessHost makeProxyFor:self];

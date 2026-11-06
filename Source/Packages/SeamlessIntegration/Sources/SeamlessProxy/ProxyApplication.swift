@@ -8,6 +8,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     private var socket: LineSocket?
     private var pending: [ProxyEvent] = []
     private var didAskToBoot = false
+    private var connectTries = 0
     private let dockMenu = NSMenu()
     private lazy var mirror = GuestMenuMirror(target: self, action: #selector(menuChosen(_:)))
     private var windows: [Int: NSWindow] = [:]
@@ -34,6 +35,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     private func connectToSession() {
         guard let connected = LineSocket.connect(path: socketPath) else {
             bootMachineOnce()
+            // One generated for a Seamless press has nothing to start, if opened afterward by hand.
+            connectTries += 1
+            if (info[ProxyBundle.machinePathKey] as? String ?? "").isEmpty, connectTries > 10 { NSApp.terminate(nil) }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.connectToSession() }
             return
         }

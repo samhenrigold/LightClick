@@ -785,6 +785,9 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
     if (self.inputHandler)
         self.inputHandler(events);
 }
+- (NSRect)presentationFrame {
+    return NSRectFromCGRect(self.presentationLayer.frame);
+}
 - (NSTimeInterval)testClick {
     NSTimeInterval at = NSDate.date.timeIntervalSince1970;
     [self emit:@[

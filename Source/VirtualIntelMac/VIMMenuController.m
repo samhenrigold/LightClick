@@ -245,6 +245,10 @@
     NSMenuItem *apps = [self add:@"Download Apps…" action:@selector(downloadApps:) key:@"" to:actions target:session];
     apps.image = VIMAppsSymbolImage();
     apps.enabled = session != nil;
+    NSMenuItem *seamless = [self add:@"Seamless" action:@selector(toggleSeamless:) key:@"" to:actions target:session];
+    seamless.image = [NSImage imageWithSystemSymbolName:@"macwindow.on.rectangle" accessibilityDescription:nil];
+    seamless.enabled = session != nil;
+    seamless.state = session && [VIMSeamlessHost isActiveFor:session] ? NSControlStateValueOn : NSControlStateValueOff;
     NSMenuItem *dockApp = [self add:@"Make Dock App…" action:@selector(makeDockApp:) key:@"" to:actions target:session];
     dockApp.image = [NSImage imageWithSystemSymbolName:@"dock.rectangle" accessibilityDescription:nil];
     dockApp.enabled = session != nil;

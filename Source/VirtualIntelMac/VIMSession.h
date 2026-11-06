@@ -50,6 +50,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property(readonly) NSString *machinePath;
 - (void)endExclusiveGuestAgentUse;
 - (IBAction)makeDockApp:(nullable id)sender;
+- (IBAction)toggleSeamless:(nullable id)sender;
+/// Added to a guest window's position to get its place on the host, down from the top of the primary screen.
+@property(readonly) NSPoint seamlessGuestOffset;
+- (void)setSeamlessWindowHidden:(BOOL)hidden;
+- (void)noteSeamlessChanged;
 @property(readonly) NSUInteger distinctFrames;
 /// The frames windowed mode shows, for a seamless session to crop from instead.
 - (void)setFrameObserver:(nullable void (^)(IOSurfaceRef _Nullable surface, const void *_Nullable bytes,

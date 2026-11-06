@@ -70,7 +70,22 @@ public final class SeamlessSession {
     private var guestDescriptor: Int32 = -1
     private var everConnected = false
     private var port: UInt16 = 0
-    private var guestOffset: NSPoint?
+    /// Added to a guest window's position to get its place on the host. If it's not set, the first window goes mid-screen.
+    public var guestOffset: NSPoint?
+    /// Whether this runs its own program in the guest, or something else starts one on `guestPort`.
+    public var drivesGuest = true
+    public var guestPort: UInt16 { port }
+    public var windowCount: Int { surfaces.count }
+    /// A menu item and Dock menu item with this title calls `onLeave`, rather than going to the guest, and so does asking the proxy to quit.
+    public var leaveTitle: String?
+    public var onLeave: (() -> Void)?
+    public var onWindowsChanged: (() -> Void)?
+    /// Whether the guest app had gone first.
+    public var onProxyClosed: ((Bool) -> Void)?
+    public var onGuestGone: (() -> Void)?
+    private var appGone = false
+    private var stopped = false
+    private var activateWhenConnected = false
     private var lastMenu: [GuestMenuItem]?
     private var nextDocument: UInt32 = 0
     private var documentPaths: [UInt32: String] = [:]
@@ -84,8 +99,7 @@ public final class SeamlessSession {
     /// For measuring: quit the guest app this long after its first window.
     public var stopAfter: Double?
     private var frame: (surface: IOSurfaceRef, width: Int, height: Int)?
-    private var copies: [IOSurfaceRef] = []
-    private var copyIndex = 0
+    private var copies = FrameCopies()
     private var arrived = 0
     private var measuring: (started: CFAbsoluteTime, arrived: Int, distinct: Int)?
     public var distinctFrames: (() -> Int)?
@@ -107,7 +121,24 @@ public final class SeamlessSession {
             finished()
             return
         }
-        Task { await self.drive() }
+        if drivesGuest { Task { await self.drive() } }
+    }
+
+    /// shortcut: the threads waiting on the listeners stay, blocked, with no session to deliver to: two per app per Seamless press,
+    /// until something needs them gone.
+    public func stop() {
+        stopped = true
+        proxy?.send(SessionCommand.terminate)
+        if guestDescriptor >= 0 { shutdown(guestDescriptor, SHUT_RDWR) }
+        surfaces = [:]
+    }
+
+    public func activateProxy() {
+        if let proxy {
+            proxy.send(SessionCommand.activate)
+        } else {
+            activateWhenConnected = true
+        }
     }
 
     public func note(_ text: String) {
@@ -180,7 +211,7 @@ public final class SeamlessSession {
 
     /// Copies the tools somewhere stable, and grants Accessibility for reading and pressing the app's menu. 10.9 asks TCC
     /// about the responsible process, and from a daemon that's the agent.
-    private static var setupScript: String {
+    static var setupScript: String {
         let clients = [
             "/private/tmp/sg/ig", "/tmp/sg/ig", "/private/tmp/sg/g", "/usr/bin/sudo", "/usr/bin/env", "/bin/launchctl",
             "/Library/Application Support/Virtual Intel Mac/GuestTools/opengl-install-bootstrap"
@@ -251,6 +282,10 @@ public final class SeamlessSession {
         guestDescriptor = -1
         for id in surfaces.keys { proxy?.send(SessionCommand.removeSurface(id: Int(id))) }
         surfaces = [:]
+        if !stopped {
+            onWindowsChanged?()
+            onGuestGone?()
+        }
     }
 
     /// One message off the wire, with the pixels already made into an image so the main thread doesn't copy them.
@@ -347,8 +382,14 @@ public final class SeamlessSession {
         case .gone(let id):
             surfaces[id] = nil
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
+            onWindowsChanged?()
         case .menu(let json):
-            guard let items = try? JSONDecoder().decode([GuestMenuItem].self, from: json) else { return }
+            guard var items = try? JSONDecoder().decode([GuestMenuItem].self, from: json) else { return }
+            // In the app's own menu, above Quit.
+            if let leaveTitle, !items.isEmpty, var children = items[0].children {
+                children.insert(GuestMenuItem(title: leaveTitle), at: max(0, children.count - 1))
+                items[0].children = children
+            }
             lastMenu = items
             proxy?.send(SessionCommand.setMenuBar(items))
             startTestOnce()
@@ -357,6 +398,7 @@ public final class SeamlessSession {
         case .appState(let json): applyAppState(json)
         case .appGone:
             note("# the guest app has exited")
+            appGone = true
             proxy?.send(SessionCommand.terminate)
         }
     }
@@ -386,6 +428,7 @@ public final class SeamlessSession {
         }
         surface.window = window
         tellProxy(surface)
+        onWindowsChanged?()
         if let stopAfter, measuring == nil {
             measuring = (CFAbsoluteTimeGetCurrent(), arrived, distinctFrames?() ?? 0)
             note("# first window")
@@ -478,7 +521,7 @@ public final class SeamlessSession {
     /// One frame of the guest's display, as windowed mode gets it. Everything shows the same surface, each through its own crop.
     public func frameArrived(surface: IOSurfaceRef?, bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) {
         arrived += 1
-        guard usesDisplayFrames, let current = surface ?? copy(bytes, width: width, height: height, stride: stride)
+        guard usesDisplayFrames, let current = surface ?? copies.copy(bytes, width: width, height: height, stride: stride)
         else { return }
         frame = (current, width, height)
         guard !surfaces.isEmpty else { return }
@@ -577,26 +620,6 @@ public final class SeamlessSession {
         }
     }
 
-    /// The display path that hands over shared memory rather than a surface: two surfaces, so one is never being read as it's written.
-    private func copy(_ bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) -> IOSurfaceRef? {
-        guard let bytes else { return nil }
-        if copies.first.map({ IOSurfaceGetWidth($0) != width || IOSurfaceGetHeight($0) != height }) ?? true {
-            let properties: [CFString: Any] = [
-                kIOSurfaceWidth: width, kIOSurfaceHeight: height, kIOSurfaceBytesPerElement: 4,
-                kIOSurfacePixelFormat: 0x4247_5241
-            ]
-            copies = (0..<2).compactMap { _ in IOSurfaceCreate(properties as CFDictionary) }
-        }
-        guard copies.count == 2 else { return nil }
-        copyIndex = 1 - copyIndex
-        let target = copies[copyIndex]
-        IOSurfaceLock(target, [], nil)
-        let row = IOSurfaceGetBytesPerRow(target)
-        let base = IOSurfaceGetBaseAddress(target)
-        for y in 0..<height { memcpy(base + y * row, bytes + y * stride, min(row, stride)) }
-        IOSurfaceUnlock(target, [], nil)
-        return target
-    }
 
     // MARK: The proxy's side
 
@@ -635,11 +658,19 @@ public final class SeamlessSession {
             guard let event = try? JSONDecoder().decode(ProxyEvent.self, from: line) else { return }
             self?.handle(event)
         }
-        socket.onClose = { [weak self] in self?.proxy = nil }
+        socket.onClose = { [weak self] in
+            self?.proxy = nil
+            if let self, !self.stopped { self.onProxyClosed?(self.appGone) }
+        }
         socket.start()
         proxy = socket
         for surface in surfaces.values { tellProxy(surface) }
         if let lastMenu { socket.send(SessionCommand.setMenuBar(lastMenu)) }
+        if let leaveTitle { socket.send(SessionCommand.setDockMenu([GuestMenuItem(title: leaveTitle)])) }
+        if activateWhenConnected {
+            activateWhenConnected = false
+            socket.send(SessionCommand.activate)
+        }
     }
 
     private func handle(_ event: ProxyEvent) {
@@ -653,8 +684,10 @@ public final class SeamlessSession {
             if let id = surfaces.values.min(by: { $0.window.order < $1.window.order })?.window.id {
                 sendToGuest(SessionWire.value(.focus, id))
             }
+        case .menuChosen(let path, _) where path.last == leaveTitle && leaveTitle != nil: onLeave?()
         case .menuChosen(let path, _): sendToGuest(SessionWire.text(.menuPress, path.joined(separator: "/")))
         case .openDocuments(let paths): for path in paths { sendDocument(path, flags: 0) }
+        case .quit where onLeave != nil: onLeave?()
         case .quit:
             if guestDescriptor >= 0 {
                 sendToGuest(SessionWire.value(.quitApp))
@@ -925,5 +958,31 @@ public struct SeamlessSessionTest: Sendable {
         dragOutFolder = parts[2]
         screenshot = parts[3]
         cancelFirst = parts[4] == "cancel"
+    }
+}
+
+/// The display path that hands over shared memory rather than a surface: two surfaces, so one is never being read as it's written.
+struct FrameCopies {
+    private var copies: [IOSurfaceRef] = []
+    private var copyIndex = 0
+
+    mutating func copy(_ bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) -> IOSurfaceRef? {
+        guard let bytes else { return nil }
+        if copies.first.map({ IOSurfaceGetWidth($0) != width || IOSurfaceGetHeight($0) != height }) ?? true {
+            let properties: [CFString: Any] = [
+                kIOSurfaceWidth: width, kIOSurfaceHeight: height, kIOSurfaceBytesPerElement: 4,
+                kIOSurfacePixelFormat: 0x4247_5241
+            ]
+            copies = (0..<2).compactMap { _ in IOSurfaceCreate(properties as CFDictionary) }
+        }
+        guard copies.count == 2 else { return nil }
+        copyIndex = 1 - copyIndex
+        let target = copies[copyIndex]
+        IOSurfaceLock(target, [], nil)
+        let row = IOSurfaceGetBytesPerRow(target)
+        let base = IOSurfaceGetBaseAddress(target)
+        for y in 0..<height { memcpy(base + y * row, bytes + y * stride, min(row, stride)) }
+        IOSurfaceUnlock(target, [], nil)
+        return target
     }
 }
