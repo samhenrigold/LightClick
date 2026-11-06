@@ -15,7 +15,7 @@ public struct PendingChanges: Sendable {
             MachineConfiguration.Key.cpuCount, .memoryMiB, .sshEnabled, .sshPort, .fileSharingEnabled, .fileSharingPort,
             .audioEnabled, .description, .retinaEnabled, .opticalMedia, .networkConnected, .macAddress, .displayMode,
             .audioOutputDevice, .audioInputDevice, .clipboardEnabled, .networkMode, .bridgeInterface,
-            .displayScalingFilter, .additionalMedia
+            .displayScalingFilter, .additionalMedia, .screenSharingEnabled, .screenSharingPort
         ].map(\.rawValue))
 
     public var settings: [String: PropertyListValue]? { values["Settings"]?.dictionary }

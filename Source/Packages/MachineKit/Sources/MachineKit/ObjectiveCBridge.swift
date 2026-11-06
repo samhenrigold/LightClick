@@ -111,6 +111,28 @@ public final class MachineModelBridge: NSObject {
         machineConfiguration(object).passthroughOpenGLEnabled
     }
 
+    // MARK: Screen sharing
+
+    /// Each command as its executable, then its arguments. The verification comes last, and its exit status is the only
+    /// one that decides anything. Nil for a guest that can't share its screen.
+    @objc(screenSharingCommandsForGuest:enabling:)
+    public class func screenSharingCommands(guest name: Any?, enabling: Bool) -> [[String]]? {
+        guard let guest = guestNamed(name), let commands = ScreenSharing.commands(enabling: enabling, on: guest) else {
+            return nil
+        }
+        return (commands + [ScreenSharing.verification]).map { [$0.executable] + $0.arguments }
+    }
+
+    @objc(screenSharingAvailableOnConfiguration:)
+    public class func screenSharingAvailable(_ object: Any?) -> Bool {
+        ScreenSharing.isAvailable(on: machineConfiguration(object))
+    }
+
+    @objc(screenSharingURLForConfiguration:)
+    public class func screenSharingURL(_ object: Any?) -> URL? {
+        ScreenSharing.connectionURL(for: machineConfiguration(object))
+    }
+
     // MARK: Install state
 
     @objc(configurationRestartingForOpenGLSetup:)

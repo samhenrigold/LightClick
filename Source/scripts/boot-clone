@@ -2,7 +2,7 @@
 # Boots an APFS clone of a VM from a private home, leaving the real library alone. CFFIXED_USER_HOME doesn't
 # redirect preferences, so window positions and similar settings still land in the real domain.
 #
-#     scripts/boot-clone <app> <machine.vintelmac> [work directory]
+#     scripts/boot-clone <app> <machine.vintelmac> [work directory [app arguments...]]
 #
 # Prints the app and QEMU PIDs, and writes QEMU's arguments and environment to launch.json. Stop it by
 # killing those PIDs, then delete the work directory (default Build/clone). Its window is titled
@@ -26,7 +26,7 @@ clone="$library/Machines/Clone of ${machine:t}"
 cp -c -R "$machine" "$clone"
 rm -f "$clone/State/PendingConfiguration.plist"
 print -u2 "WARNING: the window titled \"${clone:t:r}\" is a throwaway clone. Anything changed in it is lost."
-CFFIXED_USER_HOME=$work/home "$app/Contents/MacOS/Light Click" --open-vm "$clone" >"$work/app.log" 2>&1 &
+CFFIXED_USER_HOME=$work/home "$app/Contents/MacOS/Light Click" --open-vm "$clone" "${@:4}" >"$work/app.log" 2>&1 &
 app_pid=$!
 for _ in {1..120}; do
     qemu_pid=$(pgrep -P $app_pid -x qemu-system-x86_64 | head -1) || true

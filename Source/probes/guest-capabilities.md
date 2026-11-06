@@ -40,10 +40,11 @@ filesystem. Neither is switched on or connected in Light Click today.
 
 1. **Build first: the Share Screen toggle (#3).** It's the cheapest, it's useful on its own, and it answers the
    questions #1 depends on: can a current host client still talk to a 10.9 server, and how does auth behave?
-   - The root agent enables `com.apple.screensharing`, and a generated legacy VNC password keeps user credentials out of
-     it, matching `guest-clipboard`'s rule.
-   - `hostfwd_add`, sent through QMP's `human-monitor-command`, should add the port with no restart [I].
-     `VIMSMBService`'s local DNS-SD pattern can advertise it.
+   - Built: the root agent enables `com.apple.screensharing`, and the OS asks for a guest account when you connect, so
+     Light Click holds no password. Question 2 decides whether a generated legacy VNC password is ever needed.
+   - The forward comes from the launch plan, so turning it on takes a restart. `hostfwd_add`, sent through QMP's
+     `human-monitor-command`, should add the port with no restart [I]. `VIMSMBService`'s local DNS-SD pattern can
+     advertise it.
 2. **Rich clipboard (#2).** Add typed payloads to protocol 2, keeping `exchangeAllowed`. It needs no RFB, so it has no
    auth, no sharing indicator, and reaches Tiger. It stays useful whatever the probe finds.
 3. **The drag and drop sidecar (#1).** The largest prize and the only one nothing else can deliver, but start it only
@@ -57,20 +58,26 @@ types with no credentials, then with credentials the command bitmap, flags and t
 in the guest, and prints only the length of any clipboard text it receives. `--self-test` runs it against a loopback
 stand-in; that exercises the parser and the crypto, but not Apple's server.
 
-To run it against a clone, with Remote Login enabled on the machine:
+To run it against a clone, through the guest agent, with no Remote Login or SSH tunnel:
 
 ```
-scripts/boot-clone "<app>" "<machine.vintelmac>"
-ssh -p <SSHPort> <user>@127.0.0.1                # in the clone, once it's at the desktop:
-sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+scripts/boot-clone "<app>" "<machine.vintelmac>" "$PWD/Build/clone" --guest-diagnostics "$PWD/Build/clone-agent"
+# At the clone's desktop, choose Network > Share Screen. Then shut the clone down and start it again from its window,
+# so QEMU has the forward (5901 unless taken; see ScreenSharingPort in the clone's Machine.plist).
+
+# Only question 2 needs this: it adds a throwaway legacy password.
+scripts/app-guest-command.py Build/clone-agent \
+    /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
     -activate -configure -access -on -users <user> -privs -all \
     -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw <throwaway> -restart -agent
 
-ssh -N -L 5901:127.0.0.1:5900 -p <SSHPort> <user>@127.0.0.1 &
 python3 probes/rfb-capabilities.py 127.0.0.1:5901
 RFB_PASSWORD=<throwaway> python3 probes/rfb-capabilities.py 127.0.0.1:5901 --auth vnc
 RFB_USER=<user> RFB_PASSWORD=<password> python3 probes/rfb-capabilities.py 127.0.0.1:5901 --auth ard
-open vnc://127.0.0.1:5901                        # the host's client, for question 1 below
+# Network > Open Screen Sharing…, the host's client, for question 1 below
+
+# Question 4: while a probe holds a connection with --seconds 60, sample the server's CPU.
+scripts/app-guest-command.py Build/clone-agent /usr/bin/top -l 2 -stats command,cpu -o cpu -n 8
 ```
 
 Questions it should settle, in the order they affect the plan:

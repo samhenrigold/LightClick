@@ -147,6 +147,9 @@ public final class LaunchPlan: NSObject {
         if flag("FileSharingEnabled") {
             network += ",hostfwd=tcp:127.0.0.1:\((config["FileSharingPort"] as? NSNumber)?.intValue ?? 0)-:445"
         }
+        if flag("ScreenSharingEnabled") {
+            network += ",hostfwd=tcp:127.0.0.1:\((config["ScreenSharingPort"] as? NSNumber)?.intValue ?? 0)-:5900"
+        }
         if input.networkMode != "shared" { network = "socket,id=net0,fd=0" }
 
         var cpu = "Penryn,vendor=GenuineIntel,+sse4.2,+popcnt,+aes,+pclmulqdq,+pcid"

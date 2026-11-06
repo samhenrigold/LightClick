@@ -71,6 +71,14 @@ for guest in ('tiger', 'mavericks', 'catalina', 'bigsur'):
         'VIM_AUDIO_OUTPUT_DEVICE': 'Stale', 'VIM_AUDIO_INPUT_DEVICE': 'Stale', 'VIM_E1000_LINK_HISTORY': '1',
         'VIM_INSTALLER_DISPLAY_SOCKET': '/stale', 'VIM_DISPLAY_REFRESH_MS': '99'})
 
+SCREEN = {'ScreenSharingEnabled': True, 'ScreenSharingPort': 5901}
+for guest in ('leopard', 'mavericks', 'mojave', 'bigsur'):
+    scenarios.append(scenario(f'{guest}-screen-sharing', guest, config=SCREEN))
+    scenarios.append(scenario(f'{guest}-screen-sharing-off', guest, config={**SCREEN, 'ScreenSharingEnabled': False}))
+    scenarios.append(scenario(f'{guest}-screen-sharing-host-network', guest, config=SCREEN, networkMode='host'))
+    scenarios.append(scenario(f'{guest}-screen-sharing-all-forwards', guest, config={
+        **SCREEN, 'SSHEnabled': True, 'SSHPort': 2222, 'FileSharingEnabled': True, 'FileSharingPort': 4450}))
+
 for guest in ('tiger', 'mavericks', 'highsierra'):
     for mode, scale, explicit in (('retina', 1.0, True), ('retina', 1.0, False), ('scaled', 2.0, False), ('scaled', 1.0, False)):
         config = {**OPENGL, **({'DisplayMode': mode} if explicit else {})}
