@@ -1824,19 +1824,20 @@ static int tree_send_covers(struct Stream *s, struct TreeWindow *w, const struct
     return send_all(s->fd, message, SWM_HEADER_SIZE + size);
 }
 
-// Off the screen but still a window of an app that isn't hidden: in the guest's Dock. shortcut: or on another of the guest's Spaces, until
-// a session has any.
+// Asks the app, as a minimized window isn't in WindowServer's list by its number, even when asked for by that number.
 static int tree_window_is_minimized(CGWindowID id, pid_t pid) {
-    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, id);
-    int exists = list && CFArrayGetCount(list) > 0;
-    if (list)
-        CFRelease(list);
-    ProcessSerialNumber psn = {0, 0};
-    OSStatus found = GetProcessForPID(pid, &psn);
-    int visible = found == noErr && IsProcessVisible(&psn);
-    printf("# %.1f window %u left the screen: exists %d, process %d, visible %d\n", now(), id, exists, (int)found, visible);
+    if (!session_menu_tool)
+        return 0;
+    char pid_text[16], window[16];
+    snprintf(pid_text, sizeof(pid_text), "%d", pid);
+    snprintf(window, sizeof(window), "%u", id);
+    char *const ask[] = {(char *)session_menu_tool, "is-minimized", "--pid", pid_text, "--window", window, NULL};
+    char *said = run_tool(ask);
+    int minimized = said && strstr(said, "minimized yes");
+    printf("# %.1f window %u left the screen: %s\n", now(), id, said ? said : "(no answer)");
     fflush(stdout);
-    return exists && visible;
+    free(said);
+    return minimized;
 }
 
 static int tree_send_minimized(struct Stream *s, CGWindowID id, int minimized) {
@@ -2166,7 +2167,9 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             order++;
         }
         for (int i = 0; i < TREE_MAX_WINDOWS; i++)
-            if (windows[i].id && !windows[i].seen && tree_shared && tree_window_is_minimized(windows[i].id, windows[i].pid)) {
+            if (windows[i].id && !windows[i].seen && tree_shared &&
+                (windows[i].minimized || tree_window_is_minimized(windows[i].id, windows[i].pid))) {
+                // Once it's known, only its coming back, or the app's going, changes that.
                 if (!windows[i].minimized) {
                     windows[i].minimized = 1;
                     if (tree_send_minimized(s, windows[i].id, 1))

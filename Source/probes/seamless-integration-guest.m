@@ -223,6 +223,31 @@ static int listApps(void) {
 }
 
 // By the guest's window number, which is the only name that a window keeps, and through the app, so its Dock and Window menu follow.
+static int printMinimized(int pid, uint32_t number) {
+    extern AXError _AXUIElementGetWindow(AXUIElementRef, uint32_t *);
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    CFArrayRef windows = NULL;
+    const char *answer = "no such window";
+    if (AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, (CFTypeRef *)&windows) == kAXErrorSuccess && windows) {
+        for (CFIndex i = 0; i < CFArrayGetCount(windows); i++) {
+            AXUIElementRef window = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
+            uint32_t found = 0;
+            if (_AXUIElementGetWindow(window, &found) != kAXErrorSuccess || found != number)
+                continue;
+            CFTypeRef value = NULL;
+            AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute, &value);
+            answer = value == kCFBooleanTrue ? "minimized yes" : "minimized no";
+            if (value)
+                CFRelease(value);
+            break;
+        }
+        CFRelease(windows);
+    }
+    CFRelease(app);
+    printf("%s\n", answer);
+    return 0;
+}
+
 static int setMinimized(int pid, uint32_t number, int minimized) {
     extern AXError _AXUIElementGetWindow(AXUIElementRef, uint32_t *);
     AXUIElementRef app = AXUIElementCreateApplication(pid);
@@ -814,6 +839,8 @@ int main(int argc, char **argv) {
             [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
             return 0;
         }
+        if (!strcmp(command, "is-minimized"))
+            return printMinimized(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")));
         if (!strcmp(command, "set-minimized"))
             return setMinimized(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")),
                                 atoi(option(argc, argv, "--state", "1")));
