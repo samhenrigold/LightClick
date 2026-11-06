@@ -460,63 +460,58 @@ public final class LaunchPlan: NSObject {
     }
 
     private static func environment(_ input: LaunchInput, _ guest: Guest) -> [String: String] {
-        var env = input.inheritedEnvironment
-        func setIfEmpty(_ key: String, _ value: String) { if env[key]?.isEmpty ?? true { env[key] = value } }
+        var options = MachineOptions(configuration: input.configuration)
+        if !input.appleSilicon { options.engine = nil }
         if let library = input.inprocessOpenGLLibrary {
-            env["VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY"] = library
-            if env["VIM_PASSTHROUGH_OPENGL_INLINE"] == nil { env["VIM_PASSTHROUGH_OPENGL_INLINE"] = "1" }
-            if env["VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT"] == nil {
-                env["VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT"] = "1"
-            }
-            if env["VIM_DISPLAY_EVENT_DRIVEN"] == nil { env["VIM_DISPLAY_EVENT_DRIVEN"] = "1" }
-            setIfEmpty("VIM_OPENGL_VRAM_SERVICE", "gold.samhenri.LightClick.ram." + input.vramServiceIdentifier)
-            setIfEmpty("VIM_OPENGL_VRAM_ENDPOINT", input.runtimeDirectory + "/vram-endpoint.plist")
-            setIfEmpty("VIM_OPENGL_DISPLAY_ENDPOINT", input.runtimeDirectory + "/graphics-endpoint.plist")
+            options.passthroughOpenGLInprocessLibrary = library
+            options.passthroughOpenGLInline = true
+            options.passthroughOpenGLSurfaceImport = true
+            options.displayEventDriven = true
+            options.openGLVRAMService = "gold.samhenri.LightClick.ram." + input.vramServiceIdentifier
+            options.openGLVRAMEndpoint = input.runtimeDirectory + "/vram-endpoint.plist"
+            options.openGLDisplayEndpoint = input.runtimeDirectory + "/graphics-endpoint.plist"
         }
-        // Never inherit a developer's routing override into an unrelated VM.
-        env["VIM_AUDIO_OUTPUT_DEVICE"] = input.audioOutputDeviceName
-        env["VIM_AUDIO_INPUT_DEVICE"] = input.audioInputDeviceName
-        env["VIM_INPUT_BACKPRESSURE"] = "1"
-        env["VIM_E1000_LINK_HISTORY"] = input.processArguments.contains("--record-network-history") ? "1" : nil
-        // Host tuning must not leak between development launches or architectures.
-        env = env.filter { !$0.key.hasPrefix("PVG_") }
-        env["DYLD_INSERT_LIBRARIES"] = nil
-        env["VIM_INSTALLER_DISPLAY_SOCKET"] = nil
-        env["VIM_DISPLAY_REFRESH_MS"] = nil
-        env.merge([
-            "PVG_OOP_HELPER": input.helperPath, "PVG_OOP_DONOR": input.donorPath,
-            "PVG_APP_DISPLAY_SOCKET": input.displaySocketPath,
-            // Panel capability, not the current logical mode. Creating a 1x-only
-            // PVG panel prevents macOS from advertising any 2x mode for a later
-            // live Retina selection. The guest-display tool selects 1x or 2x.
-            "PVG_OOP_SCALE_FACTOR": "2", "PVG_APP_DISPLAY_SCALE": "2",
-            "PVG_PRESERVE_IOSURFACE": "1", "PVG_SHADOW_COALESCE": "1",
-            "PVG_SHADOW_MAX_CHUNK": "1048576", "PVG_SHADOW_TEXTURE_PAGING": "1"
-        ]) { _, new in new }
-        // The framework cannot raw-blit packed multisample depth/stencil. The
-        // ordered transfer adapter was qualified in the CLI harness, but omitted
-        // when that harness became this app. Keep its quiet path enabled on Intel;
-        // it preserves samples and the original command-buffer event ordering.
-        if !input.appleSilicon { env["PVG_TEST_MSAA_TRANSFER"] = "1" }
+        options.audioOutputDevice = input.audioOutputDeviceName
+        options.audioInputDevice = input.audioInputDeviceName
+        options.inputBackpressure = true
+        options.e1000LinkHistory = input.processArguments.contains("--record-network-history")
+        // Panel capability, not the current logical mode. Creating a 1x-only
+        // PVG panel prevents macOS from advertising any 2x mode for a later
+        // live Retina selection. The guest-display tool selects 1x or 2x.
+        options.appDisplayScale = 2
+        if input.appleSilicon {
+            options.oopHelper = input.helperPath
+            options.oopDonor = input.donorPath
+            options.oopScaleFactor = 2
+            options.preserveIOSurface = true
+            options.shadowCoalesce = true
+            options.shadowMaxChunk = 1_048_576
+            options.shadowTexturePaging = true
+            // The AIR repair is genuinely Mojave-only.
+            if guest == .mojave { options.hostAIRLLVM = input.llvmPath }
+        } else {
+            // The framework cannot raw-blit packed multisample depth/stencil. The
+            // ordered transfer adapter was qualified in the CLI harness, but omitted
+            // when that harness became this app. Keep its quiet path enabled on Intel;
+            // it preserves samples and the original command-buffer event ordering.
+            options.msaaTransfer = true
+        }
         if input.installerDisplay {
-            env["PVG_APP_DISPLAY_SOCKET"] = nil
-            env["VIM_INSTALLER_DISPLAY_SOCKET"] = input.displaySocketPath
+            options.installerDisplaySocket = input.displaySocketPath
             if input.preMetalGuest && input.passthroughOpenGLEnabled {
                 // The ordinary embedded display defaults to a 30-ms poll. That
                 // caps the accelerated research scanout at ~33 Hz before any
                 // rendering/ACK cost. This does not change supported guest paths.
                 let interval = input.legacyDisplayRefreshMS
-                env["VIM_DISPLAY_REFRESH_MS"] = String(interval >= 5 && interval <= 1000 ? interval : 16)
+                options.displayRefreshMS = interval >= 5 && interval <= 1000 ? interval : 16
             }
+        } else {
+            options.appDisplaySocket = input.displaySocketPath
         }
-        // The AIR repair is genuinely Mojave-only.
-        if guest == .mojave { env["PVG_HOST_AIR_LLVM"] = input.llvmPath }
-        if !input.appleSilicon {
-            env = env.filter { key, _ in
-                !(key.hasPrefix("PVG_SHADOW_") || key.hasPrefix("PVG_OOP_")
-                    || key == "PVG_HOST_AIR_LLVM" || key == "PVG_PRESERVE_IOSURFACE")
-            }
-        }
+        // Host tuning must not leak between development launches or architectures.
+        var env = input.inheritedEnvironment.filter { !$0.key.hasPrefix("PVG_") }
+        env["DYLD_INSERT_LIBRARIES"] = nil
+        options.apply(to: &env)
         return env
     }
 }
