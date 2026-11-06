@@ -292,6 +292,8 @@ final class HostProbe {
         running.activate()
         await sleep(500)
         await hostDrags(displayName: displayName)
+        await liveMenu(pid: running.processIdentifier)
+        await guestMenuBarMode(pid: running.processIdentifier)
 
         // Quitting asks the session first, so the guest app can ask to save.
         running.terminate()
@@ -401,6 +403,222 @@ final class HostProbe {
             Synthetic.key(53, down: false)
             await sleep(1500)
         }
+    }
+
+    // MARK: Menu pass-through
+
+    private func count(_ items: [GuestMenuItem]) -> Int { items.reduce(0) { $0 + 1 + count($1.children ?? []) } }
+
+    private func helperOutput(_ arguments: [String]) -> String { command(helper.path, arguments) }
+
+    private func menu(of app: String) -> (items: [GuestMenuItem], text: String)? {
+        let text = helperOutput(["menu", "--app", app])
+        guard let line = text.split(separator: "\n").first(where: { $0.hasPrefix("[") }),
+            let items = try? JSONDecoder().decode([GuestMenuItem].self, from: Data(line.utf8))
+        else { return nil }
+        return (items, text)
+    }
+
+    private func find(_ path: [String], in items: [GuestMenuItem]) -> GuestMenuItem? {
+        guard let first = path.first, let item = items.first(where: { $0.title == first }) else { return nil }
+        return path.count == 1 ? item : find(Array(path.dropFirst()), in: item.children ?? [])
+    }
+
+    private func liveMenu(pid: pid_t) async {
+        NSRunningApplication(processIdentifier: pid)?.activate()
+        await sleep(400)
+
+        // A real, large menu, read by the guest tool and shown by the proxy.
+        guard let finder = menu(of: "Finder") else {
+            check("guest tool reads Finder's menu", false)
+            return
+        }
+        report(
+            "real_menu_read",
+            finder.text.split(separator: "\n").filter { $0.hasPrefix("#") }.joined(separator: " "))
+        let sent = Date()
+        client?.send(SessionCommand.setMenuBar(finder.items))
+        let bar = Element.application(pid: pid)
+        func barItems() -> [Element] {
+            (bar.value("AXMenuBar")).map { Element(reference: $0 as! AXUIElement) }?.children ?? []
+        }
+        let shown = await waitFor(4) { barItems().contains { $0.string("AXTitle") == "Go" } }
+        report("real_menu_mirror_ms", "\(Int(Date().timeIntervalSince(sent) * 1000)) for \(count(finder.items)) items")
+        let titles = barItems().compactMap { $0.string("AXTitle") }
+        check("the proxy's bar has the real menu, with the host's Apple menu", shown, titles.joined(separator: " "))
+
+        // Help search: AppKit's own field, only if the mirrored Help is the real help menu.
+        if let help = barItems().last, let menu = help.children.first {
+            let first = menu.children.first
+            report("help_menu_first_role", first?.string("AXRole") ?? "none")
+            report(
+                "help_menu_first_item_children",
+                first?.children.compactMap { $0.string("AXRole") }.joined(separator: " ") ?? "")
+        }
+
+        // Opening a menu, from a fresh tree: how long until it's open, and whether an update reaches it while it's open.
+        let tree = [
+            GuestMenuItem(
+                title: "File",
+                children: [
+                    GuestMenuItem(title: "About", isEnabled: true),
+                    GuestMenuItem(title: "About Extra", modifiers: 10, isAlternate: true),
+                    GuestMenuItem(title: "Revert", isEnabled: false)
+                ])
+        ]
+        client?.send(SessionCommand.setMenuBar(tree))
+        _ = await waitFor(3) { barItems().contains { $0.string("AXTitle") == "File" } && barItems().count <= 3 }
+        await sleep(300)
+        guard let file = barItems().first(where: { $0.string("AXTitle") == "File" }), let open = file.frame else {
+            check("mirrored File is present", false)
+            return
+        }
+        events.removeAll()
+        // A real click, not AXPress, since it's what a person does.
+        let point = CGPoint(x: open.midX, y: open.midY)
+        Synthetic.post(.mouseMoved, point)
+        await sleep(150)
+        let pressed = Date()
+        Synthetic.post(.leftMouseDown, point)
+        Synthetic.post(.leftMouseUp, point)
+        let opened = await waitFor(2) {
+            has { if case .menuWillOpen(let path) = $0 { path == ["File"] } else { false } }
+        }
+        report("menu_click_to_will_open_ms", "\(Int(Date().timeIntervalSince(pressed) * 1000))")
+        check("opening a mirrored menu tells the session which", opened)
+        await sleep(200)
+        client?.send(
+            SessionCommand.setMenuBar([
+                GuestMenuItem(
+                    title: "File",
+                    children: [
+                        GuestMenuItem(title: "About", isEnabled: true),
+                        GuestMenuItem(title: "About Extra", modifiers: 10, isAlternate: true),
+                        GuestMenuItem(title: "Revert", isEnabled: true),
+                        GuestMenuItem(title: "Added While Open")
+                    ])
+            ]))
+        await sleep(300)
+        screenshot("menu-open.png", CGRect(x: open.minX - 20, y: 0, width: 420, height: 260))
+        let live = file.children.first?.children ?? []
+        func item(_ title: String) -> Element? { live.first { $0.string("AXTitle") == title } }
+        check(
+            "a menu updates while it's open",
+            item("Added While Open") != nil && (item("Revert")?.value("AXEnabled") as? Bool) == true,
+            live.compactMap { $0.string("AXTitle") }.joined(separator: ", "))
+        // Accessibility still lists a hidden alternate, so this one is by eye: not drawn here, and drawn with Option held.
+        Synthetic.key(58, down: true, flags: .maskAlternate)
+        await sleep(300)
+        screenshot("menu-open-option.png", CGRect(x: open.minX - 20, y: 0, width: 420, height: 260))
+        Synthetic.key(58, down: false)
+        await sleep(100)
+        // Choosing: the path the guest will AXPress.
+        events.removeAll()
+        item("Added While Open")?.perform("AXPress")
+        let chosen = await waitFor(2) {
+            has { if case .menuChosen(let path, _) = $0 { path == ["File", "Added While Open"] } else { false } }
+        }
+        check("choosing a mirrored item sends its path", chosen)
+        Synthetic.key(53, down: true)
+        Synthetic.key(53, down: false)
+        await sleep(300)
+        await realAppRoundTrip()
+    }
+
+    /// A real app's check mark, end to end: read it, AXPress the item, read it again, and see which notifications say so.
+    private func realAppRoundTrip() async {
+        guard NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.calculator").isEmpty else {
+            print("SKIP real app round trip: Calculator is already in use")
+            return
+        }
+        _ = command("/usr/bin/open", ["-g", "-a", "Calculator"])
+        await sleep(1500)
+        let watch = try? runHelper(["menu-watch", "--app", "Calculator", "--seconds", "5"])
+        await sleep(600)
+        guard let before = menu(of: "Calculator") else {
+            check("read Calculator", false)
+            return
+        }
+        let view = before.items.first { $0.title == "View" }?.children ?? []
+        let marked = view.first { $0.mark != nil }?.title
+        let other = view.first { $0.mark == nil && ($0.title == "Scientific" || $0.title == "Basic") }?.title
+        report("calculator_view", "marked \(marked ?? "none"), other \(other ?? "none")")
+        if let marked, let other {
+            let pressed = Date()
+            let output = helperOutput(["press", "--app", "Calculator", "--path", "View/\(other)"])
+            report("press", output.trimmingCharacters(in: .whitespacesAndNewlines))
+            let changed = await waitFor(4) {
+                menu(of: "Calculator").flatMap { find(["View", other], in: $0.items) }?.mark != nil
+            }
+            check(
+                "AXPress on a real item changes its check mark", changed,
+                "\(Int(Date().timeIntervalSince(pressed) * 1000)) ms including reads")
+            _ = helperOutput(["press", "--app", "Calculator", "--path", "View/\(marked)"])
+        }
+        if let watch {
+            let text = await finish(watch.0, watch.1, timeout: 6)
+            report("calculator_notifications", text.replacingOccurrences(of: "\n", with: " | "))
+        }
+        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.calculator").first?.terminate()
+    }
+
+    // MARK: The guest's own menu bar
+
+    private func menuBarWindows() -> [String] {
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        return windows.filter { ($0[kCGWindowLayer as String] as? Int) == 24 }.map {
+            let bounds = ($0[kCGWindowBounds as String] as? NSDictionary).flatMap {
+                CGRect(dictionaryRepresentation: $0)
+            }
+            return "\($0[kCGWindowOwnerName as String] ?? "") \(bounds ?? .zero)"
+        }
+    }
+
+    private func menuBarState() async -> String {
+        events.removeAll { if case .menuBarState = $0 { true } else { false } }
+        client?.send(SessionCommand.reportMenuBarState)
+        _ = await waitFor(2) { has { if case .menuBarState = $0 { true } else { false } } }
+        for case .menuBarState(let options, let visible, let top, let left, let right, let width) in events {
+            return
+                "options 0x\(String(options, radix: 16)) bar_visible \(visible) safe_top \(top) notch \(left)...\(right) of \(width)"
+        }
+        return "no reply"
+    }
+
+    private func guestMenuBarMode(pid: pid_t) async {
+        NSRunningApplication(processIdentifier: pid)?.activate()
+        await sleep(400)
+        report("menu_bar_before", await menuBarState())
+        for autoHide in [false, true] {
+            let name = autoHide ? "auto_hide" : "hide"
+            client?.send(SessionCommand.showGuestMenuBar(height: 37, autoHide: autoHide))
+            await sleep(900)
+            report("menu_bar_\(name)", await menuBarState())
+            report("menu_bar_\(name)_windows", menuBarWindows().joined(separator: "; "))
+            screenshot("menu-bar-\(name).png", CGRect(x: 0, y: 0, width: 1512, height: 80))
+            // Clicks at the very top of the screen, where a menu lives.
+            events.removeAll()
+            Synthetic.post(.mouseMoved, CGPoint(x: 200, y: 1))
+            await sleep(900)
+            screenshot("menu-bar-\(name)-hover.png", CGRect(x: 0, y: 0, width: 1512, height: 80))
+            Synthetic.post(.leftMouseDown, CGPoint(x: 200, y: 1))
+            Synthetic.post(.leftMouseUp, CGPoint(x: 200, y: 1))
+            let clicked = await waitFor(1.5) { has { if case .guestMenuBarClicked = $0 { true } else { false } } }
+            check("mode B, \(name): a click at the top of the screen reaches the guest's bar", clicked)
+            report("menu_bar_\(name)_after_hover", await menuBarState())
+            Synthetic.key(53, down: true)
+            Synthetic.key(53, down: false)
+            Synthetic.post(.mouseMoved, CGPoint(x: 700, y: 400))
+            await sleep(400)
+        }
+        // Another app coming forward must get the normal bar back with nothing done here.
+        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first?.activate()
+        await sleep(900)
+        report("menu_bar_other_app_active", await menuBarState())
+        screenshot("menu-bar-other-app.png", CGRect(x: 0, y: 0, width: 1512, height: 80))
+        report("menu_bar_other_app_windows", menuBarWindows().joined(separator: "; "))
+        client?.send(SessionCommand.hideGuestMenuBar)
+        await sleep(300)
     }
 
     // MARK: Drags on the host side

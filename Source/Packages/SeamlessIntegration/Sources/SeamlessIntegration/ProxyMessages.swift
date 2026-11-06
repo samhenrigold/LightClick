@@ -18,6 +18,11 @@ public enum ProxyEvent: Codable, Hashable, Sendable {
     case promiseRequested(id: Int, destination: String)
     case dragOutEnded(accepted: Bool)
     case notificationPosted(error: String?)
+    case guestMenuBarClicked(x: Double, y: Double)
+    /// Facts only the proxy's process can read, for the probe.
+    case menuBarState(
+        presentationOptions: UInt, menuBarVisible: Bool, safeTop: Double, notchLeft: Double, notchRight: Double,
+        screenWidth: Double)
 }
 
 /// What the session process tells a proxy. All of it derives from the guest, so it stays data: a proxy shows it and never
@@ -35,6 +40,10 @@ public enum SessionCommand: Codable, Hashable, Sendable {
     case beginDragOut(names: [String], imagePNG: Data?)
     case promiseFulfilled(id: Int, error: String?)
     /// Until the surfaces land, a plain window that takes drops. `seamless-apps` replaces its content with hosted layers.
+    /// Mode B: the guest's own menu bar in a window over the host's, with the host's hidden while this app is active.
+    case showGuestMenuBar(height: Double, autoHide: Bool)
+    case hideGuestMenuBar
+    case reportMenuBarState
     case showPlaceholderWindow(id: Int, title: String, x: Double, y: Double, width: Double, height: Double)
 }
 

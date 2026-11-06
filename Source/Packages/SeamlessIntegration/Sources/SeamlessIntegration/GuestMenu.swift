@@ -33,6 +33,12 @@ public struct GuestMenuItem: Codable, Hashable, Sendable {
     /// An untitled leaf is how Accessibility reports a separator.
     public var isSeparator: Bool { title.isEmpty && children == nil && key == nil && virtualKey == nil }
 
+    /// What the proxy's menu bar shows: everything but the Apple menu, which stays the host's own. The guest's would offer
+    /// its own About This Mac and Shut Down, which belong in the guest's whole-desktop window, not beside host windows.
+    public static func hostMenuBar(from items: [GuestMenuItem]) -> [GuestMenuItem] {
+        items.first?.title == "Apple" ? Array(items.dropFirst()) : items
+    }
+
     public var keyEquivalent: String {
         if let key, !key.isEmpty { return key.lowercased() == key ? key : key.lowercased() }
         return virtualKey.flatMap { Self.functionKeys[$0] } ?? ""
@@ -112,10 +118,11 @@ public struct GuestMenuMirror {
         menuItem.isEnabled = item.isEnabled
         menuItem.state = item.state
         menuItem.keyEquivalent = item.keyEquivalent
-        menuItem.keyEquivalentModifierMask = item.keyEquivalent.isEmpty ? [] : item.keyModifiers
+        // An alternate may have only modifiers, like System Information under About This Mac.
+        let usesModifiers = !item.keyEquivalent.isEmpty || item.isAlternate == true
+        menuItem.keyEquivalentModifierMask = usesModifiers ? item.keyModifiers : []
         menuItem.representedObject = path
-        // AppKit needs the same key on both for an alternate. An alternate with none stays visible rather than wrong.
-        menuItem.isAlternate = item.isAlternate == true && !item.keyEquivalent.isEmpty
+        menuItem.isAlternate = item.isAlternate == true
         if let children = item.children {
             let submenu = menuItem.submenu ?? GuestMenu(title: item.title)
             submenu.title = item.title

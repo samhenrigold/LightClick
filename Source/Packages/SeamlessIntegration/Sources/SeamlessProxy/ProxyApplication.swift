@@ -3,7 +3,7 @@ import SeamlessIntegration
 @preconcurrency import UserNotifications
 
 @MainActor
-final class ProxyApplication: NSObject, NSApplicationDelegate, ProxyEventSink {
+final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, ProxyEventSink {
     private var socket: LineSocket?
     private var pending: [ProxyEvent] = []
     private var didAskToBoot = false
@@ -12,6 +12,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, ProxyEventSink {
     private var windows: [Int: NSWindow] = [:]
     private var dropViews: [Int: ProxyDropView] = [:]
     private var quitting = false
+    private var guestMenuBar: NSWindow?
 
     private var info: [String: Any] { Bundle.main.infoDictionary ?? [:] }
     private var socketPath: String { info[ProxyBundle.sessionSocketKey] as? String ?? "" }
@@ -95,6 +96,12 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, ProxyEventSink {
                 .beginDragOut(names: names, imagePNG: image)
         case .promiseFulfilled(let id, let error):
             dropViews.values.forEach { $0.promiseFulfilled(id: id, error: error) }
+        case .showGuestMenuBar(let height, let autoHide): showGuestMenuBar(height: height, autoHide: autoHide)
+        case .hideGuestMenuBar:
+            guestMenuBar?.close()
+            guestMenuBar = nil
+            NSApp.presentationOptions = []
+        case .reportMenuBarState: reportMenuBarState()
         case .showPlaceholderWindow(let id, let title, let x, let y, let width, let height):
             showWindow(id: id, title: title, frame: NSRect(x: x, y: y, width: width, height: height))
         }
@@ -102,8 +109,44 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, ProxyEventSink {
 
     private func setMenuBar(_ items: [GuestMenuItem]) {
         let bar = NSApp.mainMenu ?? NSMenu()
-        mirror.apply(items, to: bar)
-        NSApp.mainMenu = bar
+        mirror.apply(GuestMenuItem.hostMenuBar(from: items), to: bar)
+        if NSApp.mainMenu !== bar { NSApp.mainMenu = bar }
+        // AppKit adds its search field to whatever it's told is the Help menu, and that search covers this whole bar.
+        NSApp.helpMenu = bar.items.last?.submenu
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        if let menu = menu as? GuestMenu { send(.menuWillOpen(path: menu.path)) }
+    }
+
+    private func showGuestMenuBar(height: Double, autoHide: Bool) {
+        // AppKit refuses a hidden menu bar without the Dock hidden too, and an auto-hiding one without the Dock at least
+        // auto-hiding, by raising an exception.
+        NSApp.presentationOptions = autoHide ? [.autoHideDock, .autoHideMenuBar] : [.hideDock, .hideMenuBar]
+        guard let screen = NSScreen.screens.first else { return }
+        let frame = NSRect(
+            x: screen.frame.minX, y: screen.frame.maxY - height, width: screen.frame.width, height: height)
+        let window =
+            guestMenuBar ?? NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.setFrame(frame, display: true)
+        window.level = .mainMenu + 1
+        window.backgroundColor = .systemTeal
+        window.isReleasedWhenClosed = false
+        // shortcut: first screen only and fixed height, until the surface crop arrives and multiple displays are tested.
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.contentView = GuestMenuBarView(sink: self)
+        window.orderFrontRegardless()
+        guestMenuBar = window
+    }
+
+    private func reportMenuBarState() {
+        guard let screen = NSScreen.screens.first else { return }
+        send(
+            .menuBarState(
+                presentationOptions: NSApp.currentSystemPresentationOptions.rawValue,
+                menuBarVisible: NSMenu.menuBarVisible(), safeTop: Double(screen.safeAreaInsets.top),
+                notchLeft: Double(screen.auxiliaryTopLeftArea?.maxX ?? 0),
+                notchRight: Double(screen.auxiliaryTopRightArea?.minX ?? 0), screenWidth: Double(screen.frame.width)))
     }
 
     private func showWindow(id: Int, title: String, frame: NSRect) {
@@ -147,7 +190,13 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, ProxyEventSink {
         return false
     }
 
-    func applicationDidBecomeActive(_ notification: Notification) { send(.activated) }
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guestMenuBar?.orderFrontRegardless()
+        send(.activated)
+    }
+
+    /// AppKit restores the host's bar by itself when another app comes forward, but this window would still cover it.
+    func applicationDidResignActive(_ notification: Notification) { guestMenuBar?.orderOut(nil) }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? { dockMenu }
 

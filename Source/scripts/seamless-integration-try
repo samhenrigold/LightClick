@@ -1,0 +1,13 @@
+#!/bin/zsh
+# Runs the seamless-integration guest probe in a throwaway clone, with nobody at the guest: app discovery, the menu through
+# Accessibility, badges, real drags driven by the tablet, transport speeds, and saving a host file in place over NFS.
+# Results print here and go to Build/seamless/. The clone's window is titled "Clone of <machine>".
+#
+#     scripts/seamless-integration-try <app> <machine>
+set -euo pipefail
+source_root=${0:A:h:h}
+app=${1:?usage: seamless-integration-try <app> <machine>}
+machine=${2:?usage: seamless-integration-try <app> <machine>}
+"$source_root/scripts/build-seamless-integration" "$source_root/Build/seamless" 2>/dev/null
+exec "$source_root/scripts/guest-bench" "$app" "$machine" seamless-integration \
+    --driver "$source_root/probes/seamless-integration-driver.py"

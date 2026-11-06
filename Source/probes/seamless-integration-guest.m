@@ -5,11 +5,12 @@
 //
 //     seamless-integration-guest apps                       JSON array of installed apps.
 //     seamless-integration-guest icon --path APP            The app's icon file, in base64.
-//     seamless-integration-guest menu --app NAME            The app's menu as JSON, for GuestMenuItem.
+//     seamless-integration-guest menu --app NAME [--top T]  The app's menu as JSON, for GuestMenuItem.
 //     seamless-integration-guest menu-watch --app NAME --seconds N   Prints the app's menu notifications as they come.
 //     seamless-integration-guest extras --app SystemUIServer  The menu extras.
 //     seamless-integration-guest press --app NAME --path A/B   AXPress on that menu item.
-//     seamless-integration-guest title --app NAME           The app's focused window title.
+//     seamless-integration-guest title --app NAME           The app's windows: titles and frames.
+//     seamless-integration-guest open-file --path P [--with APP]   Opens a file or app, as Finder would.
 //     seamless-integration-guest badge-self [--seconds N]   Sets its own badge and asks for attention, to read from
 //     outside. seamless-integration-guest status --pid PID           What LaunchServices says about that app's badge
 //     and attention. seamless-integration-guest screen                     The main display's size.
@@ -102,8 +103,9 @@ static int runInSession(int argc, char **argv) {
     char self[4096], account[32], target[16];
     uint32_t length = sizeof(self);
     const char *directory = "/private/tmp/lc-seamless", *copy = "/private/tmp/lc-seamless/seamless-integration-guest";
-    mkdir(directory, 0755);
-    chmod(directory, 0755);
+    // The user's run of this tool writes its drag image and promises here, in a throwaway clone.
+    mkdir(directory, 0777);
+    chmod(directory, 0777);
     if (_NSGetExecutablePath(self, &length))
         return 74;
     if (strcmp(self, copy)) {
@@ -262,8 +264,9 @@ static NSDictionary *describeMenuItem(AXUIElementRef item) {
         result[@"virtualKey"] = virtualKey;
     NSNumber *modifiers = attribute(item, CFSTR("AXMenuItemCmdModifiers"));
     result[@"modifiers"] = [modifiers isKindOfClass:NSNumber.class] ? modifiers : @0;
-    // Set on an alternate, naming the item it replaces when Option is held.
-    if (attribute(item, CFSTR("AXMenuItemPrimaryUIElement")))
+    // Every item has one; on an alternate it names the item replaced while Option is held.
+    id primary = attribute(item, CFSTR("AXMenuItemPrimaryUIElement"));
+    if (primary && !CFEqual((__bridge CFTypeRef)primary, item))
         result[@"isAlternate"] = @YES;
     for (id child in axChildren(item))
         if ([attribute((__bridge AXUIElementRef)child, kAXRoleAttribute) isEqual:(__bridge NSString *)kAXMenuRole]) {
@@ -275,7 +278,8 @@ static NSDictionary *describeMenuItem(AXUIElementRef item) {
     return result;
 }
 
-static int dumpMenu(const char *name) {
+// `only` reads one top-level menu, which is what opening it needs, and is far cheaper than the whole bar.
+static int dumpMenu(const char *name, const char *only) {
     NSRunningApplication *app = runningApp(name);
     printf("# trusted %d, %s pid %d\n", AXIsProcessTrusted(), name, app.processIdentifier);
     if (!app)
@@ -290,7 +294,8 @@ static int dumpMenu(const char *name) {
     }
     NSMutableArray *items = [NSMutableArray array];
     for (id child in axChildren((__bridge AXUIElementRef)bar))
-        [items addObject:describeMenuItem((__bridge AXUIElementRef)child)];
+        if (!only || [attribute((__bridge AXUIElementRef)child, kAXTitleAttribute) isEqual:@(only)])
+            [items addObject:describeMenuItem((__bridge AXUIElementRef)child)];
     double elapsed = (now() - start) * 1000;
     printJSON(items);
     printf("# menu_read_ms %.1f items %lu\n", elapsed, (unsigned long)menuItems);
@@ -379,17 +384,41 @@ static int pressMenu(const char *name, const char *path) {
     return error == kAXErrorSuccess ? 0 : 4;
 }
 
-static int printTitle(const char *name) {
+static int printWindows(const char *name) {
     NSRunningApplication *app = runningApp(name);
     if (!app)
         return 2;
     AXUIElementRef element = AXUIElementCreateApplication(app.processIdentifier);
-    NSMutableArray *titles = [NSMutableArray array];
-    for (id window in attribute(element, kAXWindowsAttribute))
-        [titles addObject:attribute((__bridge AXUIElementRef)window, kAXTitleAttribute) ?: @""];
-    printJSON(titles);
+    NSMutableArray *windows = [NSMutableArray array];
+    for (id window in attribute(element, kAXWindowsAttribute)) {
+        AXUIElementRef reference = (__bridge AXUIElementRef)window;
+        CGPoint position = CGPointZero;
+        CGSize size = CGSizeZero;
+        id positionValue = attribute(reference, kAXPositionAttribute),
+           sizeValue = attribute(reference, kAXSizeAttribute);
+        if (positionValue)
+            AXValueGetValue((__bridge AXValueRef)positionValue, kAXValueCGPointType, &position);
+        if (sizeValue)
+            AXValueGetValue((__bridge AXValueRef)sizeValue, kAXValueCGSizeType, &size);
+        [windows addObject:@{
+            @"title" : attribute(reference, kAXTitleAttribute) ?: @"",
+            @"x" : @(position.x),
+            @"y" : @(position.y),
+            @"w" : @(size.width),
+            @"h" : @(size.height)
+        }];
+    }
+    printJSON(windows);
     CFRelease(element);
     return 0;
+}
+
+static int openFile(const char *path, const char *with) {
+    NSString *file = @(path);
+    BOOL opened = with ? [NSWorkspace.sharedWorkspace openFile:file withApplication:@(with)]
+                       : [NSWorkspace.sharedWorkspace openFile:file];
+    printf("opened %d\n", opened);
+    return opened ? 0 : 3;
 }
 
 // MARK: Badge and attention
@@ -705,7 +734,8 @@ int main(int argc, char **argv) {
         setvbuf(stdout, NULL, _IOLBF, 0);
         if (argc < 2) {
             fputs("Usage: seamless-integration-guest "
-                  "apps|icon|menu|menu-watch|extras|press|title|badge-self|status|screen|drag-in|drag-watch|drag-sink "
+                  "apps|icon|menu|menu-watch|extras|press|title|open-file|badge-self|status|screen|drag-in|drag-watch|"
+                  "drag-sink "
                   "...\n",
                   stderr);
             return 64;
@@ -720,7 +750,7 @@ int main(int argc, char **argv) {
         if (!strcmp(command, "icon"))
             return printIcon(option(argc, argv, "--path", ""));
         if (!strcmp(command, "menu"))
-            return dumpMenu(app);
+            return dumpMenu(app, option(argc, argv, "--top", NULL));
         if (!strcmp(command, "menu-watch"))
             return watchMenu(app, seconds);
         if (!strcmp(command, "extras"))
@@ -728,7 +758,9 @@ int main(int argc, char **argv) {
         if (!strcmp(command, "press"))
             return pressMenu(app, option(argc, argv, "--path", ""));
         if (!strcmp(command, "title"))
-            return printTitle(app);
+            return printWindows(app);
+        if (!strcmp(command, "open-file"))
+            return openFile(option(argc, argv, "--path", ""), option(argc, argv, "--with", NULL));
         if (!strcmp(command, "badge-self"))
             return badgeSelf(seconds);
         if (!strcmp(command, "status"))

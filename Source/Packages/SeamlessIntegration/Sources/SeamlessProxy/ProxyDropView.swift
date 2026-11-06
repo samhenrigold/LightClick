@@ -131,3 +131,25 @@ final class ProxyDropView: NSView, NSDraggingSource, NSFilePromiseProviderDelega
             error.map { NSError(domain: "LightClick.Seamless", code: 1, userInfo: [NSLocalizedDescriptionKey: $0]) })
     }
 }
+
+/// Where the crop of the guest's menu bar goes in mode B. The surface comes from `seamless-apps`; this reports where clicks
+/// land, in points from the top left of the screen.
+@MainActor
+final class GuestMenuBarView: NSView {
+    private weak var sink: (any ProxyEventSink)?
+
+    init(sink: any ProxyEventSink) {
+        self.sink = sink
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        sink?.send(.guestMenuBarClicked(x: point.x, y: point.y))
+    }
+}
