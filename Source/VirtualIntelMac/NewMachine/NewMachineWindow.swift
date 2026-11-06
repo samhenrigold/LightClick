@@ -71,6 +71,7 @@ final class NewMachineWindow: NSWindowController, NSWindowDelegate {
                 controller.resetConfigurationUnlessResuming()
                 controller.configuration.show(guest)
             }
+            controller.updateCreateButton()
             controller.window?.contentView = controller.configuration
         }
         if installer == nil, !controller.isBusy, controller.window?.isVisible == false {
@@ -174,7 +175,7 @@ final class NewMachineWindow: NSWindowController, NSWindowDelegate {
             configuration.restore(saved, password: password)
             configuration.show(guest)
             configuration.syncSliders()
-            configuration.createButton.title = "Resume Setup"
+            updateCreateButton()
             progress = SetupProgress(fraction: saved.progress ?? 0)
         } else {
             showChoices()
@@ -242,9 +243,14 @@ final class NewMachineWindow: NSWindowController, NSWindowDelegate {
         progressPage = nil
         resetConfigurationUnlessResuming()
         configuration.show(guest)
+        updateCreateButton()
         sizeWindowForPage()
         window?.contentView = configuration
         configuration.focusEditor()
+    }
+
+    private func updateCreateButton() {
+        configuration.createButton.title = job?.guest == guest ? "Resume Setup" : "Create"
     }
 
     private func resetConfigurationUnlessResuming() {
@@ -444,18 +450,6 @@ final class NewMachineWindow: NSWindowController, NSWindowDelegate {
         }
         guard var job else { return false }
         defer { self.job = job }
-        if automatic {
-            do {
-                try VIMAutomaticSetup.savePassword(password, identifier: job.identifier)
-            } catch {
-                present(CreationIssue(detail: message(for: error)))
-                return false
-            }
-            job.automaticSetup = configuration.automaticSetupProfile(identifier: job.identifier)
-        } else {
-            forgetPassword(of: job)
-            job.automaticSetup = nil
-        }
         if !downloadOnly, installer == nil, job.sourceInstaller == nil, job.media == nil {
             let retained = VIMInstallerAssembly.retainedInstaller(forGuest: guest.rawValue, library: job.libraryURL)
             if let media = retained["Media"] {
@@ -476,6 +470,19 @@ final class NewMachineWindow: NSWindowController, NSWindowDelegate {
         if let issue = job.spaceIssue(freeBytes: (space[.systemFreeSize] as? NSNumber)?.uint64Value ?? 0) {
             present(issue)
             return false
+        }
+        // After the checks above, as nothing would ever remove a password whose new job isn't saved.
+        if automatic {
+            do {
+                try VIMAutomaticSetup.savePassword(password, identifier: job.identifier)
+            } catch {
+                present(CreationIssue(detail: message(for: error)))
+                return false
+            }
+            job.automaticSetup = configuration.automaticSetupProfile(identifier: job.identifier)
+        } else {
+            forgetPassword(of: job)
+            job.automaticSetup = nil
         }
         job.apply(specification)
         if let installer { job.useInstaller(installer) }

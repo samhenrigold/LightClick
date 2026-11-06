@@ -164,8 +164,11 @@ final class ConfigurationPage: AssistantPage {
             remoteLoginSwitch.state = profile.remoteLogin ? .on : .off
             automaticLoginSwitch.state = profile.automaticLogin == true ? .on : .off
             passwordField.stringValue = password ?? ""
-            automaticSetupChanged()
+        } else {
+            // A job only loses its profile when someone turned Automatic Setup off.
+            automaticSwitch.state = .off
         }
+        automaticSetupChanged()
     }
 
     func syncSliders() {
