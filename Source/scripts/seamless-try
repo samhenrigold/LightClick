@@ -8,6 +8,7 @@
 #     scripts/seamless-try input-live <app> <machine> [SECONDS]  The same with your own trackpad, in a host window.
 #     scripts/seamless-try tree <app> <machine> [SECONDS]      Every window of a demo app as its own host window: shadow,
 #                                                              alpha, popover, panel, menu and sheet.
+#     scripts/seamless-try safari <app> <machine> [SECONDS]    A real browser, with an animated page, through the hook.
 #     scripts/seamless-try hook <app> <machine> [SECONDS]      The same tree, by capture and then through a hook loaded
 #                                                              into a 10.9 clone's WindowServer, to compare them.
 #

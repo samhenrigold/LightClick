@@ -153,7 +153,7 @@ def input_live(seconds):
     save(output)
 
 
-def tree(seconds, guest=None, hook=False):
+def tree(seconds, guest=None, hook=False, command=None):
     label = 'with the hook' if hook else 'by capture'
     print(f'== Every window of a demo app, {label}, for {seconds} s', flush=True)
     guest = guest or stage(guest_tool)
@@ -167,7 +167,8 @@ def tree(seconds, guest=None, hook=False):
                                # The demo's Anchor button, on a 10.9 title bar: it adds "clicked" to the title.
                                '--test-input', '365,156'],
                               stdout=subprocess.PIPE, text=True)
-    status, _ = run(guest, ['program-tree', '--port', str(port), '--seconds', str(seconds)] + (['--hook'] if hook else []))
+    status, _ = run(guest, (command or ['program-tree']) + ['--port', str(port), '--seconds', str(seconds)] +
+                    (['--hook'] if hook else []))
     print(f'# guest exit {status}', flush=True)
     try:
         report, _ = viewer.communicate(timeout=30)
@@ -209,10 +210,15 @@ def install_hook():
             print(f'# waiting: {stuck}', flush=True)
             continue
         log = result.get('Stdout') or ''
-        if log.count('-- sample') >= 2 or 'refusing' in log or 'not calling any' in log:
+        if log.count('-- sample') >= 2 or 'refusing' in log or 'not calling any' in log or log.count('== loaded') > 2:
             break
         time.sleep(15)
     (results/f'{tag}.log').write_text(log)
+    if log.count('== loaded') > 1:
+        print(f'# ERROR WindowServer restarted: loaded {log.count("== loaded")} times. Newest crash:')
+        crash = request({'Executable': '/bin/sh', 'Arguments': ['-c', 'cd /Library/Logs/DiagnosticReports && f=$(ls -t WindowServer* | head -1) && '
+                                                                     'sed -n 1,70p "$f"']}, 60)
+        print((crash.get('Stdout') or crash.get('Stderr') or '')[:5000], flush=True)
     state = request({'Executable': '/usr/bin/pgrep', 'Arguments': ['-lx', 'WindowServer']}, 60)
     print(f'# WindowServer: {state.get("Stdout", "").strip() or "NOT RUNNING"}')
     print('\n'.join(log.splitlines()[:6]))
@@ -224,7 +230,7 @@ def hook(seconds):
     # The staging folder doesn't survive a reboot.
     guest = stage(guest_tool)
     tree(seconds, guest)
-    tree(seconds, guest, hook=True)
+    tree(seconds, guest, hook=True, command=['program-tree', '--gl'] if 'gl' in arguments else None)
     log = request({'Executable': '/bin/cat', 'Arguments': ['/var/tmp/seamless-ws-probe.log']}, 120).get('Stdout') or ''
     (results/f'{tag}.log').write_text(log)
 
@@ -256,7 +262,30 @@ def diag():
     print(capture(f'{tag}-frame.png'))
 
 
-if arguments[0] == 'diag':
+def gl():
+    # Does a GL view show on the guest's own display, as opposed to in a capture of its window?
+    guest = stage(guest_tool)
+    copy = 'mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp "$1" /tmp/sg/g; chmod 755 /tmp/sg/g'
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', copy, 'sh', guest]}, 120)
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', '/tmp/sg/g program-gl >/tmp/sg/gl.log 2>&1 &']}, 60)
+    time.sleep(90)
+    print('whole guest frame', capture(f'{tag}-guest-frame.png'), flush=True)
+    r = request({'Executable': '/tmp/sg/g', 'Arguments': ['png-window', '--app', 'seamless-guest', '--out', '/tmp/sg/capture.png']}, 120)
+    print(r.get('Stdout'), r.get('Stderr'))
+    print(request({'Executable': '/bin/cat', 'Arguments': ['/tmp/sg/gl.log']}, 60).get('Stdout'))
+
+
+def safari(seconds):
+    install_hook()
+    guest = stage(guest_tool)
+    tree(seconds, guest, hook=True, command=['tree', '--app', 'Safari', '--open'])
+
+
+if arguments[0] == 'gl':
+    gl()
+elif arguments[0] == 'safari':
+    safari(int(arguments[1]) if len(arguments) > 1 else 22)
+elif arguments[0] == 'diag':
     diag()
 elif arguments[0] == 'stream':
     stream(int(arguments[1]) if len(arguments) > 1 else 20)
@@ -267,6 +296,6 @@ elif arguments[0] == 'input-live':
 elif arguments[0] == 'tree':
     tree(int(arguments[1]) if len(arguments) > 1 else 22)
 elif arguments[0] == 'hook':
-    hook(int(arguments[1]) if len(arguments) > 1 else 22)
+    hook(int(arguments[1]) if len(arguments) > 1 and arguments[1].isdigit() else 22)
 else:
     display(arguments[1:] or default_ladder)

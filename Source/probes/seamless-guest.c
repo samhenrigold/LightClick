@@ -510,15 +510,22 @@ static int darwin_major(void) {
 // window.
 static CGWindowID open_app(const char *app) {
     char note[64];
-    snprintf(note, sizeof(note), "/tmp/seamless-note-%u.txt", getuid());
+    int safari = !strcmp(app, "Safari");
+    snprintf(note, sizeof(note), "/tmp/seamless-note-%u.%s", getuid(), safari ? "html" : "txt");
     FILE *file = fopen(note, "w");
     if (file) {
-        fputs("Seamless window test.\n", file);
+        // A page the browser composites on the GPU, if it does at all: a layer that keeps moving.
+        fputs(safari ? "<title>Seamless page</title><style>@-webkit-keyframes "
+                       "m{to{-webkit-transform:translate3d(400px,0,0)}}"
+                       "div{width:80px;height:80px;background:#28c;-webkit-animation:m 2s infinite alternate}</style>"
+                       "<h1>A page in a guest browser</h1><div></div><p>Some text.</p>\n"
+                     : "Seamless window test.\n",
+              file);
         fclose(file);
     }
     pid_t child = fork();
     if (child == 0) {
-        if (strcmp(app, "TextEdit"))
+        if (strcmp(app, "TextEdit") && !safari)
             execl("/usr/bin/open", "open", "-a", app, (char *)NULL);
         else
             execl("/usr/bin/open", "open", "-a", app, note, (char *)NULL);
@@ -811,6 +818,8 @@ struct TreeWindow {
     uint8_t *hook_rows; // The last backing read from the hook, to find which rows changed.
     uint32_t hook_width, hook_height;
     unsigned captures;
+    uint32_t shadow_key;
+    int margin;
 };
 
 static struct SWSTable *tree_table;
@@ -908,6 +917,155 @@ static int tree_wants(CFDictionaryRef d, const char *app, pid_t pid) {
     return strcmp(owner, "Window Server") && strcmp(owner, "Dock") && strcmp(owner, "SystemUIServer");
 }
 
+#define TREE_ITEMS 128
+// One window to show, from whichever source.
+struct TreeItem {
+    CGWindowID id;
+    pid_t pid;
+    int layer, alpha, margin, has_surfaces;
+    uint32_t shadow_key;
+    CGRect bounds;
+    char title[256], owner[256];
+};
+
+static int tree_item_from_dictionary(CFDictionaryRef d, struct TreeItem *item) {
+    item->id = (CGWindowID)int_for(d, kCGWindowNumber);
+    item->pid = int_for(d, kCGWindowOwnerPID);
+    item->layer = int_for(d, kCGWindowLayer);
+    item->bounds = bounds_for(d);
+    text_for(d, kCGWindowName, item->title, sizeof(item->title));
+    text_for(d, kCGWindowOwnerName, item->owner, sizeof(item->owner));
+    double alpha = 1;
+    CFNumberRef number = number_for(d, kCGWindowAlpha);
+    if (number)
+        CFNumberGetValue(number, kCFNumberDoubleType, &alpha);
+    item->alpha = (int)(alpha * 0x10000);
+    item->margin = TREE_SHADOW_MARGIN;
+    item->has_surfaces = 0;
+    item->shadow_key = 0;
+    return 1;
+}
+
+static int tree_items_from_list(struct TreeItem *items, const char *app, pid_t pid) {
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+                                                 kCGNullWindowID);
+    int count = 0;
+    for (CFIndex i = 0; list && count < TREE_ITEMS && i < CFArrayGetCount(list); i++) {
+        CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
+        if (tree_wants(d, app, pid))
+            tree_item_from_dictionary(d, &items[count++]);
+    }
+    if (list)
+        CFRelease(list);
+    return count;
+}
+
+// Names and titles only exist in the window list, and don't change every frame.
+static struct TreeItem tree_names[TREE_ITEMS];
+static int tree_name_count;
+static double tree_names_read;
+static uint64_t hook_bounds_checked, hook_bounds_wrong, hook_order_checked, hook_order_wrong;
+static int hook_order_front_first = -1;
+
+static const struct TreeItem *tree_name_for(CGWindowID id) {
+    for (int i = 0; i < tree_name_count; i++)
+        if (tree_names[i].id == id)
+            return &tree_names[i];
+    return NULL;
+}
+
+static void tree_read_names(void) {
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+    tree_name_count = 0;
+    for (CFIndex i = 0; list && tree_name_count < TREE_ITEMS && i < CFArrayGetCount(list); i++)
+        tree_item_from_dictionary(CFArrayGetValueAtIndex(list, i), &tree_names[tree_name_count++]);
+    if (list)
+        CFRelease(list);
+    tree_names_read = now();
+}
+
+// The window tree, from WindowServer's own structures. The window list is only read for titles, once a second or for a
+// window it hasn't named yet, and every read is also a check of the hook's bounds and order against the public answer.
+static int tree_items_from_hook(struct TreeItem *items, const char *app, pid_t pid) {
+    static struct SWSTreeEntry tree[SWS_TREE], incoming[SWS_TREE];
+    static uint32_t count;
+    static int (*connection_pid)(int, int *);
+    if (!connection_pid)
+        connection_pid = guest_symbol("CGSConnectionGetPID", "SLSConnectionGetPID");
+    // A walk takes a while under emulation, so a read can miss. Then the last good one stands: an empty answer would
+    // look as if every window had closed.
+    for (int attempt = 0; attempt < 20; attempt++, usleep(500)) {
+        uint32_t before = tree_table->tree_generation;
+        if (before & 1)
+            continue;
+        uint32_t incoming_count = tree_table->tree_count;
+        if (incoming_count > SWS_TREE)
+            continue;
+        memcpy(incoming, tree_table->tree, incoming_count * sizeof(incoming[0]));
+        if (tree_table->tree_generation == before) {
+            memcpy(tree, incoming, incoming_count * sizeof(tree[0]));
+            count = incoming_count;
+            break;
+        }
+    }
+    int reread = now() - tree_names_read > 1;
+    for (uint32_t i = 0; i < count && !reread; i++)
+        reread = tree[i].width > 0 && !tree_name_for(tree[i].id);
+    if (reread) {
+        tree_read_names();
+        // Which way round the walk runs is a fact of this build: settle it from two windows the list also has.
+        for (uint32_t i = 0; hook_order_front_first < 0 && i + 1 < count; i++) {
+            int a = -1, b = -1;
+            for (int k = 0; k < tree_name_count; k++) {
+                a = tree_names[k].id == tree[i].id ? k : a;
+                b = tree_names[k].id == tree[i + 1].id ? k : b;
+            }
+            if (a >= 0 && b >= 0)
+                hook_order_front_first = a < b;
+        }
+        int last = -1;
+        for (uint32_t step = 0; step < count; step++) {
+            const struct SWSTreeEntry *t = &tree[hook_order_front_first == 0 ? count - 1 - step : step];
+            const struct TreeItem *named = tree_name_for(t->id);
+            if (!named)
+                continue;
+            hook_bounds_checked++;
+            hook_bounds_wrong += named->bounds.origin.x != t->x || named->bounds.origin.y != t->y ||
+                                 named->bounds.size.width != t->width || named->bounds.size.height != t->height ||
+                                 named->layer != t->level;
+            int place = (int)(named - tree_names);
+            hook_order_checked++;
+            hook_order_wrong += place < last;
+            last = place;
+        }
+    }
+    int produced = 0;
+    for (uint32_t step = 0; step < count && produced < TREE_ITEMS; step++) {
+        const struct SWSTreeEntry *t = &tree[hook_order_front_first == 0 ? count - 1 - step : step];
+        const struct TreeItem *named = tree_name_for(t->id);
+        if (!named || t->width < 1 || t->height < 1 || t->level < 0)
+            continue;
+        int owner_pid = named->pid;
+        if (connection_pid && !owner_pid)
+            connection_pid((int)t->connection, &owner_pid);
+        if (pid > 0 ? owner_pid != pid
+            : app   ? strcmp(named->owner, app)
+                    : !strcmp(named->owner, "Window Server") || !strcmp(named->owner, "Dock") ||
+                        !strcmp(named->owner, "SystemUIServer"))
+            continue;
+        struct TreeItem *item = &items[produced++];
+        *item = *named;
+        item->pid = owner_pid;
+        item->layer = t->level;
+        item->alpha = (int)(t->alpha * 0x10000);
+        item->bounds = CGRectMake(t->x, t->y, t->width, t->height);
+        item->margin = (int)t->margin + 2;
+        item->has_surfaces = (int)t->has_surfaces;
+        item->shadow_key = t->shadow_key;
+    }
+    return produced;
+}
+
 // With `pid`, only that process's windows. The clock starts at the first window, since an app can take a long time to
 // start under emulation, and a run that sees none says what it did see.
 static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps, double seconds) {
@@ -920,6 +1078,7 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
     unsigned skipped = 0, roster = 0, seed_answers = 0;
     double first_window = 0;
     double started = now();
+    static struct TreeItem items[TREE_ITEMS];
     for (;;) {
         double tick = now();
         if (!roster && tick - started > 180) {
@@ -933,16 +1092,13 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
         }
         if (seconds > 0 && roster && tick - first_window > seconds)
             break;
-        CFArrayRef list = CGWindowListCopyWindowInfo(
-            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+        int item_count = tree_table ? tree_items_from_hook(items, app, pid) : tree_items_from_list(items, app, pid);
         for (int i = 0; i < TREE_MAX_WINDOWS; i++)
             windows[i].seen = 0;
         uint32_t order = 0;
-        for (CFIndex i = 0; list && i < CFArrayGetCount(list); i++) {
-            CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
-            if (!tree_wants(d, app, pid))
-                continue;
-            CGWindowID id = (CGWindowID)int_for(d, kCGWindowNumber);
+        for (int i = 0; i < item_count; i++) {
+            const struct TreeItem *item = &items[i];
+            CGWindowID id = item->id;
             struct TreeWindow *w = NULL;
             for (int k = 0; !w && k < TREE_MAX_WINDOWS; k++)
                 if (windows[k].id == id)
@@ -955,18 +1111,13 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             int fresh = w->id != id;
             w->id = id;
             w->seen = 1;
-            w->pid = int_for(d, kCGWindowOwnerPID);
-            CGRect bounds = bounds_for(d);
-            char title[256], owner[256];
-            text_for(d, kCGWindowName, title, sizeof(title));
-            text_for(d, kCGWindowOwnerName, owner, sizeof(owner));
-            double alpha_value = 1;
-            CFNumberRef alpha_number = number_for(d, kCGWindowAlpha);
-            if (alpha_number)
-                CFNumberGetValue(alpha_number, kCFNumberDoubleType, &alpha_value);
-            int alpha = (int)(alpha_value * 0x10000);
-            int layer = int_for(d, kCGWindowLayer);
-            int moved = !CGRectEqualToRect(bounds, w->bounds), sized = !CGSizeEqualToSize(bounds.size, w->bounds.size);
+            w->pid = item->pid;
+            CGRect bounds = item->bounds;
+            const char *title = item->title, *owner = item->owner;
+            int alpha = item->alpha, layer = item->layer;
+            int margin = item->margin;
+            int moved = !CGRectEqualToRect(bounds, w->bounds),
+                sized = !CGSizeEqualToSize(bounds.size, w->bounds.size) || margin != w->margin;
             uint32_t seed = 0;
             int have_seed = tree_flush_seed && tree_connection && !tree_flush_seed(tree_connection(), id, &seed);
             seed_answers += have_seed;
@@ -975,26 +1126,25 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             struct SWSEntry *entry = tree_table ? &tree_table->slots[w - windows] : NULL;
             if (entry) {
                 entry->id = id;
-                // A capture for the shadow and anything the backing doesn't hold, like GL. Otherwise, only the hook.
+                // A capture only for what the backing doesn't hold: the shadow when it changes, and GL or video always.
                 if (entry->present && !entry->accelerated && entry->width && !fresh && !sized && w->previous)
-                    stale = tick - w->last_capture > 5;
+                    stale = item->has_surfaces || item->shadow_key != w->shadow_key;
             }
             s->window = id;
             s->pid = w->pid;
             s->bounds = bounds;
             s->order = order;
             s->alpha = (uint32_t)alpha;
-            s->margin = TREE_SHADOW_MARGIN;
+            s->margin = margin;
             if (!stale) {
                 skipped++;
-                uint32_t scale = bounds.size.width > 0
-                                     ? (uint32_t)(w->pixel_width / (bounds.size.width + 2 * TREE_SHADOW_MARGIN) + 0.5)
-                                     : 0;
+                uint32_t scale =
+                    bounds.size.width > 0 ? (uint32_t)(w->pixel_width / (bounds.size.width + 2 * margin) + 0.5) : 0;
                 if (entry && scale && entry->sequence != w->hook_sequence &&
                     entry->width == bounds.size.width * scale && entry->height == bounds.size.height * scale) {
                     w->hook_sequence = entry->sequence;
                     double before = now();
-                    uint8_t *pixels = hook_overlay(w, entry, TREE_SHADOW_MARGIN * scale);
+                    uint8_t *pixels = hook_overlay(w, entry, margin * scale);
                     hook_seconds += now() - before;
                     if (pixels) {
                         hook_frames++;
@@ -1010,7 +1160,7 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                     }
                 }
             } else {
-                CGRect rect = CGRectInset(bounds, -TREE_SHADOW_MARGIN, -TREE_SHADOW_MARGIN);
+                CGRect rect = CGRectInset(bounds, -margin, -margin);
                 double before = now();
                 CGImageRef image =
                     CGWindowListCreateImage(rect, kCGWindowListOptionIncludingWindow, id, kCGWindowImageDefault);
@@ -1025,6 +1175,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 w->last_capture = tick;
                 w->captures++;
                 w->seed = seed;
+                w->shadow_key = item->shadow_key;
+                w->margin = margin;
                 if (!pixels) {
                     order++;
                     continue;
@@ -1045,11 +1197,10 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                     }
                     w->announced = 1;
                 }
-                if (entry && entry->present && !entry->accelerated && entry->width) {
-                    uint32_t scale = (uint32_t)(width / (bounds.size.width + 2 * TREE_SHADOW_MARGIN) + 0.5);
+                if (entry && entry->present && !entry->accelerated && entry->width && !item->has_surfaces) {
+                    uint32_t scale = (uint32_t)(width / (bounds.size.width + 2 * margin) + 0.5);
                     if (entry->width == bounds.size.width * scale && entry->height == bounds.size.height * scale) {
-                        hook_compare(pixels, width, TREE_SHADOW_MARGIN * scale, entry,
-                                     tree_table->arena + entry->offset);
+                        hook_compare(pixels, width, margin * scale, entry, tree_table->arena + entry->offset);
                         w->hook_sequence = entry->sequence;
                         free(w->hook_rows);
                         w->hook_rows = malloc((size_t)entry->width * entry->height * 4);
@@ -1093,8 +1244,6 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             }
             order++;
         }
-        if (list)
-            CFRelease(list);
         for (int i = 0; i < TREE_MAX_WINDOWS; i++)
             if (windows[i].id && !windows[i].seen) {
                 uint8_t gone[SWM_HEADER_SIZE + SWM_GONE_SIZE];
@@ -1162,6 +1311,11 @@ done:;
                hook_match_total ? 100.0 * hook_match_good / hook_match_total : 0, hook_match_total);
         printf("hook_passes %llu count\n", tree_table->passes);
         printf("hook_seed_skips %llu count\n", hook_seed_skips);
+        printf("hook_tree_order %s\n", hook_order_front_first == 1   ? "front-first"
+                                       : hook_order_front_first == 0 ? "back-first"
+                                                                     : "unknown");
+        printf("hook_bounds_wrong %llu of %llu\n", hook_bounds_wrong, hook_bounds_checked);
+        printf("hook_order_wrong %llu of %llu\n", hook_order_wrong, hook_order_checked);
         printf("hook_windowserver_time %.2f s\n",
                (double)tree_table->ticks_spent * tree_table->ticks_numer / tree_table->ticks_denom / 1e9);
     }
@@ -1211,6 +1365,31 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(command, "list"))
         return list_windows();
+    if (!strcmp(command, "program-gl") || !strcmp(command, "png-window")) {
+        if (geteuid() == 0 && !in_session)
+            return run_in_console_session(argc, argv, 1);
+        if (!strcmp(command, "png-window")) {
+            CGWindowID window = find_window(app);
+            CGImageRef image = window ? CGWindowListCreateImage(CGRectNull, kCGWindowListOptionIncludingWindow, window,
+                                                                kCGWindowImageDefault)
+                                      : NULL;
+            uint32_t width = 0, height = 0;
+            uint8_t *pixels = image ? copy_pixels(image, &width, &height) : NULL;
+            printf("window %u image %ux%u, middle pixel BGRA", window, width, height);
+            if (pixels) {
+                const uint8_t *m = pixels + ((size_t)height / 2 * width + width / 2) * 4;
+                printf(" %02x%02x%02x%02x", m[0], m[1], m[2], m[3]);
+            }
+            puts("");
+            return 0;
+        }
+        extern int seamless_gl_demo_main(void);
+        return seamless_gl_demo_main();
+    }
+    if (!strcmp(command, "gl-demo")) {
+        extern int seamless_gl_demo_main(void);
+        return seamless_gl_demo_main();
+    }
     if (!strcmp(command, "demo-app")) {
         extern int seamless_demo_app_main(void);
         return seamless_demo_app_main();
@@ -1223,13 +1402,17 @@ int main(int argc, char **argv) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
         alarm(600);
-        pid_t child = 0;
+        pid_t child = 0, gl_child = 0;
         if (demo) {
             char self[PATH_MAX];
             uint32_t length = sizeof(self);
             child = _NSGetExecutablePath(self, &length) ? -1 : fork();
             if (child == 0) {
                 execl(self, "seamless-guest", "demo-app", (char *)NULL);
+                _exit(127);
+            }
+            if (flag(argc, argv, "--gl") && !(gl_child = fork())) {
+                execl(self, "seamless-guest", "gl-demo", (char *)NULL);
                 _exit(127);
             }
         }
@@ -1243,7 +1426,9 @@ int main(int argc, char **argv) {
             swm_put_u32_message(hello, sizeof(hello), SWM_HELLO, SWM_VERSION);
             send_all(s.fd, hello, sizeof(hello));
         }
-        const char *target = flag(argc, argv, "--all") ? NULL : app;
+        const char *target = flag(argc, argv, "--all") ? NULL : gl_child ? "seamless-guest" : app;
+        if (flag(argc, argv, "--open") && !open_app(app))
+            return 1;
         if (flag(argc, argv, "--hook")) {
             int fd = open(SWS_PATH, O_RDWR);
             void *mapped =
@@ -1255,8 +1440,22 @@ int main(int argc, char **argv) {
             } else
                 printf("# ERROR no hook table: %s\n", strerror(errno));
         }
-        int result = stream_tree(&s, target, demo ? child : 0, atof(option(argc, argv, "--fps", "30")),
+        int result = stream_tree(&s, target, demo && !gl_child ? child : 0, atof(option(argc, argv, "--fps", "30")),
                                  atof(option(argc, argv, "--seconds", "20")));
+        if (gl_child > 0) {
+            // A GL app in trouble says where, before it goes.
+            char command_line[128];
+            snprintf(command_line, sizeof(command_line),
+                     "/usr/bin/sample %d 2 -file /tmp/seamless-gl.sample >/dev/null 2>&1", gl_child);
+            system(command_line);
+            FILE *report = fopen("/tmp/seamless-gl.sample", "r");
+            char line[220];
+            for (int i = 0; report && i < 70 && fgets(line, sizeof(line), report); i++)
+                printf("# sample: %s", line);
+            if (report)
+                fclose(report);
+            kill(gl_child, SIGTERM);
+        }
         if (child > 0)
             kill(child, SIGTERM);
         return s.fd < 0 ? 3 : result;

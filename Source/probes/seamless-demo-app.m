@@ -3,6 +3,32 @@
 // keeps changing, to measure a live window; a click on its button and typing into its field show in its title.
 // Built into seamless-guest as `seamless-guest demo-app`.
 #import <Cocoa/Cocoa.h>
+#import <OpenGL/gl.h>
+
+// A GL surface over a window's backing, which WindowServer composites separately: what a backing store alone can't
+// show.
+@interface SeamlessGLView : NSOpenGLView
+@property unsigned frames;
+@end
+@implementation SeamlessGLView
+- (void)drawRect:(NSRect)dirty {
+    if (!self.frames)
+        fputs("gl-demo: first draw\n", stderr);
+    double phase = (double)(++self.frames % 60) / 60;
+    glClearColor(phase, 1 - phase, 0.3, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBegin(GL_TRIANGLES);
+    glColor3f(1, 1, 1);
+    glVertex2f(-0.6, -0.6);
+    glVertex2f(0.6, -0.6);
+    glVertex2f((float)(phase * 2 - 1), 0.7);
+    glEnd();
+    glFlush();
+}
+- (void)tick:(NSTimer *)timer {
+    self.needsDisplay = YES;
+}
+@end
 
 @interface SeamlessDemo : NSObject <NSApplicationDelegate, NSTextFieldDelegate>
 @property(retain) NSWindow *window;
@@ -61,6 +87,22 @@
     [self performSelector:@selector(showPanels) withObject:nil afterDelay:6];
     [self performSelector:@selector(showMenu) withObject:nil afterDelay:9];
     [self performSelector:@selector(showSheet) withObject:nil afterDelay:13];
+}
+- (void)showGL {
+    fputs("gl-demo: making window\n", stderr);
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(60, 480, 240, 180)
+                                                   styleMask:NSTitledWindowMask
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO];
+    window.title = @"OpenGL";
+    NSOpenGLPixelFormatAttribute attributes[] = {NSOpenGLPFADoubleBuffer, NSOpenGLPFAAccelerated, 0};
+    NSOpenGLPixelFormat *format = [[NSOpenGLPixelFormat alloc] initWithAttributes:attributes];
+    fprintf(stderr, "gl-demo: pixel format %p\n", format);
+    SeamlessGLView *view = [[SeamlessGLView alloc] initWithFrame:NSMakeRect(0, 0, 240, 180) pixelFormat:format];
+    fprintf(stderr, "gl-demo: view %p context %p\n", view, view.openGLContext);
+    [window.contentView addSubview:view];
+    [window orderFront:nil];
+    [NSTimer scheduledTimerWithTimeInterval:1.0 / 30 target:view selector:@selector(tick:) userInfo:nil repeats:YES];
 }
 // Opens to the right of a button near the window's right edge, so most of it is past the window.
 - (void)showPopover {
@@ -123,6 +165,26 @@
     [self performSelector:@selector(endSheet:) withObject:alert.window afterDelay:3];
 }
 @end
+
+// Its own process, so that if GL stalls, it doesn't stop the rest of the demo.
+@interface SeamlessGLDemo : NSObject <NSApplicationDelegate>
+@end
+@implementation SeamlessGLDemo
+- (void)applicationDidFinishLaunching:(NSNotification *)note {
+    [[[SeamlessDemo alloc] init] showGL];
+}
+@end
+
+int seamless_gl_demo_main(void) {
+    @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+        SeamlessGLDemo *demo = [[SeamlessGLDemo alloc] init];
+        app.delegate = demo;
+        [app run];
+    }
+    return 0;
+}
 
 int seamless_demo_app_main(void) {
     @autoreleasepool {
