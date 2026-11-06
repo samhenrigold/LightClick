@@ -22,6 +22,14 @@ import Testing
         }
     }
 
+    @Test func onlyAnotherGuestStartsTheConfigurationPageOver() {
+        #expect(NewMachineDefaults.pageStartsOver(pageGuest: nil, jobGuest: nil, guest: .lion))
+        #expect(!NewMachineDefaults.pageStartsOver(pageGuest: .lion, jobGuest: nil, guest: .lion))
+        #expect(NewMachineDefaults.pageStartsOver(pageGuest: .lion, jobGuest: nil, guest: .mojave))
+        #expect(!NewMachineDefaults.pageStartsOver(pageGuest: nil, jobGuest: .lion, guest: .lion))
+        #expect(NewMachineDefaults.pageStartsOver(pageGuest: .tiger, jobGuest: .lion, guest: .mojave))
+    }
+
     @Test func hostLimitsLeaveMemoryAndCapAt64() {
         #expect(host.maximumCores == 10)
         #expect(host.maximumMemoryGiB == 31)
