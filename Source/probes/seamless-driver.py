@@ -415,7 +415,7 @@ def desktop():
 
     def proxy_windows():
         running = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
-        pids = {row.split()[0] for row in running if 'Seamless Apps/' in row}
+        pids = {row.split()[0] for row in running if 'Seamless Apps/' in row and f'Build/bench/{tag}/' in row}
         return [row for row in rows() if re.search(r'pid=(\d+)', row).group(1) in pids and ' 0x0' not in row]
 
     checks = []
