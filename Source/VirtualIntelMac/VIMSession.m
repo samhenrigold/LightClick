@@ -14,10 +14,8 @@
 #import "VIMSMBService.h"
 #import "VIMHostUSB.h"
 #import "VIMLibraryLocation.h"
-#import "VIMGuestInstallation.h"
 #import "VIMInstallerAssembly.h"
 #import "VIMGuestBootPolicy.h"
-#import "VIMGuestProgress.h"
 #import "VIMHostSupport.h"
 #import "VIMPlayButton.h"
 #import "VIMAlerts.h"
@@ -236,9 +234,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property BOOL openGLSetupMediaAttached;
 @property BOOL openGLRestartAttempted;
 @property NSUInteger tabletTrim;
-@property VIMGuestProgress *guestProgress;
 @property NSData *guestStatusTool;
-@property NSTextField *guestStatus;
 @property NSView *setupNotice;
 @property(copy) NSString *setupNoticeHeading;
 @property(copy) NSString *closedSetupNoticeHeading;
@@ -252,14 +248,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property NSDictionary *observedDisplayMode;
 - (void)applyDisplayMode:(NSString *)mode completion:(void (^)(NSDictionary *, NSError *))completion;
 @property(weak) NSWindow *diagnosticAboutWindow;
-@property(nonatomic) BOOL preparationRequested;
-@property(nonatomic) BOOL installationRequested;
 @property BOOL automaticInstallation;
 @property NSArray<NSDate *> *recentGuestReboots;
 @property NSTimer *handoffTimer;
-@property(nonatomic) NSDictionary *completionGuestReport;
-@property BOOL repairArchivePending;
-@property(nonatomic) BOOL preparing;
 @property VIMInstallationActivity *sleepActivity;
 @property NSString *lastGuestMessage;
 @property NSTextField *status;
@@ -377,6 +368,22 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 }
 - (id)controlConnection {
     return self.control;
+}
+- (id)guestAgentConnection {
+    return self.guestAgent;
+}
+- (id)currentSessionState {
+    return self.guestSessionState;
+}
+- (void)logMessage:(NSString *)message {
+    [self logNote:@"%@", message];
+}
+- (void)showHeadlessRepairProgress:(NSString *)message {
+    self.displayView.displaySleeping = YES;
+    self.statePanel.hidden = NO;
+    self.stateAction.hidden = YES;
+    self.stateLabel.stringValue =
+        [message stringByAppendingString:@"\nKeep this Mac running while graphics support is restored."];
 }
 + (NSArray<NSURL *> *)machineURLs {
     NSMutableArray *URLs = [NSMutableArray new];
@@ -2901,239 +2908,16 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         }
     }
     if (policy().mayBeginRepair) {
-        self.state.repairRequested = NO;
-        self.preparing = YES;
-        self.completionGuestReport = nil;
-        void (^beginRepair)(NSError *) = ^(NSError *failure) {
-          self.preparing = NO;
-          if (failure) {
-              self.repairArchivePending = NO;
-              self.state.updateRepairHeld = YES;
-              self.guestStatus.stringValue = failure.localizedDescription;
-              VIMPresentError(failure, self.window);
-              [self scheduleGuestStatusRetry];
-              return;
-          }
-          if (!self.task.running)
-              return;
-          self.state.reconciledBoot = nil;
-          self.preparationRequested = YES;
-          self.installationRequested = YES;
-          [self refreshGuestStatus];
-        };
-        // Imported development VMs may predate transactional installation.
-        // A missing receipt is not a malformed receipt: create a new fully
-        // backed-up transaction, without inventing a successful old outcome.
-        // Existing records must still pass reconciliation before any repair.
-        if ([NSFileManager.defaultManager fileExistsAtPath:installJournal.path]) {
-            self.repairArchivePending = YES;
-            NSDictionary *updated =
-                [self.machine canRepairUpdatedSystemWithGuestReport:report error:nil] ? report : nil;
-            [VIMGuestInstallation checkForRepairWithAgent:self.guestAgent
-                                                  journal:installJournal
-                                            updatedSystem:updated
-                                               completion:beginRepair];
-        } else
-            beginRepair(nil);
+        [self beginRepairWithReport:report];
         return;
     }
     if ([policy()
             needsReconciliationWithJournalExists:[NSFileManager.defaultManager fileExistsAtPath:installJournal.path]]) {
-        self.state.reconciliationAttempts = policy().nextReconciliationAttempt;
-        self.preparing = YES;
-        self.state.reconciledBoot = boot;
-        self.completionGuestReport = nil;
-        NSDictionary *prior = [NSDictionary dictionaryWithContentsOfURL:installJournal];
-        BOOL changed = [VIMMachineModel report:report reconciliationVerifiesAfterRebootWithJournal:prior];
-        __weak VIMSession *weakSession = self;
-        [VIMGuestInstallation
-            reconcileWithAgent:self.guestAgent
-                       journal:installJournal
-             verifyAfterReboot:changed
-                    completion:^(NSDictionary *result, NSError *failure) {
-                      VIMSession *session = weakSession;
-                      if (!session)
-                          return;
-                      session.preparing = NO;
-                      if (!session.task.running)
-                          return;
-                      BOOL verified = !failure && [VIMMachineModel report:report isVerifiedByReconciliation:result];
-                      // Desktop availability can precede Metal readiness. Permit at
-                      // most three read-only checks per boot, separated by the normal
-                      // 60-second timer. Never repeat installation or relax hashes.
-                      if (verified)
-                          session.state.reconciliationAttempts = 3;
-                      if (verified && session.machine.configuration[@"InstallerMedia"]) {
-                          session.completionGuestReport = report;
-                          // The owned backend remains open until shutdown/cleanup,
-                          // but its installer volumes need not stay on the desktop.
-                          __weak VIMSession *weakCurrent = session;
-                          [session.guestAgent ejectEmulatedVolumes:@[
-                              @"/Volumes/macOS Base System", @"/Volumes/Install macOS Mojave",
-                              @"/Volumes/Install macOS Catalina", @"/Volumes/Install macOS Big Sur"
-                          ]
-                                                             while:^BOOL {
-                                                               VIMSession *current = weakCurrent;
-                                                               return current.task.running &&
-                                                                      current.completionGuestReport;
-                                                             }];
-                      }
-                      NSString *message = failure.localizedDescription
-                                              ?: [VIMMachineModel reconciliationMessageForResult:result
-                                                                                        verified:verified];
-                      session.guestStatus.stringValue = message;
-                      [session logNote:@"Reconciliation: %@", message];
-                      // This boot checks no more, so the run could only wait forever.
-                      if (!verified && session.state.reconciliationAttempts >= 3)
-                          VIMFailCreateGuest(message);
-                      // Console discovery may have completed while this read-only
-                      // check held preparing=YES. Resume clipboard provisioning now,
-                      // not at the next minute-long desktop status refresh. Do not
-                      // let a stale callback configure another boot's GUI session.
-                      if ([session.state.reconciledBoot isEqual:boot]) {
-                          [session updateClipboardForBoot:boot];
-                          [session restoreDisplaySelectionForBoot:boot];
-                      }
-                      [session scheduleGuestStatusRefreshAfter:60];
-                    }];
+        [self beginReconciliationWithReport:report];
         return;
     }
     if (policy().mayBeginPreparation) {
-        self.preparationRequested = NO;
-        self.preparing = YES;
-        self.window.subtitle = @"Finishing setup…";
-        NSURL *runtime = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime"];
-        __weak VIMSession *weakSession = self;
-        [VIMGuestPreparation prepareWithAgent:self.guestAgent
-            report:report
-            runtime:runtime
-            journal:[self.machine.URL URLByAppendingPathComponent:@"State/GuestPreparation.plist"]
-            control:self.control
-            allowHeadlessRepair:self.state.verifiedUpdateRepair && ![report[@"DesktopRunning"] isEqual:@YES]
-            progress:^(NSString *progress) {
-              VIMSession *current = weakSession;
-              current.guestStatus.stringValue = progress;
-              if (current.state.verifiedUpdateRepair && ![report[@"DesktopRunning"] isEqual:@YES]) {
-                  current.displayView.displaySleeping = YES;
-                  current.statePanel.hidden = NO;
-                  current.stateAction.hidden = YES;
-                  current.stateLabel.stringValue =
-                      [progress stringByAppendingString:@"\nKeep this Mac running while graphics support is restored."];
-              }
-            }
-            completion:^(NSDictionary *receipt, NSError *failure) {
-              VIMSession *session = weakSession;
-              if (!session)
-                  return;
-              session.preparing = NO;
-              session.window.subtitle = @"";
-              if (!session.task.running)
-                  return;
-              session.guestProgress = [VIMGuestProgress progressWithAgent:session.guestAgent
-                                                                  receipt:receipt[@"GuestProgress"]];
-              BOOL install = session.installationRequested;
-              session.installationRequested = NO;
-              if (install && !failure) {
-                  session.preparing = YES;
-                  session.guestStatus.stringValue = @"Installing graphics support — do not shut down this Mac…";
-                  session.window.subtitle = @"Installing Graphics Drivers…";
-                  if (!session.state.verifiedUpdateRepair)
-                      [session showSetupNoticeAutomatic:NO automaticLogin:NO restarting:NO];
-                  void (^applyPrepared)(NSError *) = ^(NSError *archiveError) {
-                    if (archiveError) {
-                        [session dismissSetupNotice];
-                        session.preparing = NO;
-                        session.window.subtitle = @"";
-                        session.guestStatus.stringValue = archiveError.localizedDescription;
-                        [session.guestProgress
-                            updateMode:@"failed"
-                              fraction:0
-                               message:
-                                   @"The previous installation record could not be preserved. Nothing was installed."
-                            completion:nil];
-                        session.state.updateRepairHeld = YES;
-                        VIMPresentError(archiveError, session.window);
-                        [session scheduleGuestStatusRetry];
-                        return;
-                    }
-                    [VIMGuestInstallation
-                        applyWithAgent:session.guestAgent
-                           preparation:receipt
-                               journal:[session.machine.URL
-                                           URLByAppendingPathComponent:@"State/GuestInstallation.plist"]
-                            completion:^(NSDictionary *outcome, NSError *installError) {
-                              VIMSession *current = weakSession;
-                              if (!current)
-                                  return;
-                              current.preparing = NO;
-                              current.window.subtitle = @"";
-                              [current dismissSetupNotice];
-                              NSString *result = installError.localizedDescription
-                                                     ?: @"Graphics files installed — restart required for verification";
-                              current.guestStatus.stringValue = result;
-                              if (installError) {
-                                  BOOL restored = [outcome[@"Phase"] isEqual:@"rolled-back"];
-                                  [current.guestProgress
-                                      updateMode:restored ? @"failed" : @"working"
-                                        fraction:restored ? 0 : -1
-                                         message:
-                                             restored
-                                                 ? @"Setup couldn’t finish. The original system files were restored."
-                                                 : @"Setup status couldn’t be confirmed. Keep this Mac running and "
-                                                   @"check Session Details in the Light Click app."
-                                      completion:nil];
-                              }
-                              [current logNote:@"Installation: %@", result];
-                              if (installError)
-                                  VIMFailCreateGuest(result);
-                              current.state.reconciledBoot = nil;
-                              switch ([[current statusPolicyForReport:report error:nil]
-                                  followUpAfterInstallation:installError ? nil : outcome
-                                   requiresInstallerDisplay:current.machine.requiresInstallerDisplay]) {
-                                  case VIMInstallationFollowUpHandOff:
-                                      [current handoffToGraphics];
-                                      return;
-                                  case VIMInstallationFollowUpOfferRestart:
-                                      [current offerGraphicsRestart];
-                                      return;
-                                  case VIMInstallationFollowUpKeepPolling:
-                                      break;
-                              }
-                              [current scheduleGuestStatusRefreshAfter:60];
-                              // No unconditional reboot: uncertain outcomes and
-                              // rollback must never be mistaken for success.
-                            }];
-                  };
-                  // Keep the prior valid display handoff until preparation
-                  // succeeds. Otherwise a staging-only failure incorrectly
-                  // turns the next boot back into an unaccelerated installer.
-                  if (session.repairArchivePending) {
-                      session.repairArchivePending = NO;
-                      [VIMGuestInstallation
-                          archiveForRepairWithAgent:session.guestAgent
-                                            journal:[session.machine.URL
-                                                        URLByAppendingPathComponent:@"State/GuestInstallation.plist"]
-                                      updatedSystem:([session.machine canRepairUpdatedSystemWithGuestReport:report
-                                                                                                      error:nil]
-                                                         ? report
-                                                         : nil)completion:applyPrepared];
-                  } else
-                      applyPrepared(nil);
-                  return;
-              }
-              NSString *message = failure.localizedDescription ?: @"Guest files prepared — installation pending";
-              session.guestStatus.stringValue = message;
-              if (!failure)
-                  [session.guestProgress updateMode:@"complete"
-                                           fraction:1
-                                            message:@"Support files are prepared. No system files were installed."
-                                         completion:nil];
-              [session logNote:@"Preparation: %@", message];
-              if (failure)
-                  VIMFailCreateGuest(message);
-              // Explicit request runs once. No automatic retry of uncertain writes.
-              [session scheduleGuestStatusRefreshAfter:60];
-            }];
+        [self beginPreparationWithReport:report];
         return;
     }
     if (policy().needsDesktopServices) {

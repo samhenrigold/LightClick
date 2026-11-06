@@ -6,7 +6,7 @@ import Foundation
 extension GuestAgentBridge {
     private func exit(_ reply: [String: Any]?) -> NSNumber? { reply?["exitcode"] as? NSNumber }
 
-    private func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 0) async throws -> [String: Any]? {
+    func run(_ path: String, _ arguments: [String], timeout: TimeInterval = 0) async throws -> [String: Any]? {
         let reply: GuestReply = try await withCheckedThrowingContinuation { continuation in
             runExecutable(path, arguments: arguments, timeout: timeout) { result, error in
                 if let error {

@@ -3,7 +3,7 @@
 #import "MachineKit-Swift.h"
 #import "VIMGuestAgent.h"
 #import "VIMQMPConnection.h"
-#import "VIMGuestProgress.h"
+#import "GuestControl-Swift.h"
 @interface VIMGuestPreparation ()
 @property VIMGuestAgent *agent;
 @property VIMQMPConnection *control;
@@ -21,11 +21,11 @@
 @property(copy) void (^completion)(NSDictionary *, NSError *);
 @end
 @implementation VIMGuestPreparation
-+ (void)prepareWithAgent:(VIMGuestAgent *)agent
++ (void)prepareWithAgent:(id)agent
                   report:(NSDictionary *)report
                  runtime:(NSURL *)runtime
                  journal:(NSURL *)journal
-                 control:(VIMQMPConnection *)control
+                 control:(id)control
      allowHeadlessRepair:(BOOL)headlessRepair
                 progress:(void (^)(NSString *))progress
               completion:(void (^)(NSDictionary *, NSError *))completion {
