@@ -2324,7 +2324,7 @@ static const char leap_hide_dock[] =
     "  [ -n \"$hide\" ] && back=\"defaults write com.apple.dock autohide -bool $hide\"\n"
     "  back=\"$back; defaults delete com.apple.dock autohide-delay\"\n"
     "  [ -n \"$delay\" ] && back=\"$back; defaults write com.apple.dock autohide-delay -float $delay\"\n"
-    "  back=\"$back; /usr/bin/killall Dock; rm -f $plist; launchctl remove com.mac.virtualintelmac.seamless-restore\"\n"
+    "  back=\"$back; /usr/bin/killall Dock; rm -f $plist; launchctl remove com.mac.virtualintelmac.seamless-restore; true\"\n"
     "  domain=${plist%.plist}\n"
     "  defaults write $domain Label -string com.mac.virtualintelmac.seamless-restore\n"
     "  defaults write $domain RunAtLoad -bool true\n"

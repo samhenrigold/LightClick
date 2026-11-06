@@ -410,7 +410,8 @@ def desktop():
         return subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout.splitlines()
 
     def machine_window():
-        return next((row for row in rows() if f'pid={app_pid} ' in row and 'title="Clone of' in row), None)
+        # AppKit's word: with the Mac's display asleep, WindowServer's list still says a hidden window's on screen.
+        return request({'Action': 'seamless-state'}, 60).get('WindowVisible')
 
     def proxy_windows():
         running = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()

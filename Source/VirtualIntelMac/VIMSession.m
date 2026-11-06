@@ -1995,6 +1995,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         finish(@{@"Arrived" : @(self.displayView.arrivedFrames), @"Distinct" : @(self.displayView.differentFrames)});
         return;
     }
+    if ([command[@"Action"] isEqual:@"seamless-state"]) {
+        finish(@{@"Active" : @([VIMSeamlessHost isActiveFor:self]), @"WindowVisible" : @(self.window.isVisible)});
+        return;
+    }
     if ([command[@"Action"] isEqual:@"seamless-toggle"]) {
         [self toggleSeamless:nil];
         finish(@{@"Active" : @([VIMSeamlessHost isActiveFor:self])});
