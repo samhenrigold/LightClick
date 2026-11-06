@@ -318,25 +318,44 @@ So it is the guest's own spinlock, taken in `vm_fault`, not TLB shootdowns. Stac
 
 ### How long an application takes to start
 
-`probes/app-launch.sh`: `open -a` to a first window, cold being the first launch in a boot, warm the best of two more. 4 vCPUs, one boot of each, on a build with the call lookups and before the code cache's second part. On Mavericks no process we can start gets a window list, so there it is the time to the application reporting it has finished launching, which comes before its window, and the two guests' figures don't compare with each other. Safari was already running at login on Mavericks, so its cold figure means nothing.
+`probes/app-launch.sh`: `open -a` to a first window, cold being the first launch in a boot, warm the best of two more. 4 vCPUs, on 256 views and both parts of the code cache. Engine: the median of 3 boots on Mojave and 2 on Mavericks, range in brackets. TCG: one boot each, so its numbers carry less. Mavericks clones join Finder's audit session to get a window list.
 
 | Mojave, to a window | TCG cold | Engine cold | TCG warm | Engine warm |
 |---|---|---|---|---|
-| Calculator | 7.52 | 2.21 | 2.44 | 0.69 |
-| TextEdit | 7.27 | 1.75 | 2.74 | 0.95 |
-| Notes | 6.78 | 1.86 | 3.63 | 1.14 |
-| Maps | 5.98 | 2.10 | 2.75 | 1.03 |
-| Safari | 6.57 | 2.56 | 3.33 | 1.45 |
-| System Preferences | 5.77 | 1.85 | 2.59 | 0.99 |
+| Calculator | 4.93 | 1.77 (1.70-1.77) | 2.19 | 0.66 (0.63-0.67) |
+| TextEdit | 4.98 | 1.32 (1.28-1.48) | 2.34 | 0.77 (0.75-0.77) |
+| Notes | 5.69 | 2.04 (1.78-2.11) | 3.39 | 0.95 (0.93-0.99) |
+| Maps | 5.45 | 1.55 (1.54-1.61) | 3.20 | 0.90 (0.79-0.93) |
+| Safari | 7.69 | 1.90 (1.78-1.91) | 2.97 | 0.97 (0.92-0.99) |
+| System Preferences | 4.74 | 1.14 (1.11-1.24) | 2.39 | 0.74 (0.73-0.76) |
 
-| Mavericks, to finished launching | TCG cold | Engine cold | TCG warm | Engine warm |
+| Mavericks, to a window | TCG cold | Engine cold | TCG warm | Engine warm |
 |---|---|---|---|---|
-| Calculator | 2.71 | 0.79 | 0.81 | 0.37 |
-| TextEdit | 2.21 | 0.90 | 0.89 | 0.52 |
-| Notes | 3.18 | 1.01 | 0.68 | 0.23 |
-| Maps | 3.12 | 0.90 | 0.62 | 0.28 |
-| System Preferences | 0.71 | 0.33 | 0.65 | 0.34 |
-| Keynote (i386) | 4.32 | 1.25 | 1.80 | 0.92 |
+| Calculator | 3.82 | 0.83 (0.79-0.88) | 0.99 | 0.35 (0.34-0.37) |
+| TextEdit | 5.78 | 1.52 (1.45-1.58) | 1.32 | 0.51 (0.50-0.52) |
+| Notes | 4.56 | 1.09 (1.07-1.11) | 1.02 | 0.38 (0.37-0.38) |
+| Maps | 5.01 | 1.48 (1.46-1.49) | 1.39 | 0.82 (0.79-0.86) |
+| Safari | 1.69 | 0.56 (0.55-0.57) | 1.66 | 0.61 (0.60-0.62) |
+| System Preferences | 1.13 | 0.39 (0.38-0.40) | 1.03 | 0.34 (0.33-0.34) |
+| Keynote (i386) | 5.76 | 1.88 (1.87-1.88) | 2.64 | 1.29 (1.24-1.35) |
+
+Safari on Mavericks has run before the probe reaches it, so its cold is not cold.
+
+**Where a launch goes.** Measured with `probes/launch-profile.sh` and the tally's timeline, whose 2 s rows blur launches together:
+- Disk is not the gap between cold and warm on Mojave: reading the shared cache, the frameworks and the applications beforehand left cold launches where they were (1.45 to 2.04 s, one boot). dtrace's `io` probes showed nothing in either guest, so there is no disk latency figure.
+- Most of the guest's CPUs sit idle. Samples outside `kernel_task` over a 4 s window around a 2 s Calculator launch come to about 1.9 CPU seconds, so a launch is close to one thread's work at a time.
+- Translating: about 300 ms and 150k blocks over a Keynote launch of 1.4 to 2 s, cold or warm, and 100 to 500 ms per 2 s row around Mojave's. About 2 us a block, one vCPU at a time, plus an exit and a link per block whose cost isn't separated. Not measured: how long translated code takes against native. That is probably the largest remainder.
+- Inferred, not tried: warm Keynote translates as much as cold because i386 blocks aren't shared (the i386 shared region isn't in `SHARED_USER_BASE`) and die with their process. Reuse across views would need a dead block's own links undone, since they were made under another view's mappings.
+
+**How many views.** At 64, Mojave evicted 135 views a second and 2.8 of 3.2 million dead blocks died that way. Two boots of each build, alternating, launching seven applications (six on Mojave):
+
+| | Mojave, 64 views | Mojave, 256 | Mavericks, 64 | Mavericks, 256 |
+|---|---|---|---|---|
+| Blocks translated | 6.2M, 6.0M | 3.9M, 3.7M | 3.8M, 3.5M | 2.7M (one boot) |
+| Translation time, s | 11.3, 11.3 | 7.8, 7.0 | 7.1, 6.6 | 5.0 |
+| Second cache part resets | 8, 7 | 2, 2 | 6, 7 | 5 |
+
+Launches gain less than that: summed over Mojave's apps, 20.2 s cold before and 20.5 s after in that alternation, 10.7 s warm before and 10.4 s after, which is within the noise. Mavericks warm gains more (Calculator 0.45 to 0.35, Notes 0.50 to 0.38), but those two weren't alternated. So views are kept for the work they save and for sustained use, not for a launch number.
 
 ### A fast hidden start: resuming a snapshot under the engine
 
