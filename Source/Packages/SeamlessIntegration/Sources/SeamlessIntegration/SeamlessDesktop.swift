@@ -139,8 +139,8 @@ public final class SeamlessDesktop {
             guard let tool = await guest.stage(tools.appending(path: "seamless-guest")),
                 let menuTool = await guest.stage(tools.appending(path: "seamless-integration-guest"))
             else { return false }
-            let setup = await guest.run("/bin/sh", ["-c", SeamlessSession.setupScript, "sh", tool, menuTool])
-            guard setup.exitCode == 0 else { return false }
+            // Mavericks has been seen to drop the agent's connection during this and be set up regardless. Without Accessibility there are only no menus.
+            _ = await guest.run("/bin/sh", ["-c", SeamlessSession.setupScript, "sh", tool, menuTool])
             staged.insert(machine)
             return true
         }

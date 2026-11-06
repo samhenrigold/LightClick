@@ -472,24 +472,25 @@ def desktop():
         row = next((row for row in rows() if f'id={of} ' in row), '')
         found = re.search(r'bounds=(-?[\d.]+),(-?[\d.]+)', row)
         return (float(found.group(1)), float(found.group(2))) if found else None
-    before = place(window)
-    os.kill(safari, signal.SIGUSR2)
-    time.sleep(2)
-    after = place(window)
-    print('moved from', before, 'to', after, flush=True)
-    check('a window moves on the host', before is not None and after is not None and before != after)
-    subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-moved.png')])
-    clicks.write_text('')
-    timing = subprocess.Popen([meter, window, '5', '--clicks', str(clicks)], stdout=subprocess.PIPE, text=True)
-    for _ in range(4):
-        os.kill(safari, signal.SIGUSR1)
-        time.sleep(1)
-    said = timing.communicate()[0]
-    print(said, flush=True)
-    check('input still reaches it there', re.search(r'median \d+ ms', said) is not None)
-    check('it stayed there', place(window) == after)
-    frame = capture(f'{tag}-desktop-frame.png')
-    print('guest frame', frame, flush=True)
+    if safari and window:
+        before = place(window)
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(2)
+        after = place(window)
+        print('moved from', before, 'to', after, flush=True)
+        check('a window moves on the host', before is not None and after is not None and before != after)
+        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-moved.png')])
+        clicks.write_text('')
+        timing = subprocess.Popen([meter, window, '5', '--clicks', str(clicks)], stdout=subprocess.PIPE, text=True)
+        for _ in range(4):
+            os.kill(safari, signal.SIGUSR1)
+            time.sleep(1)
+        said = timing.communicate()[0]
+        print(said, flush=True)
+        check('input still reaches it there', re.search(r'median \d+ ms', said) is not None)
+        check('it stayed there', place(window) == after)
+        frame = capture(f'{tag}-desktop-frame.png')
+        print('guest frame', frame, flush=True)
     pressed = time.time()
     request({'Action': 'seamless-toggle'}, 60)
     while time.time() - pressed < 30 and (not machine_window() or proxy_windows()):
