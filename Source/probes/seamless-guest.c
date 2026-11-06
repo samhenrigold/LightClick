@@ -2598,8 +2598,8 @@ int main(int argc, char **argv) {
         }
         if (option(argc, argv, "--mode", NULL))
             t->gpu_mode = (uint32_t)atoi(option(argc, argv, "--mode", "0"));
-        printf("gpu mode %u scale %g generate %llu composites %llu seconds %.3f\n", t->gpu_mode, t->gpu_scale,
-               t->gpu_generate_calls, t->gpu_composites,
+        printf("gpu mode %u scale %g generate %llu composites %llu whole %llu seconds %.3f\n", t->gpu_mode, t->gpu_scale,
+               t->gpu_generate_calls, t->gpu_composites, t->gpu_whole_composites,
                (double)t->gpu_ticks * t->ticks_numer / t->ticks_denom / 1e9);
         for (uint32_t i = 0; flag(argc, argv, "--rows") && i < t->gpu_row_count; i++) {
             const struct SWSGPURow *r = &t->gpu_rows[i];

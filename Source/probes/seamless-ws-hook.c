@@ -102,7 +102,9 @@ static const char *const wanted_mojave[] = {
     "__ZL37add_connection_to_update_contributorsP13CGXConnectionP20CGXSessionWindowData",
     "_WSGetCompositorMetal",
     "_WSCompositeWindowToDestination",
-    "_CGXCopyScreenOpaqueShapeForWindow"};
+    "_CGXCopyScreenOpaqueShapeForWindow",
+    "_MetalClearRegion",
+    "__ZL23update_display_callbackPvd"};
 static const struct Build {
     const char *release; // Darwin's, as a prefix.
     const char *suffix, *path; // The image with WindowServer's code, by its name when loaded and on disk.
@@ -495,7 +497,10 @@ static void *patch_entry_with(uint8_t *function, const void *entry, const uint8_
     void *back = function + size;
     memcpy(island + size + sizeof(jump), &back, 8);
     vm_address_t page = (vm_address_t)function & ~(vm_address_t)4095;
-    kern_return_t result = vm_protect(mach_task_self(), page, 8192, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    // Executable throughout: in a running WindowServer, something may be in these pages. Their threads are stopped, but
+    // one stopped here would fault on resuming if it can't execute.
+    kern_return_t result =
+        vm_protect(mach_task_self(), page, 8192, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE | VM_PROT_COPY);
     if (result) {
         note("vm_protect failed: %d\n", result);
         return NULL;
@@ -754,7 +759,6 @@ static mach_msg_return_t hook_msg(mach_msg_header_t *msg, mach_msg_option_t opti
                                   mach_msg_size_t receive, mach_port_t port, mach_msg_timeout_t timeout,
                                   mach_port_t notify) {
     between_requests();
-    gpu_compose_damaged(option);
     mach_msg_return_t result = mach_msg(msg, option, send, receive, port, timeout, notify);
     note_request(msg, option, result);
     return result;
@@ -763,7 +767,6 @@ static mach_msg_return_t hook_overwrite(mach_msg_header_t *msg, mach_msg_option_
                                         mach_msg_size_t receive, mach_port_t port, mach_msg_timeout_t timeout,
                                         mach_port_t notify, mach_msg_header_t *rcv, mach_msg_size_t limit) {
     between_requests();
-    gpu_compose_damaged(option);
     mach_msg_return_t result = mach_msg_overwrite(msg, option, send, receive, port, timeout, notify, rcv, limit);
     note_request(rcv ? rcv : msg, option, result);
     return result;
@@ -780,20 +783,25 @@ __attribute__((used)) static struct {
 __attribute__((constructor)) static void start(void) {
     logfd = open("/var/tmp/seamless-ws-probe.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     note("== loaded into pid %d, %s\n", getpid(), getprogname());
-    main_thread = pthread_self();
+    main_thread = pthread_main_np() ? pthread_self() : main_thread;
     next_sample = time(NULL) + 60;
     // Only WindowServer: launchd's environment can reach other programs on this clone.
     if (!strcmp(getprogname(), "WindowServer")) {
         ready = resolve_symbols();
         tree_in_gl = !access("/var/tmp/seamless-ws-gl-tree", F_OK);
+        note("loaded on %s thread\n", pthread_main_np() ? "the main" : "another");
         note("tree in GL: %d\n", tree_in_gl);
         if (ready && tree_in_gl && build->full) {
             seamless_layer_continue = patch_entry(resolved[18], seamless_layer_entry);
             note("patched: %p\n", seamless_layer_continue);
         }
-        unlink(SWS_PATH);
-        int fd = open(SWS_PATH, O_RDWR | O_CREAT, 0666);
-        if (fd >= 0 && !fchmod(fd, 0666) && !ftruncate(fd, sizeof(struct SWSTable))) {
+        // Loaded into a running WindowServer, by probes/seamless-ws-inject.c: it's sandboxed by now, so the injector
+        // has made the table for it.
+        int injected = !getenv("DYLD_INSERT_LIBRARIES");
+        if (!injected)
+            unlink(SWS_PATH);
+        int fd = open(SWS_PATH, injected ? O_RDWR : O_RDWR | O_CREAT, 0666);
+        if (fd >= 0 && (injected || (!fchmod(fd, 0666) && !ftruncate(fd, sizeof(struct SWSTable))))) {
             void *mapped = mmap(NULL, sizeof(struct SWSTable), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
             if (mapped != MAP_FAILED) {
                 table = mapped;
