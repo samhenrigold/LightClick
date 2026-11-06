@@ -368,6 +368,13 @@ def windowed(seconds):
     last = request({'Action': 'display-frames'}, 60)
     spent = time.time() - started
     print(f'windowed_frames {(last.get("Arrived", 0) - first.get("Arrived", 0)) / spent:.1f} /s', flush=True)
+    # And what its window really shows, by that one window's ID.
+    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+    app_pid = next((row.split()[0] for row in listing.splitlines() if f'Build/bench/{tag}/' in row and 'Contents/MacOS/Light Click' in row), '0')
+    windows = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
+    window = next((re.search(r'id=(\d+)', row).group(1) for row in windows.splitlines() if f'pid={app_pid} ' in row and 'title="Clone of' in row), None)
+    if window:
+        print('windowed_' + subprocess.run([str(results/'seamless-present-meter'), window, str(seconds)], capture_output=True, text=True).stdout.strip(), flush=True)
     print(f'windowed_distinct {(last.get("Distinct", 0) - first.get("Distinct", 0)) / spent:.1f} /s', flush=True)
 
 

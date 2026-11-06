@@ -384,6 +384,7 @@ public final class SeamlessSession {
         tellProxy(surface)
         if let stopAfter, measuring == nil {
             measuring = (CFAbsoluteTimeGetCurrent(), arrived, distinctFrames?() ?? 0)
+            note("# first window")
             // Past the window's opening, then over the same time windowed mode was measured for.
             DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter - 22) {
                 MainActor.assumeIsolated {

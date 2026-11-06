@@ -66,11 +66,28 @@ def session(label, extra):
     subprocess.run(['/usr/bin/open', '-g', '--env', f'CFFIXED_USER_HOME={home}', '--env', 'LC_SEAMLESS_QUIET=1', '--env', 'VIM_COUNT_DISTINCT_FRAMES=1', '--env', 'LC_SEAMLESS_STOP_AFTER=45',
                     *[item for pair in extra for item in ('--env', pair)], '-a', bundle, str(page)], check=True)
     deadline = time.time()+900
+    metered = False
+    seen = {}
+
+    def first_seen(text):
+        return seen.setdefault('at', time.time())
+
     said = ''
     while time.time() < deadline:
         said = log.read_text(errors='replace') if log.exists() else ''
         if 'guest\'s side ended' in said:
             break
+        # The same meter as windowed's, on this one window, over the session's own measuring time.
+        if '# first window' in said and not metered and time.time() - first_seen(said) > 18:
+            proxies = running(f'{bundle}/Contents/MacOS/SeamlessProxy')
+            pid = proxies[0].split()[0] if proxies else '0'
+            listing = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
+            rows = [line for line in listing.splitlines() if f'pid={pid} ' in line and ' 0x0' not in line]
+            if rows:
+                metered = True
+                presented = subprocess.run([str(results/'seamless-present-meter'), re.search(r'id=(\d+)', rows[0]).group(1), '22'],
+                                           capture_output=True, text=True).stdout.strip()
+                print(f'seamless_{presented}', flush=True)
         # While it's showing: this app's windows only, never the whole screen.
         proxies = running(f'{bundle}/Contents/MacOS/SeamlessProxy')
         if proxies and 'running Safari' in said and not (results/f'seamless-compare-{tag}-{label}.png').exists():

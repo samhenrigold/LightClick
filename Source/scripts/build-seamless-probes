@@ -16,6 +16,8 @@ xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-d
   -framework AppKit -framework QuartzCore -framework ScreenCaptureKit \
   "$source_root/probes/seamless-viewer.m" -o "$output/seamless-viewer"
 codesign --force --sign - "$output/seamless-viewer"
+xcrun swiftc -O -swift-version 5 "$source_root/probes/seamless-present-meter.swift" -o "$output/seamless-present-meter"
+codesign --force --sign - "$output/seamless-present-meter"
 # Without ARC, which would need libarclite at this deployment target. It's gone from current SDKs.
 xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations \
   -framework AppKit -framework Carbon "$source_root/probes/seamless-input-guest.m" -o "$output/seamless-input-guest"
