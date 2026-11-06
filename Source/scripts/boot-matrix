@@ -493,7 +493,7 @@ class Boot:
         self.evidence.mkdir(parents=True, exist_ok=True)
         sources = {'tally.txt': self.tally, 'launch.json': self.work/'launch.json', 'app.log': self.work/'app.log'}
         if hasattr(self, 'machine'):
-            sources |= {'session.log': self.session_log, 'GuestStatus.plist': self.machine/'State/GuestStatus.plist'}
+            sources |= {'NVRAM.fd': self.machine/'Firmware/NVRAM.fd', 'session.log': self.session_log, 'GuestStatus.plist': self.machine/'State/GuestStatus.plist'}
         for name in names:
             if name in sources and sources[name].is_file():
                 shutil.copyfile(sources[name], self.evidence/name)
@@ -533,6 +533,8 @@ class Boot:
         if failures or self.options.keep_passed:
             try:
                 self.keep(('tally.txt', 'session.log', 'launch.json', 'app.log', 'GuestStatus.plist'))
+                if failures:
+                    self.keep(('NVRAM.fd',))  # a guest's panic text, if it got that far: aapl,panic-info
             except OSError as error:
                 failures.append(f'keeping evidence failed: {error}')
         if left:
