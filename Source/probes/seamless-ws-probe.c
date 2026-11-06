@@ -40,9 +40,19 @@ static void *(*window_by_id)(uint32_t);
 static char (*window_has_shadow)(void *);
 static char (*backing_is_accelerated)(void *);
 static uint32_t (*backing_row_bytes)(void *, uint64_t);
-static const char *const wanted[] = {"_CGXWindowByID", "_CGXWindowHasShadow", "_CGXBackingStoreIsAccelerated",
-                                     "_CGXBackingStoreRowBytes"};
-static void *resolved[4];
+static uint32_t (*backing_width)(void *), (*backing_height)(void *), (*backing_bits)(void *);
+static char (*backing_has_alpha)(void *);
+static void *(*backing_data)(void *, uint64_t, uint64_t);
+static const char *const wanted[] = {"_CGXWindowByID",
+                                     "_CGXWindowHasShadow",
+                                     "_CGXBackingStoreIsAccelerated",
+                                     "_CGXBackingStoreRowBytes",
+                                     "_CGXBackingStoreWidth",
+                                     "_CGXBackingStoreHeight",
+                                     "_CGXBackingStoreBitsPerPixel",
+                                     "_CGXBackingStoreHasAlpha",
+                                     "_CGXBackingStoreDataIndexed"};
+static void *resolved[9];
 
 static const struct mach_header_64 *loaded_coregraphics(void) {
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
@@ -129,6 +139,11 @@ static int resolve_symbols(void) {
     window_has_shadow = resolved[1];
     backing_is_accelerated = resolved[2];
     backing_row_bytes = resolved[3];
+    backing_width = resolved[4];
+    backing_height = resolved[5];
+    backing_bits = resolved[6];
+    backing_has_alpha = resolved[7];
+    backing_data = resolved[8];
     note("symbols resolved: CGXWindowByID at %p\n", (void *)window_by_id);
     return 1;
 }
@@ -150,9 +165,20 @@ static void sample(void) {
         count++;
         void *backing = *(void **)(window + 0x108);
         int accelerated = backing ? backing_is_accelerated(backing) : 0;
-        note("window %u at %p shadow=%d noshadowflag=%d backing=%p accelerated=%d rowbytes=%u\n", id, window,
-             window_has_shadow(window), window[0x9d], backing, accelerated,
-             backing ? backing_row_bytes(backing, 1) : 0);
+        uint32_t width = backing ? backing_width(backing) : 0, height = backing ? backing_height(backing) : 0;
+        uint32_t row = backing ? backing_row_bytes(backing, 1) : 0;
+        const uint8_t *data = backing ? backing_data(backing, 1, 0) : NULL;
+        note("window %u at %p shadow=%d noshadowflag=%d backing=%p %ux%u bits=%u alpha=%d rowbytes=%u accelerated=%d "
+             "data=%p",
+             id, window, window_has_shadow(window), window[0x9d], backing, width, height,
+             backing ? backing_bits(backing) : 0, backing ? backing_has_alpha(backing) : 0, row, accelerated, data);
+        // Is the memory really there, and is it the picture? Corners of a window are clear; its middle isn't.
+        if (data && row && height && width) {
+            const uint8_t *middle = data + (size_t)row * (height / 2) + (size_t)(width / 2) * 4;
+            note(" middle=%02x%02x%02x%02x first=%02x%02x%02x%02x", middle[0], middle[1], middle[2], middle[3], data[0],
+                 data[1], data[2], data[3]);
+        }
+        note("\n");
         // Raw structures, for working out the rest offline. A few per sample is plenty.
         if (backing && dumped < 3 && total_samples == 2) {
             dumped++;

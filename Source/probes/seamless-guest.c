@@ -83,21 +83,6 @@ static CFIndex visible_windows(void) {
     return count;
 }
 
-// On 10.9 a plain tool's window list stays empty until something opens its connection to WindowServer. This says which
-// step did it, so a guest that differs is visible in the output.
-static void connect_window_server(void) {
-    extern signed char NSApplicationLoad(void);
-    printf("# windows visible: at start %ld", (long)visible_windows());
-    CGDisplayBounds(CGMainDisplayID());
-    printf(", after CGMainDisplayID %ld", (long)visible_windows());
-    CGEventRef event = CGEventCreate(NULL);
-    if (event)
-        CFRelease(event);
-    printf(", after CGEventCreate %ld", (long)visible_windows());
-    NSApplicationLoad();
-    printf(", after NSApplicationLoad %ld (uid %d)\n", (long)visible_windows(), getuid());
-}
-
 static int list_windows(void) {
     CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
     if (!windows) {
@@ -487,9 +472,11 @@ static int stream(struct Stream *s, double fps, double run_seconds) {
         }
         // Sleep to the next tick, waking at once for input, which is what keeps clicks responsive.
         for (;;) {
+            // At least one look per tick: a capture longer than a tick would otherwise starve input entirely.
             double left = tick + 1 / fps - now();
-            if (left <= 0)
-                break;
+            int last_look = left <= 0;
+            if (last_look)
+                left = 0;
             if (s->fd < 0) {
                 usleep((useconds_t)(left * 1e6));
                 break;
@@ -501,6 +488,8 @@ static int stream(struct Stream *s, double fps, double run_seconds) {
             int ready = select(s->fd + 1, &reads, NULL, NULL, &timeout);
             if (ready > 0 && drain_input(s))
                 return 0;
+            if (last_look && ready <= 0)
+                break;
         }
     }
 }
@@ -801,8 +790,9 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 // its guest position, whether or not something covers it. This uses only WindowServer's client interface, so it needs
 // no hook; seamless-apps-design.md says what a hook adds. It's the source a hook would replace.
 #define TREE_MAX_WINDOWS 64
-// Comfortably wider than a 10.9 window shadow, so the capture rectangle holds all of it and its position is known.
-#define TREE_SHADOW_MARGIN 48
+// Wider than an active 10.9 window shadow, which 48 points clipped [measured], so the capture rectangle holds all of it
+// and its position is known.
+#define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
     CGWindowID id;
@@ -1008,9 +998,11 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 memset(&windows[i], 0, sizeof(windows[i]));
             }
         for (;;) {
+            // At least one look per tick: a capture longer than a tick would otherwise starve input entirely.
             double left = tick + 1 / fps - now();
-            if (left <= 0)
-                break;
+            int last_look = left <= 0;
+            if (last_look)
+                left = 0;
             if (s->fd < 0) {
                 usleep((useconds_t)(left * 1e6));
                 break;
@@ -1019,8 +1011,11 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             FD_ZERO(&reads);
             FD_SET(s->fd, &reads);
             struct timeval timeout = {(time_t)left, (int)((left - (time_t)left) * 1e6)};
-            if (select(s->fd + 1, &reads, NULL, NULL, &timeout) > 0 && drain_input(s))
+            int ready = select(s->fd + 1, &reads, NULL, NULL, &timeout);
+            if (ready > 0 && drain_input(s))
                 goto done;
+            if (last_look && ready <= 0)
+                break;
         }
     }
 done:;
@@ -1071,7 +1066,7 @@ int main(int argc, char **argv) {
         memset(&audit, 0, sizeof(audit));
         getaudit_addr(&audit, sizeof(audit));
         printf("# audit session %d\n", audit.ai_asid);
-        connect_window_server();
+        printf("# windows visible %ld\n", (long)visible_windows());
         int (*main_connection)(void) = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
         CGRect bounds = CGDisplayBounds(CGMainDisplayID());
         printf("# connection %d, display %u, %gx%g\n", main_connection ? main_connection() : -1, CGMainDisplayID(),
@@ -1093,7 +1088,6 @@ int main(int argc, char **argv) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
         alarm(600);
-        connect_window_server();
         pid_t child = 0;
         if (demo) {
             char self[PATH_MAX];
@@ -1131,7 +1125,6 @@ int main(int argc, char **argv) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
         alarm(600); // Partial results beat the agent timing out and losing them all.
-        connect_window_server();
         if (!strcmp(command, "program"))
             return program(app, option(argc, argv, "--host", "10.0.2.2"), atoi(option(argc, argv, "--port", "7654")),
                            atof(option(argc, argv, "--fps", "30")), atof(option(argc, argv, "--seconds", "20")));
@@ -1147,7 +1140,6 @@ int main(int argc, char **argv) {
     if (!strcmp(command, "place")) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 0);
-        connect_window_server();
         const char *slot = option(argc, argv, "--slot", NULL);
         if (!slot && !(option(argc, argv, "--x", NULL) && option(argc, argv, "--y", NULL)))
             return 64;

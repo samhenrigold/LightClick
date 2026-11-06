@@ -326,18 +326,45 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
     if (reordered)
         [self reorderWindows];
 }
-// What the host's screen really shows around these windows, against whatever is behind them. Needs Screen Recording.
+// What these windows look like together: every window's exact pixels at its position, level and order, over gray. It's
+// composed here, not read from the screen, so it works with the host's display asleep.
 - (void)takeScreenshot {
+    NSArray<GuestWindow *> *sorted =
+        [self.windows.allValues sortedArrayUsingComparator:^NSComparisonResult(GuestWindow *a, GuestWindow *b) {
+          uint32_t x = ((GuestView *)a.contentView).order, y = ((GuestView *)b.contentView).order;
+          if (a.level != b.level)
+              return a.level < b.level ? NSOrderedAscending : NSOrderedDescending;
+          return x > y ? NSOrderedAscending : x < y ? NSOrderedDescending : NSOrderedSame;
+        }];
     NSRect all = NSZeroRect;
-    CGFloat primary = NSScreen.screens.firstObject.frame.size.height;
-    for (GuestWindow *window in self.windows.allValues)
+    for (GuestWindow *window in sorted)
         all = NSIsEmptyRect(all) ? window.frame : NSUnionRect(all, window.frame);
     static unsigned shot;
     if (!NSIsEmptyRect(all)) {
+        CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+        CGContextRef context =
+            CGBitmapContextCreate(NULL, (size_t)all.size.width * 2, (size_t)all.size.height * 2, 8, 0, space,
+                                  kCGBitmapByteOrder32Little | (CGBitmapInfo)kCGImageAlphaPremultipliedFirst);
+        CGColorSpaceRelease(space);
+        CGContextSetGrayFillColor(context, 0.72, 1);
+        CGContextFillRect(context, CGRectMake(0, 0, all.size.width * 2, all.size.height * 2));
+        CGContextScaleCTM(context, 2, 2);
+        for (GuestWindow *window in sorted) {
+            CGImageRef image = (__bridge CGImageRef)window.contentView.layer.contents;
+            if (!image)
+                continue;
+            CGContextSetAlpha(context, window.alphaValue);
+            CGContextDrawImage(context,
+                               CGRectMake(NSMinX(window.frame) - NSMinX(all), NSMinY(window.frame) - NSMinY(all),
+                                          window.frame.size.width, window.frame.size.height),
+                               image);
+        }
+        CGImageRef composed = CGBitmapContextCreateImage(context);
+        CGContextRelease(context);
+        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:composed];
         NSString *path = [screenshotPrefix stringByAppendingFormat:@"-%02u.png", shot++];
-        NSString *region = [NSString stringWithFormat:@"%d,%d,%d,%d", (int)NSMinX(all), (int)(primary - NSMaxY(all)),
-                                                      (int)all.size.width, (int)all.size.height];
-        [NSTask launchedTaskWithLaunchPath:@"/usr/sbin/screencapture" arguments:@[ @"-x", @"-R", region, path ]];
+        [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES];
+        CGImageRelease(composed);
     }
     [self performSelector:@selector(takeScreenshot) withObject:nil afterDelay:3];
 }
