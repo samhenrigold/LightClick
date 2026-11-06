@@ -314,6 +314,21 @@ static void fuzz(void) {
     }
 }
 
+static void menus(void) {
+    uint8_t out[64];
+    struct SWMMessage m;
+    size_t used;
+    swm_header(out, SWM_MENU_PRESS, 6);
+    memcpy(out + SWM_HEADER_SIZE, "File/A", 6);
+    every_prefix_needs_more(out, SWM_HEADER_SIZE + 6);
+    assert(swm_parse(out, SWM_HEADER_SIZE + 6, &m, &used) == SWM_OK && m.type == SWM_MENU_PRESS);
+    assert(m.u.data.length == 6 && !memcmp(m.u.data.bytes, "File/A", 6));
+    swm_header(out, SWM_MENU, 0); // Empty.
+    assert(swm_parse(out, SWM_HEADER_SIZE, &m, &used) == SWM_BAD);
+    swm_header(out, SWM_MENU, SWM_MAX_MENU + 1); // Lying, judged from the header alone.
+    assert(swm_parse(out, SWM_HEADER_SIZE, &m, &used) == SWM_BAD);
+}
+
 static void slots(void) {
     struct SWMSlotLayout l = {8192, 4608, 1600, 1200, 64};
     int x, y;
@@ -342,6 +357,7 @@ static void slots(void) {
 }
 
 int main(void) {
+    menus();
     slots();
     round_trips();
     input_round_trips();

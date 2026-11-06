@@ -1,9 +1,13 @@
 # Host side of scripts/seamless-try. Runs inside scripts/guest-bench, which supplies arguments, channel, request, source,
 # stage and tag, and has already booted the clone.
+import base64
+import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
+import threading
 import time
 
 results = source/'Build/seamless'
@@ -287,7 +291,77 @@ def motion():
     tree(32, guest, hook=True, command=['program-tree', '--gl'])
 
 
-if arguments[0] == 'motion':
+def proxy(seconds):
+    # One guest app as a host app: a generated .app with its own Dock tile, its windows, its menu and its input, with the VM
+    # hidden. The Mac's display may be asleep, so what's checked is what WindowServer and LaunchServices report.
+    install_hook()
+    guest = stage(guest_tool)
+    tool = stage(results/'seamless-integration-guest')
+    setup = (f'mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp "$1" /tmp/sg/g; cp "$2" /tmp/sg/ig; chmod 755 /tmp/sg/g /tmp/sg/ig; '
+             '/usr/bin/sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "'
+             + ' '.join(f"INSERT OR REPLACE INTO access (service,client,client_type,allowed,prompt_count) VALUES "
+                        f"('kTCCServiceAccessibility','{client}',1,1,1);"
+                        for client in ('/tmp/sg/ig', '/tmp/sg/g', '/usr/bin/sudo', '/usr/bin/env')) +
+             '"; /usr/bin/killall tccd; sleep 2')
+    print(request({'Executable': '/bin/sh', 'Arguments': ['-c', setup, 'sh', guest, tool]}, 120), flush=True)
+    apps = request({'Executable': '/tmp/sg/ig', 'Arguments': ['apps']}, 300).get('Stdout', '')
+    line = next((l for l in apps.splitlines() if l.startswith('[')), '[]')
+    (results/f'{tag}-apps.json').write_text(line)
+    icon = base64.b64decode(request({'Executable': '/tmp/sg/ig', 'Arguments': ['icon', '--path', '/Applications/TextEdit.app']}, 300).get('Stdout', '').strip() or b'')
+    (results/f'{tag}.icns').write_bytes(icon)
+    socket_path = f'/tmp/lc-seamless-{os.getpid()}.sock'
+    bundles = results/'proxies'
+    shutil.rmtree(bundles, ignore_errors=True)
+    made = subprocess.run([str(results/'SeamlessMakeProxy'), 'write', str(results/f'{tag}-apps.json'), 'TextEdit', 'clone', 'Mavericks', '/nonexistent',
+                           str(bundles), str(results/'SeamlessProxy'), socket_path, str(results/f'{tag}.icns')], capture_output=True, text=True)
+    print('# proxy:', made.stdout, made.stderr, flush=True)
+    bundle = made.stdout.strip()
+    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+    app_pid = next((line.split()[0] for line in listing.splitlines() if f'Build/bench/{tag}/' in line and 'Contents/MacOS/Light Click' in line), '0')
+    port = free_port()
+    prefix = results/f'{tag}-window'
+    for old in list(results.glob(f'{tag}-window-*.png')) + list(results.glob(f'{tag}-screen-*.png')):
+        old.unlink()
+    viewer = subprocess.Popen([str(results/'seamless-viewer'), '--tree', '--port', str(port), '--exit-after', str(seconds + 5), '--png', str(prefix),
+                               '--screenshots', str(results/f'{tag}-screen'), '--session-socket', socket_path, '--hide-pid', app_pid,
+                               '--test-input', '200,100', '--test-menu', 'Edit/Select All'], stdout=subprocess.PIPE, text=True)
+    time.sleep(1)
+    subprocess.run(['/usr/bin/open', bundle], check=True)
+    evidence = []
+
+    def look():
+        time.sleep(seconds * 0.7)
+        rows = subprocess.run(['/bin/sh', '-c', 'lsappinfo list | grep -A4 "TextEdit (Mavericks)"'], capture_output=True, text=True).stdout
+        evidence.append(rows)
+        windows = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
+        evidence.append('\n'.join(w for w in windows.splitlines() if 'TextEdit (' in w or f'pid={app_pid} ' in w))
+        evidence.append(f'(VM app pid {app_pid}: any row above with it is still on screen)')
+
+    watcher = threading.Thread(target=look)
+    watcher.start()
+    status, _ = run(guest, ['tree', '--app', 'TextEdit', '--open', '--hook', '--menu-tool', '/tmp/sg/ig', '--port', str(port), '--seconds', str(seconds)])
+    watcher.join()
+    print(f'# guest exit {status}', flush=True)
+    try:
+        report, _ = viewer.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        viewer.terminate()
+        report, _ = viewer.communicate()
+    print(f'== Session on the host, exit {viewer.returncode}')
+    print(report)
+    print('== What the host reports about the proxy')
+    print('\n'.join(evidence), flush=True)
+    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+    for row in listing.splitlines():
+        if f'{bundle}/Contents/MacOS/SeamlessProxy' in row:
+            os.kill(int(row.split()[0]), signal.SIGKILL)
+    time.sleep(1)
+    print(subprocess.run([str(results/'SeamlessMakeProxy'), 'remove', bundle], capture_output=True, text=True).stdout)
+
+
+if arguments[0] == 'proxy':
+    proxy(int(arguments[1]) if len(arguments) > 1 else 28)
+elif arguments[0] == 'motion':
     motion()
 elif arguments[0] == 'gl':
     gl()

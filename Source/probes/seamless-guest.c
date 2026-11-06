@@ -42,6 +42,7 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <limits.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include "seamless-inject.h"
 #include "seamless-slots.h"
@@ -153,7 +154,7 @@ struct Stream {
     uint8_t receive[1024];
     size_t received;
     int buttons_down;
-    unsigned pointer_events, key_events, gesture_events, captures, frames_changed;
+    unsigned pointer_events, key_events, gesture_events, menu_presses, captures, frames_changed;
     double capture_seconds, capture_worst;
     uint64_t bytes_sent;
     uint32_t order, group, alpha, margin;
@@ -347,6 +348,104 @@ static void post_key(struct Stream *s, const struct SWMKey *k) {
 }
 
 // Applies every whole message waiting on the socket. Returns -1 once the host has gone or sent something invalid.
+// The app's menu comes from seamless-integration-guest, in a thread, as reading it through Accessibility can take a
+// while under emulation and input mustn't wait for that. shortcut: rereads on a timer, where seamless-integration.md
+// wants it on activation, focus and after input.
+static const char *menu_tool, *menu_app;
+static pthread_mutex_t menu_lock = PTHREAD_MUTEX_INITIALIZER;
+static char *menu_json;
+static double menu_read_ms;
+
+static char *run_tool(char *const *arguments) {
+    int ends[2];
+    if (pipe(ends))
+        return NULL;
+    pid_t child = fork();
+    if (child == 0) {
+        dup2(ends[1], 1);
+        close(ends[0]);
+        close(ends[1]);
+        execv(arguments[0], arguments);
+        _exit(127);
+    }
+    close(ends[1]);
+    size_t size = 0, capacity = 1 << 16;
+    char *text = malloc(capacity);
+    for (ssize_t n; text && (n = read(ends[0], text + size, capacity - size - 1)) > 0;) {
+        size += (size_t)n;
+        if (size + 1 >= capacity)
+            text = realloc(text, capacity *= 2);
+    }
+    close(ends[0]);
+    if (child > 0)
+        waitpid(child, NULL, 0);
+    if (text)
+        text[size] = 0;
+    return text;
+}
+
+static void *menu_thread(void *unused) {
+    for (;;) {
+        double before = now();
+        char *const arguments[] = {(char *)menu_tool, "menu", "--app", (char *)menu_app, NULL};
+        char *text = run_tool(arguments);
+        // Its other lines are comments; the tree is the line that's an array.
+        char *line = text;
+        while (line && *line && *line != '[') {
+            char *next = strchr(line, '\n');
+            line = next ? next + 1 : NULL;
+        }
+        char *end = line ? strchr(line, '\n') : NULL;
+        if (end)
+            *end = 0;
+        if (line && *line == '[') {
+            pthread_mutex_lock(&menu_lock);
+            free(menu_json);
+            menu_json = strdup(line);
+            menu_read_ms = (now() - before) * 1000;
+            pthread_mutex_unlock(&menu_lock);
+        }
+        free(text);
+        sleep(5);
+    }
+    return unused;
+}
+
+static int send_menu_if_new(struct Stream *s) {
+    pthread_mutex_lock(&menu_lock);
+    char *json = menu_json;
+    menu_json = NULL;
+    double spent = menu_read_ms;
+    pthread_mutex_unlock(&menu_lock);
+    if (!json)
+        return 0;
+    static char *last;
+    int failed = 0;
+    if (!last || strcmp(last, json)) {
+        uint8_t header[SWM_HEADER_SIZE];
+        size_t length = strlen(json);
+        swm_header(header, SWM_MENU, (uint32_t)length);
+        failed = send_all(s->fd, header, sizeof(header)) || send_all(s->fd, json, length);
+        printf("# menu of %zu bytes read in %.0f ms\n", length, spent);
+        free(last);
+        last = json;
+    } else
+        free(json);
+    return failed;
+}
+
+static void menu_press(struct Stream *s, const char *path, uint32_t length) {
+    if (!menu_tool || length > 1000)
+        return;
+    char copy[1024];
+    memcpy(copy, path, length);
+    copy[length] = 0;
+    char *const arguments[] = {(char *)menu_tool, "press", "--app", (char *)menu_app, "--path", copy, NULL};
+    free(run_tool(arguments));
+    printf("# pressed %s\n", copy);
+    s->menu_presses++;
+}
+
 static int darwin_major_early(void) {
     char release[32] = "";
     size_t size = sizeof(release);
@@ -376,6 +475,8 @@ static int drain_input(struct Stream *s) {
             post_pointer(s, &m.u.pointer);
         else if (m.type == SWM_KEY)
             post_key(s, &m.u.key);
+        else if (m.type == SWM_MENU_PRESS)
+            menu_press(s, (const char *)m.u.data.bytes, m.u.data.length);
         else if (m.type == SWM_GESTURE && !s->test_pattern) {
             // Apple's own route per generation: see seamless-input.md.
             static struct SWIContext context;
@@ -1109,6 +1210,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
         }
         if (seconds > 0 && roster && tick - first_window > seconds)
             break;
+        if (send_menu_if_new(s))
+            goto done;
         int item_count = tree_table ? tree_items_from_hook(items, app, pid) : tree_items_from_list(items, app, pid);
         for (int i = 0; i < TREE_MAX_WINDOWS; i++)
             windows[i].seen = 0;
@@ -1447,6 +1550,12 @@ int main(int argc, char **argv) {
         const char *target = flag(argc, argv, "--all") ? NULL : gl_child ? "seamless-guest" : app;
         if (flag(argc, argv, "--open") && !open_app(app))
             return 1;
+        menu_tool = option(argc, argv, "--menu-tool", NULL);
+        menu_app = app;
+        if (menu_tool) {
+            pthread_t thread;
+            pthread_create(&thread, NULL, menu_thread, NULL);
+        }
         if (flag(argc, argv, "--hook")) {
             int fd = open(SWS_PATH, O_RDWR);
             void *mapped =

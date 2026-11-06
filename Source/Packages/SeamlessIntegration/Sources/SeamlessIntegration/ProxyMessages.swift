@@ -19,6 +19,8 @@ public enum ProxyEvent: Codable, Hashable, Sendable {
     case dragOutEnded(accepted: Bool)
     case notificationPosted(error: String?)
     case guestMenuBarClicked(x: Double, y: Double)
+    /// Pointer, trackpad and keys, already in the seamless wire format, for the session to pass on.
+    case input(bytes: Data)
     /// Facts only the proxy's process can read, for the probe.
     case menuBarState(
         presentationOptions: UInt, menuBarVisible: Bool, safeTop: Double, notchLeft: Double, notchRight: Double,
@@ -45,6 +47,15 @@ public enum SessionCommand: Codable, Hashable, Sendable {
     case hideGuestMenuBar
     case reportMenuBarState
     case showPlaceholderWindow(id: Int, title: String, x: Double, y: Double, width: Double, height: Double)
+    /// One guest window: a window on the host's screen that shows the layer `contextID` names, hosted from the session.
+    /// `margin` is how far the content sits inside it, the rest being its shadow. `offset` turns host screen points into
+    /// guest ones.
+    case showSurface(
+        id: Int, contextID: UInt32, x: Double, y: Double, width: Double, height: Double, margin: Double, level: Int,
+        alpha: Double, order: Int, title: String, offsetX: Double, offsetY: Double)
+    case removeSurface(id: Int)
+    /// For a test with nobody at the host: the proxy clicks and types into its own front window's input view.
+    case testInput
 }
 
 /// Newline-separated JSON, capped so a misbehaving peer can't grow the buffer forever.
