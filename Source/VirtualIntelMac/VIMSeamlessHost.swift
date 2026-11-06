@@ -215,7 +215,7 @@ final class SeamlessHost: NSObject {
             } else if count == 0, windowHidden.contains(path) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                     MainActor.assumeIsolated {
-                        if desktops[path] === desktop, desktop.windowCount == 0 { desktop.finish() }
+                        if desktops[path] === desktop, desktop.windowCount == 0 { desktop.finish(why: "no windows left") }
                     }
                 }
             }
@@ -240,7 +240,7 @@ final class SeamlessHost: NSObject {
             let started = CFAbsoluteTimeGetCurrent()
             while let desktop, desktops[path] === desktop {
                 if VIMSession.running(forMachinePath: path) == nil {
-                    desktop.finish()
+                    desktop.finish(why: "the machine stopped")
                 } else if !windowHidden.contains(path), CFAbsoluteTimeGetCurrent() - started > 45 {
                     desktop.finish("There are no windows in this Mac to show. Log in and open an app, then try again.")
                 }

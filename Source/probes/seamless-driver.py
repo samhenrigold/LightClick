@@ -515,6 +515,9 @@ def desktop():
     request({'Action': 'seamless-toggle'}, 60)
     while time.time() - pressed < 120 and not machine_window():
         time.sleep(0.1)
+    # The guest's Dock back, once it's had time to restart.
+    time.sleep(20)
+    capture(f'{tag}-desktop-after.png')
     # Generated apps shouldn't stay known to the Mac after a clone's gone.
     for bundle in (source/'Build/bench'/tag).glob('**/Seamless Apps/*/*/*.app'):
         subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', str(bundle)])

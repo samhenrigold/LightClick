@@ -2346,6 +2346,9 @@ static void leap_set_guest_shadows(int off) {
     if (get)
         get(&options);
     int result = set ? set(off ? options | 0x4000 : options & ~0x4000) : -1;
+    // SkyLight's refuses that as an invalid connection, so perhaps it wants one.
+    if (result == 1002 && connection)
+        result = ((int (*)(int, int))set)(connection(), off ? options | 0x4000 : options & ~0x4000);
     printf("# guest shadows %s: %d\n", off ? "off" : "on", result);
     fflush(stdout);
 }

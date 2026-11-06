@@ -91,10 +91,10 @@ public final class SeamlessDesktop {
     }
 
     /// Ends everything, and says so once. Safe to call whenever.
-    public func finish(_ failure: String? = nil) {
+    public func finish(_ failure: String? = nil, why: String = "as asked") {
         guard !stopped else { return }
         stopped = true
-        note("# finished: \(failure ?? "as asked")")
+        note("# finished: \(failure ?? why)")
         for session in sessions.values { session.stop() }
         sessions = [:]
         // The program in the guest ends when this does, and takes its tools with it.
@@ -125,7 +125,7 @@ public final class SeamlessDesktop {
             "/usr/bin/env",
             ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--port", String(port), "--menu-tool", "/tmp/sg/ig"])
         note("# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")")
-        finish(ran.exitCode == 3 ? "This Mac couldn’t reach Light Click. Seamless needs its networking on." : nil)
+        finish(ran.exitCode == 3 ? "This Mac couldn’t reach Light Click. Seamless needs its networking on." : nil, why: "the guest's side ended")
     }
 
     /// Puts the programs in the guest, once for each of its starts, and sooner than a press if the app wants that to be quick.
@@ -307,7 +307,7 @@ public final class SeamlessDesktop {
             }
             self.windowsChanged?(self.windowCount)
         }
-        session.onLeave = { [weak self] in self?.finish() }
+        session.onLeave = { [weak self] in self?.finish(why: "\(name)'s proxy asked") }
         // A proxy that went without its guest app quitting has nothing to show the user any more, and nor should they be
         // left with what's still hidden.
         session.onProxyClosed = { [weak self] appGone in
@@ -315,7 +315,7 @@ public final class SeamlessDesktop {
             if appGone {
                 self.closeApp(app.guestPath)
             } else {
-                self.finish()
+                self.finish(why: "\(name)'s proxy went")
             }
         }
         session.onGuestGone = { [weak self] in self?.closeApp(app.guestPath) }

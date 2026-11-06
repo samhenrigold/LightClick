@@ -286,7 +286,11 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         if !dragging { updated.offset = offset }
         surfaces[id] = updated
         let frontToBack = surfaces.values.sorted { $0.order < $1.order }
-        for other in frontToBack.reversed() { other.window.orderFront(nil) }
+        let quiet = ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil
+        for other in frontToBack.reversed() {
+            // A measurement's windows stay behind what whoever's at the Mac is using, where their pointer can't reach them.
+            if quiet { other.window.orderBack(nil) } else { other.window.orderFront(nil) }
+        }
         if NSApp.keyWindow == nil, let first = frontToBack.first(where: { $0.window.level == .normal }) {
             first.window.makeKey()
             first.window.makeFirstResponder(first.input)
