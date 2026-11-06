@@ -1784,7 +1784,8 @@ static int tree_send_covers(struct Stream *s, struct TreeWindow *w, const struct
     uint32_t hash = 2166136261u, group = tree_group(item->id);
     for (int i = 0; i < tree_all_count && tree_all[i].id != item->id && n < MOST; i++) {
         const struct TreeAll *front = &tree_all[i];
-        if (front->layer < 0 || !strcmp(front->owner, "Window Server") ||
+        // The Dock's hidden for this, and owns a transparent full-screen window as well.
+        if (front->layer < 0 || !strcmp(front->owner, "Window Server") || !strcmp(front->owner, "Dock") ||
             !CGRectIntersectsRect(front->bounds, item->bounds) || tree_group(front->id) == group)
             continue;
         if (!strcmp(front->owner, item->owner) && front->layer != 0)
