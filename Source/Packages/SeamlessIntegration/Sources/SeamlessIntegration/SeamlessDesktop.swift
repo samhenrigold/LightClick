@@ -67,7 +67,7 @@ public final class SeamlessDesktop {
         logHandle = try? FileHandle(forWritingTo: configuration.log)
     }
 
-    private func note(_ text: String) {
+    public func note(_ text: String) {
         logHandle?.write(Data(String(format: "%.2f %@\n", CFAbsoluteTimeGetCurrent() - began, text).utf8))
     }
 
@@ -123,12 +123,20 @@ public final class SeamlessDesktop {
             finish("This Mac isn’t ready yet. Wait for it to finish starting, then try again.")
             return
         }
+        var ownSurfaces = false
+        if pixelSource != nil {
+            let injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
+            note("# hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)\(injected.failure ?? "")")
+            ownSurfaces = injected.exitCode == 0
+            if stopped { return }
+        }
         var ran = SeamlessGuestRun(exitCode: nil, output: "", failure: nil)
         // On Mavericks the agent's connection can drop just after setup, under whatever runs next. Nothing's reached the user yet.
         for attempt in 1...4 {
             ran = await guest.run(
                 "/usr/bin/env",
-                ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--port", String(port), "--menu-tool", "/tmp/sg/ig"])
+                ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--port", String(port), "--menu-tool", "/tmp/sg/ig"]
+                    + (ownSurfaces ? ["--own-surfaces"] : []))
             if stopped || ran.exitCode != nil || control >= 0 || attempt == 4 { break }
             note("# trying again: \(ran.failure ?? "")")
             try? await Task.sleep(for: .seconds(3))
@@ -150,12 +158,13 @@ public final class SeamlessDesktop {
             else { return false }
             // Mavericks has been seen to drop the agent's connection during this and be set up regardless. Without Accessibility there are only no menus.
             _ = await guest.run("/bin/sh", ["-c", SeamlessSession.setupScript, "sh", tool, menuTool])
-            // On Mojave, for windows of their own from the guest's next start. Until then, the display's frames do.
-            // shortcut: WindowServer only takes it at its start, until it can be put in one that's running.
+            // On Mojave, ready for a press to load into WindowServer.
             if await guest.run("/usr/bin/uname", ["-r"]).output.hasPrefix("18."),
-                let hook = await guest.stage(tools.appending(path: "seamless-ws-hook.dylib"))
+                let hook = await guest.stage(tools.appending(path: "seamless-ws-hook.dylib")),
+                let injector = await guest.stage(tools.appending(path: "seamless-ws-inject"))
             {
-                _ = await guest.run("/bin/sh", ["-c", installHookScript, "sh", hook])
+                let copy = "cp \"$1\" /tmp/sg/hook.dylib; cp \"$2\" /tmp/sg/ws-inject; chmod 755 /tmp/sg/ws-inject"
+                _ = await guest.run("/bin/sh", ["-c", copy, "sh", hook, injector])
             }
             staged.insert(machine)
             return true
@@ -164,14 +173,34 @@ public final class SeamlessDesktop {
         return await task.value
     }
 
-    private static let installHookScript: String = {
-        let plist = "/System/Library/LaunchDaemons/com.apple.WindowServer.plist"
-        return "set -e; cp \"$1\" /var/tmp/seamless-ws-hook.dylib; chmod 755 /var/tmp/seamless-ws-hook.dylib; "
-            + "/usr/bin/grep -q seamless-ws-hook \(plist) && exit 0; "
-            + "/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables dict\" \(plist) || true; "
-            + "/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string "
-            + "/var/tmp/seamless-ws-hook.dylib\" \(plist); /usr/bin/plutil -lint \(plist)"
-    }()
+    /// Loads the hook into the running WindowServer, so each window comes on a surface of its own. If this goes wrong WindowServer
+    /// dies and logs the user out, so it's only for the one build it's been run on, is tried once per guest start and is never
+    /// retried, whatever happened. Exit 0 means the hook's in this WindowServer; anything else leaves the display's frames.
+    private static let injectScript = """
+        [ "$(/usr/bin/uname -r | /usr/bin/cut -d. -f1)" = 18 ] || exit 3
+        [ "$(/usr/bin/sw_vers -buildVersion)" = 18G103 ] || exit 3
+        [ -x /tmp/sg/ws-inject ] && [ -f /tmp/sg/hook.dylib ] || exit 3
+        /usr/bin/grep -q seamless-ws-hook /System/Library/LaunchDaemons/com.apple.WindowServer.plist && exit 3
+        pid=$(/usr/bin/pgrep -x WindowServer); [ -n "$pid" ] || exit 3
+        boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed 's/.*sec = \\([0-9]*\\).*/\\1/')
+        marker=/var/tmp/seamless-ws-injected
+        said=$(/bin/cat $marker 2>/dev/null)
+        [ "$said" = "$boot $pid ok" ] && exit 0
+        case "$said" in "$boot "*) exit 4;; esac
+        # Written first, so a WindowServer that dies with this isn't tried again.
+        echo "$boot $pid tried" > $marker
+        /bin/cp /tmp/sg/hook.dylib /usr/lib/seamless-ws-hook.dylib || exit 5
+        /bin/chmod 755 /usr/lib/seamless-ws-hook.dylib
+        /bin/rm -f /var/tmp/seamless-ws-probe.log
+        /tmp/sg/ws-inject /usr/lib/seamless-ws-hook.dylib || exit 6
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            /usr/bin/grep -q "gpu: hooked" /var/tmp/seamless-ws-probe.log 2>/dev/null && break
+            /bin/sleep 0.5
+        done
+        [ "$(/usr/bin/pgrep -x WindowServer)" = "$pid" ] || exit 7
+        /usr/bin/grep -q "gpu: hooked" /var/tmp/seamless-ws-probe.log || exit 8
+        echo "$boot $pid ok" > $marker
+        """
 
     private func listen() -> Bool {
         let listener = socket(AF_INET, SOCK_STREAM, 0)

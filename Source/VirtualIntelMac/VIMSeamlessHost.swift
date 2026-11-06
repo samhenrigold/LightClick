@@ -95,6 +95,9 @@ private final class WindowSurfaces: SeamlessPixelSource {
     private func arrived(_ window: UInt32, _ surface: IOSurfaceRef) {
         guard let desktop else { return }
         if surfaces.isEmpty { FileManager.default.createFile(atPath: noDisplayFile.path, contents: nil) }
+        if surfaces[window] == nil {
+            desktop.note("# window \(window)'s own surface: \(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))")
+        }
         surfaces[window] = surface
         desktop.windowPixelsChanged(window)
     }

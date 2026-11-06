@@ -619,8 +619,6 @@ if arguments[0] == 'capture-bench':
 elif arguments[0] == 'placement':
     placement()
 elif arguments[0] == 'desktop':
-    if 'hook' in arguments:
-        install_hook()
     desktop()
 elif arguments[0] == 'windowed':
     windowed(int(arguments[1]) if len(arguments) > 1 else 22)

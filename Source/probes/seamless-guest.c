@@ -1848,7 +1848,7 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                           tree_group(front->id) != tree_group(id);
             }
             // A shared desktop has the guest's shadows off, so there's only the window itself to show, and the host's shadow.
-            int margin = crop || tree_shared ? 0 : item->margin;
+            int margin = own_surface ? item->margin : crop || tree_shared ? 0 : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
                 sized = !CGSizeEqualToSize(bounds.size, w->bounds.size) || margin != w->margin;
             uint32_t seed = 0;
@@ -2448,7 +2448,7 @@ static void leap_hide_desktop(void) {
     fcntl(ends[1], F_SETFD, FD_CLOEXEC);
 }
 
-static int leap(const char *host, int port, const char *menu_tool) {
+static int leap(const char *host, int port, const char *menu_tool, int own_surfaces) {
     char self[PATH_MAX];
     uint32_t length = sizeof(self);
     if (_NSGetExecutablePath(self, &length))
@@ -2459,7 +2459,7 @@ static int leap(const char *host, int port, const char *menu_tool) {
         return 3;
     }
     leap_hide_desktop();
-    if (leap_set_own_surfaces(self, 1) && leap_send(fd, "gpu\n"))
+    if (own_surfaces && leap_set_own_surfaces(self, 1) && leap_send(fd, "gpu\n"))
         return 0;
     static char input[1 << 16], listed[1 << 14], last[1 << 14];
     size_t have = 0;
@@ -2669,7 +2669,7 @@ int main(int argc, char **argv) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
         return leap(option(argc, argv, "--host", "10.0.2.2"), atoi(option(argc, argv, "--port", "7654")),
-                    option(argc, argv, "--menu-tool", ""));
+                    option(argc, argv, "--menu-tool", ""), flag(argc, argv, "--own-surfaces"));
     }
     if (!strcmp(command, "tree") || !strcmp(command, "program-tree")) {
         // Only ever reads windows, so it's safe on the host; the program form opens an app, so it isn't.

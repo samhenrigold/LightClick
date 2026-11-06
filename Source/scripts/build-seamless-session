@@ -13,6 +13,6 @@ universal=(swift build -c release --package-path "$source_root/Packages/Seamless
   --scratch-path "$source_root/Build/seamless-integration-universal" --arch arm64 --arch x86_64)
 "${universal[@]}" --product SeamlessProxy >&2
 cp "$("${universal[@]}" --show-bin-path)/SeamlessProxy" "$output/SeamlessProxy"
-for program in seamless-guest seamless-ws-hook.dylib seamless-integration-guest; do
+for program in seamless-guest seamless-ws-hook.dylib seamless-ws-inject seamless-integration-guest; do
   cp "$work/$program" "$output/"
 done

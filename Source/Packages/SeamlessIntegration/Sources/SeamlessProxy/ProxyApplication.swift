@@ -203,6 +203,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         /// Set for a window with a title bar in its pixels. Told when a drag of it on the host has ended.
         var movedByUser: (() -> Void)?
         private(set) var isBeingDragged = false
+        /// Around the guest's window, for its shadow.
+        var margin = 0.0
         override var canBecomeKey: Bool { true }
         override var canBecomeMain: Bool { true }
         override func sendEvent(_ event: NSEvent) {
@@ -240,7 +242,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         /// or a toolbar's blank space, still drags in the guest, within its display, until there's a hit test for it from the guest.
         private func isInTitleBar(_ event: NSEvent) -> Bool {
             let place = event.locationInWindow
-            return frame.height - place.y <= 22 && place.x >= 70 && place.x <= frame.width - 28
+            let fromTop = frame.height - margin - place.y
+            return fromTop >= 0 && fromTop <= 22 && place.x >= margin + 70 && place.x <= frame.width - margin - 28
         }
     }
 
@@ -278,7 +281,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         if !dragging { SeamlessInputViewSetGuestOffset(surface.input, offset) }
         setEventShape(of: window, margin: margin, size: frame.size)
         // A window with a title bar in its pixels moves on the host. What's in its layer doesn't care where it is.
-        (window as? SurfaceWindow)?.movedByUser = margin == 0 && level == 0 && !title.isEmpty ? { [weak self] in
+        (window as? SurfaceWindow)?.margin = margin
+        (window as? SurfaceWindow)?.movedByUser = level == 0 && !title.isEmpty ? { [weak self] in
             self?.surfaceMoved(id)
         } : nil
         var updated = surface

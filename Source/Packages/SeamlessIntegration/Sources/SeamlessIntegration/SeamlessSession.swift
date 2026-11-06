@@ -595,11 +595,11 @@ public final class SeamlessSession {
             setPieces(of: surface, to: [], from: own, place: place, height: whole.height)
             layer.mask = nil
             layer.contents = own
-            // Only the window: its shadow's the host's, and the surface is padded right and bottom.
+            // The window and the room around it for its shadow, which is the guest's. The surface is padded right and bottom.
             layer.contentsRect = CGRect(
-                x: (Double(window.x) - Double(origin.x)) * scale / width,
-                y: (height - (Double(window.y) - Double(origin.y) + Double(window.height)) * scale) / height,
-                width: Double(window.width) * scale / width, height: Double(window.height) * scale / height)
+                x: (Double(window.x) - side - Double(origin.x)) * scale / width,
+                y: (height - (Double(window.y) - side - Double(origin.y) + whole.height) * scale) / height,
+                width: whole.width * scale / width, height: whole.height * scale / height)
             layer.cornerRadius = 0
             layer.masksToBounds = false
             layer.perform(NSSelectorFromString("setContentsChanged"))
@@ -741,7 +741,8 @@ public final class SeamlessSession {
             }
         case .surfaceMoved(let id, let x, let y):
             guard let surface = surfaces[UInt32(clamping: id)] else { return }
-            surface.hostOffset = NSPoint(x: x - Double(surface.window.x), y: y - Double(surface.window.y))
+            let side = Double(surface.window.margin)
+            surface.hostOffset = NSPoint(x: x + side - Double(surface.window.x), y: y + side - Double(surface.window.y))
             tellProxy(surface)
         case .menuChosen(let path, _) where path.last == leaveTitle && leaveTitle != nil: onLeave?()
         case .menuChosen(let path, _): sendToGuest(SessionWire.text(.menuPress, path.joined(separator: "/")))
