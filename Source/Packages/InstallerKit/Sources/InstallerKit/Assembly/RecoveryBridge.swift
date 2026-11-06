@@ -49,13 +49,12 @@ public final class RecoveryEditBridge: NSObject {
         if case .patchStartup(_, let patch) = value { patch.applied(to: original) } else { nil }
     }
 
-    @objc public var unrecognizedMessage: String? {
-        guard case .patchStartup(_, let patch) = value else { return nil }
-        switch patch {
-        case .highSierraOpenDocument:
-            return "This High Sierra installer’s startup interface is not recognized. Its original files were retained."
-        case .scopedInstallerLaunch:
-            return "This installer’s automatic launch interface is not recognized. Its original files were retained."
+    /// Why a patch refused. Only a startup patch can.
+    @objc public var unrecognizedFailure: AssemblyFailure {
+        if case .patchStartup(_, .highSierraOpenDocument) = value {
+            .highSierraStartupUnrecognized
+        } else {
+            .automaticLaunchUnrecognized
         }
     }
 }
