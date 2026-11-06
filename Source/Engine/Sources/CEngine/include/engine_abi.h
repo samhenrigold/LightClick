@@ -22,7 +22,7 @@
 // Private memory. Mapped from PRIV_IPA and in every shadow root at PRIV_VA (non-canonical for x86: bit 47 set, top bits clear).
 #define PRIV_IPA 0xF00000000ULL // 60 GB; x86 RAM and device GPAs stay below it
 #define PRIV_VA 0xF00000000000ULL
-#define PRIV_SIZE (1ULL << 30) // reserved, touched lazily
+#define PRIV_SIZE (2ULL << 30) // reserved, touched lazily
 
 #define OFF_MON_TEXT 0ULL // EL1 rx: vectors, monitor text and rodata
 #define OFF_MON_DATA (2ULL << 20) // EL1 rw: monitor data, stack
@@ -33,26 +33,31 @@
 #define MAX_VCPUS 8
 #define CTX_SLOT (64ULL << 10)
 #define OFF_MON_CPU (OFF_MON_DATA + (3ULL << 19)) // EL1 rw: per vCPU, CTX_SLOT apart too, the monitor's own state and stack
-#define OFF_RSTACKS (126ULL << 20) // EL0 rw, per view: 16 KB guard (unmapped), then a 16 KB shadow return stack
-#define OFF_HASH (128ULL << 20) // EL0 ro, per view: indirect-branch table
+#define OFF_CTX_END (126ULL << 20)
+#define OFF_HASH (1024ULL << 20) // EL0 ro, per view: indirect-branch table
 #define HASH_ENTRIES (1ULL << 16)
 #define HASH_BYTES (HASH_ENTRIES * 16)
 // The gigabyte that XNU nests its shared libraries into from one page directory, whatever process maps it. Elsewhere, or under another OS, nothing is shared.
 #define SHARED_USER_BASE 0x7FFF00000000ULL // Mavericks' shared region starts at 0x7FFF80000000, and Mojave's lower
 #define SHARED_USER_END 0x7FFFC0000000ULL
 #define SHARED_USER_DIRS 4
-#define MAX_VIEWS 64 // two per x86 address space. shortcut: no recycling yet, a real guest needs LRU eviction
+#define MAX_VIEWS 256 // two or three per x86 address space, and one that goes takes its blocks with it: a desktop has a hundred processes
+#define OFF_RSTACKS (OFF_HASH + MAX_VIEWS * HASH_BYTES) // EL0 rw, per vCPU and view: 16 KB guard (unmapped), then a 16 KB shadow return stack
 #define OFF_BLOCKS (196ULL << 20) // EL1 ro: block table, pc maps
 #define BLOCKS_MAX (1ULL << 19) // the table has 16 MB
 #define OFF_PCMAP (212ULL << 20)
 #define PCMAP_BYTES (44ULL << 20)
 #define OFF_PT (256ULL << 20) // EL1 rw: static hole tables, then the shadow pool
 #define PT_STATIC_BYTES (1ULL << 20)
-#define SHADOW_POOL_BYTES (256ULL << 20)
+#define SHADOW_POOL_BYTES (255ULL << 20) // after the static tables, up to OFF_SHADOW_META
 #define OFF_SHADOW_META (512ULL << 20) // EL1 rw: shadow page descriptors, hash, rmap
 #define OFF_PAGEINFO (768ULL << 20) // EL1 rw, one byte per guest page frame (4 GB of RAM per MB)
-#define OFF_RSTACKS_MORE (800ULL << 20) // EL0 rw: as OFF_RSTACKS, 2 MB each, for vCPUs above 0
-static inline uint64_t engine_off_rstacks(uint32_t cpu) { return cpu ? OFF_RSTACKS_MORE + (uint64_t)(cpu - 1) * (2ULL << 20) : OFF_RSTACKS; }
+// The code cache's second part, for blocks of one view: as far as this is from the first, so with stubs of its own in reach, and tables of its own.
+#define OFF_STUBS2 (816ULL << 20)
+#define OFF_CC2 (818ULL << 20)
+#define OFF_BLOCKS2 (936ULL << 20)
+#define OFF_PCMAP2 (952ULL << 20)
+#define CC_PART2_WORD ((OFF_CC2 - OFF_CC) / 4)
 
 // RAM alias, EL1 only: x86 GPA + RAM_ALIAS_VA reaches guest RAM for the monitor's walker.
 #define RAM_ALIAS_VA 0xF10000000000ULL
@@ -66,6 +71,7 @@ static inline uint64_t engine_off_rstacks(uint32_t cpu) { return cpu ? OFF_RSTAC
 
 #define RSTACK_BYTES (16ULL << 10)
 #define RSTACK_SLOT (32ULL << 10)
+static inline uint64_t engine_off_rstacks(uint32_t cpu) { return OFF_RSTACKS + (uint64_t)cpu * MAX_VIEWS * RSTACK_SLOT; }
 
 // Page info bits, one byte per GPA frame, owned by the monitor.
 #define PI_CODE 1 // blocks were translated from this frame
@@ -165,6 +171,7 @@ enum {
     HC_YIELD, // a lock has been held a long time: let the host run something else
     HC_PARK, // out of the code cache for a moment, in case another vCPU is resetting it
     HC_VIEW_FORGET, // a[0] view: empty its lookup table, as a slot above a shared directory changed
+    HC_CALL_TAIL, // a[0] the bl of a direct call into another key, a[1] its x86 target: from now on it looks that up without leaving translated code
 };
 
 // Stop reasons for HC_STOP.
@@ -269,7 +276,7 @@ typedef struct {
     uint64_t stat_apic_timer, stat_ipi_self;
 
     // Blocks, published by the host.
-    uint64_t block_count;
+    uint64_t block_count, block_count_private; // the code cache's two parts: see "code cache" in translate.c
     uint64_t tsc_offset;
 
     // Statistics, read by the host.

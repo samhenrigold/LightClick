@@ -424,7 +424,8 @@ class Boot:
         if self.case.desktop is not None:
             (self.work/'diagnostics').mkdir(mode=0o700)
             arguments += ['--guest-diagnostics-root', str(self.work/'diagnostics')]
-        env = dict(os.environ, **self.case.env, CFFIXED_USER_HOME=str(home))
+        # Tests have no use for host audio, and Core Audio can stall QEMU's startup. SDL_AUDIODRIVER= brings it back.
+        env = {**os.environ, 'SDL_AUDIODRIVER': 'dummy', **self.case.env, 'CFFIXED_USER_HOME': str(home)}
         if self.case.env.get('LC_HVDBT') == '1':
             env['LC_HVDBT_TALLY'] = str(self.tally)
         # Its own session: the terminal's Ctrl-C comes to us, and we stop it after saving the evidence.

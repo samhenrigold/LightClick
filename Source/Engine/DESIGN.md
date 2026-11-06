@@ -295,9 +295,67 @@ Build the disk cache if the app launch measurement shows translation is more tha
 
 Measured on a Mavericks exec loop at 4 vCPUs: 9.5M cold blocks in 89 s, of which 8.3M in high user memory outside the shared region, and 99.8% of those were a frame and offset already translated at some other rip. That is dyld, which each process maps at its own slide. A block holds absolute x86 addresses, so sharing them across slides needs the relocatable output described above, in every emitter. The gain is bounded: translating is about 1.6 ms of about 7 ms per exec of a program as small as `/usr/bin/true`, and a real application's launch runs dyld once. Not built. Mojave has the same shape in low user memory: 4.2M cold blocks in 174 s, 94% seen before.
 
-Code cache resets are the larger cost on Mojave: 19 in 174 s of launching six applications, each dropping the kernel and system libraries, with 2.6 GB of code generated through a 118 MB cache. 81 to 88% of cold kernel and shared blocks had been translated before. Splitting the cache, so that a process's own blocks could reset alone, did not help: the shared half fills by itself, with 22 full resets and 9 partial in the same run, and cold blocks unchanged at about 9M. So it was removed. The working set is simply larger than the cache. `b` and `bl` reach 128 MB, which is what holds it at 118, so a larger cache needs a part beyond reach with its own copy of the stubs. Not built.
+Code cache resets were the larger cost on Mojave: 19 in 174 s of launching six applications, each dropping the kernel and system libraries, with 2.6 GB of code generated through a 118 MB cache. 81 to 88% of cold kernel and shared blocks had been translated before. Halving the cache took resets to about 70 and slowed launches, so size matters.
 
-Direct calls between keys, such as from a program into a shared library, can't link, so each takes a trip through the monitor: 300,000 to 480,000 a second on Mojave's first vCPU. Patching the call's stub to do the lookup inline would avoid the trip, and a lookup is always right, so it risks no staleness. Not built.
+So the cache has a second part, with 118 MB for each. Shared domains go in the first, blocks of one view in the second. Links join blocks of one key, so none crosses between them, and the second needs only its own copy of the stubs in reach and its own tables. It can reset alone, which keeps the kernel and libraries. Splitting the old 118 MB in two had not helped, as the shared half filled by itself.
+
+On Mojave at 4 vCPUs, with the launch timer below, two boots of each build alternating: full resets from 22 to 3 or 4, with 7 to 9 of the second part alone; cold blocks from 9.5M and 9.8M to 5.7M; translating from 17.6 and 19.3 s to 10.9 and 11.4 s. Mean cold launch across six applications from 2.10 and 2.47 s to 1.94 and 2.06 s; mean warm from 0.97 and 1.24 s to 0.98 and 1.10 s. Single applications vary either way by more than that, so the launch figures only hold as means.
+
+Direct calls between keys, such as from a program into a shared library, can't link, so each took a trip through the monitor: 300,000 to 480,000 a second on Mojave's first vCPU. The first such trip now sends the call to a few words that do the lookup an indirect call does, which is always right, so it risks no staleness. On Mojave running six apps at 4 vCPUs, one boot each: those trips on the first vCPU from 55M to under 3M, and its time in the VM from 58.6 to 50.8 s.
+
+### What stops mmap_touch scaling
+
+`mmap_touch` at 8 vCPUs on Mavericks: 452 Kpages/s at N=1, 619 at N=2, 436 at N=4, 386 at N=8. A `dtrace` kernel profile in the guest, 4 s at 997 Hz per CPU, counts samples by function:
+
+| N | `hw_lock_to` | `ml_set_interrupts_enabled` | `pmap_enter_options` | `pmap_remove_range_options` | `lck_rw_*` | `pmap_flush_tlbs` | idle |
+|---|---|---|---|---|---|---|---|
+| 1 | 14 | 133 | 573 | 533 | 0 | 39 | 15,404 |
+| 2 | 521 | 377 | 755 | 649 | 94 | 26 | 15,036 |
+| 4 | 1,295 | 1,716 | 682 | 528 | 125 | 84 | 12,683 |
+| 8 | 3,687 | 3,037 | 731 | 363 | 356 | 75 | 9,736 |
+
+So it is the guest's own spinlock, taken in `vm_fault`, not TLB shootdowns. Stacks at N=4 put most of `hw_lock_to` under `vm_fault`, with samples on single instructions in `pmap_enter_options` and `pmap_remove_range_options`, which looks like the return from a trapped PTE store. `ml_set_interrupts_enabled` is probably skid: a profile tick held off until interrupts open again. The monitor's own lock is not it: at 4 vCPUs the first vCPU waited 1.3 s for it of 27 s in the VM. That a PTE store's trap stretches the guest's critical section is inferred from those stacks, not measured directly. Rosetta shows the same lock with shorter sections, at a ratio of 2.42 at N=4 against 1.1 here. Nothing cheap fixes it: the store has to trap while the table is shadowed.
+
+### How long an application takes to start
+
+`probes/app-launch.sh`: `open -a` to a first window, cold being the first launch in a boot, warm the best of two more. 4 vCPUs, on 256 views and both parts of the code cache. Engine: the median of 3 boots on Mojave and 2 on Mavericks, range in brackets. TCG: one boot each, so its numbers carry less. Mavericks clones join Finder's audit session to get a window list.
+
+| Mojave, to a window | TCG cold | Engine cold | TCG warm | Engine warm |
+|---|---|---|---|---|
+| Calculator | 4.93 | 1.77 (1.70-1.77) | 2.19 | 0.66 (0.63-0.67) |
+| TextEdit | 4.98 | 1.32 (1.28-1.48) | 2.34 | 0.77 (0.75-0.77) |
+| Notes | 5.69 | 2.04 (1.78-2.11) | 3.39 | 0.95 (0.93-0.99) |
+| Maps | 5.45 | 1.55 (1.54-1.61) | 3.20 | 0.90 (0.79-0.93) |
+| Safari | 7.69 | 1.90 (1.78-1.91) | 2.97 | 0.97 (0.92-0.99) |
+| System Preferences | 4.74 | 1.14 (1.11-1.24) | 2.39 | 0.74 (0.73-0.76) |
+
+| Mavericks, to a window | TCG cold | Engine cold | TCG warm | Engine warm |
+|---|---|---|---|---|
+| Calculator | 3.82 | 0.83 (0.79-0.88) | 0.99 | 0.35 (0.34-0.37) |
+| TextEdit | 5.78 | 1.52 (1.45-1.58) | 1.32 | 0.51 (0.50-0.52) |
+| Notes | 4.56 | 1.09 (1.07-1.11) | 1.02 | 0.38 (0.37-0.38) |
+| Maps | 5.01 | 1.48 (1.46-1.49) | 1.39 | 0.82 (0.79-0.86) |
+| Safari | 1.69 | 0.56 (0.55-0.57) | 1.66 | 0.61 (0.60-0.62) |
+| System Preferences | 1.13 | 0.39 (0.38-0.40) | 1.03 | 0.34 (0.33-0.34) |
+| Keynote (i386) | 5.76 | 1.88 (1.87-1.88) | 2.64 | 1.29 (1.24-1.35) |
+
+Safari on Mavericks has run before the probe reaches it, so its cold is not cold.
+
+**Where a launch goes.** Measured with `probes/launch-profile.sh` and the tally's timeline, whose 2 s rows blur launches together:
+- Disk is not the gap between cold and warm on Mojave: reading the shared cache, the frameworks and the applications beforehand left cold launches where they were (1.45 to 2.04 s, one boot). dtrace's `io` probes showed nothing in either guest, so there is no disk latency figure.
+- Most of the guest's CPUs sit idle. Samples outside `kernel_task` over a 4 s window around a 2 s Calculator launch come to about 1.9 CPU seconds, so a launch is close to one thread's work at a time.
+- Translating: about 300 ms and 150k blocks over a Keynote launch of 1.4 to 2 s, cold or warm, and 100 to 500 ms per 2 s row around Mojave's. About 2 us a block, one vCPU at a time, plus an exit and a link per block whose cost isn't separated. Not measured: how long translated code takes against native. That is probably the largest remainder.
+- Inferred, not tried: warm Keynote translates as much as cold because i386 blocks aren't shared (the i386 shared region isn't in `SHARED_USER_BASE`) and die with their process. Reuse across views would need a dead block's own links undone, since they were made under another view's mappings.
+
+**How many views.** At 64, Mojave evicted 135 views a second and 2.8 of 3.2 million dead blocks died that way. Two boots of each build, alternating, launching seven applications (six on Mojave):
+
+| | Mojave, 64 views | Mojave, 256 | Mavericks, 64 | Mavericks, 256 |
+|---|---|---|---|---|
+| Blocks translated | 6.2M, 6.0M | 3.9M, 3.7M | 3.8M, 3.5M | 2.7M (one boot) |
+| Translation time, s | 11.3, 11.3 | 7.8, 7.0 | 7.1, 6.6 | 5.0 |
+| Second cache part resets | 8, 7 | 2, 2 | 6, 7 | 5 |
+
+Launches gain less than that: summed over Mojave's apps, 20.2 s cold before and 20.5 s after in that alternation, 10.7 s warm before and 10.4 s after, which is within the noise. Mavericks warm gains more (Calculator 0.45 to 0.35, Notes 0.50 to 0.38), but those two weren't alternated. So views are kept for the work they save and for sustained use, not for a launch number.
 
 ### A fast hidden start: resuming a snapshot under the engine
 

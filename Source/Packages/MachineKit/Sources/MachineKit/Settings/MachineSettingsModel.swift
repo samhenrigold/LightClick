@@ -101,11 +101,13 @@ public struct SettingsHardwareLimits: Equatable, Sendable {
 
     public init(physicalMemoryBytes: UInt64, processorCount: Int) {
         self.processorCount = processorCount
-        maximumMemoryMiB = Int(physicalMemoryBytes >> 20)
+        maximumMemoryMiB =
+            HostCapacity(physicalMemoryBytes: physicalMemoryBytes, processorCount: processorCount).maximumMemoryGiB
+            * 1024
         physicalMemoryGiB = Int(physicalMemoryBytes >> 30)
     }
 
-    public var memorySliderMaximumGiB: Int { max(1, physicalMemoryGiB) }
+    public var memorySliderMaximumGiB: Int { maximumMemoryMiB / 1024 }
     public var memorySliderMiddleGiB: Int { Int((Double(memorySliderMaximumGiB + 1) / 2).rounded()) }
 
     /// "4 (Recommended)" for the core count a new machine would get, otherwise the number.
@@ -114,13 +116,27 @@ public struct SettingsHardwareLimits: Equatable, Sendable {
         return (1...processorCount).map { "\($0)\($0 == min(4, processorCount) ? " (Recommended)" : "")" }
     }
 
+    /// What the processor popup offers and which entry it shows. A saved count past this host, from a machine moved here,
+    /// gets its own entry: it's what the machine would start with, and picking a lower one is the edit that changes it.
+    public func processorChoices(saved: Int) -> (counts: [Int], titles: [String], selectedIndex: Int) {
+        var counts = processorCount > 0 ? Array(1...processorCount) : []
+        var titles = processorTitles
+        if saved > processorCount {
+            counts.append(saved)
+            titles.append("\(saved) (more than this Mac has)")
+        }
+        return (counts, titles, saved > processorCount ? counts.count - 1 : max(0, saved - 1))
+    }
+
     public var summary: String {
         "This Mac has \(processorCount) logical processors and \(physicalMemoryGiB) GB of memory. Leave resources "
             + "available for other apps."
     }
 
-    /// The megabytes typed into the memory field, or what to say about them.
-    public func memoryMiB(from text: String) -> Result<Int, SettingsFieldIssue> {
+    /// The megabytes typed into the memory field, or what to say about them. A saved value past the limit stays valid
+    /// until it's edited: leaving the field without changing it isn't an edit.
+    public func memoryMiB(from text: String, saved: Int? = nil) -> Result<Int, SettingsFieldIssue> {
+        if let saved, NewMachineForm.wholeNumber(text, in: saved...saved) != nil { return .success(saved) }
         guard let value = NewMachineForm.wholeNumber(text, in: 1024...max(1024, maximumMemoryMiB)) else {
             return .failure(
                 SettingsFieldIssue(
@@ -129,7 +145,7 @@ public struct SettingsHardwareLimits: Equatable, Sendable {
         return .success(value)
     }
 
-    /// A slider position, in megabytes, which can't exceed the host.
+    /// A slider position, in megabytes, which can't exceed the limit.
     public func memoryMiB(fromSliderGiB value: Double) -> Int {
         min(maximumMemoryMiB, 1024 * Int(value.rounded()))
     }

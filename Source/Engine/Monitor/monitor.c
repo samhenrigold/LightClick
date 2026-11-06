@@ -57,7 +57,8 @@ typedef struct {
 _Static_assert(sizeof(MonCpu) <= CTX_SLOT / 2, "the rest of the slot is the stack");
 _Static_assert(sizeof(EngineCtx) <= CTX_SLOT, "EngineCtx outgrew its slot");
 _Static_assert(OFF_MON_CPU + MAX_VCPUS * CTX_SLOT <= OFF_STUBS, "per-vCPU slots run past monitor data");
-_Static_assert(OFF_CTX + MAX_VCPUS * CTX_SLOT <= OFF_RSTACKS, "contexts run past their region");
+_Static_assert(OFF_CTX + MAX_VCPUS * CTX_SLOT <= OFF_CTX_END, "contexts run past their region");
+_Static_assert(OFF_RSTACKS + MAX_VCPUS * MAX_VIEWS * RSTACK_SLOT <= PRIV_SIZE, "return stacks run past private memory");
 #define me ((MonCpu *)((u64)c + (OFF_MON_CPU - OFF_CTX)))
 #define c0 ((EngineCtx *)(PRIV_VA + OFF_CTX)) // what the host publishes once for the VM lives in the first context
 #define cpu_index() ((u32)(((u64)c - (PRIV_VA + OFF_CTX)) / CTX_SLOT))
@@ -193,6 +194,7 @@ typedef struct {
 
 #define POOL_PAGES (SHADOW_POOL_BYTES / 4096)
 #define POOL_VA (PRIV_VA + OFF_PT + PT_STATIC_BYTES)
+_Static_assert(OFF_PT + PT_STATIC_BYTES + SHADOW_POOL_BYTES <= OFF_SHADOW_META, "a full pool would write over its own descriptors");
 static ShadowDesc *const desc = (ShadowDesc *)PRIV(OFF_SHADOW_META);
 #define MIRROR_HEAD_OFF (OFF_SHADOW_META + (16ULL << 20)) // u32 per guest frame
 #define RMAP_HEAD_OFF (OFF_SHADOW_META + (48ULL << 20)) // u32 per guest frame
@@ -430,11 +432,12 @@ static void write_protect_frame(u64 gpa) {
 // ---- Boundary lookup: ARM pc to x86 rip ----
 static BlockEntry *find_block(u64 pc) {
     u64 cc = PRIV_VA + OFF_CC;
-    if (pc < cc || pc >= cc + CC_SIZE)
+    if ((pc < cc || pc >= cc + CC_SIZE) && (pc < PRIV_VA + OFF_CC2 || pc >= PRIV_VA + OFF_CC2 + CC_SIZE))
         return 0;
     u32 word = (u32)((pc - cc) >> 2);
     BlockEntry *t = (BlockEntry *)PRIV(OFF_BLOCKS);
-    u64 lo = 0, hi = c0->block_count;
+    bool private_part = word >= CC_PART2_WORD; // two tables, each sorted
+    u64 first = private_part ? (OFF_BLOCKS2 - OFF_BLOCKS) / sizeof(BlockEntry) : 0, lo = first, hi = first + (private_part ? c0->block_count_private : c0->block_count);
     while (lo < hi) {
         u64 mid = (lo + hi) / 2;
         if (t[mid].arm_off <= word)
@@ -442,22 +445,23 @@ static BlockEntry *find_block(u64 pc) {
         else
             hi = mid;
     }
-    if (!lo)
+    if (lo == first)
         return 0;
     BlockEntry *b = &t[lo - 1];
     return word < b->arm_off + b->arm_words ? b : 0;
 }
 
 // x86 rip of the instruction containing pc. exact is set when pc is its first word.
+static inline u64 stubs_of(u64 pc) { return PRIV_VA + (pc >= PRIV_VA + OFF_STUBS2 ? OFF_STUBS2 : OFF_STUBS); } // of the copy in pc's part
 static inline bool in_rep_stub(u64 pc) {
-    u64 s = PRIV_VA + OFF_STUBS;
+    u64 s = stubs_of(pc);
     return pc >= s + STUB_OFF_REP_MOVS && pc < s + STUB_OFF_REP_END;
 }
 
 static u64 rip_of_pc(u64 pc, bool *exact, bool *found) {
     if (in_rep_stub(pc)) { // inside a rep instruction, called from its block; the loop heads are boundaries
         bool e;
-        u64 s = PRIV_VA + OFF_STUBS, rip = rip_of_pc(c->x[R_LR] - 4, &e, found);
+        u64 s = stubs_of(pc), rip = rip_of_pc(c->x[R_LR] - 4, &e, found);
         *exact = pc == s + STUB_OFF_REP_MOVS_HEAD || pc == s + STUB_OFF_REP_STOS_HEAD;
         return rip;
     }
@@ -661,9 +665,16 @@ static void pool_reclaim(void) {
 }
 
 static View *view_find_locked(u64 cr3_key, u32 cpl) {
+    static u16 hints[1024]; // the last view found under this hash, so that a guest crossing tables at every syscall doesn't scan them all under the lock
+    u16 *hint = &hints[(cr3_key >> 12 ^ cr3_key >> 22 ^ cpl * 37) & 1023];
+    View *hinted = &views[*hint];
+    if (hinted->cr3 == cr3_key && hinted->cpl == cpl && hinted->valid)
+        return hinted;
     for (u32 i = 0; i < view_count; i++)
-        if (views[i].cr3 == cr3_key && views[i].cpl == cpl && views[i].valid)
+        if (views[i].cr3 == cr3_key && views[i].cpl == cpl && views[i].valid) {
+            *hint = (u16)i;
             return &views[i];
+        }
     pool_reclaim();
     u32 idx = MAX_VIEWS;
     for (u32 i = 0; i < view_count; i++)
@@ -901,12 +912,20 @@ static inline void code_changed(u32 *word) {
 // tr_link, for a target this view already knows, with no way out of the VM. Half of all host calls in a fork loop did only this.
 static void link_here(u64 site, u32 kind, u64 arm) {
     BlockEntry *from = find_block(site), *to = find_block(arm);
+    if (from && to && from->key != to->key && kind == SVC_CALL) {
+        c->req_a[0] = site;
+        c->req_a[1] = to->rip;
+        hostcall(HC_CALL_TAIL);
+        return;
+    }
     if (!from || !to || from->key != to->key)
         return; // a link is forever, so it may only join blocks of one domain
     u32 *s = (u32 *)site, was = *s;
     if (site == arm || (kind != SVC_CALL && (was & 0xFFE0001Fu) != 0xD4000001u)) // as in tr_link: a dead block's entry may have come back
         return;
     i64 d = ((i64)arm - (i64)site) >> 2;
+    if (d < -(1 << 25) || d >= (1 << 25)) // the parts of the cache are out of reach of each other
+        return;
     if (!__atomic_compare_exchange_n(s, &was, (kind == SVC_CALL ? 0x94000000u : 0x14000000u) | ((u32)d & 0x3ffffff), false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
         return;
     code_changed(s);

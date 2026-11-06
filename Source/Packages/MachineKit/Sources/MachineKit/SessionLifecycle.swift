@@ -208,6 +208,17 @@ public final class SessionRunState: NSObject {
         }
     }
 
+    /// What the library says about a machine. `installing` is the machine's own: pending setup, on or off.
+    @objc(statusForRunning:runState:installing:)
+    public class func status(running: Bool, runState: String?, installing: Bool) -> String {
+        guard running else { return installing ? "Installation in progress" : "Shut down" }
+        switch runState {
+        case "suspended": return "Sleeping"
+        case "paused": return "Paused"
+        default: return installing ? "Installing macOS" : "Running"
+        }
+    }
+
     /// The guest can't go on, and the window says so.
     @objc(isFailure:)
     public class func isFailure(_ state: String?) -> Bool {

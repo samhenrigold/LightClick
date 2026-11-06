@@ -23,7 +23,13 @@ static u32 *cc_base;
 static u64 cc_limit;
 static BlockEntry *block_table;
 static PcMap *pc_map;
-static u32 pc_map_used;
+// The code cache has two parts, each with its share of the block table and pc maps. Shared domains go in the first: the kernel and system libraries, which every
+// process needs and which live long. Blocks of one view go in the second, and most die with their process, unusable until a reset. Links join blocks of one key, so
+// none crosses between the parts, and the second can reset alone without taking the first with it.
+#define PCMAP_ENTRIES (PCMAP_BYTES / sizeof(PcMap))
+static u32 pc_map_used[2] = {0, (OFF_PCMAP2 - OFF_PCMAP) / sizeof(PcMap)};
+static u32 *cc_cursor[2];
+int cur_part;
 static EngineCtx *ctx_ptr;
 
 typedef struct {
@@ -43,7 +49,10 @@ typedef struct {
     u32 first_word; // its entry word, which a kill overwrites
 } HostBlock;
 static HostBlock *hblocks;
-static u32 hblock_count;
+static u32 hblock_count[2];
+#define BLOCK_BASE(part) ((part) ? BLOCKS_MAX : 0)
+#define BLOCK_TABLE_PART2 ((OFF_BLOCKS2 - OFF_BLOCKS) / sizeof(BlockEntry))
+#define KEY_PART(key) (((key) & KEY_DOMAIN) ? 0 : 1)
 static u32 *frame_head; // per GPA frame: block index + 1
 #define PAGE_HEADS (1u << 18)
 static u32 *page_head; // by x86 page number, modulo PAGE_HEADS: block index + 1
@@ -293,7 +302,7 @@ static void stub_lit(u64 target) {
 static void emit_indirect_tail(void) {
     // x16 holds the x86 target. Lookup returns the translation in x22, and the branch stays here so that each site has
     // its own predictor entry.
-    bl_rel((int)((i64)(tr_stub_lookup - tr_cc_va(tr_cc)) / 4));
+    bl_rel((int)((i64)(STUB(tr_stub_lookup) - tr_cc_va(tr_cc)) / 4));
     br(S2);
 }
 
@@ -409,7 +418,7 @@ static void emit_control(const Insn *in, int idx, int live_after) {
                 E(0xF8000C00u | ((u32)-8 & 0x1ff) << 12 | 4 << 5 | S1);
             adr_words(AD, 4);
             E(0xA9800000u | ((u32)-2 & 0x7f) << 15 | AD << 10 | RS << 5 | S1);
-            bl_rel((int)((i64)(tr_stub_lookup - tr_cc_va(tr_cc)) / 4));
+            bl_rel((int)((i64)(STUB(tr_stub_lookup) - tr_cc_va(tr_cc)) / 4));
             E(0xD63F0000u | S2 << 5); // blr x22
             // landing pad: the next instruction (adr above counts from the adr: push, stp, bl, blr, then here)
             break;
@@ -436,14 +445,14 @@ static void emit_control(const Insn *in, int idx, int live_after) {
                 }
             }
             if (cfg.no_return_prediction) { // the guest's value decides, by lookup
-                b_rel((int)((i64)(tr_stub_ret_miss - tr_cc_va(tr_cc)) / 4));
+                b_rel((int)((i64)(STUB(tr_stub_ret_miss) - tr_cc_va(tr_cc)) / 4));
                 break;
             }
             E(0xA8C00000u | 2 << 15 | LR << 10 | RS << 5 | S1); // ldp x17, x30, [x26], #16
             logic_reg(1, 2, 0, S1, S1, S0);
             cbz(1, 1, S1, 2);
             ret_reg(LR);
-            b_rel((int)((i64)(tr_stub_ret_miss - tr_cc_va(tr_cc)) / 4));
+            b_rel((int)((i64)(STUB(tr_stub_ret_miss) - tr_cc_va(tr_cc)) / 4));
             break;
         }
         default:
@@ -461,9 +470,14 @@ static void fix(u32 *site, int form, u32 *to) {
         *site = (*site & 0xFC000000u) | ((u32)d & 0x3ffffff);
 }
 
-bool tr_needs_flush(void) {
-    return (u8 *)tr_cc - (u8 *)cc_base > (long)(cc_limit - 0x40000) || hblock_count >= BLOCKS_MAX - 2 || pc_map_used + MAX_INSNS >= PCMAP_BYTES / sizeof(PcMap);
+static bool part_full(int part) {
+    u32 *start = cc_base + part * CC_PART2_WORD;
+    u32 first_map = part ? (OFF_PCMAP2 - OFF_PCMAP) / sizeof(PcMap) : 0;
+    return (u8 *)cc_cursor[part] - (u8 *)start > (long)(cc_limit - 0x40000) || hblock_count[part] >= BLOCKS_MAX - 2 ||
+           pc_map_used[part] + MAX_INSNS >= first_map + PCMAP_ENTRIES;
 }
+
+bool tr_needs_flush(void) { return part_full(0) || part_full(1); }
 
 static void flush_everything(void) {
     tr_flush_all();
@@ -473,24 +487,25 @@ static void flush_everything(void) {
 // Blocks often die with nothing wrong with them: a view reused, a mapping rewritten. A block is a function of its x86 address, the bytes translating it read,
 // its CPL and code size, and settings fixed for the run. So if those match it can come back, under the protection a new translation would read them under.
 #define DEAD_SLOTS (1u << 20)
-#define READ_COPY_BYTES (256u << 20) // virtual: touched as used. Past it, blocks just aren't reusable until the next reset
+#define READ_COPY_BYTES (512u << 20) // virtual: touched as used. Past it, blocks just aren't reusable until the next reset
 #define WORD_NOP 0xD503201Fu
 #define WORD_DEAD (0xD4000001u | SVC_DEAD << 5)
 static u32 *dead_slots; // by key and rip: a block index + 1, the last to die there. A lost entry only means translating again
 static u8 *read_copies;
-static u32 read_copied = 1;
+static u32 read_copied[2] = {1, READ_COPY_BYTES / 2};
 
 static inline u32 dead_slot(u32 key, u64 rip) { return (u32)((rip * 0x9E3779B97F4A7C15ULL + key) >> 40) & (DEAD_SLOTS - 1); }
 
 static void remember_reads(HostBlock *hb, u64 rip) {
     u64 page_end = (rip & ~0xfffULL) + 4096, lo = fetch_lo, hi = fetch_hi < page_end ? fetch_hi : page_end;
-    if (cfg.no_reuse || hb->frame[1] != ~0ULL || hb->frame[0] >= cfg.ram_size || read_copied + (hi - lo) > READ_COPY_BYTES)
+    u32 end = cur_part ? READ_COPY_BYTES : READ_COPY_BYTES / 2;
+    if (cfg.no_reuse || hb->frame[1] != ~0ULL || hb->frame[0] >= cfg.ram_size || read_copied[cur_part] + (hi - lo) > end)
         return;
-    memcpy(read_copies + read_copied, ram_at(hb->frame[0] + (lo & 0xfff)), hi - lo);
-    hb->read_copy = read_copied;
+    memcpy(read_copies + read_copied[cur_part], ram_at(hb->frame[0] + (lo & 0xfff)), hi - lo);
+    hb->read_copy = read_copied[cur_part];
     hb->read_off = (u16)(lo & 0xfff);
     hb->read_bytes = (u16)(hi - lo);
-    read_copied += (u32)(hi - lo);
+    read_copied[cur_part] += (u32)(hi - lo);
 }
 
 static bool reuse_dead_block(u32 key, int cpl, u64 rip, TrResult *res) {
@@ -534,7 +549,33 @@ static bool reuse_dead_block(u32 key, int cpl, u64 rip, TrResult *res) {
     return true;
 }
 
-static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
+// A block joins the chains that find it to kill it.
+static void link_block(u32 idx) {
+    HostBlock *hb = &hblocks[idx];
+    for (int f = 0; f < 2; f++) {
+        if (hb->frame[f] != ~0ULL && hb->frame[f] < cfg.ram_size) {
+            u32 *head = &frame_head[hb->frame[f] >> 12];
+            hb->next_on_frame[f] = *head;
+            *head = idx + 1;
+        }
+    }
+    u32 *head = &page_head[page_slot(hb->rip)];
+    hb->next_on_page[0] = *head;
+    *head = idx + 1;
+    if (hb->frame[1] != ~0ULL) { // it runs on into the next page
+        head = &page_head[page_slot(hb->rip + 4096)];
+        hb->next_on_page[1] = *head;
+        *head = idx + 1;
+    }
+    if (!(hb->view & KEY_DOMAIN)) {
+        hb->next_in_view = view_head[hb->view];
+        view_head[hb->view] = idx + 1;
+    }
+    hb->on_frame = hb->on_page = hb->on_view = true;
+}
+
+static TrResult do_translate(int key, int view, u64 cr3, int cpl, u64 rip, bool single) {
+    (void)view;
     u64 t0 = mach_absolute_time();
     TrResult res = {0};
     res.frames[0] = res.frames[1] = ~0ULL;
@@ -546,6 +587,8 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
         flush_everything();
         res.flushed = true;
     }
+    cur_part = KEY_PART(key);
+    tr_cc = cc_cursor[cur_part];
     int count = 0;
     u64 pc = rip, page = rip & ~0xfffULL, frame;
     if (!single) {
@@ -553,7 +596,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
             res.unprotected = frame + 1;
             return res;
         }
-        if (reuse_dead_block((u32)block_key(view, cr3, cpl, rip), cpl, rip, &res)) {
+        if (reuse_dead_block((u32)key, cpl, rip, &res)) {
             stats.translate_ns += mach_absolute_time() - t0;
             return res;
         }
@@ -621,13 +664,13 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     u32 *start = tr_cc;
     if (ctx_ptr->vcpu_count > 1) // a kill patches the entry word under peers running it: nop to svc is a change the architecture allows, an arbitrary word isn't
         E(0xD503201Fu);
-    u32 map0 = pc_map_used;
+    u32 map0 = pc_map_used[cur_part];
     for (int i = 0; i < count; i++) {
         const Insn *in = &list[i];
         insn_arm[i] = tr_cc;
-        pc_map[pc_map_used].arm_word = (u16)(tr_cc - start);
-        pc_map[pc_map_used].rip_off = (u16)(in->rip - rip);
-        pc_map_used++;
+        pc_map[pc_map_used[cur_part]].arm_word = (u16)(tr_cc - start);
+        pc_map[pc_map_used[cur_part]].rip_off = (u16)(in->rip - rip);
+        pc_map_used[cur_part]++;
         stats.insns++;
         switch (in->op) {
             case OP_JCC:
@@ -722,11 +765,11 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     }
 
     // Registers the block.
-    u32 idx = hblock_count++;
+    u32 idx = BLOCK_BASE(cur_part) + hblock_count[cur_part]++;
     HostBlock *hb = &hblocks[idx];
     memset(hb, 0, sizeof *hb);
     hb->rip = rip;
-    hb->view = (u32)block_key(view, cr3, cpl, rip);
+    hb->view = (u32)key; // one reading: the tables can change under this, and which part of the cache it's in goes by this
     hb->entry_word = (u32)(start - cc_base);
     hb->frame[0] = res.frames[0];
     hb->frame[1] = res.frames[1];
@@ -736,28 +779,8 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     hb->on_frame = hb->on_page = hb->on_view = true;
     if (!single)
         remember_reads(hb, rip);
-    for (int f = 0; f < 2; f++) {
-        if (hb->frame[f] != ~0ULL && hb->frame[f] < cfg.ram_size) {
-            u32 *head = &frame_head[hb->frame[f] >> 12];
-            hb->next_on_frame[f] = *head;
-            *head = idx + 1;
-        }
-    }
-    {
-        u32 *head = &page_head[page_slot(rip)];
-        hb->next_on_page[0] = *head;
-        *head = idx + 1;
-        if (hb->frame[1] != ~0ULL) { // it runs on into the next page
-            head = &page_head[page_slot(rip + 4096)];
-            hb->next_on_page[1] = *head;
-            *head = idx + 1;
-        }
-    }
-    if (!(hb->view & KEY_DOMAIN)) {
-        hb->next_in_view = view_head[hb->view];
-        view_head[hb->view] = idx + 1;
-    }
-    BlockEntry *be = &block_table[idx];
+    link_block(idx);
+    BlockEntry *be = &block_table[cur_part ? BLOCK_TABLE_PART2 + (idx - BLOCK_BASE(1)) : idx];
     be->rip = rip;
     be->key = hb->view;
     be->arm_off = (u32)(start - cc_base);
@@ -769,7 +792,9 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
         hb->registered = true;
     }
     __sync_synchronize();
-    ctx_ptr->block_count = hblock_count;
+    ctx_ptr->block_count = hblock_count[0];
+    ctx_ptr->block_count_private = hblock_count[1];
+    cc_cursor[cur_part] = tr_cc;
     sys_icache_invalidate(start, (u8 *)tr_cc - (u8 *)start);
     stats.blocks++;
     stats.words += tr_cc - start;
@@ -1093,6 +1118,8 @@ void tr_init(const TrConfig *config) {
     cfg = *config;
     cc_base = (u32 *)(cfg.priv + OFF_CC);
     tr_cc = cc_base;
+    cc_cursor[0] = cc_base;
+    cc_cursor[1] = cc_base + CC_PART2_WORD;
     block_table = (BlockEntry *)(cfg.priv + OFF_BLOCKS);
     pc_map = (PcMap *)(cfg.priv + OFF_PCMAP);
     ctx_ptr = (EngineCtx *)(cfg.priv + OFF_CTX);
@@ -1105,7 +1132,7 @@ void tr_init(const TrConfig *config) {
     tr_stub_ret_miss = cfg.stub_ret_miss;
     tr_stub_pushf = cfg.stub_pushf;
     tr_stub_sahf = cfg.stub_sahf;
-    hblocks = calloc(BLOCKS_MAX, sizeof(HostBlock));
+    hblocks = calloc(BLOCKS_MAX * 2, sizeof(HostBlock));
     block_map = calloc(MAP_SIZE, sizeof(MapEntry));
     frame_head = calloc(cfg.ram_size >> 12, sizeof(u32));
     dead_slots = calloc(DEAD_SLOTS, sizeof(u32));
@@ -1131,7 +1158,7 @@ TrResult tr_translate(int view, uint64_t cr3, int cpl, bool compat, uint64_t rip
             return r;
         }
     }
-    TrResult r = do_translate(view, cr3, cpl, rip, single);
+    TrResult r = do_translate(key, view, cr3, cpl, rip, single);
     if ((key & KEY_DOMAIN) && cpl == 3 && !r.unprotected)
         stats.shared_blocks++;
     r.key = key;
@@ -1140,7 +1167,8 @@ TrResult tr_translate(int view, uint64_t cr3, int cpl, bool compat, uint64_t rip
 
 // The block holding a code cache word. Blocks only grow upward, so the table is sorted.
 static HostBlock *block_at(u32 word) {
-    u32 lo = 0, hi = hblock_count;
+    int part = word >= CC_PART2_WORD;
+    u32 first = BLOCK_BASE(part), lo = first, hi = first + hblock_count[part];
     while (lo < hi) {
         u32 mid = (lo + hi) / 2;
         if (hblocks[mid].entry_word <= word)
@@ -1148,7 +1176,30 @@ static HostBlock *block_at(u32 word) {
         else
             hi = mid;
     }
-    return lo ? &hblocks[lo - 1] : 0;
+    return lo != first ? &hblocks[lo - 1] : 0;
+}
+
+// A direct call into another key can't link, as a link is forever and the target's key is only good for some views. So each would take a trip through the monitor,
+// a program calling a system library being the common case. A lookup is right whatever has changed, so send the bl to one, as an indirect call does. Nothing else gets to
+// that code, so it needs no block of its own: an interrupt in it is stepped through, as in the lookup stub.
+void tr_call_tail(uint64_t site, uint64_t target) {
+    u32 *s = cc_host(site), was = *s;
+    if ((was & 0xFC000000u) != 0x94000000u)
+        return;
+    cur_part = (u32)(s - cc_base) >= CC_PART2_WORD; // in reach of its site
+    tr_cc = cc_cursor[cur_part];
+    u32 *tail = tr_cc;
+    movimm(S0, target);
+    mov_reg(1, S4, LR);
+    bl_rel((int)((i64)(STUB(tr_stub_lookup) - tr_cc_va(tr_cc)) / 4));
+    mov_reg(1, LR, S4);
+    br(S2);
+    cc_cursor[cur_part] = tr_cc;
+    sys_icache_invalidate(tail, (u8 *)tr_cc - (u8 *)tail);
+    i64 d = tail - s;
+    if (__atomic_compare_exchange_n(s, &was, 0x94000000u | ((u32)d & 0x3ffffff), false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        sys_icache_invalidate(s, 4);
+    stats.call_tails++;
 }
 
 void tr_link(uint64_t site, int kind, uint64_t arm, int key) {
@@ -1156,9 +1207,17 @@ void tr_link(uint64_t site, int kind, uint64_t arm, int key) {
     // A link is forever, so it may only join blocks of one domain: a chain from shared code into one view's code would be wrong in the next.
     HostBlock *from = block_at((u32)(s - cc_base));
     u32 was = *s;
+    if (from && (int)from->view != key && kind == SVC_CALL) {
+        HostBlock *to = block_at((u32)(cc_host(arm) - cc_base));
+        if (to)
+            tr_call_tail(site, to->rip);
+        return;
+    }
     if (!from || (int)from->view != key || site == arm || (kind != SVC_CALL && (was & 0xFFE0001Fu) != 0xD4000001u)) // a dead block's entry may have come back: that site runs on as it is
         return;
     i64 d = ((i64)arm - (i64)site) >> 2;
+    if (d < -(1 << 25) || d >= (1 << 25)) // the parts of the cache are out of reach of each other
+        return;
     if (!__atomic_compare_exchange_n(s, &was, (kind == SVC_CALL ? 0x94000000u : 0x14000000u) | ((u32)d & 0x3ffffff), false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
         return;
     sys_icache_invalidate(s, 4);
@@ -1340,25 +1399,46 @@ void tr_flush_all(void) {
         fprintf(stderr, "engine stop: code cache reset with other vCPUs running\n");
         abort();
     }
-    tr_flush_parked();
+    tr_flush_parked(false);
 }
 
-void tr_flush_parked(void) {
-    stats.cache_resets++;
+void tr_flush_parked(bool everything) {
+    everything = everything || part_full(0);
     ctx_ptr->tr_flushed = 1;
-    tr_cc = cc_base;
-    hblock_count = 0;
-    pc_map_used = 0;
-    ctx_ptr->block_count = 0;
-    memset(block_map, 0, MAP_SIZE * sizeof(MapEntry));
     memset(frame_head, 0, (cfg.ram_size >> 12) * sizeof(u32));
     memset(page_head, 0, PAGE_HEADS * sizeof(u32));
     memset(view_head, 0, sizeof view_head);
+    memset(block_map, 0, MAP_SIZE * sizeof(MapEntry));
     memset(dead_slots, 0, DEAD_SLOTS * sizeof(u32));
-    read_copied = 1;
     for (int v = 0; v <= view_high; v++)
         memset(hash_table(v), 0, HASH_BYTES);
     memset(hash_slots_used, 0, sizeof hash_slots_used);
+    cc_cursor[1] = cc_base + CC_PART2_WORD;
+    hblock_count[1] = 0;
+    pc_map_used[1] = (OFF_PCMAP2 - OFF_PCMAP) / sizeof(PcMap);
+    read_copied[1] = READ_COPY_BYTES / 2;
+    ctx_ptr->block_count_private = 0;
+    if (everything) {
+        stats.cache_resets++;
+        cc_cursor[0] = cc_base;
+        hblock_count[0] = 0;
+        pc_map_used[0] = 0;
+        read_copied[0] = 1;
+        ctx_ptr->block_count = 0;
+        return;
+    }
+    stats.cache_private_resets++;
+    // The shared part stays, and finds its way back onto what was just emptied. Its dead blocks stay off, as a kill took them.
+    for (u32 idx = 0; idx < hblock_count[0]; idx++) {
+        HostBlock *hb = &hblocks[idx];
+        if (hb->dead) {
+            hb->on_frame = hb->on_page = hb->on_view = false;
+            continue;
+        }
+        link_block(idx);
+        if (hb->registered)
+            map_insert((int)hb->view, hb->rip, idx + 1);
+    }
 }
 
 TrStats tr_stats(void) { return stats; }

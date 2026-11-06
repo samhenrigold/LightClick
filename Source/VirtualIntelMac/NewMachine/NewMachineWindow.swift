@@ -14,6 +14,8 @@ final class NewMachineWindow: NSWindowController, NSWindowDelegate {
     private let store = CreationJobStore()
     private let host: HostCapacity
     private let configuration: ConfigurationPage
+    /// The guest the configuration page was last filled in for, if what's on it should survive going Back.
+    private var configuredGuest: Guest?
     private let chooseButton = NSButton(title: "Use an Existing Installer…", target: nil, action: nil)
     private var choices: ChoicesPage?
     private var progressPage: ProgressPage?
@@ -77,6 +79,7 @@ final class NewMachineWindow: NSWindowController, NSWindowDelegate {
         if installer == nil, !controller.isBusy, controller.window?.isVisible == false {
             controller.installer = nil
             controller.progressPage = nil
+            controller.configuredGuest = nil
             controller.showChoices()
         }
         controller.showWindow(nil)
@@ -254,7 +257,10 @@ final class NewMachineWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func resetConfigurationUnlessResuming() {
-        if job?.guest != guest { configuration.reset(to: defaults(for: guest)) }
+        if NewMachineDefaults.pageStartsOver(pageGuest: configuredGuest, jobGuest: job?.guest, guest: guest) {
+            configuration.reset(to: defaults(for: guest))
+        }
+        configuredGuest = guest
     }
 
     @objc private func chooseInstaller() {
@@ -937,6 +943,7 @@ final class NewMachineWindow: NSWindowController, NSWindowDelegate {
         if let job { forgetPassword(of: job) }
         store.remove(slot)
         job = nil
+        configuredGuest = nil
         installer = nil
         progress = SetupProgress()
         downloadOnly = false

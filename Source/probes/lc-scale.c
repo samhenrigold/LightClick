@@ -293,7 +293,10 @@ int main(int argc, char **argv) {
             continue;
 #endif
         double one = 0;
+        const char *only_n = getenv("LC_SCALE_ONLY_N");
         for (int c = 0; c < 4; c++) {
+            if (only_n && atoi(only_n) != counts[c])
+                continue;
             double rate = run(&tests[t], counts[c], seconds);
             if (!c)
                 one = rate;

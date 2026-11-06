@@ -23,8 +23,10 @@ extension ConfigurationWindow {
         cpu.identifier = NSUserInterfaceItemIdentifier("CPUCount")
         cpu.target = self
         cpu.action = #selector(processorsChanged)
-        cpu.addItems(withTitles: limits.processorTitles)
-        cpu.selectItem(at: max(0, ((editable["CPUCount"] as? NSNumber)?.intValue ?? 0) - 1))
+        let choices = limits.processorChoices(saved: (editable["CPUCount"] as? NSNumber)?.intValue ?? 0)
+        cpu.addItems(withTitles: choices.titles)
+        for (item, count) in zip(cpu.itemArray, choices.counts) { item.tag = count }
+        cpu.selectItem(at: choices.selectedIndex)
         cpu.widthAnchor.constraint(equalToConstant: 170).isActive = true
 
         let memory = NSTextField(string: (editable["MemoryMiB"] as? NSNumber)?.stringValue ?? "")
@@ -36,6 +38,7 @@ extension ConfigurationWindow {
         stepper.minValue = 1024
         stepper.maxValue = Double(limits.maximumMemoryMiB)
         stepper.increment = 1024
+        stepper.valueWraps = false
         stepper.doubleValue = memory.doubleValue
         stepper.target = self
         stepper.action = #selector(memoryStepped)
@@ -76,7 +79,7 @@ extension ConfigurationWindow {
     }
 
     @objc private func processorsChanged(_ sender: NSPopUpButton) {
-        commit(["CPUCount": sender.indexOfSelectedItem + 1])
+        commit(["CPUCount": sender.selectedTag()])
     }
 
     @objc private func memoryStepped(_ sender: NSStepper) {
