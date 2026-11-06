@@ -474,6 +474,8 @@ def desktop():
         time.sleep(2)
     moving = subprocess.run([meter, window or '0', '8'], capture_output=True, text=True).stdout
     print('moving', moving, flush=True)
+    rate = re.search(r'presented ([0-9.]+)', moving)
+    check('the window shows its page moving', rate is not None and float(rate.group(1)) >= 30)
     # Moved on the host, past where the machine's window was: the guest's doesn't follow, it still moves, and a click still lands.
     def place(of):
         row = next((row for row in rows() if f'id={of} ' in row), '')
