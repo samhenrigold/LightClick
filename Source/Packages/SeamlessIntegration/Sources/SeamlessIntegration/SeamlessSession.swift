@@ -129,7 +129,8 @@ public final class SeamlessSession {
             fail("couldn't put the programs in the guest")
             return nil
         }
-        _ = await guest.run("/bin/sh", ["-c", Self.setupScript, "sh", tool, menuTool])
+        let setup = await guest.run("/bin/sh", ["-c", Self.setupScript, "sh", tool, menuTool])
+        note("# set up: exit \(setup.exitCode.map(String.init) ?? "none"), \(setup.output)\(setup.failure ?? "")")
         note("# running \(configuration.guestApp) in the guest")
         var arguments = [
             "SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "tree", "--app", configuration.guestApp, "--open", "--session",
@@ -157,10 +158,14 @@ public final class SeamlessSession {
             "INSERT OR REPLACE INTO access (service,client,client_type,allowed,prompt_count) VALUES "
                 + "('kTCCServiceAccessibility','\($0)',1,1,1);"
         }
+        // The agent is in a different place on other guests, and it's this script's parent.
+        let agentRow =
+            "INSERT OR REPLACE INTO access (service,client,client_type,allowed,prompt_count) VALUES "
+            + "('kTCCServiceAccessibility','$(/bin/ps -o comm= -p $PPID)',1,1,1);"
         return
             "mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp \"$1\" /tmp/sg/g; cp \"$2\" /tmp/sg/ig; chmod 755 /tmp/sg/g /tmp/sg/ig; "
-            + "/usr/bin/sqlite3 \"/Library/Application Support/com.apple.TCC/TCC.db\" \"\(rows.joined())\"; "
-            + "/usr/bin/killall tccd; sleep 2"
+            + "/usr/bin/sqlite3 \"/Library/Application Support/com.apple.TCC/TCC.db\" \"\(rows.joined())\(agentRow)\" 2>&1; "
+            + "/bin/ps -o comm= -p $PPID; /usr/bin/killall tccd; sleep 2"
     }
 
     private func listenForGuest() -> Bool {

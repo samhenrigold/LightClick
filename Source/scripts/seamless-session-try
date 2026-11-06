@@ -69,6 +69,7 @@ if not bundle:
     sys.exit(1)
 info = plistlib.loads((Path(bundle)/'Contents/Info.plist').read_bytes())
 socket_path = Path(info['LCSessionSocket'])
+Path(str(socket_path)+'.log').unlink(missing_ok=True)  # Or the last run's would look like this one's.
 bundle_id = plistlib.loads((Path(bundle)/'Contents/Info.plist').read_bytes())['CFBundleIdentifier']
 document = work/'A note from the host.txt'
 document.write_text('Written on the host.\n')
