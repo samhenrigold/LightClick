@@ -677,6 +677,7 @@ static void *(*region_copy)(void *);
 // When the host needs all of a window: once its bounds have held for a second, since one that opened by an effect
 // wasn't drawn whole at its final size. With gpu_mode 2, every time, which times a full redraw, and draws a covered
 // window.
+static uint32_t whole_generation;
 static int whole_window_due(uint32_t id, char *window) {
     if (table->gpu_mode == 2)
         return 1;
@@ -685,7 +686,7 @@ static int whole_window_due(uint32_t id, char *window) {
         int done;
         uint64_t stable_since;
         struct RectResult rect;
-        uint32_t shadow;
+        uint32_t shadow, generation;
     } seen[256];
     unsigned i = 0;
     while (i < 256 && seen[i].id && seen[i].id != id)
@@ -694,6 +695,13 @@ static int whole_window_due(uint32_t id, char *window) {
         return 0;
     uint64_t now = mach_absolute_time();
     struct RectResult rect = window_screen_rect(window);
+    // All of each window once the mode's on, covered or not, as nothing else would ever draw what doesn't change.
+    if (seen[i].generation != whole_generation) {
+        seen[i].generation = whole_generation;
+        seen[i].id = id;
+        seen[i].rect = rect;
+        return 1;
+    }
     uint32_t key = 2166136261u;
     for (int b = 0x134; b < 0x148; b++)
         key = (key ^ (uint8_t)window[b]) * 16777619u;
@@ -731,6 +739,8 @@ static char redraw_placed(char *state, char *window) {
         static uint32_t last_mode;
         static uint64_t refresh_until;
         uint64_t now = mach_absolute_time();
+        if (!last_mode && off)
+            whole_generation++;
         if (last_mode && !off)
             refresh_until =
                 now + 300000000ull * table->ticks_denom / table->ticks_numer; // All of it back on the display.
