@@ -5,6 +5,7 @@
 #ifdef VIM_MODERN_ACCOUNT_SETUP
 #import "guest-system-version.h"
 #import "modern-setup-identity.h"
+#import "modern-first-login.h"
 #import "opengl-desktop-processes.h"
 #import <SystemConfiguration/SystemConfiguration.h>
 #else
@@ -420,11 +421,20 @@ int main(int argc, char **argv) {
             if (finish && ![[journal objectForKey:@"Phase"] isEqual:@"complete"]) {
                 uid_t consoleUID = 0;
                 NSString *console = (NSString *)SCDynamicStoreCopyConsoleUser(NULL, &consoleUID, NULL);
-                BOOL desktop =
-                    consoleUID == identifier && [console isEqual:name] && VIMOpenGLDesktopRunning(identifier);
+                struct passwd *directory = console ? getpwuid(consoleUID) : NULL;
+                VIMFirstDesktopOwner owner = VIMFirstDesktopOwnerFor(
+                    identifier, [name UTF8String], consoleUID, [console UTF8String],
+                    directory ? directory->pw_name : NULL, [[journal objectForKey:@"Phase"] isEqual:@"autologin-armed"],
+                    VIMOpenGLDesktopRunning(consoleUID));
                 [console release];
-                if (!desktop)
+                if (owner == VIMFirstDesktopWaiting)
                     return 75;
+                // Everything below touches only what this transaction created,
+                // never the person's own account. Nothing runs after completion,
+                // so another user's desktop ends the automation here: the created
+                // account keeps its password and, if it signs in later, gets macOS's
+                // ordinary new-account assistant.
+                BOOL createdDesktop = owner == VIMFirstDesktopCreatedAccount;
                 if ([[journal objectForKey:@"FirstLoginCookieIntent"] boolValue] &&
                     VIMOpenGLFirstLoginCookie(name, identifier, 2) < 0)
                     return Failure("retiring native first-login policy");
@@ -433,12 +443,19 @@ int main(int argc, char **argv) {
                     if (result)
                         return result;
                 }
-                BOOL ours = [VIMOpenGLLoginUser() isEqual:name] && Owned(@"/etc/kcpassword", NO) &&
+                // A credential with this transaction's hash is ours even if macOS
+                // already cleared the login user. Any other credential isn't.
+                BOOL ours = Owned(@"/etc/kcpassword", NO) &&
                             [[journal objectForKey:@"AutoLoginSHA256"]
                                 isEqual:SHA([NSData dataWithContentsOfFile:@"/etc/kcpassword"])];
-                if (ours && ![[ownership objectForKey:@"AutomaticLogin"] boolValue] &&
-                    (!VIMOpenGLSetLoginUser(nil) || unlink("/etc/kcpassword")))
+                // Signing the created account in on every boot only makes sense
+                // if that's the account the person is actually using.
+                BOOL keepLogin = createdDesktop && [[ownership objectForKey:@"AutomaticLogin"] boolValue];
+                if (ours && !keepLogin &&
+                    (([VIMOpenGLLoginUser() isEqual:name] && !VIMOpenGLSetLoginUser(nil)) || unlink("/etc/kcpassword")))
                     return Failure("retiring the one-time login credential");
+                // Never claim the created account reached a desktop when it didn't.
+                [journal setObject:@(createdDesktop) forKey:@"CreatedAccountDesktopVerified"];
                 [journal setObject:@"complete" forKey:@"Phase"];
                 if (!Save(journal, journalPath))
                     return Failure("saving the first desktop handoff");
@@ -449,6 +466,7 @@ int main(int argc, char **argv) {
                 @"VolumeUUID" : volume,
                 @"Username" : name,
                 @"UID" : @(identifier),
+                @"CreatedAccountDesktopVerified" : [journal objectForKey:@"CreatedAccountDesktopVerified"] ?: @NO,
                 @"FirstLoginPolicyBootSessionUUID" : [journal objectForKey:@"FirstLoginPolicyBootSessionUUID"] ?: @""
             };
             NSData *json = [NSJSONSerialization dataWithJSONObject:result options:0 error:NULL];
