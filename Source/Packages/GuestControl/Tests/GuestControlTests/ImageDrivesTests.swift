@@ -47,6 +47,8 @@ struct ImageDrivesTests {
         #expect(ImageDrives.deviceName(slot: 0, format: nil) == "cdrom-device")
         #expect(ImageDrives.deviceName(slot: 0, format: "dmg") == "image-device")
         #expect(ImageDrives.deviceName(slot: 2, format: "dmg") == "image-disk-2")
+        let names = (0..<4).flatMap { slot in ["raw", "dmg"].map { ImageDrives.deviceName(slot: slot, format: $0) } }
+        #expect(Set(names).count == 5)
     }
 
     @Test func startingWithMediaReportsIt() {
