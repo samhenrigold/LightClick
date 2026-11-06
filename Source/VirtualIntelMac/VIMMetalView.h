@@ -34,8 +34,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Explicit developer experiment. Valid Metal swap-queue depths are 2 or 3;
 /// no frame contents, producer ownership, VSync or guest mode are changed.
 - (BOOL)setPresentationDrawableCount:(NSUInteger)count;
-/// Developer-controlled until qualified: wait for a swap drawable away from
-/// the input thread, selecting the newest immutable source before encoding.
+/// Wait for a swap drawable away from the input thread, selecting the newest
+/// immutable source before encoding. On unless VIM_DISPLAY_LEGACY_QUEUE=1.
 @property(nonatomic) BOOL asynchronousDrawableAcquisition;
 /// Explicit developer-only measurement; GPU fingerprints, not full-image CPU
 /// readback. Off in normal launches. No guest or input connection is touched.
@@ -44,6 +44,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// guest backing pixels. Empty rect disables the marker. Never normal input.
 - (void)setFingerprintTraceEnabled:(BOOL)enabled;
 - (void)setFingerprintMarkerRect:(NSRect)rect;
+/// With VIM_INPUT_LATENCY=1, marks the QMP reply of the input being timed. Otherwise a flag check.
+- (void)noteInputReply;
 /// Takes ownership of fd on every path; never copies the shared frame pixels.
 - (BOOL)installFrameDescriptor:(int)fd length:(NSUInteger)length error:(NSError **)error;
 /// Main-thread only. Completion fires once, after GPU use or a skipped frame.

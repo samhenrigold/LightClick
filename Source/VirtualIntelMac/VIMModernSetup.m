@@ -174,10 +174,13 @@ static NSError *SetupError(NSString *text) {
                                                             : @"The native installer could not confirm Macintosh HD."));
                                   return;
                               }
+                              NSMutableDictionary *undispatched = [self.state mutableCopy];
                               self.state[@"InstallDispatched"] = @YES;
                               self.state[@"InstallerPlan"] = plan;
                               NSError *issue = nil;
                               if (![self savePhase:@"install-dispatched" error:&issue]) {
+                                  // Nothing started, so the next pass must plan again, not report an installation.
+                                  self.state = undispatched;
                                   completion(nil, issue);
                                   return;
                               }
@@ -243,7 +246,8 @@ static NSError *SetupError(NSString *text) {
                       return;
                   }
                   if (finishing && ![report[@"DesktopRunning"] isEqual:@YES]) {
-                      completion(@{@"Handled" : @YES, @"Message" : @"Signing in to your virtual Mac…"}, nil);
+                      // Automatic login can be lost, so someone may have to sign in by hand.
+                      completion(@{@"Handled" : @YES, @"Message" : @"Waiting for sign-in on your virtual Mac…"}, nil);
                       return;
                   }
                   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -265,8 +269,11 @@ static NSError *SetupError(NSString *text) {
                           completion:^(NSDictionary *reply, NSError *failure) {
                             if (!failure && [reply[@"exitcode"] isEqual:@75]) {
                                 completion(
-                                    @{@"Handled" : @YES,
-                                      @"Message" : @"Preparing your account and sharing…"},
+                                    @{
+                                        @"Handled" : @YES,
+                                        @"Message" : finishing ? @"Waiting for the signed-in desktop and sharing…"
+                                                               : @"Preparing your account and sharing…"
+                                    },
                                     nil);
                                 return;
                             }
@@ -302,6 +309,8 @@ static NSError *SetupError(NSString *text) {
                                 self.profile = profile;
                                 [VIMAutomaticSetup removePasswordForIdentifier:profile[@"CredentialIdentifier"]
                                                                          error:NULL];
+                                self.state[@"CreatedAccountDesktopVerified"] =
+                                    result[@"CreatedAccountDesktopVerified"] ?: @NO;
                                 [self savePhase:@"complete" error:&saveError];
                                 completion(@{@"Handled" : @NO}, saveError);
                             } else {
@@ -310,8 +319,11 @@ static NSError *SetupError(NSString *text) {
                                                SetupError(@"The automatic account handoff could not be confirmed."));
                                     return;
                                 }
+                                NSMutableDictionary *unsaved = [self.state mutableCopy];
                                 self.state[@"AccountBootSessionUUID"] = boot;
                                 if (![self savePhase:@"awaiting-first-login" error:&saveError]) {
+                                    // The next pass must not restart the guest on a phase that isn't on disk.
+                                    self.state = unsaved;
                                     completion(nil, saveError);
                                     return;
                                 }

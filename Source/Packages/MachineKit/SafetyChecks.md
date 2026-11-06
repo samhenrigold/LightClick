@@ -1,7 +1,7 @@
 # MachineKit's safety and consistency checks
 
-Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpenGLRestartEvidence.h`, `VIMSession.m` and
-`VIMNetworkDefaults.m`, or left in Objective-C. Tests are in `Tests/MachineKitTests`.
+Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpenGLRestartEvidence.h`, `VIMSession.m`,
+`VIMNetworkDefaults.m` and `VIMLibraryLocation.m`, or left in Objective-C. Tests are in `Tests/MachineKitTests`.
 
 ## Evidence comparison
 
@@ -31,6 +31,34 @@ Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpen
 - A rename has no slash, colon, newline or leading dot. Package names replace those characters, avoid a leading dot, and
   never collide.
 - Prepared media can be deleted only under `<UUID>/Media`, in `Downloads/Preparation` or in this library's `Installers`.
+
+## Library location and layout (`LibrarySelection`, `LibraryLocation`, `LibraryMigration`)
+
+- The standard library's path can't be saved: `.standard` has no path, and `.chosen` only comes from comparing a root
+  with this instance's standard root. Preferences stay shared under `CFFIXED_USER_HOME`, so a saved default would pin
+  every other instance to this home.
+- `VIMLibraryPath` is written only by `LibrarySelection`. The migration's sweep of `VIM…` preferences skips it. A value
+  from the command line is never saved, and doesn't remove the saved one.
+- A migration runs only with the library lock, every machine's `Session.lock` and `Configuration.lock`, and no active
+  creation job for this library. All of these refusals use `EBUSY`, which the app retries next launch.
+- A package without a `State` folder can't be locked, so it defers the migration as if it were running.
+- The plan is saved before anything moves. A saved plan with the wrong format or legacy root, or any location outside
+  the two roots, refuses. A journal that doesn't parse at all is planned again.
+- A move with both ends present, or neither, refuses. Nothing is overwritten.
+- Moves run deepest first. Rewriting a path uses its longest moved ancestor, at a whole path component.
+- Only `Machine.plist` and non-hidden property lists under `Installation` and `State` are rewritten.
+
+## Guest preparation (`GuestPreparationChecks`, `SupportDisc`)
+
+- Preparation needs a Metal-capable guest in its live installed system with a volume UUID, and a desktop unless it's a
+  headless repair after an update.
+- The support disc is mounted only if exactly one volume has its name, the identifier has the shape `disk1s2`, and
+  `diskutil info` says the same name and unwritable. Only a disc that hasn't appeared yet may wait.
+- A staged copy must report the directory it was given, a known archive name that's listed and not empty, and a device
+  of the shape `/dev/disk1s2`.
+- The environment check, prepared files and plan must agree with the first report on guest, volume or build, as each
+  has them. Tools claiming `Installed` or `Ready` this early are refused.
+- A payload path may come back only as itself, or as the exact `/private/var` alias of the known staging folders.
 
 ## Pending edits
 
@@ -73,6 +101,10 @@ Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpen
 - Session: completion report staleness, live installed system, boot policy admission, repair restart of only the
   repaired boot, preparation and reconciliation admission, reconciliation of this boot, console user at least 501 and
   the expected UID.
+- Status pass (`GuestStatusPolicy`, `GuestSessionState`): each step `finishGuestStatus` and `refreshGuestStatus` may take,
+  once-per-boot steps, at most three reconciliations a boot, and when the next pass runs. A failed report passes
+  nothing. A failed repair check or archive holds automatic repair claims until the guest next starts, and each modern
+  setup failure gets one alert in that time. Doing the work, and asking the disk, stays in `VIMSession.m`.
 
 ## Left in Objective-C
 
@@ -85,8 +117,6 @@ and `saveAutomaticSetup:`'s validation with `VIMAutomaticSetup`.
 
 Ported and tested, but the app still uses its own copy:
 
-- `VIMSession.m`: only completion staleness, live installed system and preparation admission call MachineKit, to keep
-  that file's diff small. Boot policy, reconciliation and console user checks are unchanged there.
 - `VIMHostAudio.h` display mode, `VIMNetworkDefaults.m` MAC checks and forwarding defaults, and `VIMLibraryLocation`:
   they have other callers and weren't needed to shrink `VIMMachine.m`.
 - `machine.configuration` remains an `NSDictionary` for its Objective-C callers.
@@ -95,6 +125,7 @@ Ported and tested, but the app still uses its own copy:
 
 - A value of the wrong type nested inside a report or journal, such as a string for `GuestResult`, now refuses. It was
   an unrecognized-selector exception.
+- The older `Network` report key lists addresses in order of interface name. It was `NSDictionary`'s arbitrary order.
 - `saveSettings:` checks for an unsupported key under the configuration lock, so a held lock reports first.
 - `Codable` reads `<real>4</real>` as an integer. `init(propertyList:)` and `propertyList()` are exact and are what
   files should use.

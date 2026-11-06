@@ -100,6 +100,13 @@ static NSTextField *AlertParagraph(NSView *view, NSString *copy) {
 }
 @end
 
+// The window is the only other place a --create-guest run's progress shows up. Never given the password.
+static void CreationProgress(NSString *message) {
+    if (!VIMCreatingGuestFromArguments())
+        return;
+    printf("create-guest: %s\n", message.UTF8String);
+    fflush(stdout);
+}
 static NSTextField *AssistantText(NSString *text, CGFloat size, NSFontWeight weight) {
     NSTextField *field = [NSTextField wrappingLabelWithString:text];
     field.font = [NSFont systemFontOfSize:size weight:weight];
@@ -361,6 +368,32 @@ static VIMNewMachineWindow *creationController;
     [creationController resetConfigurationUnlessResuming];
     [creationController systemChanged:nil];
     [creationController beginSetup:nil];
+}
++ (void)createGuestFromArguments:(NSArray<NSString *> *)arguments {
+    NSMutableDictionary<NSString *, NSString *> *options = [NSMutableDictionary new];
+    for (NSUInteger i = 1; i + 1 < arguments.count; i += 2)
+        options[arguments[i]] = arguments[i + 1];
+    NSString *guest = options[@"--create-guest"];
+    if (![CreationGuests() containsObject:guest])
+        VIMFailCreateGuest([NSString
+            stringWithFormat:@"Unknown guest. Use one of: %@.", [CreationGuests() componentsJoinedByString:@", "]]);
+    [self showWithInstaller:nil guest:nil];
+    VIMNewMachineWindow *window = creationController;
+    [window.system selectItemAtIndex:[CreationGuests() indexOfObject:guest]];
+    [window resetConfigurationUnlessResuming];
+    [window systemChanged:nil];
+    window.nameField.stringValue = options[@"--name"];
+    // Left as text for beginSetup: to validate, as it does what's typed in the window.
+    if (options[@"--cpu"])
+        window.cpuField.stringValue = options[@"--cpu"];
+    if (options[@"--memory-gb"])
+        window.memoryField.stringValue = options[@"--memory-gb"];
+    if (options[@"--disk-gb"])
+        window.diskField.stringValue = options[@"--disk-gb"];
+    if (options[@"--account-name"])
+        window.guestUsername.stringValue = options[@"--account-name"];
+    window.guestPassword.stringValue = options[@"--account-password"] ?: @"";
+    [window beginSetup:nil];
 }
 + (void)restorePendingSetup {
     NSDictionary *saved = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"VIMCreationJob"];
@@ -1334,6 +1367,7 @@ static VIMNewMachineWindow *creationController;
     [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
 }
 - (void)setPhase:(NSString *)phase {
+    CreationProgress(phase);
     if (self.job) {
         self.job[@"Phase"] = phase;
         [self saveJob];
@@ -1920,6 +1954,7 @@ static void VIMRemoveAbandonedPreparation(NSURL *root, NSURL *library, NSString 
     VIMRemoveAbandonedPreparation(root, [NSURL fileURLWithPath:self.job[@"Library"]], self.job[@"Media"],
                                   existingInstaller);
     worker.progress = ^(NSString *stage) {
+      CreationProgress(stage);
       self.status.stringValue = stage;
     };
     worker.workProgress = ^(double fraction) {
@@ -2188,6 +2223,7 @@ static void VIMRemoveAbandonedPreparation(NSURL *root, NSURL *library, NSString 
         }
         self.job[@"Machine"] = machine.URL.path;
         [self saveJob];
+        CreationProgress(machine.URL.path);
         NSError *settingsError = nil;
         if (self.job[@"AutomaticSetup"] && ![machine saveAutomaticSetup:self.job[@"AutomaticSetup"]
                                                                   error:&settingsError]) {

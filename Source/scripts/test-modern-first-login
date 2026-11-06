@@ -1,0 +1,6 @@
+#!/bin/zsh
+set -euo pipefail
+root=${0:A:h:h}
+work=$(mktemp -d /tmp/vim-first-login-tests.XXXXXX)
+xcrun clang -fobjc-arc -O2 -Wall -Wextra -framework Foundation "$root/probes/modern-first-login.m" -o "$work/first-login"
+"$work/first-login"

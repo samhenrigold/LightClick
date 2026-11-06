@@ -1,6 +1,7 @@
 // swift-tools-version: 6.0
-// MachineKit: the machine model. Machine.plist as a value, the rules it must satisfy, and the pure checks on guest
-// reports and installation journals. No file locks and no third-party dependencies; `Guest` comes from InstallerKit.
+// MachineKit: the machine model. Machine.plist as a value, the rules it must satisfy, the pure checks on guest reports
+// and installation journals, and the library's location and layout. No third-party dependencies; `Guest` comes from
+// InstallerKit. The only file locks are the library migration's.
 import PackageDescription
 
 let package = Package(
