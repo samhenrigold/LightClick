@@ -1416,7 +1416,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
-    int cropping;
+    int cropping, covered; // cropping: the message the host last had, if it's taking this from the display.
     double look_every;
     uint32_t surface_flushes;
     CGWindowID id;
@@ -1784,17 +1784,16 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             CGRect bounds = item->bounds;
             const char *title = item->title, *owner = item->owner;
             int alpha = item->alpha, layer = item->layer;
-            //             // The host crops a window from the display's own frames if that shows it right: an opaque,
-            //             ordinary window that no
-            // other window in front of it covers. Its shape is a rectangle with the corners the host gives it, and its
-            // shadow is the host's. Anything else, such as a menu, a popover, a sheet or a covered window, keeps its
-            // capture, with real alpha.
+            // The host shows everything from the display's own frames. An opaque, ordinary window has the host's corners
+            // and shadow. One a window in front covers also gets a capture a second, for the part under that window, which
+            // only shows when nothing's over it on the host either, as in Mission Control. Anything else, such as a menu, a
+            // popover or a sheet, gets a capture a second for its alpha.
             int crop = no_pixels && item->layer == 0 && item->title[0] && item->alpha == 0x10000;
-            for (int k = 0; crop && k < i; k++) {
+            int covered = 0;
+            for (int k = 0; crop && !covered && k < i; k++) {
                 const struct TreeItem *front = &items[k];
-                if (front->layer == 0 && front->title[0] && CGRectIntersectsRect(front->bounds, item->bounds) &&
-                    tree_group(front->id) != tree_group(id))
-                    crop = 0;
+                covered = front->layer == 0 && front->title[0] && CGRectIntersectsRect(front->bounds, item->bounds) &&
+                          tree_group(front->id) != tree_group(id);
             }
             int margin = crop ? 0 : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
@@ -1835,25 +1834,27 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             s->order = order;
             s->alpha = (uint32_t)alpha;
             s->margin = margin;
-            if (no_pixels && !crop && w->cropping) {
-                // Back to captures, starting with a whole one.
-                w->cropping = 0;
-                free(w->previous);
-                w->previous = NULL;
-                stale = 1;
-            }
-            if (crop) {
+            int kind = !no_pixels ? 0 : crop ? SWM_CROP : SWM_OVERLAY;
+            if (kind)
+                stale = (!crop || covered) &&
+                        (fresh || sized || !w->previous || covered != w->covered || tick - w->last_capture >= 1);
+            w->covered = covered;
+            if (kind && !stale) {
                 if (fresh || moved || sized || order != w->order || alpha != w->alpha || strcmp(title, w->title)) {
-                    s->pixel_width = w->pixel_width = (uint32_t)(bounds.size.width * display_scale() + 0.5);
-                    s->pixel_height = w->pixel_height = (uint32_t)(bounds.size.height * display_scale() + 0.5);
+                    s->pixel_width = w->pixel_width = (uint32_t)((bounds.size.width + 2 * margin) * display_scale() + 0.5);
+                    s->pixel_height = w->pixel_height = (uint32_t)((bounds.size.height + 2 * margin) * display_scale() + 0.5);
                     s->group = tree_group(id);
                     if (send_window(s, title, owner, layer))
                         goto done;
                 }
-                if (!w->cropping) {
-                    w->cropping = 1;
+                if (sized) {
+                    free(w->previous);
+                    w->previous = NULL;
+                }
+                if (w->cropping != kind) {
+                    w->cropping = kind;
                     uint8_t message[SWM_HEADER_SIZE + SWM_GONE_SIZE];
-                    if (send_all(s->fd, message, swm_put_u32_message(message, sizeof(message), SWM_CROP, id)))
+                    if (send_all(s->fd, message, swm_put_u32_message(message, sizeof(message), kind, id)))
                         goto done;
                 }
                 if (fresh) {
@@ -1956,6 +1957,12 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 }
                 w->previous = s->previous;
                 s->previous = NULL;
+                if (kind && w->cropping != kind) {
+                    w->cropping = kind;
+                    uint8_t message[SWM_HEADER_SIZE + SWM_GONE_SIZE];
+                    if (send_all(s->fd, message, swm_put_u32_message(message, sizeof(message), kind, id)))
+                        goto done;
+                }
                 if (!seed_moved && !sized) {
                     double next = s->frames_changed != changed_before ? look_every / 2 : look_every * 2;
                     w->look_every = next < 1.0 / 15 ? 1.0 / 15 : next > 1 ? 1 : next;

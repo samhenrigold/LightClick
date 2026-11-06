@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """The bar for seamless: the same animated page, windowed and seamless, in clones of the same machine.
 
-    scripts/seamless-compare <app built by build-app> <machine.vintelmac>
+    scripts/seamless-compare <app built by build-app> <machine.vintelmac> [--overlays]
 
 Fails unless seamless's window changes at least 90% as often as windowed's, read from WindowServer by each window's ID, with
 the same click-to-change times printed beside it. It's WindowServer's copy, not photons, in both.
+
+--overlays skips that for a covered window, a popup menu and a sheet, reading the covered one's rate and saving each state's
+windows by ID, into Build/seamless, to look at.
 The proxy's window is saved with screencapture -l, by window, so whether what's on the display is right can be checked.
 """
 import os
@@ -26,15 +29,18 @@ results.mkdir(parents=True, exist_ok=True)
 tag = original_machine.stem.split()[0].lower()
 clicks = results/f'seamless-compare-{tag}-clicks.txt'
 
-windowed = subprocess.run([str(source/'scripts/guest-bench'), str(original_app), str(original_machine), f'seamless-compare-{tag}', '--driver',
+overlays = '--overlays' in sys.argv
+windowed = None if overlays else subprocess.run([str(source/'scripts/guest-bench'), str(original_app), str(original_machine), f'seamless-compare-{tag}', '--driver',
                            str(source/'probes/seamless-driver.py'), '--driver-arg', 'windowed', '--env', 'LC_HVDBT=1'],
                           capture_output=True, text=True)
-print(windowed.stdout[-800:], windowed.stderr[-300:], flush=True)
-match = re.search(r'windowed_distinct ([0-9.]+)', windowed.stdout)
-windowed_rate = float(match.group(1)) if match else 0
-match = re.search(r'windowed_presented ([0-9.]+)', windowed.stdout)
-windowed_presented = float(match.group(1)) if match else 0
-shutil.rmtree(source/f'Build/bench/seamless-compare-{tag}', ignore_errors=True)
+windowed_rate = windowed_presented = 0
+if windowed:
+    print(windowed.stdout[-800:], windowed.stderr[-300:], flush=True)
+    match = re.search(r'windowed_distinct ([0-9.]+)', windowed.stdout)
+    windowed_rate = float(match.group(1)) if match else 0
+    match = re.search(r'windowed_presented ([0-9.]+)', windowed.stdout)
+    windowed_presented = float(match.group(1)) if match else 0
+    shutil.rmtree(source/f'Build/bench/seamless-compare-{tag}', ignore_errors=True)
 
 work = source/'Build/bench/seamless-compare-session'
 shutil.rmtree(work, ignore_errors=True)
@@ -62,11 +68,35 @@ def running(pattern):
     return [row.strip() for row in rows if pattern in row]
 
 
+def walk_overlays(window_rows, pid):
+    def save(state):
+        for row in window_rows():
+            window = re.search(r'id=(\d+)', row).group(1)
+            subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'seamless-overlays-{tag}-{state}-{window}.png')])
+            print(state, row[:110], flush=True)
+
+    # A click opens a second window over part of the first, away from what moves in it.
+    save('one')
+    main = re.search(r'id=(\d+)', window_rows()[0]).group(1)
+    os.kill(pid, signal.SIGUSR1)
+    time.sleep(6)
+    save('covered')
+    print('covered_' + subprocess.run([str(results/'seamless-present-meter'), main, '10'], capture_output=True, text=True).stdout.strip(), flush=True)
+    # A click in that one opens its popup menu.
+    os.kill(pid, signal.SIGUSR1)
+    time.sleep(3)
+    save('menu')
+    os.kill(pid, signal.SIGUSR1)
+    # Closing it starts the sheet's timer.
+    time.sleep(6)
+    save('sheet')
+
+
 def session(label, extra):
     log.unlink(missing_ok=True)
     (results/f'seamless-compare-{tag}-{label}.png').unlink(missing_ok=True)
     page = work/f'{label}.html'
-    page.write_text(PAGE)
+    page.write_text((source/'probes/seamless-overlays-page.html').read_text() if overlays else PAGE)
     subprocess.run(['/usr/bin/open', '-g', '--env', f'CFFIXED_USER_HOME={home}', '--env', 'LC_SEAMLESS_QUIET=1', '--env', 'VIM_COUNT_DISTINCT_FRAMES=1', '--env', 'LC_SEAMLESS_STOP_AFTER=60', '--env', f'LC_SEAMLESS_CLICK_LOG={clicks}',
                     *[item for pair in extra for item in ('--env', pair)], '-a', bundle, str(page)], check=True)
     deadline = time.time()+900
@@ -88,6 +118,12 @@ def session(label, extra):
         said = log.read_text(errors='replace') if log.exists() else ''
         if 'guest\'s side ended' in said:
             break
+        if overlays:
+            if '# first window' in said and window_rows() and not clicked and time.time() - first_seen(said) > 12:
+                clicked = True
+                walk_overlays(window_rows, int(running(f'{bundle}/Contents/MacOS/SeamlessProxy')[0].split()[0]))
+            time.sleep(1)
+            continue
         # The same meter as windowed's, on this one window, clicks first and then over the session's own measuring time.
         rows = window_rows()
         if '# first window' in said and rows and not clicked and time.time() - first_seen(said) > 12:
@@ -131,6 +167,10 @@ def session(label, extra):
 
 
 frames_rate, presented_rate = session('frames', [])
+if overlays:
+    subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', bundle])
+    shutil.rmtree(work, ignore_errors=True)
+    sys.exit(0)
 print(f'distinct frames/s at the app: windowed {windowed_rate:.1f}; seamless {frames_rate:.1f}', flush=True)
 print(f'distinct frames/s in WindowServer\'s copy of the window: windowed {windowed_presented:.1f}; seamless {presented_rate:.1f}', flush=True)
 subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', bundle])

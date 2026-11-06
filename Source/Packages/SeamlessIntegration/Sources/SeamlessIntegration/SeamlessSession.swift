@@ -50,6 +50,10 @@ public final class SeamlessSession {
         let layer: CALayer
         var image: CGImage?
         var cropped = false
+        /// Its shape is `image`'s alpha, rather than a rectangle with the host's corners.
+        var overlay = false
+        /// The parts of a covered window nothing's in front of, live, over `image`.
+        var pieces: [CALayer] = []
         init(window: SessionWire.Window, context: NSObject, layer: CALayer) {
             self.window = window
             self.context = context
@@ -323,6 +327,10 @@ public final class SeamlessSession {
         case .frame(let frame):
             guard let surface = surfaces[frame.window], let image else { return }
             surface.image = image
+            if surface.cropped, self.frame != nil {
+                showCrops(of: [surface])
+                return
+            }
             surface.cropped = false
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -331,15 +339,11 @@ public final class SeamlessSession {
             surface.layer.cornerRadius = 0
             CATransaction.commit()
             CATransaction.flush()
-        case .crop(let id):
-            surfaces[id]?.cropped = true
-            if let surface = surfaces[id], let frame {
-                CATransaction.begin()
-                CATransaction.setDisableActions(true)
-                crop(surface, from: frame)
-                CATransaction.commit()
-                CATransaction.flush()
-            }
+        case .crop(let id), .overlay(let id):
+            guard let surface = surfaces[id] else { return }
+            surface.cropped = true
+            if case .overlay = message { surface.overlay = true } else { surface.overlay = false }
+            showCrops(of: [surface])
         case .gone(let id):
             surfaces[id] = nil
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
@@ -457,9 +461,9 @@ public final class SeamlessSession {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         surface.layer.frame = CGRect(x: 0, y: 0, width: width, height: height)
-        if let frame, surface.cropped { crop(surface, from: frame) }
         CATransaction.commit()
-        CATransaction.flush()
+        // Its place may have covered or uncovered others.
+        showCrops(of: Array(surfaces.values))
         proxy?.send(
             SessionCommand.showSurface(
                 id: Int(window.id),
@@ -485,22 +489,92 @@ public final class SeamlessSession {
         CATransaction.flush()
     }
 
+    private func showCrops(of list: [Surface]) {
+        guard let frame else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for surface in list where surface.cropped { crop(surface, from: frame) }
+        CATransaction.commit()
+        CATransaction.flush()
+    }
+
     private func crop(_ surface: Surface, from frame: (surface: IOSurfaceRef, width: Int, height: Int)) {
         let window = surface.window
-        let scale = window.width > 0 ? Double(window.pixelWidth) / Double(window.width) : 1
+        let side = Double(window.margin)
+        let whole = CGRect(x: 0, y: 0, width: Double(window.width) + 2 * side, height: Double(window.height) + 2 * side)
+        let scale = whole.width > 0 ? Double(window.pixelWidth) / whole.width : 1
         let fullWidth = Double(frame.width)
         let fullHeight = Double(frame.height)
-        surface.layer.contents = frame.surface
         // contentsRect counts up from the bottom of the surface, and guest windows down from the top of the display.
-        surface.layer.contentsRect = CGRect(
-            x: Double(window.x) * scale / fullWidth,
-            y: (fullHeight - (Double(window.y) + Double(window.height)) * scale) / fullHeight,
-            width: Double(window.width) * scale / fullWidth, height: Double(window.height) * scale / fullHeight)
-        // shortcut: the same corners all round, where a window's own differ a little, until they're read from its shape.
-        surface.layer.cornerRadius = 5
-        surface.layer.masksToBounds = true
+        func place(_ part: CGRect) -> CGRect {
+            CGRect(
+                x: (Double(window.x) - side + part.minX) * scale / fullWidth,
+                y: (fullHeight - (Double(window.y) - side + part.maxY) * scale) / fullHeight,
+                width: part.width * scale / fullWidth, height: part.height * scale / fullHeight)
+        }
+        let layer = surface.layer
+        let covers = surfaces.values.filter {
+            $0.window.order < window.order && $0.window.level == 0 && !$0.window.title.isEmpty && $0.window.group != window.group
+        }.map { CGRect(x: Double($0.window.x - window.x), y: Double($0.window.y - window.y), width: Double($0.window.width), height: Double($0.window.height)) }
+        let visible = surface.overlay ? [whole] : SeamlessSession.uncovered(whole, by: covers)
+        if visible == [whole] {
+            layer.contents = frame.surface
+            layer.contentsRect = place(whole)
+            setPieces(of: surface, to: [], from: frame.surface, place: place, height: whole.height)
+        } else {
+            layer.contents = surface.image ?? (frame.surface as Any)
+            layer.contentsRect = surface.image == nil ? place(whole) : CGRect(x: 0, y: 0, width: 1, height: 1)
+            setPieces(of: surface, to: visible, from: frame.surface, place: place, height: whole.height)
+        }
+        if surface.overlay {
+            let mask = layer.mask ?? CALayer()
+            mask.frame = whole
+            mask.contents = surface.image
+            layer.mask = mask
+            layer.cornerRadius = 0
+            layer.masksToBounds = false
+        } else {
+            layer.mask = nil
+            // shortcut: the same corners all round, where a window's own differ a little, until they're read from its shape.
+            layer.cornerRadius = 5
+            layer.masksToBounds = true
+        }
         // A surface a producer has drawn into again is the same object, which on its own wouldn't refresh.
-        surface.layer.perform(NSSelectorFromString("setContentsChanged"))
+        layer.perform(NSSelectorFromString("setContentsChanged"))
+    }
+
+    private func setPieces(
+        of surface: Surface, to parts: [CGRect], from frame: IOSurfaceRef, place: (CGRect) -> CGRect, height: Double
+    ) {
+        while surface.pieces.count > parts.count { surface.pieces.removeLast().removeFromSuperlayer() }
+        while surface.pieces.count < parts.count {
+            let piece = CALayer()
+            piece.edgeAntialiasingMask = []
+            surface.layer.addSublayer(piece)
+            surface.pieces.append(piece)
+        }
+        for (piece, part) in zip(surface.pieces, parts) {
+            piece.frame = CGRect(x: part.minX, y: height - part.maxY, width: part.width, height: part.height)
+            piece.contents = frame
+            piece.contentsRect = place(part)
+            piece.perform(NSSelectorFromString("setContentsChanged"))
+        }
+    }
+
+    /// What's left of `rect` with `covers` taken out, as rectangles that don't overlap.
+    nonisolated static func uncovered(_ rect: CGRect, by covers: [CGRect]) -> [CGRect] {
+        covers.reduce([rect]) { parts, cover in
+            parts.flatMap { part -> [CGRect] in
+                let cut = part.intersection(cover)
+                guard !cut.isEmpty else { return [part] }
+                return [
+                    CGRect(x: part.minX, y: part.minY, width: part.width, height: cut.minY - part.minY),
+                    CGRect(x: part.minX, y: cut.maxY, width: part.width, height: part.maxY - cut.maxY),
+                    CGRect(x: part.minX, y: cut.minY, width: cut.minX - part.minX, height: cut.height),
+                    CGRect(x: cut.maxX, y: cut.minY, width: part.maxX - cut.maxX, height: cut.height)
+                ].filter { !$0.isEmpty }
+            }
+        }
     }
 
     /// The display path that hands over shared memory rather than a surface: two surfaces, so one is never being read as it's written.
