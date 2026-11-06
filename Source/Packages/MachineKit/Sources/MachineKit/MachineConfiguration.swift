@@ -111,6 +111,8 @@ public struct MachineConfiguration: Sendable, Equatable {
         case sshPort = "SSHPort"
         case fileSharingEnabled = "FileSharingEnabled"
         case fileSharingPort = "FileSharingPort"
+        case screenSharingEnabled = "ScreenSharingEnabled"
+        case screenSharingPort = "ScreenSharingPort"
         case audioEnabled = "AudioEnabled"
         case audioOutputDevice = "AudioOutputDevice"
         case audioInputDevice = "AudioInputDevice"
@@ -294,6 +296,17 @@ public struct MachineConfiguration: Sendable, Equatable {
     public var fileSharingPort: Int? {
         get { self[.fileSharingPort]?.number?.intValue }
         set { setNumber(.fileSharingPort, newValue as NSNumber?) }
+    }
+
+    /// Off unless a user turned it on: `withNetworkDefaults` doesn't fill this one in.
+    public var screenSharingEnabled: Bool? {
+        get { self[.screenSharingEnabled]?.number?.boolValue }
+        set { setNumber(.screenSharingEnabled, newValue as NSNumber?) }
+    }
+
+    public var screenSharingPort: Int? {
+        get { self[.screenSharingPort]?.number?.intValue }
+        set { setNumber(.screenSharingPort, newValue as NSNumber?) }
     }
 
     public var audioEnabled: Bool? {

@@ -433,7 +433,7 @@ import Testing
                 "AudioEnabled",
                 "Description", "RetinaEnabled", "OpticalMedia", "NetworkConnected", "MACAddress", "DisplayMode",
                 "AudioOutputDevice", "AudioInputDevice", "ClipboardEnabled", "NetworkMode", "BridgeInterface",
-                "DisplayScalingFilter", "AdditionalMedia"
+                "DisplayScalingFilter", "AdditionalMedia", "ScreenSharingEnabled", "ScreenSharingPort"
             ])
     }
 

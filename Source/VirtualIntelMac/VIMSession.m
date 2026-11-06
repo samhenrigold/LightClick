@@ -4131,6 +4131,11 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     BOOL idle = self.guestSessionState.graphicsActionsEnabled;
     BOOL recorded = [NSFileManager.defaultManager
         fileExistsAtPath:[self.machine.URL URLByAppendingPathComponent:@"State/GuestInstallation.plist"].path];
+    if (item.action == @selector(toggleScreenSharing:))
+        return self.guestAgentFree;
+    if (item.action == @selector(openScreenSharing:))
+        return self.guestAgentFree && [self.machine.editableConfiguration[@"ScreenSharingEnabled"] boolValue] &&
+               [VIMMachineModel screenSharingURLForConfiguration:self.machine.configuration];
     if (item.action == @selector(checkGraphicsSetup:))
         return idle && recorded;
     if (item.action == @selector(finishGraphicsSetup:))
@@ -4265,6 +4270,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                     address;
         }
         [menu addItem:NSMenuItem.separatorItem];
+        if ([VIMMachineModel screenSharingAvailableOnConfiguration:config]) {
+            [self addDeviceItem:@"Share Screen" action:@selector(toggleScreenSharing:) toMenu:menu].state =
+                [config[@"ScreenSharingEnabled"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+            [self addDeviceItem:@"Open Screen Sharing…" action:@selector(openScreenSharing:) toMenu:menu];
+            [menu addItem:NSMenuItem.separatorItem];
+        }
         [self addDeviceItem:@"Configure…" action:@selector(showNetworkSettings:) toMenu:menu];
         return;
     }
@@ -4832,6 +4843,94 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 }
 - (void)showNetworkSettings:(id)sender {
     [VIMMachineSettings showForMachine:self.machine section:@"Hardware" category:@"Network" window:self.window];
+}
+- (BOOL)guestAgentFree {
+    return self.task.running && !self.preparing && !self.preparationRequested && !self.guestPending &&
+           !self.diagnosticPending && !self.clipboardPending && !self.bootPolicyPending &&
+           ![@[ @"paused", @"suspended" ] containsObject:self.lastRunState];
+}
+- (void)applyGuestScreenSharing:(BOOL)enabled completion:(void (^)(NSError *))completion {
+    NSArray *steps = [VIMMachineModel screenSharingCommandsForGuest:self.machine.guest enabling:enabled];
+    if (!steps || !self.guestAgentFree) {
+        completion(VIMSessionError(@"Start this Mac and wait for setup to finish, then try again."));
+        return;
+    }
+    self.guestPending = YES;
+    void (^finish)(NSError *) = ^(NSError *error) {
+      self.guestPending = NO;
+      [self refreshGuestStatus];
+      completion(error);
+    };
+    [self.guestAgent connectWithCompletion:^(NSError *error) {
+      if (error)
+          finish(error);
+      else
+          [self runScreenSharingSteps:steps enabled:enabled finish:finish];
+    }];
+}
+- (void)runScreenSharingSteps:(NSArray<NSArray<NSString *> *> *)steps
+                      enabled:(BOOL)enabled
+                       finish:(void (^)(NSError *))finish {
+    NSArray<NSString *> *step = steps.firstObject;
+    [self.guestAgent
+        runExecutable:step.firstObject
+            arguments:[step subarrayWithRange:NSMakeRange(1, step.count - 1)]
+              timeout:30
+           completion:^(NSDictionary *result, NSError *failure) {
+             if (failure) {
+                 finish(failure);
+             } else if (steps.count > 1) {
+                 [self runScreenSharingSteps:[steps subarrayWithRange:NSMakeRange(1, steps.count - 1)]
+                                     enabled:enabled
+                                      finish:finish];
+             } else {
+                 finish([result[@"exitcode"] isEqual:@0] == enabled
+                            ? nil
+                            : VIMSessionError(enabled ? @"Screen Sharing is still off. Turn it on in the virtual Mac’s "
+                                                        @"System Preferences → Sharing."
+                                                      : @"Screen Sharing is still on. Turn it off in the virtual "
+                                                        @"Mac’s System Preferences → Sharing."));
+             }
+           }];
+}
+- (void)toggleScreenSharing:(id)sender {
+    NSDictionary *settings = self.machine.editableConfiguration;
+    BOOL enable = ![settings[@"ScreenSharingEnabled"] boolValue];
+    // The guest first: a setting that says off while the service still runs would be worse than an error.
+    [self applyGuestScreenSharing:enable
+                       completion:^(NSError *error) {
+                         NSMutableDictionary *changes = [@{@"ScreenSharingEnabled" : @(enable)} mutableCopy];
+                         if (!settings[@"ScreenSharingPort"])
+                             changes[@"ScreenSharingPort"] =
+                                 VIMSuggestedForwardPorts(self.machine.URL.URLByDeletingLastPathComponent,
+                                                          self.machine.URL)[@"ScreenSharingPort"];
+                         NSError *failure = error;
+                         if (!failure)
+                             [self.machine saveSettings:changes error:&failure];
+                         if (failure) {
+                             VIMPresentError(failure, self.window);
+                             return;
+                         }
+                         if (enable && ![VIMMachineModel screenSharingURLForConfiguration:self.machine.configuration]) {
+                             NSAlert *alert = [NSAlert new];
+                             alert.messageText = @"Screen Sharing is on in the virtual Mac";
+                             alert.informativeText = @"Restart this virtual Mac to connect to it from this Mac.";
+                             [alert addButtonWithTitle:@"OK"];
+                             VIMPresentAlert(alert, self.window, nil);
+                         }
+                       }];
+}
+- (void)openScreenSharing:(id)sender {
+    NSURL *URL = [VIMMachineModel screenSharingURLForConfiguration:self.machine.configuration];
+    // Enabling is idempotent, and a guest that's been reinstalled or restored has lost it. Screen Sharing asks for the
+    // guest's account itself, so no name or password ever passes through here.
+    [self applyGuestScreenSharing:YES
+                       completion:^(NSError *error) {
+                         if (error)
+                             VIMPresentError(error, self.window);
+                         else
+                             [NSWorkspace.sharedWorkspace openURL:URL];
+                       }];
 }
 + (void)clipboardPreferencesChangedForMachine:(VIMMachine *)machine {
     VIMSession *session = sessions[SessionKey(machine)];

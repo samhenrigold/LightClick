@@ -1,5 +1,5 @@
-// Non-root GUI-session side of the opt-in text clipboard bridge.
-// Protocol: newline-delimited JSON, protocol 2; authenticate before any text.
+// Non-root GUI-session side of the opt-in clipboard bridge.
+// Protocol: newline-delimited JSON, protocol 2; authenticate before any content.
 #import <AppKit/AppKit.h>
 #ifdef VIM_OPENGL_GUEST
 #import "opengl-system-version.h"
@@ -23,7 +23,6 @@
 #import "guest-clipboard-publication.h"
 #if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 1060
 #include <mach/mach_time.h>
-#define NSPasteboardTypeString NSStringPboardType
 #ifndef CFBridgingRelease
 #define CFBridgingRelease(value) ([(id)(value) autorelease])
 #endif
@@ -382,6 +381,11 @@ typedef unsigned long long VIMClipboardSequence;
 typedef NSUInteger VIMClipboardSequence;
 #endif
 static const NSUInteger TextLimit = 1024 * 1024, WireLimit = 8 * 1024 * 1024;
+#ifdef VIM_OPENGL_GUEST
+static const NSUInteger RichOffer = VIMClipboardRichLimitSerial;
+#else
+static const NSUInteger RichOffer = VIMClipboardRichLimitVirtio;
+#endif
 static BOOL ActiveConsoleUser(void) {
     struct stat console;
     return !stat("/dev/console", &console) && console.st_uid == getuid();
@@ -393,6 +397,7 @@ static BOOL ActiveConsoleUser(void) {
     NSMutableData *_incoming, *_outgoing;
     NSString *_token;
     BOOL _authenticated, _displayPowerOnly;
+    NSUInteger _richLimit;
     NSInteger _observedChange;
     VIMClipboardSequence _localSequence, _remoteSequence, _remoteHeartbeat;
     NSTimeInterval _lastHeartbeat;
@@ -423,6 +428,7 @@ static BOOL ActiveConsoleUser(void) {
 @property(VIM_CLIPBOARD_ATOMIC, retain) NSMutableData *outgoing;
 @property(VIM_CLIPBOARD_ATOMIC, retain) NSString *token;
 @property(VIM_CLIPBOARD_ATOMIC) BOOL authenticated;
+@property(VIM_CLIPBOARD_ATOMIC) NSUInteger richLimit;
 @property(VIM_CLIPBOARD_ATOMIC) NSInteger observedChange;
 @property(VIM_CLIPBOARD_ATOMIC) VIMClipboardPendingPublication publication;
 @property(VIM_CLIPBOARD_ATOMIC) VIMClipboardSequence localSequence;
@@ -447,6 +453,7 @@ static BOOL ActiveConsoleUser(void) {
 #if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 1050
 @synthesize descriptor = _descriptor, selectWakeRead = _selectWakeRead, selectWakeWrite = _selectWakeWrite;
 @synthesize authenticated = _authenticated, observedChange = _observedChange, publication = _publication;
+@synthesize richLimit = _richLimit;
 @synthesize localSequence = _localSequence, remoteSequence = _remoteSequence, remoteHeartbeat = _remoteHeartbeat,
             lastHeartbeat = _lastHeartbeat;
 @synthesize displayPowerOnly = _displayPowerOnly;
@@ -695,6 +702,8 @@ static BOOL ActiveConsoleUser(void) {
             return;
         }
         budget -= n;
+        // A long frame holds back the pong behind it, so a moving stream counts as the host being alive.
+        self.lastHeartbeat = ClipboardUptime();
         [self.outgoing replaceBytesInRange:NSMakeRange(0, n) withBytes:NULL length:0];
     }
 #if defined(VIM_OPENGL_GUEST) && __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 1070
@@ -752,6 +761,9 @@ static BOOL ActiveConsoleUser(void) {
         }
         self.authenticated = YES;
         self.lastHeartbeat = ClipboardUptime();
+        // A host that predates rich frames doesn't answer the offer, and stays on text.
+        id rich = self.displayPowerOnly ? nil : [message objectForKey:@"rich"];
+        self.richLimit = [rich isKindOfClass:NSNumber.class] ? MIN([rich unsignedLongValue], RichOffer) : 0;
         // Do not export old pasteboard contents merely because sharing starts.
         if (self.displayPowerOnly)
             [self emitDisplayPower];
@@ -779,31 +791,41 @@ static BOOL ActiveConsoleUser(void) {
         [self stop];
         return;
     }
-    if (![[message objectForKey:@"type"] isEqual:@"text"] ||
-        ![[message objectForKey:@"sequence"] isKindOfClass:NSNumber.class] ||
-        ![[message objectForKey:@"text"] isKindOfClass:NSString.class]) {
+    BOOL rich = [[message objectForKey:@"type"] isEqual:@"rich"];
+    NSString *text = [message objectForKey:@"text"];
+    NSData *rtf = nil, *png = nil;
+    if (rich ? !VIMClipboardReadRichFrame(message, self.richLimit, &text, &rtf, &png)
+             : (![[message objectForKey:@"type"] isEqual:@"text"] || ![text isKindOfClass:NSString.class])) {
+        [self stop];
+        return;
+    }
+    if (![[message objectForKey:@"sequence"] isKindOfClass:NSNumber.class]) {
         [self stop];
         return;
     }
     double sequence = [[message objectForKey:@"sequence"] doubleValue];
     if (sequence < 1 || sequence > 9007199254740991.0 || floor(sequence) != sequence ||
-        sequence <= self.remoteSequence ||
-        [[message objectForKey:@"text"] lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > TextLimit) {
+        sequence <= self.remoteSequence || [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > TextLimit) {
         [self stop];
         return;
     }
     self.remoteSequence = (VIMClipboardSequence)sequence;
     // Keep heartbeats and sequence validation live while locked, but never
-    // apply host text there. Consuming the sequence prevents replay on unlock.
+    // apply host content there. Consuming the sequence prevents replay on unlock.
     if ([self consoleLockState] != 0)
         return;
     NSPasteboard *pasteboard = self.pasteboard;
+    if (rich) {
+        VIMClipboardPublishRich(pasteboard, text, rtf, png, YES);
+        self.observedChange = pasteboard.changeCount;
+        return;
+    }
 #if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < 1060
     [pasteboard declareTypes:[NSArray arrayWithObject:NSStringPboardType] owner:nil];
 #else
     [pasteboard clearContents];
 #endif
-    [pasteboard setString:[message objectForKey:@"text"] forType:NSPasteboardTypeString];
+    [pasteboard setString:text forType:NSPasteboardTypeString];
     self.observedChange = pasteboard.changeCount; // suppress reflection to host
 }
 - (void)readAvailable {
@@ -821,16 +843,21 @@ static BOOL ActiveConsoleUser(void) {
                 return;
             }
             budget -= n;
+            self.lastHeartbeat = ClipboardUptime(); // see flush
             [self.incoming appendBytes:bytes length:n];
             if (self.incoming.length > WireLimit) {
                 [self stop];
                 return;
             }
+            // Only the new bytes can hold a newline. A UART delivers a long frame in tiny reads, and rescanning all of
+            // it on each one is quadratic, which a TCG guest would feel.
+            NSUInteger searched = self.incoming.length - n;
             while (self.incoming.length) {
                 const uint8_t *start = self.incoming.bytes;
-                const uint8_t *end = memchr(start, '\n', self.incoming.length);
+                const uint8_t *end = memchr(start + searched, '\n', self.incoming.length - searched);
                 if (!end)
                     break;
+                searched = 0;
                 NSUInteger length = end - start;
                 NSData *line = [self.incoming subdataWithRange:NSMakeRange(0, length)];
                 [self.incoming replaceBytesInRange:NSMakeRange(0, length + 1) withBytes:NULL length:0];
@@ -882,8 +909,12 @@ static BOOL ActiveConsoleUser(void) {
             return;
         }
         NSString *text = [pasteboard stringForType:NSPasteboardTypeString];
-        if (!text) {
-            if (pasteboard.types.count && ![pasteboard availableTypeFromArray:@[ NSPasteboardTypeString ]]) {
+        NSData *rtf = nil, *png = nil;
+        BOOL richBytes = self.richLimit && VIMClipboardReadRich(pasteboard, &rtf, &png);
+        if (!text && !richBytes) {
+            NSArray *supported = self.richLimit ? [VIMClipboardRichTypes() arrayByAddingObject:NSPasteboardTypeString]
+                                                : [NSArray arrayWithObject:NSPasteboardTypeString];
+            if (pasteboard.types.count && ![pasteboard availableTypeFromArray:supported]) {
                 self.observedChange = change;
                 self.publication = (VIMClipboardPendingPublication){0};
             } else {
@@ -894,7 +925,16 @@ static BOOL ActiveConsoleUser(void) {
         }
         self.observedChange = change;
         self.publication = (VIMClipboardPendingPublication){0};
-        if ([text lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > TextLimit)
+        // Only into an empty queue, so a frame this long can't overflow the wire limit and end the connection. A copy
+        // made while one is still crossing a slow UART goes as text.
+        NSMutableDictionary *frame =
+            richBytes && !self.outgoing.length ? VIMClipboardRichFrame(text, rtf, png, self.richLimit) : nil;
+        if (frame) {
+            [frame setObject:@(++self.localSequence) forKey:@"sequence"];
+            [self send:frame];
+            return;
+        }
+        if (!text || [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > TextLimit)
             return;
         [self send:@{@"type" : @"text", @"sequence" : @(++self.localSequence), @"text" : text}];
     }
@@ -1036,7 +1076,14 @@ int main(int argc, const char **argv) {
             dispatch_resume(agent.reader);
         }
 #endif
-        [agent send:@{@"type" : @"hello", @"protocol" : @2, @"token" : secret}];
+        [agent send:powerOnly
+                        ? @{@"type" : @"hello",
+                            @"protocol" : @2,
+                            @"token" : secret}
+                        : @{@"type" : @"hello",
+                            @"protocol" : @2,
+                            @"token" : secret,
+                            @"rich" : @(RichOffer)}];
         [NSTimer scheduledTimerWithTimeInterval:powerOnly ? 1 : 0.2
                                          target:agent
                                        selector:@selector(tick:)

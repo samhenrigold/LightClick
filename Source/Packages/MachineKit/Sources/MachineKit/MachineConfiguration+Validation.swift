@@ -35,7 +35,7 @@ extension MachineConfiguration {
     public var hasValidSettings: Bool {
         if let value = self[.networkMode], value.string.flatMap(NetworkMode.init(rawValue:)) == nil { return false }
         if let value = self[.bridgeInterface], !fits(value, within: 64) { return false }
-        for key in [Key.cpuCount, .memoryMiB, .sshPort, .fileSharingPort] {
+        for key in [Key.cpuCount, .memoryMiB, .sshPort, .fileSharingPort, .screenSharingPort] {
             if let value = self[key] {
                 guard let number = value.number, number.doubleValue == Double(number.intValue) else { return false }
             }
@@ -44,20 +44,25 @@ extension MachineConfiguration {
         let memory = self[.memoryMiB]?.number?.intValue ?? 0
         guard (1...64).contains(cpu), (1024...1_048_576).contains(memory) else { return false }
         for key in [
-            Key.sshEnabled, .fileSharingEnabled, .audioEnabled, .retinaEnabled, .networkConnected, .clipboardEnabled
+            Key.sshEnabled, .fileSharingEnabled, .screenSharingEnabled, .audioEnabled, .retinaEnabled,
+            .networkConnected, .clipboardEnabled
         ] {
             if let value = self[key] {
                 guard let number = value.number, [0, 1].contains(number.doubleValue) else { return false }
             }
         }
-        for key in [Key.sshPort, .fileSharingPort] {
+        for key in [Key.sshPort, .fileSharingPort, .screenSharingPort] {
             if let number = self[key]?.number, !(1024...65535).contains(number.intValue) { return false }
         }
         let ssh = self[.sshEnabled].boolValue
         let fileSharing = self[.fileSharingEnabled].boolValue
+        let screenSharing = self[.screenSharingEnabled].boolValue
         if ssh && self[.sshPort] == nil { return false }
         if fileSharing && self[.fileSharingPort] == nil { return false }
+        if screenSharing && self[.screenSharingPort] == nil { return false }
         if ssh && fileSharing && self[.sshPort].isEqual(self[.fileSharingPort]) { return false }
+        if screenSharing && ssh && self[.screenSharingPort].isEqual(self[.sshPort]) { return false }
+        if screenSharing && fileSharing && self[.screenSharingPort].isEqual(self[.fileSharingPort]) { return false }
         if let value = self[.description], !fits(value, within: 4096) { return false }
         if let value = self[.opticalMedia], !isEmptyOrAbsolutePath(value) { return false }
         if let value = self[.additionalMedia] {

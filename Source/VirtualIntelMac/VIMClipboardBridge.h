@@ -1,6 +1,6 @@
 #import <AppKit/AppKit.h>
 NS_ASSUME_NONNULL_BEGIN
-/// Per-VM private virtual-serial text channel. Owner must provision token only to that VM's
+/// Per-VM private virtual-serial clipboard channel. Owner must provision token only to that VM's
 /// non-root GUI helper and supply foreground/consent policy before use.
 @interface VIMClipboardBridge : NSObject
 @property(nonatomic, readonly) NSString *token;

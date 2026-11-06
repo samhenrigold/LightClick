@@ -20,7 +20,7 @@ with tempfile.TemporaryDirectory(prefix="vim-clipboard-test-") as directory:
         try:
             assert select.select([master], [], [], 5)[0], "No serial hello"
             hello = json.loads(os.read(master, 1024))
-            assert hello == {"type": "hello", "protocol": 2, "token": "a" * 64}
+            assert hello == {"type": "hello", "protocol": 2, "token": "a" * 64, "rich": 4194304}
             os.write(master, b'{"type":"text","sequence":1,"text":"must not be applied"}\n')
             assert child.wait(timeout=5) == 75
         finally:

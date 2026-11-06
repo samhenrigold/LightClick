@@ -913,7 +913,7 @@ static void VIMAlignFormBaselines(NSView *view) {
 - (NSView *)sharing {
     if (self.hardwareIndex == 2) {
         NSView *pane = [NSView new];
-        NSButton *enabled = [self toggle:@"ClipboardEnabled" title:@"Share copied text with this Mac"];
+        NSButton *enabled = [self toggle:@"ClipboardEnabled" title:@"Share copied text and images with this Mac"];
         enabled.translatesAutoresizingMaskIntoConstraints = NO;
         [pane addSubview:enabled];
         [NSLayoutConstraint activateConstraints:@[

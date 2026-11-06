@@ -126,13 +126,17 @@ static NSDictionary<NSString *, NSNumber *> *SuggestedPorts(NSURL *library, NSUR
             continue;
         NSDictionary *config =
             [NSDictionary dictionaryWithContentsOfURL:[entry URLByAppendingPathComponent:@"Machine.plist"]];
-        for (NSString *key in @[ @"SSHPort", @"FileSharingPort" ])
+        for (NSString *key in @[ @"SSHPort", @"FileSharingPort", @"ScreenSharingPort" ])
             if ([config[key] isKindOfClass:NSNumber.class])
                 [reserved addObject:config[key]];
     }
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
-    for (NSString *key in @[ @"SSHPort", @"FileSharingPort" ]) {
-        NSUInteger first = [key isEqual:@"SSHPort"] ? 2222 : 1445;
+    for (NSString *key in @[ @"SSHPort", @"FileSharingPort", @"ScreenSharingPort" ]) {
+        // Not 5900: that's this Mac's own Screen Sharing, if it's turned on.
+        NSUInteger first =
+            [@{@"SSHPort" : @2222,
+               @"FileSharingPort" : @1445,
+               @"ScreenSharingPort" : @5901}[key] unsignedIntegerValue];
         // Bound work on the UI thread. Zero is visibly invalid rather than
         // silently suggesting a known-conflicting port on an exhausted host.
         result[key] = @0;
@@ -153,7 +157,7 @@ NSDictionary *VIMNetworkConfigurationWithDefaults(NSDictionary *configuration, N
     NSMutableDictionary *result = [configuration mutableCopy];
     BOOL needsPorts = NO;
     NSMutableSet *reserved = [NSMutableSet set];
-    for (NSString *key in @[ @"SSHPort", @"FileSharingPort" ])
+    for (NSString *key in @[ @"SSHPort", @"FileSharingPort", @"ScreenSharingPort" ])
         if (result[key])
             [reserved addObject:result[key]];
     for (NSString *key in @[ @"SSH", @"FileSharing" ]) {
