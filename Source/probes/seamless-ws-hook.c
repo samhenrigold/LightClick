@@ -1,4 +1,5 @@
-// Runs inside WindowServer, on 10.9 only (13F34's CoreGraphics). Loaded with DYLD_INSERT_LIBRARIES by
+// Runs inside WindowServer, for the builds in `builds`: 13F34's CoreGraphics in full, 18G103's SkyLight for now only
+// reporting what it finds. Loaded with DYLD_INSERT_LIBRARIES by
 // probes/seamless-driver.py on a throwaway clone. It logs each window's backing and shadow to
 // /var/tmp/seamless-ws-probe.log, and publishes the backing stores of windows seamless-guest asks for through
 // seamless-ws-table.h, so reading a window no longer means a capture. It changes nothing WindowServer does.
@@ -25,6 +26,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -78,12 +80,36 @@ static char *(*enumerator_next)(void *);
 static struct RectResult (*window_screen_rect)(void *);
 static void (*shadow_margin)(void *, int *, int *, int *, int *);
 
-static const struct mach_header_64 *loaded_coregraphics(void) {
+// What differs by build, one row per guest build this has been read for. See "Surviving several builds" in
+// seamless-apps-design.md.
+static const char *const wanted_mojave[] = {"_CGXWindowByID"};
+static const struct Build {
+    const char *release; // Darwin's, as a prefix.
+    const char *suffix, *path; // The image with WindowServer's code, by its name when loaded and on disk.
+    const char *const *wanted;
+    size_t wanted_count;
+    size_t window_backing;
+    int full; // The tree, damage and backing stores are known. Otherwise this only reports what it finds, for reading.
+    int flush_surface, flush_surface_inline; // Their message IDs. Each holds the window at its offset below.
+    size_t flush_window, flush_inline_window;
+} builds[] = {
+    {"13.", "/CoreGraphics",
+     "/System/Library/Frameworks/ApplicationServices.framework/Frameworks/CoreGraphics.framework/Versions/A/"
+     "CoreGraphics",
+     wanted, sizeof(wanted) / sizeof(*wanted), 0x108, 1, 0x7268, 0x7267, 0x34, 0x20},
+    {"18.", "/SkyLight", "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/SkyLight", wanted_mojave,
+     sizeof(wanted_mojave) / sizeof(*wanted_mojave), 0xf0, 0, 0, 0, 0, 0},
+};
+static const struct Build *build;
+static int samples_left = 12;
+
+static const struct mach_header_64 *loaded_image(void) {
+    size_t suffix = strlen(build->suffix);
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
         const char *name = _dyld_get_image_name(i);
         // Not just anything under the framework: its Resources hold more libraries.
         size_t length = name ? strlen(name) : 0;
-        if (length > 13 && !strcmp(name + length - 13, "/CoreGraphics"))
+        if (length > suffix && !strcmp(name + length - suffix, build->suffix))
             return (const struct mach_header_64 *)_dyld_get_image_header(i);
     }
     return NULL;
@@ -98,14 +124,21 @@ static const uint8_t *image_uuid(const struct mach_header_64 *header) {
 }
 
 static int resolve_symbols(void) {
-    const struct mach_header_64 *loaded = loaded_coregraphics();
-    if (!loaded) {
-        note("no CoreGraphics image\n");
+    struct utsname name_of_system;
+    uname(&name_of_system);
+    for (size_t i = 0; !build && i < sizeof(builds) / sizeof(*builds); i++)
+        if (!strncmp(name_of_system.release, builds[i].release, strlen(builds[i].release)))
+            build = &builds[i];
+    if (!build) {
+        note("nothing is known of Darwin %s\n", name_of_system.release);
         return 0;
     }
-    const char *path = "/System/Library/Frameworks/ApplicationServices.framework/Frameworks/CoreGraphics.framework/"
-                       "Versions/A/CoreGraphics";
-    int fd = open(path, O_RDONLY);
+    const struct mach_header_64 *loaded = loaded_image();
+    if (!loaded) {
+        note("no %s image\n", build->suffix);
+        return 0;
+    }
+    int fd = open(build->path, O_RDONLY);
     struct stat st;
     if (fd < 0 || fstat(fd, &st)) {
         note("can't open CoreGraphics\n");
@@ -149,8 +182,8 @@ static int resolve_symbols(void) {
         if (symbols[i].n_type & N_STAB)
             continue;
         const char *name = names + symbols[i].n_un.n_strx;
-        for (size_t w = 0; w < sizeof(wanted) / sizeof(*wanted); w++)
-            if (!resolved[w] && !strcmp(name, wanted[w])) {
+        for (size_t w = 0; w < build->wanted_count; w++)
+            if (!resolved[w] && !strcmp(name, build->wanted[w])) {
                 // The file's __TEXT starts at 0, so a text symbol's value is its offset from the header. Text keeps
                 // its layout in the shared cache.
                 resolved[w] = (char *)loaded + symbols[i].n_value;
@@ -162,11 +195,15 @@ static int resolve_symbols(void) {
             }
     }
     munmap((void *)file, (size_t)st.st_size);
-    if (found != (int)(sizeof(wanted) / sizeof(*wanted))) {
+    if (found != (int)build->wanted_count) {
         note("found %d of the wanted symbols; not calling any\n", found);
         return 0;
     }
     window_by_id = resolved[0];
+    note("build: Darwin %s, %s\n", name_of_system.release, build->full ? "known" : "reporting only");
+    if (!build->full)
+        return 1;
+    samples_left = 2;
     window_has_shadow = resolved[1];
     backing_is_accelerated = resolved[2];
     backing_row_bytes = resolved[3];
@@ -190,6 +227,41 @@ static void dump(const void *data, size_t size) {
     const uint32_t *words = data;
     for (size_t i = 0; i < size / 4; i += 4)
         note("  +%03zx %08x %08x %08x %08x\n", i * 4, words[i], words[i + 1], words[i + 2], words[i + 3]);
+}
+
+// For a build not yet read in full: what its windows hold, for working out the rest offline.
+static void sample_unknown_build(void) {
+    unsigned count = 0, dumped = 0;
+    static unsigned total_samples;
+    note("-- sample %u at %ld\n", ++total_samples, (long)time(NULL));
+    for (uint32_t id = 1; id < 8192; id++) {
+        char *window = window_by_id(id);
+        if (!window)
+            continue;
+        count++;
+        const char *backing = *(const char **)(window + build->window_backing);
+        note("window %u at %p backing %p", id, window, backing);
+        if (backing)
+            note(" words %u %u %u %u flags %x surface %p", *(const uint32_t *)(backing + 0),
+                 *(const uint32_t *)(backing + 4), *(const uint32_t *)(backing + 8), *(const uint32_t *)(backing + 12),
+                 *(const uint32_t *)(backing + 0x38), *(void *const *)(backing + 0x68));
+        note("\n");
+        // Only what's on the desktop by now: an app's window, not the ones from before login.
+        if (backing && dumped < 6 && total_samples > 2 && *(const uint32_t *)(backing + 4) > 400 &&
+            *(const uint32_t *)(backing + 12) > 200) {
+            dumped++;
+            const uint8_t *data = *(const uint8_t *const *)(backing + 0x48);
+            uint32_t row = *(const uint32_t *)(backing + 8), height = *(const uint32_t *)(backing + 12);
+            if (data && row)
+                note(" data %p, size %x, middle %08x\n", data, *(const uint32_t *)(backing + 0x50),
+                     *(const uint32_t *)(data + (size_t)row * (height / 2) + row / 2));
+            note(" window bytes\n");
+            dump(window, 0x200);
+            note(" backing bytes\n");
+            dump(backing, 0x100);
+        }
+    }
+    note("%u windows\n", count);
 }
 
 static void sample(void) {
@@ -362,7 +434,7 @@ static void publish(void) {
 
 static pthread_t main_thread;
 static time_t next_sample;
-static int ready, samples_left = 2, in_sample, reached;
+static int ready, in_sample, reached;
 
 static void between_requests(void) {
     if (!pthread_equal(pthread_self(), main_thread) || in_sample)
@@ -377,24 +449,45 @@ static void between_requests(void) {
         // 60 s in: past login, when there are windows worth reading.
         samples_left--;
         next_sample = now + 15;
-        sample();
+        if (build->full)
+            sample();
+        else
+            sample_unknown_build();
     }
-    if (ready && table)
+    if (ready && table && build->full)
         publish();
     in_sample = 0;
+}
+
+// A surface flush is a request this thread receives, with no state in WindowServer that says so afterward. On 13F34, as
+// a disassembly of _CGSFlushSurface and _CGSFlushSurfaceInline shows: their IDs, and the window's place in each.
+static void note_request(const mach_msg_header_t *msg, mach_msg_option_t option, mach_msg_return_t result) {
+    if (!table || result != MACH_MSG_SUCCESS || !(option & MACH_RCV_MSG) || !pthread_equal(pthread_self(), main_thread))
+        return;
+    if (!build || !build->flush_surface)
+        return;
+    size_t place = msg->msgh_id == build->flush_surface          ? build->flush_window
+                   : msg->msgh_id == build->flush_surface_inline ? build->flush_inline_window
+                                                                 : 0;
+    if (place && msg->msgh_size >= place + 4)
+        table->surface_flushes[*(const uint32_t *)((const char *)msg + place) % SWS_FLUSHES]++;
 }
 
 static mach_msg_return_t hook_msg(mach_msg_header_t *msg, mach_msg_option_t option, mach_msg_size_t send,
                                   mach_msg_size_t receive, mach_port_t port, mach_msg_timeout_t timeout,
                                   mach_port_t notify) {
     between_requests();
-    return mach_msg(msg, option, send, receive, port, timeout, notify);
+    mach_msg_return_t result = mach_msg(msg, option, send, receive, port, timeout, notify);
+    note_request(msg, option, result);
+    return result;
 }
 static mach_msg_return_t hook_overwrite(mach_msg_header_t *msg, mach_msg_option_t option, mach_msg_size_t send,
                                         mach_msg_size_t receive, mach_port_t port, mach_msg_timeout_t timeout,
                                         mach_port_t notify, mach_msg_header_t *rcv, mach_msg_size_t limit) {
     between_requests();
-    return mach_msg_overwrite(msg, option, send, receive, port, timeout, notify, rcv, limit);
+    mach_msg_return_t result = mach_msg_overwrite(msg, option, send, receive, port, timeout, notify, rcv, limit);
+    note_request(rcv ? rcv : msg, option, result);
+    return result;
 }
 __attribute__((used)) static struct {
     const void *replacement, *original;

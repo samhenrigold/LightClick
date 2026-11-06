@@ -199,9 +199,15 @@ def tree(seconds, guest=None, hook=False, command=None):
 
 def install_hook():
     # Uses a reboot, since launchd only reads a job's environment when it loads. This is a clone, so the edit goes with it.
-    version = request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60).get('Stdout', '')
-    if not version.startswith('13.'):
-        raise SystemExit(f'The hook is for 10.9, with its symbol names; this is Darwin {version.strip()}.')
+    # The agent answers with an error until it's up.
+    version = ''
+    for _ in range(120):
+        version = request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60).get('Stdout', '')
+        if version:
+            break
+        time.sleep(5)
+    if not version.startswith(('13.', '18.')):
+        raise SystemExit(f'The hook has builds for 10.9 and 10.14, with their symbol names; this is Darwin {version.strip()}.')
     staged = stage(results/'seamless-ws-hook.dylib')
     plist = '/System/Library/LaunchDaemons/com.apple.WindowServer.plist'
     install = ('set -e; cp "$1" /var/tmp/seamless-ws-hook.dylib; chmod 755 /var/tmp/seamless-ws-hook.dylib; '
@@ -304,6 +310,28 @@ def motion():
     tree(32, guest, hook=True, command=['program-tree', '--gl'])
 
 
+def tree_bench(seconds):
+    # The windows the hook can't read, plus what it can, once each in one boot, to compare a machine's settings.
+    install_hook()
+    guest = stage(guest_tool)
+    copy = 'mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp "$1" /tmp/sg/g; chmod 755 /tmp/sg/g'
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', copy, 'sh', guest]}, 120)
+    for name, command in {'Safari': ['tree', '--app', 'Safari', '--open'], 'TextEdit': ['tree', '--app', 'TextEdit', '--open'],
+                          'Demo': ['program-tree', '--gl']}.items():
+        print(f'=== {name}', flush=True)
+        tree(seconds, '/tmp/sg/g', hook=True, command=command)
+
+
+def mojave(seconds):
+    # What a capture does on Mojave, with the hook only reporting what its windows hold.
+    install_hook()
+    guest = stage(guest_tool)
+    tree(seconds, guest, hook=True, command=['tree', '--app', 'TextEdit', '--open'])
+    tree(seconds, guest, hook=True, command=['tree', '--app', 'Safari', '--open'])
+    log = request({'Executable': '/bin/cat', 'Arguments': ['/var/tmp/seamless-ws-probe.log']}, 120).get('Stdout') or ''
+    (results/f'{tag}-hook.log').write_text(log)
+
+
 def capture_bench():
     guest = stage(guest_tool)
     run(guest, ['capture-bench', '--app', 'Safari', '--open'])
@@ -392,6 +420,10 @@ def proxy(seconds):
 
 if arguments[0] == 'capture-bench':
     capture_bench()
+elif arguments[0] == 'mojave':
+    mojave(int(arguments[1]) if len(arguments) > 1 else 22)
+elif arguments[0] == 'tree-bench':
+    tree_bench(int(arguments[1]) if len(arguments) > 1 else 22)
 elif arguments[0] == 'proxy':
     proxy(int(arguments[1]) if len(arguments) > 1 else 28)
 elif arguments[0] == 'motion':

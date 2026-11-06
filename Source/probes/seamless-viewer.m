@@ -38,6 +38,8 @@ static pid_t proxyPID;
 static NSMutableDictionary<NSNumber *, NSString *> *documentPaths;
 static NSMutableDictionary<NSNumber *, NSMutableData *> *documentsComing;
 static NSMutableArray<NSString *> *documentsWaiting;
+static NSString *testDragPath, *testDragOutFolder;
+static NSArray<NSString *> *guestDragFiles;
 static int proxyFD = -1; // Main thread. A connected proxy, when this viewer is its session process.
 static NSString *testMenuPath;
 static pid_t hidePID;
@@ -369,9 +371,28 @@ static NSData *lastMenu;
     if (input) {
         NSData *bytes = [[NSData alloc] initWithBase64EncodedString:input[@"bytes"] options:0];
         sendToGuest(bytes.bytes, bytes.length);
+    } else if (event[@"dragEntered"]) {
+        NSDictionary *drag = event[@"dragEntered"];
+        [self sendGuestPointer:SWM_MOVE window:drag];
+        NSArray<NSString *> *paths = drag[@"paths"];
+        for (NSString *path in paths)
+            [self sendDocument:path flags:SWD_DRAG | (path == paths.lastObject ? SWD_DRAG_START : 0)];
+    } else if (event[@"dragMoved"]) {
+        [self sendGuestPointer:SWM_DRAG window:event[@"dragMoved"]];
+    } else if (event[@"dragDropped"]) {
+        [self sendGuestPointer:SWM_DRAG window:event[@"dragDropped"]];
+        [self sendGuestPointer:SWM_UP window:event[@"dragDropped"]];
+    } else if (event[@"dragExited"]) {
+        uint8_t out[32];
+        sendToGuest(out, swm_put_u32_message(out, sizeof(out), SWM_DRAG_CANCEL, 0));
+    } else if (event[@"pointerLeftWithButtonDown"]) {
+        uint8_t out[32];
+        sendToGuest(out, swm_put_u32_message(out, sizeof(out), SWM_DRAG_QUERY, 0));
+    } else if (event[@"promiseRequested"]) {
+        [self sendGuestFileForPromise:event[@"promiseRequested"]];
     } else if (event[@"openDocuments"]) {
         for (NSString *path in event[@"openDocuments"][@"paths"])
-            [self sendDocument:path];
+            [self sendDocument:path flags:0];
     } else if (event[@"hello"]) {
         printf("# proxy said hello: %s\n", [event[@"hello"] description].UTF8String);
         proxyPID = [event[@"hello"][@"pid"] intValue];
@@ -399,7 +420,7 @@ static NSData *lastMenu;
     }
 }
 // A file of the host's goes into the guest and opens there. It waits if the guest isn't here yet.
-- (void)sendDocument:(NSString *)path {
+- (void)sendDocument:(NSString *)path flags:(uint8_t)flags {
     if (connectionFD < 0) {
         [documentsWaiting addObject:path];
         return;
@@ -417,13 +438,49 @@ static NSData *lastMenu;
     NSUInteger offset = 0;
     do {
         uint32_t piece = (uint32_t)MIN(file.length - offset, SWM_DOCUMENT_PIECE);
-        size_t prefix = swm_put_document_prefix(out.mutableBytes, identifier, offset + piece == file.length, name.bytes,
-                                                (uint16_t)name.length, piece);
+        size_t prefix = swm_put_document_prefix(out.mutableBytes, identifier, offset + piece == file.length, flags,
+                                                name.bytes, (uint16_t)name.length, piece);
         memcpy((uint8_t *)out.mutableBytes + prefix, (const uint8_t *)file.bytes + offset, piece);
         sendToGuest(out.bytes, prefix + piece);
         offset += piece;
     } while (offset < file.length);
     printf("# sent %s to the guest, %lu bytes\n", path.UTF8String, (unsigned long)file.length);
+}
+// A host drag's point is in the proxy window's points from its top left, shadow included.
+- (void)sendGuestPointer:(enum SWMPointerKind)kind window:(NSDictionary *)place {
+    GuestView *view = (GuestView *)self.windows[place[@"windowID"]].contentView;
+    if (!view)
+        return;
+    struct SWMPointer pointer = {.kind = (uint8_t)kind, .clicks = 1};
+    pointer.x = (int32_t)((view.guestOrigin.x + [place[@"x"] doubleValue] - view.margin) * 16);
+    pointer.y = (int32_t)((view.guestOrigin.y + [place[@"y"] doubleValue] - view.margin) * 16);
+    uint8_t out[64];
+    sendToGuest(out, swm_put_pointer(out, sizeof(out), &pointer));
+}
+// Finder gave a destination for a promised file. It's only ever a file the guest's drag pasteboard named, matched by
+// its name.
+- (void)sendGuestFileForPromise:(NSDictionary *)promise {
+    NSString *destination = promise[@"destination"], *found = nil;
+    for (NSString *path in guestDragFiles)
+        if ([path.lastPathComponent isEqual:destination.lastPathComponent])
+            found = path;
+    NSUInteger index = [promise[@"id"] unsignedIntegerValue];
+    if (!found && index >= 1 && index <= guestDragFiles.count)
+        found = guestDragFiles[index - 1];
+    if (!found) {
+        [self
+            sendToProxy:@{@"promiseFulfilled" : @{@"id" : promise[@"id"], @"error" : @"The guest has no such file."}}];
+        return;
+    }
+    uint32_t identifier = 0x80000000u | (uint32_t)index;
+    documentPaths[@(identifier)] = destination;
+    NSData *text = [found dataUsingEncoding:NSUTF8StringEncoding];
+    NSMutableData *out = [NSMutableData dataWithLength:SWM_HEADER_SIZE + 4];
+    swm_header(out.mutableBytes, SWM_DRAG_SEND, (uint32_t)text.length + 4);
+    swm_w32((uint8_t *)out.mutableBytes + SWM_HEADER_SIZE, identifier);
+    [out appendData:text];
+    sendToGuest(out.bytes, out.length);
+    printf("# asked the guest for %s, to %s\n", found.UTF8String, destination.UTF8String);
 }
 // The guest is untrusted: it only ever names a document this session sent it, and the file goes where that came from.
 - (void)receiveDocument:(const uint8_t *)bytes length:(uint32_t)length {
@@ -448,6 +505,14 @@ static NSData *lastMenu;
         printf("# the guest saved %s, %lu bytes: %s\n", path.UTF8String, (unsigned long)coming.length,
                wrote ? "written" : error.localizedDescription.UTF8String);
         [documentsComing removeObjectForKey:identifier];
+        if (identifier.unsignedIntValue & 0x80000000u) {
+            NSNumber *promise = @(identifier.unsignedIntValue & 0x7fffffffu);
+            [documentPaths removeObjectForKey:identifier];
+            [self sendToProxy:@{
+                @"promiseFulfilled" : wrote ? @{@"id" : promise}
+                                            : @{@"id" : promise, @"error" : error.localizedDescription}
+            }];
+        }
     }
     fflush(stdout);
 }
@@ -522,18 +587,25 @@ static NSData *lastMenu;
         fflush(stdout);
         NSString *hook = [self stageInGuest:@"seamless-ws-hook.dylib"];
         NSString *install = [NSString
-            stringWithFormat:
-                @"set -e; cp \"$1\" /var/tmp/seamless-ws-hook.dylib; chmod 755 /var/tmp/seamless-ws-hook.dylib; "
-                @"/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables dict\" %1$@ || true; "
-                @"/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string "
-                @"/var/tmp/seamless-ws-hook.dylib\" %1$@; /usr/bin/plutil -lint %1$@; "
-                @"(sleep 5; /sbin/reboot) >/dev/null 2>&1 &",
-                windowServer];
+            stringWithFormat:@"set -e; rm -f /var/tmp/seamless-ws.table; cp \"$1\" /var/tmp/seamless-ws-hook.dylib; "
+                             @"chmod 755 /var/tmp/seamless-ws-hook.dylib; "
+                             @"/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables dict\" %1$@ || true; "
+                             @"/usr/libexec/PlistBuddy -c \"Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string "
+                             @"/var/tmp/seamless-ws-hook.dylib\" %1$@; /usr/bin/plutil -lint %1$@; "
+                             @"(sleep 5; /sbin/reboot) >/dev/null 2>&1 &",
+                             windowServer];
         NSDictionary *done =
             hook ? [self channelRun:@"/bin/sh" arguments:@[ @"-c", install, @"sh", hook ] timeout:120] : nil;
         if (![done[@"ExitCode"] isEqual:@0])
             [self failSession:[NSString stringWithFormat:@"couldn't install the hook: %@", done]];
-        sleep(90);
+        // The hook makes its table once WindowServer loads it, so this is the new boot, however long the old one took
+        // to go.
+        for (double started = CFAbsoluteTimeGetCurrent(); ![[self channelRun:@"/bin/test"
+                                                                   arguments:@[ @"-e", @"/var/tmp/seamless-ws.table" ]
+                                                                     timeout:900][@"ExitCode"] isEqual:@0];
+             sleep(5))
+            if (CFAbsoluteTimeGetCurrent() - started > 900)
+                [self failSession:@"the guest didn't come back from its restart"];
     }
     NSString *tool = [self stageInGuest:@"seamless-guest"];
     NSString *menuTool = [self stageInGuest:@"seamless-integration-guest"];
@@ -559,7 +631,8 @@ static NSData *lastMenu;
         [self channelRun:@"/usr/bin/env"
                arguments:@[
                    @"SEAMLESS_RUN_IN_PLACE=1", @"/tmp/sg/g", @"tree", @"--app", guestAppName, @"--open", @"--session",
-                   @"--hook", @"--menu-tool", @"/tmp/sg/ig", @"--port", @(self.port).stringValue, @"--seconds", @"0"
+                   testSession ? @"--test-badge" : @"--session", @"--hook", @"--menu-tool", @"/tmp/sg/ig", @"--port",
+                   @(self.port).stringValue, @"--seconds", @"0"
                ]
                  timeout:1e9];
     printf("# the guest's side ended, exit %s\n%s\n%s\n", [ran[@"ExitCode"] description].UTF8String,
@@ -589,15 +662,61 @@ static NSData *lastMenu;
       puts("# test: typing in the new document");
       [self sendToProxy:@{@"testInput" : @{}}];
     });
-    after(44, ^{
+    // The file drag, driven as the proxy would report it: a real drop in the guest, then a drag that leaves the window.
+    void (^dragStep)(NSString *, NSMutableDictionary *) = ^(NSString *name, NSMutableDictionary *fields) {
+      NSNumber *target = nil;
+      NSInteger best = NSIntegerMax;
+      for (NSNumber *key in self.windows) {
+          GuestView *view = (GuestView *)self.windows[key].contentView;
+          if (view.layer_ == 0 && view.order < best) {
+              best = view.order;
+              target = key;
+          }
+      }
+      GuestView *view = (GuestView *)self.windows[target].contentView;
+      fields[@"windowID"] = target ?: @0;
+      fields[@"x"] = @(self.windows[target].frame.size.width / 2);
+      fields[@"y"] = @(self.windows[target].frame.size.height / 2 + view.margin / 2);
+      NSData *line = [NSJSONSerialization dataWithJSONObject:@{name : fields} options:0 error:nil];
+      printf("# test: %s %s\n", name.UTF8String, fields.description.UTF8String);
+      [self handleProxyLine:line];
+    };
+    if (testDragPath) {
+        after(40, ^{
+          dragStep(@"dragEntered", [@{@"paths" : @[ testDragPath ]} mutableCopy]);
+        });
+        after(52, ^{
+          dragStep(@"dragDropped", [NSMutableDictionary dictionary]);
+        });
+        after(60, ^{
+          [self takeScreenshot];
+          dragStep(@"dragEntered", [@{@"paths" : @[ testDragPath ]} mutableCopy]);
+        });
+        after(72, ^{
+          dragStep(@"dragMoved", [NSMutableDictionary dictionary]);
+          [self handleProxyLine:[@"{\"pointerLeftWithButtonDown\":{\"windowID\":0}}"
+                                    dataUsingEncoding:NSUTF8StringEncoding]];
+        });
+        after(82, ^{
+          NSString *destination = [testDragOutFolder stringByAppendingPathComponent:testDragPath.lastPathComponent];
+          [self handleProxyLine:[NSJSONSerialization dataWithJSONObject:@{
+                    @"promiseRequested" : @{@"id" : @1, @"destination" : destination}
+                }
+                                                                options:0
+                                                                  error:nil]];
+        });
+    }
+    double quitAt = testDragPath ? 92 : 44;
+    after(quitAt, ^{
       printf("# test: asking the proxy, pid %d, to quit\n", proxyPID);
       [[NSRunningApplication runningApplicationWithProcessIdentifier:proxyPID] terminate];
     });
-    after(150, ^{
+    after(quitAt + 106, ^{
       puts("# ERROR test: the guest app didn't exit after the answer");
-      [NSThread detachNewThreadSelector:@selector(failSession:) toTarget:self withObject:@"test timed out"];
+      // Ends the guest's side normally, which brings its log back with it.
+      shutdown(connectionFD, SHUT_RDWR);
     });
-    after(60, ^{
+    after(quitAt + 16, ^{
       NSMutableArray *titles = [NSMutableArray array];
       for (GuestWindow *window in self.windows.allValues)
           [titles addObject:[NSString stringWithFormat:@"%u %@ %gx%g", window.guestID, window.title,
@@ -1043,6 +1162,38 @@ static NSData *lastMenu;
         [self sendToProxy:@{@"removeSurface" : @{@"id" : @(m->u.window_id)}}];
     } else if (m->type == SWM_DOCUMENT) {
         [self receiveDocument:m->u.data.bytes length:m->u.data.length];
+    } else if (m->type == SWM_DRAG_STATE) {
+        NSDictionary *state = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:m->u.data.bytes
+                                                                                     length:m->u.data.length]
+                                                              options:0
+                                                                error:nil];
+        NSArray *files = [state isKindOfClass:NSDictionary.class] ? state[@"files"] : nil;
+        NSMutableArray<NSString *> *strings = [NSMutableArray array];
+        for (id file in [files isKindOfClass:NSArray.class] ? files : @[])
+            if ([file isKindOfClass:NSString.class])
+                [strings addObject:file];
+        guestDragFiles = strings;
+        NSMutableArray *names = [NSMutableArray array];
+        for (NSString *file in strings)
+            [names addObject:file.lastPathComponent];
+        printf("# the guest is dragging %lu files\n", (unsigned long)names.count);
+        if (names.count)
+            [self sendToProxy:@{@"beginDragOut" : @{@"names" : names}}];
+    } else if (m->type == SWM_APP_STATE) {
+        NSDictionary *state = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:m->u.data.bytes
+                                                                                     length:m->u.data.length]
+                                                              options:0
+                                                                error:nil];
+        if ([state isKindOfClass:NSDictionary.class]) {
+            NSString *badge = state[@"badge"];
+            printf("# app state: %s\n", state.description.UTF8String);
+            // Swift's Codable for an Optional payload: an absent value is nil.
+            [self sendToProxy:@{
+                @"setBadge" : [badge isKindOfClass:NSString.class] && badge.length ? @{@"_0" : badge} : @{}
+            }];
+            if ([state[@"attention"] isEqual:@YES])
+                [self sendToProxy:@{@"requestAttention" : @{@"critical" : @YES}}];
+        }
     } else if (m->type == SWM_APP_GONE) {
         puts("# the guest app has exited");
         [self sendToProxy:@{@"terminate" : @{}}];
@@ -1073,7 +1224,7 @@ static NSData *lastMenu;
       NSArray<NSString *> *waiting = [documentsWaiting copy];
       [documentsWaiting removeAllObjects];
       for (NSString *path in waiting)
-          [self sendDocument:path];
+          [self sendDocument:path flags:0];
     });
     size_t capacity = 1 << 20, have = 0;
     uint8_t *buffer = malloc(capacity);
@@ -1200,7 +1351,10 @@ int main(int argc, const char **argv) {
                 guestToolsPath = @(argv[++i]);
             else if (!strcmp(argv[i], "--test-session"))
                 testSession = YES;
-            else if (!strcmp(argv[i], "--test-menu") && i + 1 < argc)
+            else if (!strcmp(argv[i], "--test-drag") && i + 2 < argc) {
+                testDragPath = @(argv[++i]);
+                testDragOutFolder = @(argv[++i]);
+            } else if (!strcmp(argv[i], "--test-menu") && i + 1 < argc)
                 testMenuPath = @(argv[++i]);
             else if (!strcmp(argv[i], "--hide-pid") && i + 1 < argc)
                 hidePID = atoi(argv[++i]);

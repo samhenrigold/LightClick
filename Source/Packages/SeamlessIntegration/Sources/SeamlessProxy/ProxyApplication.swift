@@ -131,6 +131,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                 level: level, alpha: alpha, order: order, title: title, offset: NSPoint(x: offsetX, y: offsetY))
         case .removeSurface(let id):
             surfaces.removeValue(forKey: id)?.window.close()
+            dropViews.removeValue(forKey: id)
         case .testInput: testInput()
         }
     }
@@ -181,8 +182,13 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
 
     /// A borderless window can't normally take keys, and a guest window's frame is in its pixels.
     private final class SurfaceWindow: NSWindow {
+        var observer: ProxyDropView?
         override var canBecomeKey: Bool { true }
         override var canBecomeMain: Bool { true }
+        override func sendEvent(_ event: NSEvent) {
+            observer?.observe(event)
+            super.sendEvent(event)
+        }
     }
 
     private struct Surface {
@@ -199,7 +205,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         offset: NSPoint
     ) {
         let isFirstSurface = surfaces.isEmpty
-        let surface = surfaces[id] ?? makeSurface(frame: frame)
+        let surface = surfaces[id] ?? makeSurface(id: id, frame: frame)
         surface.host.setValue(contextID, forKey: "contextId")
         let window = surface.window
         CATransaction.begin()
@@ -242,6 +248,13 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                 surface.input.mouseUp(with: event)
             }
         }
+        // A real scroll event through the trackpad's path. The other gestures can't be made without a trackpad.
+        if let scroll = CGEvent(
+            scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -40, wheel2: 0, wheel3: 0),
+            let event = NSEvent(cgEvent: scroll)
+        {
+            surface.input.scrollWheel(with: event)
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
             for type in [NSEvent.EventType.keyDown, .keyUp] {
                 guard
@@ -254,7 +267,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         }
     }
 
-    private func makeSurface(frame: NSRect) -> Surface {
+    private func makeSurface(id: Int, frame: NSRect) -> Surface {
         let window = SurfaceWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -270,6 +283,12 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         let host = hostClass.init()
         host.anchorPoint = .zero
         input.layer?.addSublayer(host)
+        let drop = ProxyDropView(windowID: id, sink: self)
+        drop.frame = input.bounds
+        drop.autoresizingMask = [.width, .height]
+        input.addSubview(drop)
+        window.observer = drop
+        dropViews[id] = drop
         return Surface(window: window, host: host, input: input, order: 0)
     }
 

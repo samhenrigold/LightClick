@@ -33,6 +33,7 @@ parser.add_argument('machine', type=Path)
 parser.add_argument('tag')
 parser.add_argument('--env', action='append', default=[])
 parser.add_argument('--qemu', action='append', default=[])
+parser.add_argument('--plist', action='append', default=[], help='KEY=JSON set in the clone\'s Machine.plist, such as DisplayMode=\'"scaled"\'')
 parser.add_argument('-t', default='1')
 parser.add_argument('--boot-wait', type=int, default=45)
 parser.add_argument('--repeat', type=int, default=1, help='benchmark runs in the same boot; results are the fastest of each test')
@@ -57,6 +58,9 @@ machine = library/f'Clone of {args.machine.name}'
 subprocess.run(['cp', '-c', '-R', str(args.machine), str(machine)], check=True)
 (machine/'State/PendingConfiguration.plist').unlink(missing_ok=True)
 print(f'WARNING: the window titled "{machine.stem}" is a throwaway clone. Anything changed in it is lost.', flush=True)
+for item in args.plist:
+    key, value = item.split('=', 1)
+    subprocess.run(['plutil', '-replace', key, '-json', value, str(machine/'Machine.plist')], check=True)
 # Forwarded ports would clash with any VM already running.
 for key in ('SSHEnabled', 'FileSharingEnabled'):
     subprocess.run(['plutil', '-replace', key, '-bool', 'NO', str(machine/'Machine.plist')], check=True)

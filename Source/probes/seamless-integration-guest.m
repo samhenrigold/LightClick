@@ -16,6 +16,7 @@
 //     and attention. seamless-integration-guest screen                     The main display's size.
 //     seamless-integration-guest drag-in --file F [--backend ns|coredrag] [--no-image] [--drive X,Y]
 //     seamless-integration-guest drag-watch [--seconds N]   Reports each change of the drag pasteboard.
+//     seamless-integration-guest drag-read                  Reports the drag pasteboard now, as a line of JSON.
 //     seamless-integration-guest drag-sink [--seconds N] [--promises DIR]   Takes any drop, as a guest drag leaves a
 //     window.
 //
@@ -789,6 +790,10 @@ int main(int argc, char **argv) {
                 return 64;
             return dragIn(paths, option(argc, argv, "--backend", "ns"), !flag(argc, argv, "--no-image"),
                           option(argc, argv, "--drive", NULL));
+        }
+        if (!strcmp(command, "drag-read")) {
+            describeDragPasteboard([NSPasteboard pasteboardWithName:NSDragPboard]);
+            return 0;
         }
         if (!strcmp(command, "drag-watch"))
             return dragWatch(seconds);

@@ -29,8 +29,9 @@ final class ProxyDropView: NSView, NSDraggingSource, NSFilePromiseProviderDelega
     required init?(coder: NSCoder) { nil }
 
     override var isFlipped: Bool { true }
-    override var acceptsFirstResponder: Bool { true }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// Lies over the input view, which takes every click, and only stands in for a window's drag destination.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     // MARK: Into the guest
 
@@ -63,17 +64,19 @@ final class ProxyDropView: NSView, NSDraggingSource, NSFilePromiseProviderDelega
 
     // MARK: Out of the guest
 
-    override func mouseDown(with event: NSEvent) {
-        lastMouseEvent = event
-        leftWithButtonDown = false
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        lastMouseEvent = event
-        // Only this edge matters here: `seamless-input` owns forwarding the drag itself.
-        if !bounds.contains(convert(event.locationInWindow, from: nil)), !leftWithButtonDown {
-            leftWithButtonDown = true
-            sink?.send(.pointerLeftWithButtonDown(windowID: windowID))
+    /// Called with every event the window gets. Only this edge matters here: the input view forwards the drag itself.
+    func observe(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            lastMouseEvent = event
+            leftWithButtonDown = false
+        case .leftMouseDragged:
+            lastMouseEvent = event
+            if !bounds.contains(convert(event.locationInWindow, from: nil)), !leftWithButtonDown {
+                leftWithButtonDown = true
+                sink?.send(.pointerLeftWithButtonDown(windowID: windowID))
+            }
+        default: break
         }
     }
 
