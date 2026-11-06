@@ -152,167 +152,51 @@ static void RelocatedPackage(NSURL *old, NSURL *new, NSString *identifier) {
     return [VIMMachineModel journal:[self plist:@"State/GuestInstallation.plist"]
         hasPublishedGraphicsForGuest:self.guest];
 }
+- (void (^)(NSURL *, NSDictionary *, NSURL *))packageAdopter {
+    return ^(NSURL *package, NSDictionary *configuration, NSURL *movedFrom) {
+      self->_URL = package;
+      self->_configuration = [configuration copy];
+      if (movedFrom)
+          RelocatedPackage(movedFrom, package, configuration[@"Identifier"]);
+    };
+}
 - (BOOL)rename:(NSString *)name error:(NSError **)error {
-    if (![VIMMachineModel renameIsValid:name])
-        return Fail(error, @"Enter a name of 1–128 characters without slashes, colons, or a leading dot.");
-    int fd = ConfigurationLock(self.URL, error);
-    if (fd < 0)
-        return NO;
-    NSURL *URL = [self.URL URLByAppendingPathComponent:@"State/PendingConfiguration.plist"];
-    NSMutableDictionary *pending =
-        [[NSDictionary dictionaryWithContentsOfURL:URL] mutableCopy] ?: [NSMutableDictionary dictionary];
-    pending[@"RequestedBundleName"] = name;
-    BOOL saved = Save(pending, URL, error);
-    close(fd);
-    return saved && [self applyPendingChanges:error];
+    return [VIMMachineFiles renamePackage:self.URL
+                            configuration:self.configuration
+                                       to:name
+                          networkDefaults:NetworkDefaults
+                                    adopt:self.packageAdopter
+                                    error:error];
 }
 - (BOOL)saveAutomaticSetup:(NSDictionary *)profile error:(NSError **)error {
-    if (![VIMAutomaticSetup supportsGuest:self.guest] || ![self.configuration[@"InstallState"] isEqual:@"installing"] ||
-        ![profile isKindOfClass:NSDictionary.class] || ![profile[@"FormatVersion"] isEqual:@1] ||
-        ![profile[@"Enabled"] isEqual:@YES])
-        return Fail(error, @"Automatic setup is only available for a new virtual Mac installation.");
-    NSMutableSet *allowed = [NSMutableSet setWithArray:@[
-        @"FormatVersion", @"Enabled", @"Username", @"FileSharing", @"RemoteLogin", @"CredentialIdentifier"
-    ]];
-    // Old saved transactions retain their one-time-login behavior. New UI
-    // and CLI transactions explicitly request persistent automatic login.
-    if (profile[@"AutomaticLogin"])
-        [allowed addObject:@"AutomaticLogin"];
-    if (![allowed isEqual:[NSSet setWithArray:profile.allKeys]])
-        return Fail(error, @"Automatic setup contains an unsupported option.");
-    if (![VIMAutomaticSetup validateUsername:profile[@"Username"] error:error] ||
-        ![profile[@"CredentialIdentifier"] isKindOfClass:NSString.class] ||
-        ![[NSUUID alloc] initWithUUIDString:profile[@"CredentialIdentifier"]])
-        return Fail(error, @"Check the virtual Mac’s account and setup credential.");
-    for (NSString *key in (profile[@"AutomaticLogin"] ? @[ @"FileSharing", @"RemoteLogin", @"AutomaticLogin" ]
-                                                      : @[ @"FileSharing", @"RemoteLogin" ]))
-        if (![profile[key] isKindOfClass:NSNumber.class] ||
-            ([profile[key] doubleValue] != 0 && [profile[key] doubleValue] != 1))
-            return Fail(error, @"Check the automatic sharing options.");
-    NSDictionary *target = [self plist:@"State/InstallationTarget.plist"];
-    NSDictionary *installer = [VIMAutomaticSetup installerConfigurationForVolumeUUID:target[@"VolumeUUID"] error:error];
-    if (!installer)
-        return NO;
-    NSURL *lock = [self.URL URLByAppendingPathComponent:@"State/Session.lock"];
-    int fd = open(lock.fileSystemRepresentation, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
-    struct stat lockInfo;
-    if (fd < 0 || fstat(fd, &lockInfo) || !S_ISREG(lockInfo.st_mode) || lockInfo.st_nlink != 1 ||
-        flock(fd, LOCK_EX | LOCK_NB)) {
-        if (fd >= 0)
-            close(fd);
-        return Fail(error, @"Stop this virtual Mac before changing its initial setup.");
-    }
-    @try {
-        NSURL *journal = [self.URL URLByAppendingPathComponent:@"State/AutomaticSetup.plist"];
-        if ([NSFileManager.defaultManager fileExistsAtPath:journal.path]) {
-            NSDictionary *existing = [NSDictionary dictionaryWithContentsOfURL:journal];
-            if (!existing)
-                return Fail(error, @"The saved automatic setup state could not be read. It was not replaced.");
-            for (NSString *key in allowed)
-                if (![existing[key] isEqual:profile[key]])
-                    return Fail(error, @"This Mac’s initial account setup has already been saved. Resume that setup "
-                                       @"before changing it.");
-            return YES; // Never reset an in-progress/completed journal to pending.
+    return [VIMMachineFiles saveAutomaticSetup:profile
+        package:self.URL
+        configuration:self.configuration
+        supportsGuest:[VIMAutomaticSetup supportsGuest:self.guest]
+        checkUsername:^NSError *(id username) {
+          NSError *failure = nil;
+          return [VIMAutomaticSetup validateUsername:username error:&failure] ? nil : failure;
         }
-        NSMutableDictionary *state = [profile mutableCopy];
-        state[@"Guest"] = self.guest;
-        state[@"MachineIdentifier"] = self.configuration[@"Identifier"];
-        state[@"VolumeUUID"] = target[@"VolumeUUID"];
-        state[@"Phase"] = @"pending";
-        return Save(state, journal, error);
-    } @finally {
-        close(fd);
-    }
+        checkVolume:^NSError *(id volume) {
+          NSError *failure = nil;
+          return [VIMAutomaticSetup installerConfigurationForVolumeUUID:volume error:&failure] ? nil : failure;
+        }
+        error:error];
 }
 - (BOOL)saveSettings:(NSDictionary *)settings error:(NSError **)error {
-    // Stage edits independently of the live launch snapshot. Never rewrite the
-    // active configuration or move a live package. Session locking decides when
-    // publication is safe, including when another app process owns the VM.
-    int edit = ConfigurationLock(self.URL, error);
-    if (edit < 0)
-        return NO;
-    @try {
-        if (![VIMMachineModel validateSettings:settings onEditableConfiguration:self.editableConfiguration error:error])
-            return NO;
-        NSURL *pendingURL = [self.URL URLByAppendingPathComponent:@"State/PendingConfiguration.plist"];
-        NSMutableDictionary *pending =
-            [[NSDictionary dictionaryWithContentsOfURL:pendingURL] mutableCopy] ?: [NSMutableDictionary dictionary];
-        NSMutableDictionary *values = [pending[@"Settings"] mutableCopy] ?: [NSMutableDictionary dictionary];
-        [values addEntriesFromDictionary:settings];
-        pending[@"Settings"] = values;
-        if (!Save(pending, pendingURL, error))
-            return NO;
-    } @finally {
-        close(edit);
-    }
-    return [self applyPendingChanges:error];
+    return [VIMMachineFiles saveSettings:settings
+                                 package:self.URL
+                           configuration:self.configuration
+                         networkDefaults:NetworkDefaults
+                                   adopt:self.packageAdopter
+                                   error:error];
 }
 - (BOOL)applyPendingChanges:(NSError **)error {
-    NSURL *lock = [self.URL URLByAppendingPathComponent:@"State/Session.lock"];
-    int fd = open(lock.fileSystemRepresentation, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
-    struct stat info;
-    if (fd < 0 || fstat(fd, &info) || !S_ISREG(info.st_mode) || info.st_nlink != 1) {
-        if (fd >= 0)
-            close(fd);
-        return Fail(error, @"This Mac’s configuration lock could not be opened.");
-    }
-    if (flock(fd, LOCK_EX | LOCK_NB)) {
-        int issue = errno;
-        close(fd);
-        return issue == EWOULDBLOCK ? YES : Fail(error, @"This Mac’s configuration lock is unavailable.");
-    }
-    int edit = ConfigurationLock(self.URL, error);
-    if (edit < 0) {
-        close(fd);
-        return NO;
-    }
-    @try {
-        VIMMachine *fresh = [VIMMachine loadURL:self.URL error:error];
-        if (!fresh)
-            return NO;
-        NSURL *old = self.URL, *pendingURL = [old URLByAppendingPathComponent:@"State/PendingConfiguration.plist"];
-        NSDictionary *pending = [NSDictionary dictionaryWithContentsOfURL:pendingURL];
-        NSDictionary *applied = [VIMMachineModel configuration:fresh.configuration applyingPending:pending error:error];
-        if (!applied)
-            return NO;
-        NSMutableDictionary *c = [applied mutableCopy];
-        NSDictionary *network =
-            VIMNetworkConfigurationWithDefaults(c, self.URL.URLByDeletingLastPathComponent, self.URL);
-        if (!network)
-            return Fail(error, @"No local connection ports are available. Close unused virtual Macs or network "
-                               @"services, then try again.");
-        [c addEntriesFromDictionary:network];
-        NSString *requested =
-            [VIMMachineModel destinationNameForPackageStem:old.lastPathComponent.stringByDeletingPathExtension
-                                                   pending:pending
-                                             configuration:c];
-        NSURL *destination = requested ? [VIMMachineModel newPackageURLForName:requested
-                                                                     inLibrary:old.URLByDeletingLastPathComponent]
-                                       : old;
-        BOOL moved = ![destination isEqual:old];
-        if (moved && ![NSFileManager.defaultManager moveItemAtURL:old toURL:destination error:error])
-            return NO;
-        BOOL needsSave = pending != nil || c[@"Name"] != nil || ![c isEqualToDictionary:fresh.configuration];
-        c = [[VIMMachineModel configurationRemovingLegacyName:c] mutableCopy];
-        if (needsSave && !Save(c, [destination URLByAppendingPathComponent:@"Machine.plist"], error)) {
-            if (moved)
-                [NSFileManager.defaultManager moveItemAtURL:destination toURL:old error:nil];
-            return NO;
-        }
-        _URL = destination;
-        _configuration = [c copy];
-        if (moved)
-            RelocatedPackage(old, destination, c[@"Identifier"]);
-        if (pending && ![NSFileManager.defaultManager
-                           removeItemAtURL:[destination URLByAppendingPathComponent:@"State/PendingConfiguration.plist"]
-                                     error:error])
-            return NO;
-        return YES;
-    } @finally {
-        close(edit);
-        flock(fd, LOCK_UN);
-        close(fd);
-    }
+    return [VIMMachineFiles applyPendingChangesOfPackage:self.URL
+                                           configuration:self.configuration
+                                         networkDefaults:NetworkDefaults
+                                                   adopt:self.packageAdopter
+                                                   error:error];
 }
 - (BOOL)claimAutomaticInstallationWithGuestReport:(NSDictionary *)report error:(NSError **)error {
     return [VIMMachineFiles claimAutomaticInstallationOfPackage:self.URL
