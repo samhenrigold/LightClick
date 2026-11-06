@@ -4,13 +4,15 @@
 #
 #     scripts/seamless-try stream <app> <machine> [SECONDS]    Phase 1: TextEdit as its own host window.
 #     scripts/seamless-try display <app> <machine> [WxH ...]   Phase 2: how large a guest display works, and slot placement.
+#     scripts/seamless-try input <app> <machine>               What a test NSView in the guest receives. See seamless-input.md.
+#     scripts/seamless-try input-live <app> <machine> [SECONDS]  The same with your own trackpad, in a host window.
 #
 # `display` needs an app built from this branch, for its display-request diagnostic. `stream` works with any recent one.
 set -euo pipefail
 source_root=${0:A:h:h}
-mode=${1:?usage: seamless-try stream|display <app> <machine> [arguments]}
-app=${2:?usage: seamless-try stream|display <app> <machine> [arguments]}
-machine=${3:?usage: seamless-try stream|display <app> <machine> [arguments]}
+mode=${1:?usage: seamless-try stream|display|input|input-live <app> <machine> [arguments]}
+app=${2:?usage: seamless-try stream|display|input|input-live <app> <machine> [arguments]}
+machine=${3:?usage: seamless-try stream|display|input|input-live <app> <machine> [arguments]}
 shift 3
 "$source_root/scripts/build-seamless-probes" "$source_root/Build/seamless" 2>/dev/null
 driver_arguments=(--driver-arg "$mode")

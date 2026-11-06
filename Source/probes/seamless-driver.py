@@ -125,7 +125,38 @@ def display(ladder):
     capture(f'{tag}-slot.png')
 
 
+def save(text):
+    path = results/f'{tag}.txt'
+    path.write_text(text)
+    print(f'# Saved to {path}')
+
+
+def input_probe():
+    print('== What a test NSView in the guest receives, by mechanism', flush=True)
+    guest = stage(results/'seamless-input-guest')
+    status, output = run(guest, ['probe'], 900)
+    print(f'# guest exit {status}', flush=True)
+    save(output)
+
+
+def input_live(seconds):
+    print(f'== Your trackpad and keyboard to a test view in the guest, for {seconds} s. Use the window that appears.', flush=True)
+    guest = stage(results/'seamless-input-guest')
+    port = free_port()
+    host = subprocess.Popen([str(results/'seamless-input-host'), '--port', str(port), '--seconds', str(seconds + 10)])
+    status, output = run(guest, ['live', '--port', str(port), '--seconds', str(seconds)], seconds + 300)
+    print(f'# guest exit {status}', flush=True)
+    host.terminate()
+    if status == 3:
+        print("The guest couldn't connect to 10.0.2.2, so nothing reached it. `input` needs no network and still works.")
+    save(output)
+
+
 if arguments[0] == 'stream':
     stream(int(arguments[1]) if len(arguments) > 1 else 20)
+elif arguments[0] == 'input':
+    input_probe()
+elif arguments[0] == 'input-live':
+    input_live(int(arguments[1]) if len(arguments) > 1 else 60)
 else:
     display(arguments[1:] or default_ladder)

@@ -186,6 +186,9 @@ source of glitches in its seamless series [source], so tag metadata with a frame
 
 ### Input
 
+`seamless-input.md` supersedes this section where they differ: gestures need a guest helper, and a click has to reach the guest before
+focus does.
+
 The final design uses the existing QMP tablet and USB keyboard, with no `CGEventPost`, so Mojave's event-posting permission never
 arises [memory]. Virtual keycodes need no table beyond the existing one.
 
