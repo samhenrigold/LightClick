@@ -53,7 +53,7 @@ void tr_flush_all(void);
 void tr_call_tail(uint64_t site, uint64_t target);
 // Whether the next translation would need the code cache reset. With several vCPUs that takes them all out of the cache first, and then tr_flush_parked.
 bool tr_needs_flush(void);
-void tr_flush_parked(void);
+void tr_flush_parked(bool everything);
 
 // Text for a stop reason written by the translator.
 const char *tr_stop_reason(uint32_t index);
@@ -66,7 +66,7 @@ typedef struct {
     // Cold blocks at a rip and frame some earlier block already covers, live in another view or dead with the frame unchanged:
     // what translations keyed by frame would have saved. Looks at only the first few blocks on the frame, so these are lower bounds.
     uint64_t again_live, again_dead, reused, call_tails;
-    uint64_t hash_refills, hash_forgets, cache_resets;
+    uint64_t hash_refills, hash_forgets, cache_resets, cache_private_resets;
     uint64_t shared_blocks, shared_found; // translated into a shared user domain; found there by a view that had not looked before
 } TrStats;
 TrStats tr_stats(void);

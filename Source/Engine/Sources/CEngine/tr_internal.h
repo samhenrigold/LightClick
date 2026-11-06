@@ -289,3 +289,5 @@ void emit_x87(const Insn *in); // OP_X87
 
 // Stub entry points, relative to the stubs region. Filled in by the Swift loader from the monitor image's symbols.
 extern u64 tr_stub_lookup, tr_stub_ret_miss, tr_stub_pushf, tr_stub_sahf;
+extern int cur_part;
+#define STUB(address) ((address) + (cur_part ? OFF_STUBS2 - OFF_STUBS : 0)) // the copy in reach of the part being written

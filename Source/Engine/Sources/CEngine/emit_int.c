@@ -1214,7 +1214,7 @@ static void emit_string(const Insn *in) {
         movimm(S1, (u64)(32 / sz));
         if (sub == 2)
             E(0x4E000C00u | (u32)sz << 16 | V_S0); // dup v24.<T>, the accumulator
-        bl_abs(PRIV_VA + OFF_STUBS + (sub == 0 ? STUB_OFF_REP_MOVS : STUB_OFF_REP_STOS));
+        bl_abs(STUB(PRIV_VA + OFF_STUBS + (sub == 0 ? STUB_OFF_REP_MOVS : STUB_OFF_REP_STOS)));
         for (int i = 0; i < 2; i++)
             if (wraps[i])
                 *wraps[i] |= ((u32)(tr_cc - wraps[i]) & 0x7ffff) << 5;
@@ -1625,7 +1625,7 @@ void emit_int(const Insn *in, int live) {
             emit_pusha(in);
             break;
         case OP_PUSHF:
-            bl_abs(tr_stub_pushf);
+            bl_abs(STUB(tr_stub_pushf));
             if (sz == 8)
                 E(0xF8000C00u | ((u32)-8 & 0x1ff) << 12 | 4 << 5 | S0);
             else if (sz == 4)
@@ -1762,12 +1762,12 @@ void emit_int(const Insn *in, int live) {
             }
             break;
         case OP_LAHF:
-            bl_abs(tr_stub_pushf);
+            bl_abs(STUB(tr_stub_pushf));
             bfi(1, 0, S0, 8, 8);
             break;
         case OP_SAHF:
             ubfx(1, S0, 0, 8, 8);
-            bl_abs(tr_stub_sahf);
+            bl_abs(STUB(tr_stub_sahf));
             break;
         case OP_CMC:
             cfinv();

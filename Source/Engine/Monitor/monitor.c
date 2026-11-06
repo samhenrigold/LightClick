@@ -430,11 +430,12 @@ static void write_protect_frame(u64 gpa) {
 // ---- Boundary lookup: ARM pc to x86 rip ----
 static BlockEntry *find_block(u64 pc) {
     u64 cc = PRIV_VA + OFF_CC;
-    if (pc < cc || pc >= cc + CC_SIZE)
+    if ((pc < cc || pc >= cc + CC_SIZE) && (pc < PRIV_VA + OFF_CC2 || pc >= PRIV_VA + OFF_CC2 + CC_SIZE))
         return 0;
     u32 word = (u32)((pc - cc) >> 2);
     BlockEntry *t = (BlockEntry *)PRIV(OFF_BLOCKS);
-    u64 lo = 0, hi = c0->block_count;
+    bool private_part = word >= CC_PART2_WORD; // two tables, each sorted
+    u64 first = private_part ? (OFF_BLOCKS2 - OFF_BLOCKS) / sizeof(BlockEntry) : 0, lo = first, hi = first + (private_part ? c0->block_count_private : c0->block_count);
     while (lo < hi) {
         u64 mid = (lo + hi) / 2;
         if (t[mid].arm_off <= word)
@@ -442,22 +443,23 @@ static BlockEntry *find_block(u64 pc) {
         else
             hi = mid;
     }
-    if (!lo)
+    if (lo == first)
         return 0;
     BlockEntry *b = &t[lo - 1];
     return word < b->arm_off + b->arm_words ? b : 0;
 }
 
 // x86 rip of the instruction containing pc. exact is set when pc is its first word.
+static inline u64 stubs_of(u64 pc) { return PRIV_VA + (pc >= PRIV_VA + OFF_STUBS2 ? OFF_STUBS2 : OFF_STUBS); } // of the copy in pc's part
 static inline bool in_rep_stub(u64 pc) {
-    u64 s = PRIV_VA + OFF_STUBS;
+    u64 s = stubs_of(pc);
     return pc >= s + STUB_OFF_REP_MOVS && pc < s + STUB_OFF_REP_END;
 }
 
 static u64 rip_of_pc(u64 pc, bool *exact, bool *found) {
     if (in_rep_stub(pc)) { // inside a rep instruction, called from its block; the loop heads are boundaries
         bool e;
-        u64 s = PRIV_VA + OFF_STUBS, rip = rip_of_pc(c->x[R_LR] - 4, &e, found);
+        u64 s = stubs_of(pc), rip = rip_of_pc(c->x[R_LR] - 4, &e, found);
         *exact = pc == s + STUB_OFF_REP_MOVS_HEAD || pc == s + STUB_OFF_REP_STOS_HEAD;
         return rip;
     }
