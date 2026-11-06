@@ -48,7 +48,7 @@
 @property BOOL measurePresentation;
 @property NSUInteger presentedFrames;
 @property(readwrite) NSUInteger arrivedFrames;
-@property(readwrite) NSUInteger distinctFrames;
+@property(readwrite) NSUInteger differentFrames;
 @property uint64_t lastFrameHash;
 @property NSUInteger skippedPresentations;
 @property NSUInteger reorderedPresentations;
@@ -1193,7 +1193,7 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
             hash = (hash ^ row[x]) * 1099511628211ULL;
     }
     if (hash != self.lastFrameHash)
-        self.distinctFrames++;
+        self.differentFrames++;
     self.lastFrameHash = hash;
 }
 - (void)presentWidth:(NSUInteger)width

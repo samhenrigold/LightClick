@@ -62,7 +62,7 @@ NS_ASSUME_NONNULL_BEGIN
                                                 NSUInteger width, NSUInteger height, NSUInteger stride);
 @property(readonly) NSUInteger arrivedFrames;
 /// Of those, how many differed from the last on a sample of their rows, if VIM_COUNT_DISTINCT_FRAMES is set.
-@property(readonly) NSUInteger distinctFrames;
+@property(readonly) NSUInteger differentFrames;
 - (void)presentSurface:(IOSurfaceRef)surface
                  width:(NSUInteger)width
                 height:(NSUInteger)height

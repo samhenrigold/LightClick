@@ -1987,7 +1987,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     }
     if ([command[@"Action"] isEqual:@"display-frames"]) {
-        finish(@{@"Arrived" : @(self.displayView.arrivedFrames), @"Distinct" : @(self.displayView.distinctFrames)});
+        finish(@{@"Arrived" : @(self.displayView.arrivedFrames), @"Distinct" : @(self.displayView.differentFrames)});
         return;
     }
     if ([command[@"Action"] isEqual:@"display-request"]) {
@@ -4100,7 +4100,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.displayView.frameObserver = observer;
 }
 - (NSUInteger)distinctFrames {
-    return self.displayView.distinctFrames;
+    return self.displayView.differentFrames;
 }
 - (IBAction)makeDockApp:(id)sender {
     [VIMSeamlessHost makeProxyFor:self];
