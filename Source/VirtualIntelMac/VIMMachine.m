@@ -93,43 +93,6 @@ static void RelocatedPackage(NSURL *old, NSURL *new, NSString *identifier) {
 - (nullable NSDictionary *)plist:(NSString *)relativePath;
 @property(readonly) BOOL firmwareSelectsInstaller;
 @end
-/// Media the app prepared lives in its own Downloads/Preparation/<UUID>
-/// attempt and is never reused for another Mac. Once the owner is installed,
-/// delete that attempt unless another Mac in the library still references it.
-static BOOL RemovePreparedMedia(NSString *path, NSURL *owner) {
-    if ([NSUserDefaults.standardUserDefaults boolForKey:@"VIMKeepInstallers"])
-        return NO;
-    if (![path isKindOfClass:NSString.class] || !path.isAbsolutePath)
-        return NO;
-    NSURL *media = [NSURL fileURLWithPath:path].URLByResolvingSymlinksInPath;
-    NSURL *attempt = [VIMMachineModel preparedMediaAttemptForMedia:media owner:owner];
-    if (!attempt)
-        return NO;
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *prefix = [attempt.path stringByAppendingString:@"/"];
-    NSDictionary *creation = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"VIMCreationJob"];
-    NSString *creatingMedia = creation[@"Media"];
-    if ([creatingMedia isKindOfClass:NSString.class] &&
-        [creatingMedia.stringByResolvingSymlinksInPath hasPrefix:prefix])
-        return NO;
-    for (NSURL *sibling in [fm contentsOfDirectoryAtURL:owner.URLByDeletingLastPathComponent
-                             includingPropertiesForKeys:nil
-                                                options:0
-                                                  error:nil]
-             ?: @[]) {
-        if (![sibling.pathExtension isEqual:@"vintelmac"] ||
-            [sibling.URLByResolvingSymlinksInPath.path isEqual:owner.URLByResolvingSymlinksInPath.path])
-            continue;
-        NSDictionary *config =
-            [NSDictionary dictionaryWithContentsOfURL:[sibling URLByAppendingPathComponent:@"Machine.plist"]];
-        if (!config)
-            return NO;
-        NSString *other = config[@"InstallerMedia"];
-        if ([other isKindOfClass:NSString.class] && [other.stringByResolvingSymlinksInPath hasPrefix:prefix])
-            return NO;
-    }
-    return [fm removeItemAtURL:attempt error:nil];
-}
 @implementation VIMMachine
 - (NSDictionary *)plist:(NSString *)relativePath {
     return [NSDictionary dictionaryWithContentsOfURL:[self.URL URLByAppendingPathComponent:relativePath]];
@@ -197,25 +160,8 @@ static BOOL RemovePreparedMedia(NSString *path, NSURL *owner) {
         return nil;
     }
     URL = URL.URLByResolvingSymlinksInPath;
-    NSError *readError = nil;
-    NSData *data = [NSData dataWithContentsOfURL:[URL URLByAppendingPathComponent:@"Machine.plist"]
-                                         options:0
-                                           error:&readError];
-    if (!data) {
-        if (error)
-            *error = [NSError
-                errorWithDomain:@"VirtualIntelMac.Machine"
-                           code:1
-                       userInfo:@{
-                           NSLocalizedDescriptionKey :
-                               @"This Mac isn’t available. Reconnect its drive or locate its current folder.",
-                           NSUnderlyingErrorKey : readError
-                               ?: [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileNoSuchFileError userInfo:nil]
-                       }];
-        return nil;
-    }
-    id c = [NSPropertyListSerialization propertyListWithData:data options:0 format:nil error:error];
-    if (![VIMMachineModel validateConfiguration:c package:URL error:error])
+    NSDictionary *c = [VIMMachineFiles loadConfigurationOfPackage:URL error:error];
+    if (!c)
         return nil;
     VIMMachine *machine = [self new];
     machine->_URL = URL;
@@ -528,29 +474,26 @@ static BOOL RemovePreparedMedia(NSString *path, NSURL *owner) {
         close(lock);
     }
 }
+- (NSError * (^)(NSString *))passwordRemover {
+    return ^NSError *(NSString *identifier) {
+      NSError *failure = nil;
+      return [VIMAutomaticSetup removePasswordForIdentifier:identifier error:&failure]
+                 ? nil
+                 : failure ?: [NSError errorWithDomain:@"VirtualIntelMac.Machine" code:1 userInfo:nil];
+    };
+}
+- (void (^)(NSDictionary *))configurationAdopter {
+    return ^(NSDictionary *configuration) {
+      self->_configuration = [configuration copy];
+    };
+}
 - (BOOL)retryInstallerCleanup:(NSError **)error {
-    if (self.preMetalGuest)
-        return [self retryOpenGLInstallerCleanup:error];
-    NSDictionary *pending = [self plist:@"State/Install.plist"];
-    if (![pending[@"Phase"] isEqual:@"cleanup-pending"]) {
-        // Verification is durable, but the session's completionGuestReport is
-        // not. Recover it after an app restart/close instead of indefinitely
-        // retaining the installer when the original session no longer exists.
-        NSDictionary *installation = [self plist:@"State/GuestInstallation.plist"];
-        if (!self.configuration[@"InstallerMedia"] || ![installation[@"Phase"] isEqual:@"graphics-verified"])
-            return YES;
-        NSDictionary *observed = [self plist:@"State/GuestStatus.plist"];
-        NSDictionary *report = observed[@"Report"];
-        if (![report isKindOfClass:NSDictionary.class])
-            return Fail(error, @"Saved guest status is unavailable. Installer media was retained.");
-        // finishInstallation rechecks the transaction, boot, volume, guest,
-        // ownership and stopped-session lock before changing any media.
-        return [self finishInstallationWithGuestReport:report error:error];
-    }
-    if (![pending[@"Identifier"] isEqual:self.configuration[@"Identifier"]] ||
-        ![pending[@"GuestReport"] isKindOfClass:NSDictionary.class])
-        return Fail(error, @"Saved installer cleanup does not match this Mac. Media was retained.");
-    return [self finishInstallationWithGuestReport:pending[@"GuestReport"] error:error];
+    return [VIMMachineFiles retryInstallerCleanupOfPackage:self.URL
+                                             configuration:self.configuration
+                                             preMetalGuest:self.preMetalGuest
+                                            removePassword:self.passwordRemover
+                                                     adopt:self.configurationAdopter
+                                                     error:error];
 }
 - (BOOL)validateOpenGLSetupReport:(NSDictionary *)report requirePixels:(BOOL)pixels error:(NSError **)error {
     if (![VIMMachineModel report:report
@@ -652,162 +595,12 @@ static BOOL RemovePreparedMedia(NSString *path, NSURL *owner) {
         close(lock);
     }
 }
-- (BOOL)retryOpenGLInstallerCleanup:(NSError **)error {
-    NSDictionary *finished = [self plist:@"State/Install.plist"];
-    if ([finished[@"Phase"] isEqual:@"complete"] && [finished[@"Identifier"] isEqual:self.configuration[@"Identifier"]])
-        return YES;
-    NSDictionary *receipt = [self plist:@"State/LegacyGuestInstallation.plist"];
-    if (![receipt[@"Phase"] isEqual:@"graphics-verified"])
-        return YES;
-    // Called before session acquisition or after QEMU exit, never on a live
-    // optical backend. Use the same lifetime lock as modern cleanup.
-    int fd = open([[self.URL URLByAppendingPathComponent:@"State/Session.lock"] fileSystemRepresentation],
-                  O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
-    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB)) {
-        if (fd >= 0)
-            close(fd);
-        return Fail(error, @"Shut down this Mac before retiring its installer files.");
-    }
-    @try {
-        VIMMachine *fresh = [VIMMachine loadURL:self.URL error:error];
-        if (!fresh)
-            return NO;
-        if (fresh.configuration[@"InstallerMedia"] || ![fresh.configuration[@"InstallState"] isEqual:@"installed"] ||
-            ![receipt[@"MachineIdentifier"] isEqual:fresh.configuration[@"Identifier"]])
-            return Fail(error, @"Installer cleanup is not yet authorized for this Mac.");
-        NSDictionary *owner = [self plist:@"Installation/Ownership.plist"];
-        if (!owner)
-            return YES;
-        if (![owner[@"MachineIdentifier"] isEqual:fresh.configuration[@"Identifier"]])
-            return Fail(error, @"Installer ownership changed. Its files were retained.");
-        BOOL removed = RemovePreparedMedia(owner[@"Media"], self.URL);
-        NSDictionary *profile = [self plist:@"State/AutomaticSetup.plist"];
-        if (profile[@"CredentialIdentifier"] &&
-            ![VIMAutomaticSetup removePasswordForIdentifier:profile[@"CredentialIdentifier"] error:error])
-            return NO;
-        return Save(@{
-            @"Phase" : @"complete",
-            @"Identifier" : fresh.configuration[@"Identifier"],
-            @"InstallerDetached" : @YES,
-            @"SharedMediaRetained" : @(!removed),
-            @"CompletedAt" : NSDate.date
-        },
-                    [self.URL URLByAppendingPathComponent:@"State/Install.plist"], error);
-    } @finally {
-        close(fd);
-    }
-}
 - (BOOL)finishInstallationWithGuestReport:(NSDictionary *)report error:(NSError **)error {
-    NSURL *lock = [self.URL URLByAppendingPathComponent:@"State/Session.lock"];
-    int fd = open(lock.fileSystemRepresentation, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
-    struct stat info;
-    if (fd < 0 || fstat(fd, &info) || !S_ISREG(info.st_mode) || info.st_nlink != 1 || flock(fd, LOCK_EX | LOCK_NB)) {
-        if (fd >= 0)
-            close(fd);
-        return Fail(error, @"Shut down this Mac before finishing installer cleanup.");
-    }
-    @try {
-        VIMMachine *fresh = [VIMMachine loadURL:self.URL error:error];
-        if (!fresh)
-            return NO;
-        NSDictionary *state = [self plist:@"State/GuestInstallation.plist"];
-        NSDictionary *verified = state[@"PostBootVerification"];
-        if (![VIMMachineModel journal:state authorizesInstallerCleanupWithReport:report guest:fresh.guest])
-            return Fail(
-                error,
-                @"Matching completed guest installation and graphics verification are required. Media was retained.");
-        NSURL *media = [self.URL URLByAppendingPathComponent:@"Installation/Installer.iso"];
-        NSDictionary *owner = [self plist:@"Installation/Ownership.plist"];
-        // Shared library media belongs to the download cache, not this VM. Detach
-        // it after verification, but never delete another VM's or user's ISO.
-        if ([fresh.configuration[@"InstallerMediaShared"] isEqual:@YES]) {
-            if (![VIMMachineModel ownership:owner namesConfiguration:fresh.configuration])
-                return Fail(error, @"Installer reference does not match its record.");
-            NSDictionary *config = [VIMMachineModel configurationFinishingWithSharedInstaller:fresh.configuration];
-            if (!Save(config, [self.URL URLByAppendingPathComponent:@"Machine.plist"], error))
-                return NO;
-            _configuration = [config copy];
-            BOOL removed = RemovePreparedMedia(fresh.configuration[@"InstallerMedia"], self.URL);
-            return Save(@{
-                @"Phase" : @"complete",
-                @"Identifier" : config[@"Identifier"],
-                @"InstallerDetached" : @YES,
-                @"SharedMediaRetained" : @(!removed),
-                @"CompletedAt" : NSDate.date
-            },
-                        [self.URL URLByAppendingPathComponent:@"State/Install.plist"], error);
-        }
-        if (![VIMMachineModel ownership:owner admitsOwnedCleanupByConfiguration:fresh.configuration])
-            return Fail(error, @"Installer ownership could not be established. Media was retained.");
-        // Never follow a relocated Installation directory or delete a linked file.
-        if (![media.URLByResolvingSymlinksInPath.path isEqual:media.path])
-            return Fail(error, @"Installer media has been relocated. Automatic cleanup is unavailable.");
-        BOOL exists = lstat(media.fileSystemRepresentation, &info) == 0;
-        if (!exists && errno != ENOENT)
-            return Fail(error, @"Cannot inspect installer media.");
-        if (exists && (!S_ISREG(info.st_mode) || info.st_nlink != 1 || info.st_size <= 0 ||
-                       (uint64_t)info.st_size != [owner[@"Size"] unsignedLongLongValue]))
-            return Fail(error, @"Installer media no longer matches its ownership record.");
-        NSFileManager *fm = NSFileManager.defaultManager;
-        for (NSString *key in @[ @"BootMedia", @"Disk", @"Firmware", @"NVRAM" ])
-            if ([[[self.URL URLByAppendingPathComponent:fresh.configuration[key]] URLByResolvingSymlinksInPath].path
-                    isEqual:media.path])
-                return Fail(error, @"Installer media is still used by another device in this Mac.");
-        NSArray *siblings = [fm contentsOfDirectoryAtURL:self.URL.URLByDeletingLastPathComponent
-                              includingPropertiesForKeys:nil
-                                                 options:0
-                                                   error:error];
-        if (!siblings)
-            return NO;
-        for (NSURL *sibling in siblings) {
-            if (![sibling.pathExtension isEqual:@"vintelmac"] ||
-                [sibling.URLByResolvingSymlinksInPath.path isEqual:self.URL.path])
-                continue;
-            NSDictionary *config =
-                [NSDictionary dictionaryWithContentsOfURL:[sibling URLByAppendingPathComponent:@"Machine.plist"]];
-            if (!config)
-                return Fail(error, @"Another Mac's configuration could not be checked. Media was retained.");
-            for (NSString *key in @[ @"InstallerMedia", @"BootMedia", @"Disk", @"Firmware", @"NVRAM" ]) {
-                NSString *relative = config[key];
-                if (![relative isKindOfClass:NSString.class])
-                    continue;
-                NSURL *reference = [sibling URLByAppendingPathComponent:relative].URLByResolvingSymlinksInPath;
-                if ([reference.path isEqual:media.path])
-                    return Fail(error, @"Another Mac still references this installer.");
-            }
-        }
-        NSDictionary *config = [VIMMachineModel configurationFinishingWithOwnedInstaller:fresh.configuration];
-        // Persist the validated evidence before retiring routing. A deletion or
-        // final journal failure can then be retried after app/process restart.
-        if (!Save(@{
-                @"Phase" : @"cleanup-pending",
-                @"Identifier" : config[@"Identifier"],
-                @"TransactionID" : verified[@"TransactionID"],
-                @"GuestReport" : report,
-                @"UpdatedAt" : NSDate.date
-            },
-                  [self.URL URLByAppendingPathComponent:@"State/Install.plist"], error))
-            return NO;
-        // Config first: a crash can leave surplus media, never a dangling boot
-        // reference. A subsequent call can finish the same cleanup idempotently.
-        if (!Save(config, [self.URL URLByAppendingPathComponent:@"Machine.plist"], error))
-            return NO;
-        _configuration = [config copy];
-        BOOL keep = [NSUserDefaults.standardUserDefaults boolForKey:@"VIMKeepInstallers"];
-        if (exists && !keep && ![fm removeItemAtURL:media error:error])
-            return NO;
-        return Save(@{
-            @"Phase" : @"complete",
-            @"Identifier" : config[@"Identifier"],
-            @"TransactionID" : verified[@"TransactionID"],
-            @"InstallerMediaRemoved" : @(!keep),
-            @"CompletedAt" : NSDate.date
-        },
-                    [self.URL URLByAppendingPathComponent:@"State/Install.plist"], error);
-    } @finally {
-        flock(fd, LOCK_UN);
-        close(fd);
-    }
+    return [VIMMachineFiles finishInstallerCleanupOfPackage:self.URL
+                                                     report:report
+                                             removePassword:self.passwordRemover
+                                                      adopt:self.configurationAdopter
+                                                      error:error];
 }
 + (instancetype)importDisk:(NSURL *)disk
                      guest:(NSString *)guest
