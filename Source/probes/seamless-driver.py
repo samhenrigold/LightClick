@@ -424,7 +424,7 @@ def desktop():
         print(f'{"PASS" if passed else "FAIL"} {what}', flush=True)
 
     def proxy_pid(name):
-        found = next((row for row in proxy_windows() if f'owner="{name}"' in row), '')
+        found = next((row for row in proxy_windows() if f'owner="{name}' in row), '')
         match = re.search(r'pid=(\d+)', found)
         return int(match.group(1)) if match else 0
 
@@ -447,7 +447,7 @@ def desktop():
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
         subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-{window}.png')])
-    clicks = Path(os.environ['LC_SEAMLESS_CLICK_LOG'])
+    clicks = results/f'{tag}-clicks.txt'
     safari = proxy_pid('Safari')
     window = next((re.search(r'id=(\d+)', row).group(1) for row in windows if 'Safari' in row), None)
     if safari and window:
