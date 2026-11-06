@@ -291,6 +291,12 @@ def motion():
     tree(32, guest, hook=True, command=['program-tree', '--gl'])
 
 
+def capture_bench():
+    guest = stage(guest_tool)
+    run(guest, ['capture-bench', '--app', 'Safari', '--open'])
+    run(guest, ['capture-bench', '--app', 'TextEdit', '--open'])
+
+
 def proxy(seconds):
     # One guest app as a host app: a generated .app with its own Dock tile, its windows, its menu and its input, with the VM
     # hidden. The Mac's display may be asleep, so what's checked is what WindowServer and LaunchServices report.
@@ -371,7 +377,9 @@ def proxy(seconds):
     print(subprocess.run([str(results/'SeamlessMakeProxy'), 'remove', bundle], capture_output=True, text=True).stdout)
 
 
-if arguments[0] == 'proxy':
+if arguments[0] == 'capture-bench':
+    capture_bench()
+elif arguments[0] == 'proxy':
     proxy(int(arguments[1]) if len(arguments) > 1 else 28)
 elif arguments[0] == 'motion':
     motion()

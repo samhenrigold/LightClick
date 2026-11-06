@@ -1470,6 +1470,86 @@ done:;
     return 0;
 }
 
+// What each way of asking WindowServer for a window's pixels costs, on the same window.
+static void capture_bench_report(const char *name, CGImageRef image, double spent, unsigned attempts) {
+    if (!image) {
+        printf("%-34s no image\n", name);
+        return;
+    }
+    uint32_t width = 0, height = 0;
+    double before = now();
+    uint8_t *pixels = copy_pixels(image, &width, &height);
+    double copied = now() - before;
+    unsigned opaque = 0, clear = 0;
+    for (size_t i = 0; pixels && i < (size_t)width * height; i += 97) {
+        opaque += pixels[i * 4 + 3] == 255;
+        clear += pixels[i * 4 + 3] == 0;
+    }
+    printf("%-34s %6.1f ms over %u, then %5.1f ms to read; %ux%u, %u%% solid, %u%% clear\n", name, spent / attempts * 1000,
+           attempts, copied * 1000, width, height, width ? opaque * 100 / (unsigned)((size_t)width * height / 97 + 1) : 0,
+           width ? clear * 100 / (unsigned)((size_t)width * height / 97 + 1) : 0);
+    free(pixels);
+}
+
+static int capture_bench(const char *app) {
+    CGWindowID window = find_window(app);
+    if (!window) {
+        printf("# ERROR no window of %s\n", app);
+        return 1;
+    }
+    char title[64];
+    CGRect bounds = CGRectZero;
+    snapshot(window, title, sizeof(title), &bounds);
+    printf("# window %u %gx%g\n", window, bounds.size.width, bounds.size.height);
+    enum { ATTEMPTS = 12 };
+    const struct {
+        const char *name;
+        CGWindowImageOption options;
+    } plain[] = {{"CGWindowList default", kCGWindowImageDefault},
+                 {"CGWindowList no framing", kCGWindowImageBoundsIgnoreFraming},
+                 {"CGWindowList nominal", kCGWindowImageNominalResolution},
+                 {"CGWindowList no framing, nominal", kCGWindowImageBoundsIgnoreFraming | kCGWindowImageNominalResolution}};
+    for (size_t k = 0; k < sizeof(plain) / sizeof(*plain); k++) {
+        CGImageRef image = NULL;
+        double before = now();
+        for (int i = 0; i < ATTEMPTS; i++) {
+            if (image)
+                CGImageRelease(image);
+            image = CGWindowListCreateImage(CGRectNull, kCGWindowListOptionIncludingWindow, window, plain[k].options);
+        }
+        capture_bench_report(plain[k].name, image, now() - before, ATTEMPTS);
+        if (image)
+            CGImageRelease(image);
+    }
+    int (*connection)(void) = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
+    CFArrayRef (*hw)(int, const CGWindowID *, int, uint32_t) = guest_symbol("CGSHWCaptureWindowList", "SLSHWCaptureWindowList");
+    const struct {
+        const char *name;
+        uint32_t options;
+    } private_ways[] = {{"HW capture", 0},
+                        {"HW capture nominal", 0x200},
+                        {"HW capture ignore clip", 0x800},
+                        {"HW capture nominal, ignore clip", 0xa00},
+                        {"HW capture 0x1", 0x1},
+                        {"HW capture 0x2", 0x2}};
+    for (size_t k = 0; hw && connection && k < sizeof(private_ways) / sizeof(*private_ways); k++) {
+        CFArrayRef images = NULL;
+        double before = now();
+        for (int i = 0; i < ATTEMPTS; i++) {
+            if (images)
+                CFRelease(images);
+            images = hw(connection(), &window, 1, private_ways[k].options);
+        }
+        double spent = now() - before;
+        capture_bench_report(private_ways[k].name,
+                             images && CFArrayGetCount(images) ? (CGImageRef)CFArrayGetValueAtIndex(images, 0) : NULL, spent,
+                             ATTEMPTS);
+        if (images)
+            CFRelease(images);
+    }
+    return 0;
+}
+
 static const char *option(int argc, char **argv, const char *name, const char *fallback) {
     for (int i = 2; i + 1 < argc; i++)
         if (!strcmp(argv[i], name))
@@ -1513,6 +1593,14 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(command, "list"))
         return list_windows();
+    if (!strcmp(command, "capture-bench")) {
+        if (geteuid() == 0 && !in_session)
+            return run_in_console_session(argc, argv, 1);
+        if (flag(argc, argv, "--open") && !open_app(app))
+            return 1;
+        sleep(5);
+        return capture_bench(app);
+    }
     if (!strcmp(command, "program-gl") || !strcmp(command, "png-window")) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
