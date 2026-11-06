@@ -1,3 +1,10 @@
+// Runs what InstallerKit decides: tool commands, per-guest media and edits, what inputs are, receipts and messages.
+// What's left here is ordering, process supervision and file operations.
+//
+// Every disk write is marked WRITES or ERASES. Each stays inside the fresh job directory it created, the working
+// copy attached from that job, an app-owned completed download, or a temporary directory of its own. Originals are only
+// ever attached read-only, a device is only ever read, and nothing here runs a command that can erase or partition a
+// disk.
 #import "VIMInstallerAssembly.h"
 #import "VIMGuestFiles.h"
 #import <signal.h>
@@ -35,6 +42,7 @@ static BOOL NonemptyFile(NSURL *URL) {
 // Commit the output before retiring its working files, and use a fresh POSIX
 // size rather than an NSURL resource-value cache for the completion receipt.
 static NSNumber *FlushGeneratedImage(NSURL *URL, NSError **error) {
+    // Read-write only to flush: writes no bytes. Refuses a symlink, a hard link or a file replaced meanwhile.
     int fd = open(URL.fileSystemRepresentation, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
     struct stat before, after, path;
     BOOL valid =
@@ -95,6 +103,7 @@ static BOOL LeopardRestoreProfile(NSURL *mount, NSString *guest, NSError **error
            AssemblyError(error, VIMAssemblyFailureIncompleteLeopardDisc);
 }
 // Receipts are written last, so one's presence means everything before it finished.
+// WRITES a job's receipt, atomically.
 static BOOL WriteReceipt(NSDictionary *receipt, NSURL *URL, NSError **error) {
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:receipt
                                                               format:NSPropertyListXMLFormat_v1_0
@@ -169,6 +178,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
             [VIMImagePartitionDevice deviceFromInfo:[NSDictionary dictionaryWithContentsOfURL:self.lastLog]
                                        requiringHFS:YES];
         if (device) {
+            // WRITES the job's new volume (O_EXCL). Reads the raw node of the image attached read-only above, and
+            // only a device that InstallerKit recognizes as that image's HFS partition.
             copied = VIMCopyHFSInstallerVolume(device.rawPath.fileSystemRepresentation, volume.fileSystemRepresentation,
                                                HFSExtractionProgress, (__bridge void *)self) == 0;
             if (!copied)
@@ -190,6 +201,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return NO;
     // Only replace our unmounted generated working image. HFS catalog bytes,
     // UUID, system owners and blessing are preserved by the native block copy.
+    // ERASES the job's own working image, by replacing it with its extracted volume.
     if (rename(volume.fileSystemRepresentation, working.fileSystemRepresentation))
         return AssemblyError(error, VIMAssemblyFailureWorkingVolumeNotSaved);
     return YES;
@@ -207,6 +219,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     if (![VIMRecoveryText hasSerialHook:original])
         return AssemblyError(error, VIMAssemblyFailureSerialHookUnrecognized);
     NSURL *destination = [mount URLByAppendingPathComponent:@"usr/libexec/guest-recovery-agent"];
+    // WRITES the attached working copy, after the hook above proved this is the measured rc.install.
     if (![fm copyItemAtURL:tool toURL:destination error:error] || ![fm setAttributes:@{NSFilePosixPermissions : @0755}
                                                                         ofItemAtPath:destination.path
                                                                                error:error])
@@ -219,6 +232,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
 - (BOOL)prepareLeopardRecoveryMemoryAtMount:(NSURL *)mount error:(NSError **)error {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSURL *model = [mount URLByAppendingPathComponent:@"usr/libexec/cpu_check"];
+    // WRITES the attached working copy: a recognized model check, then rc.cdrom's RAMDisk budgets.
     if ([fm fileExistsAtPath:model.path]) {
         NSString *bypass = [VIMRecoveryText bypassingModelCheck:[NSString stringWithContentsOfURL:model
                                                                                          encoding:NSUTF8StringEncoding
@@ -259,6 +273,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
             [VIMDownloadRetirement record:record allowsRemovalOfPayloadWithSize:st.st_size]) {
             // Payload first, then the completion record: interruption leaves a
             // stale record, which beginTransfer can safely restart below.
+            // ERASES a completed download: only an owned payload path, holding its lock, a plain single-link file of
+            // the recorded length, from an approved source.
             if ([fm removeItemAtURL:file error:nil])
                 [fm removeItemAtURL:[directory URLByAppendingPathComponent:@"Download.plist"] error:nil];
         }
@@ -346,6 +362,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                                error:&detachError];
         if (detached) {
             rmdir(mount.fileSystemRepresentation);
+            // ERASES this probe's own temporary log directory.
             [NSFileManager.defaultManager removeItemAtURL:logs error:nil];
         } else {
             if (error)
@@ -402,6 +419,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSURL *package = [mount URLByAppendingPathComponent:@"System/Installation/Packages/OSInstall.mpkg"];
     BOOL flat = [VIMInstallerInspection fileIsInstallerPackage:package];
     NSURL *expanded = [self.job URLByAppendingPathComponent:@"RestoreDistribution"];
+    // WRITES inside the job, then the attached working copy's OSInstall package or distribution.
     if (flat && (![fm createDirectoryAtURL:expanded withIntermediateDirectories:NO attributes:nil error:error] ||
                  ![self perform:[VIMToolInvocation extractArchive:package.path into:expanded.path] error:error]))
         return NO;
@@ -501,6 +519,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSFileManager *fm = NSFileManager.defaultManager;
     if ([fm fileExistsAtPath:automatic.path])
         return AssemblyError(error, VIMAssemblyFailureAutomaticInstallerAlreadyPresent);
+    // WRITES the job, then a new app on the attached working copy. The original app and its signature are untouched.
     NSURL *policy = [self.job URLByAppendingPathComponent:@"AutomaticInstallerEntitlements.plist"];
     NSData *empty = [NSPropertyListSerialization dataWithPropertyList:@{}
                                                                format:NSPropertyListXMLFormat_v1_0
@@ -630,6 +649,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         AssemblyError(error, VIMAssemblyFailureAssemblyNeedsSpace);
         return nil;
     }
+    // WRITES the new job directory, which is the ownership boundary: it must not already exist.
     if (![fm createDirectoryAtURL:directory
             withIntermediateDirectories:NO
                              attributes:@{NSFilePosixPermissions : @0700}
@@ -657,6 +677,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     if (mounted) {
         [self report:@"Unpacking the original Mac OS X installer…"];
         [self nextWorkTo:.35 seconds:90];
+        // WRITES the job's Expanded directory. The image stays attached read-only.
         unpacked = [self perform:[VIMToolInvocation expandPackage:[mount URLByAppendingPathComponent:package].path
                                                              into:expanded.path]
                            error:error];
@@ -675,6 +696,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     // of that script on a modern host (and does not require administrator access).
     NSURL *component = [expanded URLByAppendingPathComponent:package];
     NSURL *app = [directory URLByAppendingPathComponent:name];
+    // WRITES inside the job: moves the app and its ESD out of Expanded.
     if (![fm moveItemAtURL:[component URLByAppendingPathComponent:[@"Payload" stringByAppendingPathComponent:name]]
                      toURL:app
                      error:error])
@@ -686,6 +708,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                      error:error] ||
         ![self.class validateInstallerApplication:app guest:guest error:error])
         return nil;
+    // ERASES the job's own Expanded directory.
     if (![fm removeItemAtURL:expanded error:error])
         return nil;
     if (!WriteReceipt([VIMPreparationRecords pinnedImageReceiptForGuest:guest installer:name],
@@ -710,6 +733,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         AssemblyError(error, VIMAssemblyFailureAssemblyNeedsSpace);
         return nil;
     }
+    // WRITES the new job directory, which is the ownership boundary: it must not already exist.
     if (![fm createDirectoryAtURL:directory
             withIntermediateDirectories:NO
                              attributes:@{NSFilePosixPermissions : @0700}
@@ -762,6 +786,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         app = [directory URLByAppendingPathComponent:plan.installerApplicationName];
         [self report:@"Preparing the original Mavericks installer…"];
         [self nextWorkTo:.2 seconds:10];
+        // WRITES the app and its support files inside the job. Both images stay attached read-only.
         if (![self perform:[VIMToolInvocation copy:[base URLByAppendingPathComponent:app.lastPathComponent].path
                                                 to:app.path
                                            timeout:300]
@@ -862,6 +887,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return nil;
     }
     // A fresh directory is the ownership boundary; never reuse or clear user paths.
+    // WRITES the new job directory, which is the ownership boundary: it must not already exist.
     if ([fm fileExistsAtPath:directory.path] || ![fm createDirectoryAtURL:directory
                                                     withIntermediateDirectories:NO
                                                                      attributes:@{NSFilePosixPermissions : @0700}
@@ -887,6 +913,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     [self completedWork:.05];
     [self report:@"Unpacking the installer…"];
     [self nextWorkTo:.30 seconds:splitInstaller ? 45 : 180];
+    // WRITES the job's Expanded directory, only after pkgutil called this signed Apple Software.
     if (![self perform:[VIMToolInvocation expandPackage:files[@"assistant"].path into:expanded.path] error:error])
         return nil;
     // Apple packages may be a single component or a product archive containing components.
@@ -921,6 +948,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return nil;
     // All package members we need now live in the app. This may itself contain
     // several GB of unused payload; never carry it through media conversion.
+    // ERASES the job's own Expanded directory, once the app has moved out.
     if (![fm removeItemAtURL:expanded error:error])
         return nil;
     if (!splitInstaller) {
@@ -931,6 +959,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         // Copy the already verified original byte-for-byte, without running
         // package scripts or linking it to a download we subsequently retire.
         NSURL *destination = [support URLByAppendingPathComponent:@"SharedSupport.dmg"];
+        // ERASES the moved app's own SharedSupport.dmg, inside the job, to replace it with the verified original.
         if ([fm fileExistsAtPath:destination.path] && ![fm removeItemAtURL:destination error:error])
             return nil;
         [self report:@"Adding Apple’s signed installation package…"];
@@ -960,6 +989,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                     copied = AssemblyError(error, VIMAssemblyFailureRecoveryFilesMissing);
                     break;
                 }
+                // WRITES inside the job's app. The recovery image stays attached read-only.
                 if (![fm copyItemAtURL:source toURL:[support URLByAppendingPathComponent:file] error:error]) {
                     copied = NO;
                     break;
@@ -992,6 +1022,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         [self report:@"Copying macOS installation data…"];
         [self completedWork:.36];
         [self nextWorkTo:.43 seconds:75];
+        // WRITES inside the job's app, refusing the unexpected existing ESD above.
         if (![self perform:[VIMToolInvocation copy:files[@"esd"].path to:esdDestination.path timeout:1800] error:error])
             return nil;
     }
@@ -1053,6 +1084,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         AssemblyError(error, VIMAssemblyFailureNeedsNewMediaJob);
         return nil;
     }
+    // WRITES the new job directory, which is the ownership boundary: it must not already exist.
     if (![fm createDirectoryAtURL:directory
             withIntermediateDirectories:NO
                              attributes:@{NSFilePosixPermissions : @0700}
@@ -1072,6 +1104,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         BOOL copied = mounted;
         base = [directory URLByAppendingPathComponent:@"Original-BaseSystem.dmg"];
         if (mounted)
+            // WRITES inside the job, never a user-selected installer app.
             copied = [fm copyItemAtURL:[sourceMount URLByAppendingPathComponent:@"BaseSystem.dmg"]
                                  toURL:base
                                  error:error];
@@ -1118,6 +1151,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                     // The block node is exclusively owned by the mounted
                     // filesystem. Use that same image partition's raw node
                     // for read-only copying, never unmount a user's disk.
+                    // WRITES the job's working copy (O_EXCL), reading this image's own partition read-only.
                     converted = VIMCopyHFSInstallerVolume(device.rawPath.fileSystemRepresentation,
                                                           working.fileSystemRepresentation, HFSExtractionProgress,
                                                           (__bridge void *)self) == 0;
@@ -1125,6 +1159,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                         AssemblyError(error, self.cancelled ? VIMAssemblyFailureCancelledWithDownloadSaved
                                                             : VIMAssemblyFailureLeopardVolumeCopyFailed);
                 } else
+                    // WRITES the job's working copy. The device is only its source.
                     converted = [self perform:[VIMToolInvocation createWorkingImageFromDevice:device at:working.path]
                                         error:error];
             } else
@@ -1140,6 +1175,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         }
         rmdir(original.fileSystemRepresentation);
     } else
+        // WRITES the job's working copy. The installer's image is only its source.
         converted = [self perform:[VIMToolInvocation createWorkingImageFrom:base.path at:working.path backend:backend]
                             error:error];
     if (!converted) {
@@ -1159,6 +1195,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     }
     BOOL partitionedInstaller = restoreDVD || volumeOnly;
     [self nextWorkTo:.60 seconds:8];
+    // WRITES the job's working copy.
     if (![self perform:[VIMToolInvocation resizeWorkingImage:working.path capacity:plan.workingCapacity backend:backend]
                  error:error]) {
         rmdir(mount.fileSystemRepresentation);
@@ -1184,6 +1221,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                 // not supply that tree and cannot replace this native layout.
                 NSURL *packages = [mount URLByAppendingPathComponent:@"System/Installation/Packages"];
                 struct stat info;
+                // ERASES the working copy's stub Packages. A restore disc keeps its own, and an original is never
+                // attached writable.
                 BOOL removed = restoreDVD || lstat(packages.fileSystemRepresentation, &info) != 0 ||
                                [fm removeItemAtURL:packages error:error];
                 BOOL imageInstaller = plan.carriesInstallerImages;
@@ -1204,6 +1243,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                         [packages URLByAppendingPathComponent:@"OSInstall.mpkg/Contents/OSInstall.dist"];
                     NSData *prepared = VIMTigerPrepareDiscOneDistribution([NSData dataWithContentsOfURL:distribution],
                                                                           &tigerPolicy, error);
+                    // WRITES the attached working copy, after the disc validated above.
                     copied = prepared && [prepared writeToURL:distribution options:NSDataWritingAtomic error:error];
                     if (copied)
                         copied = VIMTigerStageInstallerControls(mount, openGLSupport, &tigerControls, error);
@@ -1226,6 +1266,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                     [self report:@"Adding OS X installation packages…"];
                     [self nextWorkTo:.87 seconds:100];
                     copied =
+                        // WRITES the attached working copy. The installer's image stays attached read-only.
                         [self perform:[VIMToolInvocation copy:[sourceMount URLByAppendingPathComponent:@"Packages"].path
                                                            to:packages.path
                                                       timeout:1800]
@@ -1241,6 +1282,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                             if (!RegularFile(recovery))
                                 recovery = [[installer URLByAppendingPathComponent:@"Contents/SharedSupport"]
                                     URLByAppendingPathComponent:file];
+                            // WRITES the attached working copy.
                             if (RegularFile(recovery))
                                 copied = [fm
                                     copyItemAtURL:recovery
@@ -1272,6 +1314,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                 }
             } else {
                 NSURL *stub = [mount URLByAppendingPathComponent:name];
+                // ERASES the working copy's stub app, then WRITES the complete one over it.
                 BOOL removed = ![fm fileExistsAtPath:stub.path] || [fm removeItemAtURL:stub error:error];
                 [self report:@"Adding the complete OS installer…"];
                 [self completedWork:.65];
@@ -1310,11 +1353,13 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         // diskutil created this working image with --format RAW already.
         // Resizing/mounting edited that same disk. QEMU can use it directly:
         // publish by a same-directory rename, not a second 16 GB conversion.
+        // WRITES by a same-directory rename inside the job.
         if (![fm moveItemAtURL:working toURL:volumeImage error:error])
             return nil;
         [self completedWork:partitionedInstaller ? .96 : .99];
     } else {
         NSURL *converted = [directory URLByAppendingPathComponent:@"Installer-blocks.cdr"];
+        // WRITES new files inside the job.
         if (![self perform:[VIMToolInvocation convertToBlocks:working.path output:converted.path] error:error] ||
             ![fm moveItemAtURL:converted toURL:volumeImage error:error])
             return nil;
@@ -1325,6 +1370,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         // kernel waits forever for boot-uuid-media. Add real GPT metadata;
         // preserve all volume bytes/UUID and use the existing disk boot path.
         [self report:@"Preparing the installation disk…"];
+        // WRITES the final image (O_EXCL), preserving every byte of the volume.
         if (VIMWrapHFSInstallerDisk(volumeImage.fileSystemRepresentation, image.fileSystemRepresentation,
                                     HFSInstallerProgress, (__bridge void *)self)) {
             AssemblyError(error, errno == ECANCELED ? VIMAssemblyFailureCancelledWithDownloadSaved
@@ -1377,6 +1423,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         AssemblyError(error, VIMAssemblyFailureMediaUnverified);
         return nil;
     }
+    // ERASES the job's own intermediates, only after the final image was reopened and verified above.
     if (partitionedInstaller && ![fm removeItemAtURL:volumeImage error:error])
         return nil;
     // Only a verified final image can retire the generated working copy.
@@ -1423,6 +1470,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         AssemblyError(error, VIMAssemblyFailureNeedsNewMediaJob);
         return nil;
     }
+    // WRITES the new job directory, which is the ownership boundary: it must not already exist.
     if (![fm createDirectoryAtURL:directory
             withIntermediateDirectories:NO
                              attributes:@{NSFilePosixPermissions : @0700}
@@ -1446,6 +1494,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSURL *extracted = [directory URLByAppendingPathComponent:@"BootAssets"];
     NSURL *stage = [directory URLByAppendingPathComponent:@"MediaRoot"];
     for (NSURL *URL in @[ extracted, stage ])
+        // WRITES inside the job: BootAssets and MediaRoot, neither of which may exist.
         if (![fm createDirectoryAtURL:URL withIntermediateDirectories:NO attributes:nil error:error])
             return nil;
     [self report:@"Reading Big Sur installer boot files…"];
@@ -1503,10 +1552,12 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                 withIntermediateDirectories:YES
                                  attributes:nil
                                       error:error] ||
+            // WRITES inside the job, moving a file from BootAssets to MediaRoot.
             ![fm moveItemAtURL:source toURL:target error:error])
             return nil;
     }
     NSURL *manifests = [extracted URLByAppendingPathComponent:VIMHybridMedia.extractedManifests];
+    // WRITES the job's MediaRoot, as do the plists and app copy below.
     if (![self perform:[VIMToolInvocation copy:manifests.path to:stage.path timeout:120] error:error])
         return nil;
     NSURL *bootPlist = [stage URLByAppendingPathComponent:VIMHybridMedia.bootPlistPath];
@@ -1537,12 +1588,14 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                        timeout:1800]
                  error:error])
         return nil;
+    // ERASES the job's own BootAssets. Their contents were staged above.
     if (![fm removeItemAtURL:extracted error:error])
         return nil;
     [self report:@"Creating the bootable installer image…"];
     [self completedWork:.9];
     NSURL *image = [directory URLByAppendingPathComponent:@"Installer.iso"];
     [self nextWorkTo:.99 seconds:120];
+    // WRITES the final image inside the job, from the job's MediaRoot.
     if (![self perform:[VIMToolInvocation
                            makeHybridImageFromStage:stage.path
                                    blessedDirectory:[stage URLByAppendingPathComponent:VIMHybridMedia.blessedDirectory]
@@ -1559,6 +1612,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return nil;
     }
     // Staged files are now inside the image and are never reused.
+    // ERASES the job's own MediaRoot, once its files are inside the checked image.
     if (![fm removeItemAtURL:stage error:error])
         return nil;
     if (!WriteReceipt([VIMPreparationRecords hybridReceiptForMedia:image.lastPathComponent
