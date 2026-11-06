@@ -60,7 +60,7 @@ struct SWSTable {
     // Mojave, per-window composites on the GPU: see seamless-ws-mojave.h. The tool writes the first two.
     volatile uint32_t gpu_mode;
     volatile float gpu_scale;
-    volatile uint64_t gpu_generate_calls, gpu_composites, gpu_ticks;
+    volatile uint64_t gpu_generate_calls, gpu_composites, gpu_ticks, gpu_whole_composites;
     // Windows nobody will show, such as the desktop's, so not worth a composite. The tool writes these.
     volatile uint32_t gpu_skip_count, gpu_skip[64];
     // Every window in the last update, front first: what the host's surface for each one holds, in points.
