@@ -161,5 +161,17 @@
 #define LC_OPTION_PVG_TCG_RET_STACK "PVG_TCG_RET_STACK"
 /* PVG_TCG_SSE_DIRECT_LOAD (fastPath, default on for arm64): Direct SSE loads. */
 #define LC_OPTION_PVG_TCG_SSE_DIRECT_LOAD "PVG_TCG_SSE_DIRECT_LOAD"
+/* VIM_PVG_EXACT_RUNS (flag, default on): Build shadow runs from the exact pages used. */
+#define LC_OPTION_VIM_PVG_EXACT_RUNS "VIM_PVG_EXACT_RUNS"
+/* VIM_PVG_GATHER (flag, default on): Gather shadow uploads through RAM windows. */
+#define LC_OPTION_VIM_PVG_GATHER "VIM_PVG_GATHER"
+/* VIM_PVG_POSTED_MMIO (flag, default off): Post allow-listed MMIO writes to PVG without waiting. */
+#define LC_OPTION_VIM_PVG_POSTED_MMIO "VIM_PVG_POSTED_MMIO"
+/* VIM_PVG_SCATTER (flag, default on): Scatter shadow downloads through RAM windows. */
+#define LC_OPTION_VIM_PVG_SCATTER "VIM_PVG_SCATTER"
+/* VIM_PVG_SLAB (flag, default on): Keep shadow baselines in a slab. */
+#define LC_OPTION_VIM_PVG_SLAB "VIM_PVG_SLAB"
+/* VIM_PVG_TIMING (flag, default off): Print PVG timing lines, at most every 5 s per metric. */
+#define LC_OPTION_VIM_PVG_TIMING "VIM_PVG_TIMING"
 
 #endif

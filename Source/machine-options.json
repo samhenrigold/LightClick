@@ -113,6 +113,12 @@
     {"name": "PVG_TCG_PCID_CONTEXTS", "type": "fastPath", "reader": "qemu", "default": "on for arm64", "meaning": "Keep translations per PCID."},
     {"name": "PVG_TCG_RET_MISS_TAIL", "type": "fastPath", "reader": "qemu", "default": "on for Apple silicon", "meaning": "A tail routine for return-stack misses."},
     {"name": "PVG_TCG_RET_STACK", "type": "fastPath", "reader": "qemu", "default": "on for Apple silicon", "meaning": "Predict returns with a return stack."},
-    {"name": "PVG_TCG_SSE_DIRECT_LOAD", "type": "fastPath", "reader": "qemu", "default": "on for arm64", "meaning": "Direct SSE loads."}
+    {"name": "PVG_TCG_SSE_DIRECT_LOAD", "type": "fastPath", "reader": "qemu", "default": "on for arm64", "meaning": "Direct SSE loads."},
+    {"name": "VIM_PVG_EXACT_RUNS", "type": "flag", "reader": "qemu", "default": "on", "meaning": "Build shadow runs from the exact pages used."},
+    {"name": "VIM_PVG_GATHER", "type": "flag", "reader": "qemu", "default": "on", "meaning": "Gather shadow uploads through RAM windows."},
+    {"name": "VIM_PVG_POSTED_MMIO", "type": "flag", "reader": "qemu", "default": "off", "meaning": "Post allow-listed MMIO writes to PVG without waiting."},
+    {"name": "VIM_PVG_SCATTER", "type": "flag", "reader": "qemu", "default": "on", "meaning": "Scatter shadow downloads through RAM windows."},
+    {"name": "VIM_PVG_SLAB", "type": "flag", "reader": "qemu", "default": "on", "meaning": "Keep shadow baselines in a slab."},
+    {"name": "VIM_PVG_TIMING", "type": "flag", "reader": "qemu", "default": "off", "meaning": "Print PVG timing lines, at most every 5 s per metric."}
   ]
 }
