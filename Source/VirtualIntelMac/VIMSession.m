@@ -253,6 +253,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @interface VIMSession () <NSWindowDelegate, NSMenuItemValidation, NSMenuDelegate, NSToolbarDelegate>
 @property VIMMachine *machine;
 @property(readonly) VIMGuestSessionState *state;
+- (void)logNote:(NSString *)format, ... NS_FORMAT_FUNCTION(1, 2);
 @property NSTask *task;
 @property NSFileHandle *log;
 @property VIMMetalView *displayView;
@@ -356,13 +357,19 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                                   }
                                                 }];
 }
+- (void)logNote:(NSString *)format, ... {
+    va_list arguments;
+    va_start(arguments, format);
+    NSString *note = [[NSString alloc] initWithFormat:format arguments:arguments];
+    va_end(arguments);
+    [self.log
+        writeData:[[NSString stringWithFormat:@"\n[Light Click] %@\n", note] dataUsingEncoding:NSUTF8StringEncoding]];
+}
 - (void)applyLifecycleEvent:(VIMSessionEvent)event {
     NSString *before = self.state.lifecycleDescription;
     [self.state applyEvent:event];
     if (![before isEqual:self.state.lifecycleDescription])
-        [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Session: %@ -> %@\n", before,
-                                                        self.state.lifecycleDescription]
-                                dataUsingEncoding:NSUTF8StringEncoding]];
+        [self logNote:@"Session: %@ -> %@", before, self.state.lifecycleDescription];
 }
 - (void)updateInstallationActivity {
     BOOL setup = self.machine.configuration[@"InstallerMedia"] != nil ||
@@ -718,9 +725,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     if (cleanupError) {
         session.guestStatus.stringValue =
             [NSString stringWithFormat:@"Installer cleanup pending: %@", cleanupError.localizedDescription];
-        [session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Cleanup retry: %@\n",
-                                                           cleanupError.localizedDescription]
-                                   dataUsingEncoding:NSUTF8StringEncoding]];
+        [session logNote:@"Cleanup retry: %@", cleanupError.localizedDescription];
     }
     sessions[key] = session;
     NSMutableDictionary *opened = [[NSUserDefaults.standardUserDefaults dictionaryForKey:@"VIMLastOpened"] mutableCopy]
@@ -1252,8 +1257,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       }
       NSData *json = [NSJSONSerialization dataWithJSONObject:event options:0 error:NULL];
       NSString *line = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
-      [session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Lifecycle: %@\n", line]
-                                 dataUsingEncoding:NSUTF8StringEncoding]];
+      [session logNote:@"Lifecycle: %@", line];
     };
     self.guestAgent = [[VIMGuestAgent alloc]
         initWithSocketPath:[self.runtimeDirectory stringByAppendingPathComponent:@"guest-agent"]];
@@ -1379,8 +1383,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             return NO;
         }
         researchCPUModel = model;
-        [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Research CPU comparison: %@\n", model]
-                                dataUsingEncoding:NSUTF8StringEncoding]];
+        [self logNote:@"Research CPU comparison: %@", model];
     }
     NSUInteger diskOption = [launchArguments indexOfObject:@"--system-disk-interface"];
     NSString *systemDiskInterface = nil;
@@ -1393,8 +1396,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             return NO;
         }
         systemDiskInterface = interface;
-        [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Development system disk interface: %@\n",
-                                                        interface] dataUsingEncoding:NSUTF8StringEncoding]];
+        [self logNote:@"Development system disk interface: %@", interface];
     }
     self.task = [NSTask new];
     self.task.executableURL = [NSURL fileURLWithPath:qemu];
@@ -1568,11 +1570,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [self.log seekToEndOfFile];
     self.task.standardOutput = self.log;
     self.task.standardError = self.log;
-    [self.log writeData:[@"\n[Light Click] Memory ordering: normal runtime barriers\n"
-                            dataUsingEncoding:NSUTF8StringEncoding]];
-    [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] %@ runtime: %@\n",
-                                                    root.length ? @"Development override" : @"Bundled", qemu]
-                            dataUsingEncoding:NSUTF8StringEncoding]];
+    [self logNote:@"Memory ordering: normal runtime barriers"];
+    [self logNote:@"%@ runtime: %@", root.length ? @"Development override" : @"Bundled", qemu];
     self.task.terminationHandler = ^(NSTask *task) {
       dispatch_async(dispatch_get_main_queue(), ^{
         VIMSession *session = weakSelf;
@@ -1691,8 +1690,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                     [self cleanUp];
                     return NO;
                 }
-                [self.log writeData:[@"\n[Light Click] Shared graphics memory endpoint unavailable; using copied "
-                                     @"graphics fallback.\n" dataUsingEncoding:NSUTF8StringEncoding]];
+                [self logNote:@"Shared graphics memory endpoint unavailable; using copied "
+                              @"graphics fallback."];
             }
         }
     }
@@ -1701,8 +1700,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                                             port:[config[@"FileSharingPort"] unsignedShortValue]];
         NSError *sharingError = nil;
         if (![self.smbService start:&sharingError])
-            [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] %@\n", sharingError.localizedDescription]
-                                    dataUsingEncoding:NSUTF8StringEncoding]];
+            [self logNote:@"%@", sharingError.localizedDescription];
     }
     [self updateInstallationActivity];
     [self showWindow:nil];
@@ -2925,12 +2923,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         case VIMGuestRefreshStepRetryAfterCommand: {
             // A one-shot status timer may fire during a diagnostic command. Keep
             // the normal production readiness/verification loop alive afterward.
-            [self.guestTimer invalidate];
-            self.guestTimer = [NSTimer scheduledTimerWithTimeInterval:15
-                                                              repeats:NO
-                                                                block:^(NSTimer *timer) {
-                                                                  [weakSelf refreshGuestStatus];
-                                                                }];
+            [self scheduleGuestStatusRefreshAfter:15];
             return;
         }
         case VIMGuestRefreshStepNativeTigerInstallation:
@@ -3003,17 +2996,20 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                      }];
     }];
 }
-- (void)scheduleGuestStatusRetry {
-    // Nothing else restarts this loop after finishGuestStatus cancels its timer.
-    if (!self.task.running)
-        return;
+- (void)scheduleGuestStatusRefreshAfter:(NSTimeInterval)delay {
     __weak VIMSession *weakSelf = self;
     [self.guestTimer invalidate];
-    self.guestTimer = [NSTimer scheduledTimerWithTimeInterval:15
+    self.guestTimer = [NSTimer scheduledTimerWithTimeInterval:delay
                                                       repeats:NO
                                                         block:^(NSTimer *timer) {
                                                           [weakSelf refreshGuestStatus];
                                                         }];
+}
+- (void)scheduleGuestStatusRetry {
+    // Nothing else restarts this loop after finishGuestStatus cancels its timer.
+    if (!self.task.running)
+        return;
+    [self scheduleGuestStatusRefreshAfter:15];
 }
 - (void)dismissSetupNotice {
     if (self.previewSetupNotice)
@@ -3159,8 +3155,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           case VIMOpenGLSetupStepMonitorDesktop:
               [session dismissSetupNotice];
               if (decision.leftSystemUnchanged)
-                  [session.log writeData:[@"\n[Light Click] Automatic OpenGL setup left the current system unchanged; "
-                                          @"continuing desktop monitoring.\n" dataUsingEncoding:NSUTF8StringEncoding]];
+                  [session logNote:@"Automatic OpenGL setup left the current system unchanged; "
+                                   @"continuing desktop monitoring."];
               session.state.openGLDesktopMonitoring = YES;
               [session refreshGuestStatus];
               break;
@@ -3349,11 +3345,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           return;
       session.state.guestPending = NO;
       if (failure)
-          [session.log
-              writeData:[[NSString
-                            stringWithFormat:
-                                @"\n[Light Click] Mavericks File Sharing compatibility could not be applied: %@\n",
-                                failure] dataUsingEncoding:NSUTF8StringEncoding]];
+          [session logNote:@"Mavericks File Sharing compatibility could not be applied: %@", failure];
       [session refreshGuestStatus];
     };
     [agent stageFiles:@{@"mavericks-smb-compat" : tool, @"codesign_allocate" : allocator}
@@ -3450,13 +3442,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                  nativeIdleGuard:[report[@"IdleSleepGuardRegistered"] isEqual:@YES]];
             [self updateClipboardForBoot:boot];
         }
-        [self.guestTimer invalidate];
-        __weak VIMSession *weakSelf = self;
-        self.guestTimer = [NSTimer scheduledTimerWithTimeInterval:preMetal.preMetalRefreshInterval
-                                                          repeats:NO
-                                                            block:^(NSTimer *timer) {
-                                                              [weakSelf refreshGuestStatus];
-                                                            }];
+        [self scheduleGuestStatusRefreshAfter:preMetal.preMetalRefreshInterval];
         return; // Desktop evidence never authorizes modern Metal patching.
     }
     if (self.completionGuestReport && (error || ![VIMMachineModel report:report
@@ -3500,16 +3486,14 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.guestStatus.toolTip = message;
     if (![message isEqual:self.lastGuestMessage]) {
         self.lastGuestMessage = message;
-        [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Guest status: %@\n", message]
-                                dataUsingEncoding:NSUTF8StringEncoding]];
+        [self logNote:@"Guest status: %@", message];
     }
     [self.guestTimer invalidate];
     if (policy().mayCheckNativeDisplay) {
         NSError *nativeError = nil;
         if ([self.machine prepareNativeBigSurDisplayWithGuestReport:report error:&nativeError]) {
-            [self.log writeData:[@"\n[Light Click] Installed Big Sur has native PVG; switching Setup Assistant to "
-                                 @"accelerated graphics. Guest patches and installer cleanup remain pending.\n"
-                                    dataUsingEncoding:NSUTF8StringEncoding]];
+            [self logNote:@"Installed Big Sur has native PVG; switching Setup Assistant to "
+                          @"accelerated graphics. Guest patches and installer cleanup remain pending."];
             [self handoffToGraphics];
             self.guestStatus.stringValue = @"Starting native Big Sur graphics for Setup Assistant…";
             return;
@@ -3525,50 +3509,47 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         self.state.guestPending = YES;
         NSString *runtime = self.runtimeDirectory;
         __weak VIMSession *weakSelf = self;
-        [self.modernSetup
-            advanceReport:report
-               completion:^(NSDictionary *outcome, NSError *failure) {
-                 VIMSession *session = weakSelf;
-                 if (!session.task.running || ![session.runtimeDirectory isEqual:runtime])
-                     return;
-                 session.state.guestPending = NO;
-                 if (failure) {
-                     [session dismissSetupNotice];
-                     NSString *message = failure.localizedDescription;
-                     session.guestStatus.stringValue = message;
-                     if ([session.guestSessionState presentsSetupFailure:message]) {
-                         session.state.presentedSetupFailures =
-                             [session.state.presentedSetupFailures setByAddingObject:message];
-                         VIMPresentError(failure, session.window);
-                     }
-                     // Each step is journaled and rechecks its target, and a dispatched or failed install isn't redone.
-                     [session scheduleGuestStatusRetry];
-                     return;
-                 }
-                 if ([outcome[@"Handled"] isEqual:@YES]) {
-                     session.guestStatus.stringValue = outcome[@"Message"] ?: @"Installing macOS…";
-                     if ([outcome[@"Restart"] isEqual:@YES]) {
-                         [session handoffToGraphics];
-                         // First-boot shutdown may wait for native cache/service
-                         // work. Keep the one acknowledged handoff pending until
-                         // actual exit; do not expire it and dispatch another one.
-                         [session.handoffTimer invalidate];
-                         session.handoffTimer = nil;
-                         session.guestStatus.stringValue = outcome[@"Message"] ?: @"Restarting to sign in…";
-                         return;
-                     }
-                     session.guestTimer = [NSTimer scheduledTimerWithTimeInterval:15
-                                                                          repeats:NO
-                                                                            block:^(NSTimer *timer) {
-                                                                              [weakSelf refreshGuestStatus];
-                                                                            }];
-                 } else {
-                     [session dismissSetupNotice];
-                     session.state.modernSetupReportActive = YES;
-                     [session finishGuestStatus:report error:nil];
-                     session.state.modernSetupReportActive = NO;
-                 }
-               }];
+        [self.modernSetup advanceReport:report
+                             completion:^(NSDictionary *outcome, NSError *failure) {
+                               VIMSession *session = weakSelf;
+                               if (!session.task.running || ![session.runtimeDirectory isEqual:runtime])
+                                   return;
+                               session.state.guestPending = NO;
+                               if (failure) {
+                                   [session dismissSetupNotice];
+                                   NSString *message = failure.localizedDescription;
+                                   session.guestStatus.stringValue = message;
+                                   if ([session.guestSessionState presentsSetupFailure:message]) {
+                                       session.state.presentedSetupFailures =
+                                           [session.state.presentedSetupFailures setByAddingObject:message];
+                                       VIMPresentError(failure, session.window);
+                                   }
+                                   // Each step is journaled and rechecks its target, and a dispatched or failed install
+                                   // isn't redone.
+                                   [session scheduleGuestStatusRetry];
+                                   return;
+                               }
+                               if ([outcome[@"Handled"] isEqual:@YES]) {
+                                   session.guestStatus.stringValue = outcome[@"Message"] ?: @"Installing macOS…";
+                                   if ([outcome[@"Restart"] isEqual:@YES]) {
+                                       [session handoffToGraphics];
+                                       // First-boot shutdown may wait for native cache/service
+                                       // work. Keep the one acknowledged handoff pending until
+                                       // actual exit; do not expire it and dispatch another one.
+                                       [session.handoffTimer invalidate];
+                                       session.handoffTimer = nil;
+                                       session.guestStatus.stringValue =
+                                           outcome[@"Message"] ?: @"Restarting to sign in…";
+                                       return;
+                                   }
+                                   [session scheduleGuestStatusRefreshAfter:15];
+                               } else {
+                                   [session dismissSetupNotice];
+                                   session.state.modernSetupReportActive = YES;
+                                   [session finishGuestStatus:report error:nil];
+                                   session.state.modernSetupReportActive = NO;
+                               }
+                             }];
         return;
     }
     NSString *boot = [report[@"BootSessionUUID"] isKindOfClass:NSString.class] ? report[@"BootSessionUUID"] : nil;
@@ -3601,11 +3582,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                         return;
                     session.state.bootPolicyPending = NO;
                     NSString *message = ready ? @"Guest privacy compatibility verified." : failure.localizedDescription;
-                    [session.log
-                        writeData:[[NSString
-                                      stringWithFormat:@"\n[Light Click] Boot policy: %@\n",
-                                                       message ?: @"Verification did not finish; legacy boot retained."]
-                                      dataUsingEncoding:NSUTF8StringEncoding]];
+                    [session
+                        logNote:@"Boot policy: %@", message ?: @"Verification did not finish; legacy boot retained."];
                     NSDictionary *saved = [NSDictionary
                         dictionaryWithContentsOfURL:[session.machine.URL
                                                         URLByAppendingPathComponent:@"State/BootPolicy.plist"]];
@@ -3641,8 +3619,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             self.preparationRequested = YES;
             self.installationRequested = YES;
             self.automaticInstallation = YES;
-            [self.log writeData:[@"\n[Light Click] macOS setup completed; beginning initial graphics installation.\n"
-                                    dataUsingEncoding:NSUTF8StringEncoding]];
+            [self logNote:@"macOS setup completed; beginning initial graphics installation."];
         } else if (claimError)
             self.guestStatus.stringValue = claimError.localizedDescription;
     }
@@ -3688,13 +3665,11 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         if ([self.machine claimAutomaticUpdateRepairWithGuestReport:report error:&claimError]) {
             self.state.repairRequested = YES;
             self.state.verifiedUpdateRepair = YES;
-            [self.log writeData:[@"\n[Light Click] Guest macOS build changed; beginning graphics repair from the "
-                                 @"updated system files.\n" dataUsingEncoding:NSUTF8StringEncoding]];
+            [self logNote:@"Guest macOS build changed; beginning graphics repair from the "
+                          @"updated system files."];
         } else if (claimError) {
             self.guestStatus.stringValue = claimError.localizedDescription;
-            [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Automatic update repair: %@\n",
-                                                            claimError.localizedDescription]
-                                    dataUsingEncoding:NSUTF8StringEncoding]];
+            [self logNote:@"Automatic update repair: %@", claimError.localizedDescription];
         }
     }
     if (policy().mayBeginRepair) {
@@ -3773,9 +3748,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                               ?: [VIMMachineModel reconciliationMessageForResult:result
                                                                                         verified:verified];
                       session.guestStatus.stringValue = message;
-                      [session.log
-                          writeData:[[NSString stringWithFormat:@"\n[Light Click] Reconciliation: %@\n", message]
-                                        dataUsingEncoding:NSUTF8StringEncoding]];
+                      [session logNote:@"Reconciliation: %@", message];
                       // This boot checks no more, so the run could only wait forever.
                       if (!verified && session.state.reconciliationAttempts >= 3)
                           VIMFailCreateGuest(message);
@@ -3787,11 +3760,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                           [session updateClipboardForBoot:boot];
                           [session restoreDisplaySelectionForBoot:boot];
                       }
-                      session.guestTimer = [NSTimer scheduledTimerWithTimeInterval:60
-                                                                           repeats:NO
-                                                                             block:^(NSTimer *timer) {
-                                                                               [weakSession refreshGuestStatus];
-                                                                             }];
+                      [session scheduleGuestStatusRefreshAfter:60];
                     }];
         return;
     }
@@ -3880,9 +3849,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                                    @"check Session Details in the Light Click app."
                                       completion:nil];
                               }
-                              [current.log
-                                  writeData:[[NSString stringWithFormat:@"\n[Light Click] Installation: %@\n", result]
-                                                dataUsingEncoding:NSUTF8StringEncoding]];
+                              [current logNote:@"Installation: %@", result];
                               if (installError)
                                   VIMFailCreateGuest(result);
                               current.state.reconciledBoot = nil;
@@ -3897,11 +3864,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                   [current offerGraphicsRestart];
                                   return;
                               }
-                              current.guestTimer = [NSTimer scheduledTimerWithTimeInterval:60
-                                                                                   repeats:NO
-                                                                                     block:^(NSTimer *timer) {
-                                                                                       [weakSession refreshGuestStatus];
-                                                                                     }];
+                              [current scheduleGuestStatusRefreshAfter:60];
                               // No unconditional reboot: uncertain outcomes and
                               // rollback must never be mistaken for success.
                             }];
@@ -3930,30 +3893,20 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                            fraction:1
                                             message:@"Support files are prepared. No system files were installed."
                                          completion:nil];
-              [session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Preparation: %@\n", message]
-                                         dataUsingEncoding:NSUTF8StringEncoding]];
+              [session logNote:@"Preparation: %@", message];
               if (failure)
                   VIMFailCreateGuest(message);
               // Explicit request runs once. No automatic retry of uncertain writes.
-              session.guestTimer = [NSTimer scheduledTimerWithTimeInterval:60
-                                                                   repeats:NO
-                                                                     block:^(NSTimer *timer) {
-                                                                       [weakSession refreshGuestStatus];
-                                                                     }];
+              [session scheduleGuestStatusRefreshAfter:60];
             }];
         return;
     }
-    __weak VIMSession *weakSelf = self;
     if (policy().needsDesktopServices) {
         [self applyLifecycleEvent:VIMSessionEventDesktopReached];
         [self updateClipboardForBoot:boot];
         [self restoreDisplaySelectionForBoot:boot];
     }
-    self.guestTimer = [NSTimer scheduledTimerWithTimeInterval:policy().refreshInterval
-                                                      repeats:NO
-                                                        block:^(NSTimer *timer) {
-                                                          [weakSelf refreshGuestStatus];
-                                                        }];
+    [self scheduleGuestStatusRefreshAfter:policy().refreshInterval];
 }
 - (void)restoreDisplaySelectionForBoot:(NSString *)boot {
     // Updating the PVG panel's pixel size does not select macOS's logical
@@ -3963,23 +3916,19 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     NSString *runtime = self.runtimeDirectory;
     self.state.displaySelectedBoot = boot;
-    [self
-        applyDisplayMode:self.displayMode
-              completion:^(NSDictionary *observed, NSError *failure) {
-                if (!self.task.running || ![runtime isEqual:self.runtimeDirectory])
-                    return;
-                if (failure) {
-                    self.state.displaySelectedBoot = nil;
-                    // Retry only through the ordinary cold readiness pass. A slow TCG
-                    // hot-plug must not become an immediate status/selection loop.
-                    self.state.displaySelectionRetryAfter = [NSDate dateWithTimeIntervalSinceNow:60];
-                    [self.log writeData:[[NSString
-                                            stringWithFormat:@"\n[Light Click] Initial display selection pending: %@\n",
-                                                             failure.localizedDescription]
-                                            dataUsingEncoding:NSUTF8StringEncoding]];
-                } else
-                    self.state.displaySelectionRetryAfter = nil;
-              }];
+    [self applyDisplayMode:self.displayMode
+                completion:^(NSDictionary *observed, NSError *failure) {
+                  if (!self.task.running || ![runtime isEqual:self.runtimeDirectory])
+                      return;
+                  if (failure) {
+                      self.state.displaySelectedBoot = nil;
+                      // Retry only through the ordinary cold readiness pass. A slow TCG
+                      // hot-plug must not become an immediate status/selection loop.
+                      self.state.displaySelectionRetryAfter = [NSDate dateWithTimeIntervalSinceNow:60];
+                      [self logNote:@"Initial display selection pending: %@", failure.localizedDescription];
+                  } else
+                      self.state.displaySelectionRetryAfter = nil;
+                }];
 }
 - (void)refreshRunState {
     if (self.statusPending || !self.task.running)
@@ -4020,9 +3969,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                      session.stateLabel.stringValue = [session.status.stringValue
                          stringByAppendingString:@". Open Controls → Session Details for more information."];
                  }
-                 NSData *line = [[NSString stringWithFormat:@"\n[Light Click] QEMU state: %@\n", state]
-                     dataUsingEncoding:NSUTF8StringEncoding];
-                 [session.log writeData:line];
+                 [session logNote:@"QEMU state: %@", state];
                  if (failed)
                      VIMFailCreateGuest(session.status.stringValue);
                }];
@@ -4073,12 +4020,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                       else {
                                           current.guestStatus.stringValue =
                                               @"Graphics support installed. Restart when you’re ready to finish setup.";
-                                          current.guestTimer =
-                                              [NSTimer scheduledTimerWithTimeInterval:60
-                                                                              repeats:NO
-                                                                                block:^(NSTimer *timer) {
-                                                                                  [weakSelf refreshGuestStatus];
-                                                                                }];
+                                          [current scheduleGuestStatusRefreshAfter:60];
                                       }
                                     }];
                               }];
@@ -5026,8 +4968,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           NSString *message = [NSString stringWithFormat:@"Guest %@ %@ did not finish.",
                                                          powerOnly ? @"display-power observer" : @"clipboard", step];
           if (![session.clipboardFailure isEqual:message])
-              [session.log writeData:[[NSString stringWithFormat:@"\n[Light Click] %@\n", message]
-                                         dataUsingEncoding:NSUTF8StringEncoding]];
+              [session logNote:@"%@", message];
           [bridge stop];
           if (powerOnly)
               session.powerBridge = nil;
@@ -5776,9 +5717,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                 @"The shutdown request couldn’t be confirmed. This Mac may already be shutting down. If it stays on, "
                 @"choose Shut Down inside the virtual Mac, or use Force Stop.";
             self.guestStatus.toolTip = connectionError.localizedDescription;
-            [self.log writeData:[[NSString stringWithFormat:@"\n[Light Click] Shutdown connection: %@\n",
-                                                            connectionError.localizedDescription]
-                                    dataUsingEncoding:NSUTF8StringEncoding]];
+            [self logNote:@"Shutdown connection: %@", connectionError.localizedDescription];
             return;
         }
         [self.guestAgent requestShutdownWithCompletion:^(NSError *error) {
