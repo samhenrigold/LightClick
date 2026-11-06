@@ -1912,7 +1912,6 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 covered = front->layer == 0 && front->title[0] && CGRectIntersectsRect(front->bounds, item->bounds) &&
                           tree_group(front->id) != tree_group(id);
             }
-            // A shared desktop has the guest's shadows off, so there's only the window itself to show, and the host's shadow.
             // Room for the guest's shadow if its surface has one, or else there's the window's own shape for the host's.
             int margin = own_surface && tree_surface_has_shadow(id) ? item->margin : crop || tree_shared ? 0 : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
@@ -1969,8 +1968,10 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             w->covered = covered;
             if (kind && !stale) {
                 if (fresh || moved || sized || order != w->order || alpha != w->alpha || strcmp(title, w->title)) {
-                    s->pixel_width = w->pixel_width = (uint32_t)((bounds.size.width + 2 * margin) * display_scale() + 0.5);
-                    s->pixel_height = w->pixel_height = (uint32_t)((bounds.size.height + 2 * margin) * display_scale() + 0.5);
+                    s->pixel_width = w->pixel_width =
+                        (uint32_t)((bounds.size.width + 2 * margin) * display_scale() + 0.5);
+                    s->pixel_height = w->pixel_height =
+                        (uint32_t)((bounds.size.height + 2 * margin) * display_scale() + 0.5);
                     s->group = tree_group(id);
                     if (send_window(s, title, owner, layer))
                         goto done;
@@ -2304,8 +2305,8 @@ static int flag(int argc, char **argv, const char *name) {
     return 0;
 }
 
-// A whole desktop as host apps. Says which apps have windows, front first, and runs a `tree` for each one the host asks for. It
-// and they end when the host's connection does. Lines, each a tab-separated list:
+// A whole desktop as host apps. Says which apps have windows, front first, and runs a `tree` for each one the host asks
+// for. It and they end when the host's connection does. Lines, each a tab-separated list:
 //   to the host:  apps NAME BUNDLE NAME BUNDLE ...  and  described BUNDLE JSON ICON-BASE64
 //   from the host: describe BUNDLE  and  run NAME PORT
 static int leap_send(int fd, const char *text) {
@@ -2411,29 +2412,33 @@ static void leap_list(char *out, size_t size) {
         strcpy(out + used, "\n");
 }
 
-// While a desktop's showing as host apps, the guest's Dock mustn't paint over a window it's cropped from, and its shadows mustn't
-// show beside ones the host draws. The Dock's way of hiding is a saved preference, so what puts it back is written first, as a
-// login item that deletes itself, for a guest that stops with no chance to undo it. It stays alive through anything that ends this
-// process: a child that waits for a pipe to close.
+// While a desktop's showing as host apps, the guest's Dock mustn't paint over a window it's cropped from, and its
+// shadows mustn't show beside ones the host draws. The Dock's way of hiding is a saved preference, so what puts it back
+// is written first, as a login item that deletes itself, for a guest that stops with no chance to undo it. It stays
+// alive through anything that ends this process: a child that waits for a pipe to close.
 #define LEAP_RESTORE_PLIST "Library/LaunchAgents/com.mac.virtualintelmac.seamless-restore.plist"
 static const char leap_hide_dock[] =
     "cd; plist=$HOME/" LEAP_RESTORE_PLIST "\n"
     "if ! [ -f $plist ]; then\n"
     "  mkdir -p Library/LaunchAgents\n"
-    "  hide=$(defaults read com.apple.dock autohide 2>/dev/null); delay=$(defaults read com.apple.dock autohide-delay 2>/dev/null)\n"
+    "  hide=$(defaults read com.apple.dock autohide 2>/dev/null); delay=$(defaults read com.apple.dock autohide-delay "
+    "2>/dev/null)\n"
     "  back='defaults delete com.apple.dock autohide'\n"
     "  [ -n \"$hide\" ] && back=\"defaults write com.apple.dock autohide -bool $hide\"\n"
     "  back=\"$back; defaults delete com.apple.dock autohide-delay\"\n"
     "  [ -n \"$delay\" ] && back=\"$back; defaults write com.apple.dock autohide-delay -float $delay\"\n"
-    "  back=\"$back; /usr/bin/killall Dock; rm -f $plist; launchctl remove com.mac.virtualintelmac.seamless-restore; true\"\n"
+    "  back=\"$back; /usr/bin/killall Dock; rm -f $plist; launchctl remove com.mac.virtualintelmac.seamless-restore; "
+    "true\"\n"
     "  domain=${plist%.plist}\n"
     "  defaults write $domain Label -string com.mac.virtualintelmac.seamless-restore\n"
     "  defaults write $domain RunAtLoad -bool true\n"
     "  defaults write $domain ProgramArguments -array /bin/sh -c \"$back\"\n"
     "fi\n"
-    "defaults write com.apple.dock autohide -bool true; defaults write com.apple.dock autohide-delay -float 1000; /usr/bin/killall Dock\n";
+    "defaults write com.apple.dock autohide -bool true; defaults write com.apple.dock autohide-delay -float 1000; "
+    "/usr/bin/killall Dock\n";
 static const char leap_show_dock[] =
-    "cd; plist=$HOME/" LEAP_RESTORE_PLIST "; [ -f $plist ] && /bin/sh -c \"$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:2' $plist)\"\n";
+    "cd; plist=$HOME/" LEAP_RESTORE_PLIST
+    "; [ -f $plist ] && /bin/sh -c \"$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:2' $plist)\"\n";
 
 static void leap_set_guest_shadows(int off) {
     typedef int (*SetOptions)(int);
@@ -2671,9 +2676,14 @@ int main(int argc, char **argv) {
         }
         if (option(argc, argv, "--mode", NULL))
             t->gpu_mode = (uint32_t)atoi(option(argc, argv, "--mode", "0"));
-        printf("gpu mode %u scale %g generate %llu composites %llu whole %llu seconds %.3f\n", t->gpu_mode, t->gpu_scale,
-               t->gpu_generate_calls, t->gpu_composites, t->gpu_whole_composites,
+        printf("gpu mode %u scale %g generate %llu composites %llu whole %llu seconds %.3f\n", t->gpu_mode,
+               t->gpu_scale, t->gpu_generate_calls, t->gpu_composites, t->gpu_whole_composites,
                (double)t->gpu_ticks * t->ticks_numer / t->ticks_denom / 1e9);
+        for (uint32_t i = 0; flag(argc, argv, "--rows") && i < t->gpu_backdrop_count; i++) {
+            const volatile struct SWSBackdrop *b = &t->gpu_backdrops[i];
+            printf("backdrop id %u order %u material %u active %u blend %u rect %g,%g %gx%g saturation %g\n", b->id,
+                   b->order, b->material, b->active, b->blend, b->x, b->y, b->width, b->height, b->saturation);
+        }
         for (uint32_t i = 0; flag(argc, argv, "--rows") && i < t->gpu_row_count; i++) {
             const struct SWSGPURow *r = &t->gpu_rows[i];
             printf("row %u id %u frames %u content %g,%g %gx%g window %g,%g %gx%g\n", i, r->id, r->frames, r->x, r->y,

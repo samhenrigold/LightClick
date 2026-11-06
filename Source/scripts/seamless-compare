@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 
 source = Path(__file__).resolve().parents[1]
 PAGE = (source/'probes/seamless-compare-page.html').read_text()
@@ -31,7 +32,7 @@ clicks = results/f'seamless-compare-{tag}-clicks.txt'
 
 overlays = '--overlays' in sys.argv
 windowed = None if overlays else subprocess.run([str(source/'scripts/guest-bench'), str(original_app), str(original_machine), f'seamless-compare-{tag}', '--driver',
-                           str(source/'probes/seamless-driver.py'), '--driver-arg', 'windowed', '--env', 'LC_HVDBT=1'],
+                           str(source/'probes/seamless-driver.py'), '--fresh-identifier', '--driver-arg', 'windowed', '--env', 'LC_HVDBT=1'],
                           capture_output=True, text=True)
 windowed_rate = windowed_presented = 0
 if windowed:
@@ -50,6 +51,8 @@ library.mkdir(parents=True)
 machine = library/f'Clone of {original_machine.name}'
 subprocess.run(['cp', '-c', '-R', str(original_machine), str(machine)], check=True)
 (machine/'State/PendingConfiguration.plist').unlink(missing_ok=True)
+# The socket, its log and the proxy's bundle identifier all come from this, so a clone keeping it would share them with a live session.
+subprocess.run(['plutil', '-replace', 'Identifier', '-string', str(uuid.uuid4()).upper(), str(machine/'Machine.plist')], check=True)
 for key in ('SSHEnabled', 'FileSharingEnabled'):
     subprocess.run(['plutil', '-replace', key, '-bool', 'NO', str(machine/'Machine.plist')], check=True)
 app = work/original_app.name
@@ -57,6 +60,8 @@ subprocess.run(['cp', '-c', '-R', str(original_app), str(app)], check=True)
 env = dict(os.environ, CFFIXED_USER_HOME=str(home), LC_HVDBT='1')
 made = subprocess.run([str(app/'Contents/MacOS/Light Click'), '--open-vm', str(machine), '--seamless-make-proxy', 'Safari'], env=env, capture_output=True, text=True, timeout=1200)
 bundle = next((line for line in made.stdout.splitlines() if line.endswith('.app')), '')
+if bundle and not Path(bundle).is_relative_to(work):
+    sys.exit(f'The proxy landed outside this clone\'s folder, so nothing here will touch it: {bundle}')
 if not bundle:
     sys.exit('Couldn\'t make the proxy: '+made.stderr[-800:])
 socket_path = plistlib.loads((Path(bundle)/'Contents/Info.plist').read_bytes())['LCSessionSocket']
