@@ -285,4 +285,30 @@ public final class MachineModelBridge: NSObject {
         GuestReport(foundationObject: report)?
             .admitsPreparation(guest: guestNamed(name), verifiedUpdateRepair: verifiedUpdateRepair) ?? false
     }
+
+    @objc(report:bootPolicyRepairNeedsRestart:)
+    public class func bootPolicyRepairNeedsRestart(report: Any?, policy: Any?) -> Bool {
+        GuestReport(foundationObject: report)?.bootPolicyRepairNeedsRestart(policy: propertyList(policy)) ?? false
+    }
+
+    @objc(report:reconciliationVerifiesAfterRebootWithJournal:)
+    public class func reconciliationVerifiesAfterReboot(report: Any?, journal: Any?) -> Bool {
+        (GuestReport(foundationObject: report) ?? GuestReport(values: [:]))
+            .reconciliationVerifiesAfterReboot(journal: propertyList(journal))
+    }
+
+    @objc(report:isVerifiedByReconciliation:)
+    public class func isVerifiedByReconciliation(report: Any?, result: Any?) -> Bool {
+        GuestReport(foundationObject: report)?.isVerifiedByReconciliation(result: propertyList(result)) ?? false
+    }
+
+    @objc(reconciliationMessageForResult:verified:)
+    public class func reconciliationMessage(result: Any?, verified: Bool) -> String {
+        GuestReport.reconciliationMessage(result: propertyList(result), verified: verified)
+    }
+
+    @objc(consoleUsernameFromStatOutput:expectedUID:)
+    public class func consoleUsername(statOutput: String?, expectedUID: NSNumber) -> String? {
+        GuestReport.consoleUsername(statOutput: statOutput ?? "", expectedUID: Int(expectedUID.uint32Value))
+    }
 }

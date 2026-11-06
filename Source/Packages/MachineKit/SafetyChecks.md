@@ -73,6 +73,9 @@ Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpen
 - Session: completion report staleness, live installed system, boot policy admission, repair restart of only the
   repaired boot, preparation and reconciliation admission, reconciliation of this boot, console user at least 501 and
   the expected UID.
+- Status pass (`GuestStatusPolicy`, `GuestSessionState`): each step `finishGuestStatus` and `refreshGuestStatus` may take,
+  once-per-boot steps, at most three reconciliations a boot, and when the next pass runs. A failed report passes
+  nothing. Doing the work, and asking the disk, stays in `VIMSession.m`.
 
 ## Left in Objective-C
 
@@ -85,8 +88,6 @@ and `saveAutomaticSetup:`'s validation with `VIMAutomaticSetup`.
 
 Ported and tested, but the app still uses its own copy:
 
-- `VIMSession.m`: only completion staleness, live installed system and preparation admission call MachineKit, to keep
-  that file's diff small. Boot policy, reconciliation and console user checks are unchanged there.
 - `VIMHostAudio.h` display mode, `VIMNetworkDefaults.m` MAC checks and forwarding defaults, and `VIMLibraryLocation`:
   they have other callers and weren't needed to shrink `VIMMachine.m`.
 - `machine.configuration` remains an `NSDictionary` for its Objective-C callers.
@@ -95,6 +96,7 @@ Ported and tested, but the app still uses its own copy:
 
 - A value of the wrong type nested inside a report or journal, such as a string for `GuestResult`, now refuses. It was
   an unrecognized-selector exception.
+- The older `Network` report key lists addresses in order of interface name. It was `NSDictionary`'s arbitrary order.
 - `saveSettings:` checks for an unsupported key under the configuration lock, so a held lock reports first.
 - `Codable` reads `<real>4</real>` as an integer. `init(propertyList:)` and `propertyList()` are exact and are what
   files should use.
