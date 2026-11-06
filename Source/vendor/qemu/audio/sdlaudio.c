@@ -462,9 +462,20 @@ static int sdl_init_in(HWVoiceIn *hw, audsettings *as)
     req.callback = sdl_callback_in;
     req.userdata = sdl;
 
+    /*
+     * Light Click: QEMU retries a failed voice, and after Core Audio refuses a
+     * queue, reopening it can wait forever, which stops the VM from booting.
+     * Run without a microphone until the next launch instead.
+     */
+    static bool input_failed;
+    if (input_failed) {
+        return -1;
+    }
+
     sdl->dev = dev;
     sdl->devid = sdl_open(&req, &obt, 1);
     if (!sdl->devid) {
+        input_failed = true;
         return -1;
     }
 
