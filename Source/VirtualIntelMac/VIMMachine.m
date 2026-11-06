@@ -12,16 +12,6 @@
 #include <sys/file.h>
 #include <errno.h>
 
-static BOOL EFIDisk(NSURL *URL) {
-    int fd = open(URL.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
-    if (fd < 0)
-        return NO;
-    char signature[8];
-    ssize_t count = pread(fd, signature, sizeof(signature), 512);
-    close(fd);
-    return count == sizeof(signature) && memcmp(signature, "EFI PART", 8) == 0;
-}
-
 static BOOL Fail(NSError **error, NSString *message) {
     if (error)
         *error = [NSError errorWithDomain:@"VirtualIntelMac.Machine"
@@ -41,8 +31,11 @@ static BOOL OpenGLResearchEnabled(void) {
     NSUInteger index = [arguments indexOfObject:@"--opengl-guest-research"];
     return index != NSNotFound && index + 1 < arguments.count && [arguments[index + 1] isEqual:@"1"];
 }
-static BOOL Supported(NSString *guest) { return VIMGuestIsSupported(guest); }
-static BOOL NameValid(id name) { return [VIMMachineModel nameIsValid:name]; }
+static NSDictionary * (^const NetworkDefaults)(NSDictionary *, NSURL *,
+                                               NSURL *) = ^NSDictionary *(NSDictionary *configuration, NSURL *library,
+                                                                          NSURL *machine) {
+  return VIMNetworkConfigurationWithDefaults(configuration, library, machine);
+};
 static int ConfigurationLock(NSURL *package, NSError **error) {
     NSURL *lock = [package URLByAppendingPathComponent:@"State/Configuration.lock"];
     int fd = open(lock.fileSystemRepresentation, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -93,120 +86,6 @@ static void RelocatedPackage(NSURL *old, NSURL *new, NSString *identifier) {
                         object:nil
                       userInfo:@{@"OldURL" : old, @"URL" : new, @"Identifier" : identifier}];
     });
-}
-static BOOL Run(NSURL *executable, NSArray *arguments, NSURL *log, NSError **error) {
-    NSFileManager *fm = NSFileManager.defaultManager;
-    if (![fm createFileAtPath:log.path contents:nil attributes:nil])
-        return Fail(error, @"Cannot create import log.");
-    NSFileHandle *output = [NSFileHandle fileHandleForWritingToURL:log error:error];
-    if (!output)
-        return NO;
-    NSTask *task = [NSTask new];
-    task.executableURL = executable;
-    task.arguments = arguments;
-    task.standardOutput = output;
-    task.standardError = output;
-    BOOL launched = [task launchAndReturnError:error];
-    if (launched)
-        [task waitUntilExit];
-    [output closeFile];
-    if (!launched)
-        return NO;
-    return task.terminationStatus == 0 ||
-           Fail(
-               error,
-               [NSString stringWithFormat:
-                             @"The disk tool could not complete the operation. See %@. Source disks were not modified.",
-                             log.path]);
-}
-// Only called inside a freshly created, unpublished package. Never format an
-// existing guest disk. Sparse staging keeps large logical disks cheap on exFAT.
-static BOOL CreateFormattedDisk(NSURL *stage, NSURL *qemuImage, NSUInteger diskGiB, BOOL recordTarget,
-                                NSError **error) {
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSURL *seed = [stage URLByAppendingPathComponent:@"Disks/Formatting.sparsebundle"];
-    NSURL *disk = [stage URLByAppendingPathComponent:@"Disks/System.qcow2"];
-    NSURL *hdiutil = [NSURL fileURLWithPath:@"/usr/bin/hdiutil"];
-    NSURL * (^log)(NSString *) = ^NSURL *(NSString *name) {
-      return [stage URLByAppendingPathComponent:[@"Logs/" stringByAppendingString:name]];
-    };
-    if (!Run(hdiutil,
-             @[
-                 @"create", @"-size", [NSString stringWithFormat:@"%lug", diskGiB], @"-type", @"SPARSEBUNDLE",
-                 @"-layout", @"GPTSPUD", @"-fs", @"Journaled HFS+", @"-volname", @"Macintosh HD", seed.path
-             ],
-             log(@"FormatDisk.log"), error))
-        return NO;
-    NSURL *attachLog = log(@"AttachFormattingDisk.log");
-    if (!Run(hdiutil, @[ @"attach", @"-nomount", @"-readonly", @"-plist", seed.path ], attachLog, error))
-        return NO;
-    // hdiutil on newer hosts appends a deprecation warning to the merged log.
-    NSString *output = [NSString stringWithContentsOfURL:attachLog encoding:NSUTF8StringEncoding error:error];
-    NSRange start = [output rangeOfString:@"<?xml"], end = [output rangeOfString:@"</plist>"];
-    NSDictionary *attached = nil;
-    if (output && start.location != NSNotFound && end.location != NSNotFound && end.location >= start.location) {
-        NSData *plist = [[output substringWithRange:NSMakeRange(start.location, NSMaxRange(end) - start.location)]
-            dataUsingEncoding:NSUTF8StringEncoding];
-        attached = [NSPropertyListSerialization propertyListWithData:plist options:0 format:nil error:error];
-    }
-    NSString *device = nil;
-    for (NSDictionary *entity in attached[@"system-entities"])
-        if ([entity[@"content-hint"] isEqual:@"GUID_partition_scheme"])
-            device = entity[@"dev-entry"];
-    NSRegularExpression *pattern = [NSRegularExpression regularExpressionWithPattern:@"^/dev/disk[0-9]+$"
-                                                                             options:0
-                                                                               error:nil];
-    if (![device isKindOfClass:NSString.class] || ![pattern numberOfMatchesInString:device
-                                                                            options:0
-                                                                              range:NSMakeRange(0, device.length)]) {
-        // Detach by our exact image path if the plist was not understood.
-        Run(hdiutil, @[ @"detach", seed.path ], log(@"DetachFormattingDisk.log"), nil);
-        return Fail(error, @"Cannot identify the newly formatted virtual disk. See AttachFormattingDisk.log.");
-    }
-    NSString *raw = [device stringByReplacingOccurrencesOfString:@"/dev/disk" withString:@"/dev/rdisk"];
-    if (recordTarget) {
-        NSString *slice = nil;
-        for (NSDictionary *entity in attached[@"system-entities"])
-            if ([entity[@"content-hint"] isEqual:@"Apple_HFS"]) {
-                if (slice) {
-                    slice = nil;
-                    break;
-                }
-                slice = entity[@"dev-entry"];
-            }
-        NSRegularExpression *validSlice = [NSRegularExpression regularExpressionWithPattern:@"^/dev/disk[0-9]+s[0-9]+$"
-                                                                                    options:0
-                                                                                      error:NULL];
-        BOOL found = [slice isKindOfClass:NSString.class] && [slice hasPrefix:[device stringByAppendingString:@"s"]] &&
-                     [validSlice numberOfMatchesInString:slice options:0 range:NSMakeRange(0, slice.length)] == 1;
-        NSURL *metadata = log(@"FormattedVolume.plist");
-        if (found)
-            found = Run([NSURL fileURLWithPath:@"/usr/sbin/diskutil"], @[ @"info", @"-plist", slice ], metadata, error);
-        NSDictionary *volume = found ? [NSDictionary dictionaryWithContentsOfURL:metadata] : nil;
-        NSString *UUID = volume[@"VolumeUUID"];
-        if (![UUID isKindOfClass:NSString.class] || ![[NSUUID alloc] initWithUUIDString:UUID] ||
-            !Save(
-                @{@"FormatVersion" : @1,
-                  @"VolumeUUID" : UUID,
-                  @"Filesystem" : @"HFS+"},
-                [stage URLByAppendingPathComponent:@"State/InstallationTarget.plist"], error)) {
-            Run(hdiutil, @[ @"detach", device ], log(@"DetachFormattingDisk.log"), nil);
-            return Fail(error, @"The new Macintosh HD could not be identified safely for automatic installation.");
-        }
-    }
-    BOOL converted =
-        Run(qemuImage, @[ @"convert", @"-f", @"raw", @"-O", @"qcow2", raw, disk.path ], log(@"CreateDisk.log"), error);
-    NSError *detachError = nil;
-    BOOL detached = Run(hdiutil, @[ @"detach", device ], log(@"DetachFormattingDisk.log"), &detachError);
-    if (!converted)
-        return NO;
-    if (!detached) {
-        if (error)
-            *error = detachError;
-        return NO;
-    }
-    // Discard only our generated seed after conversion and successful detach.
-    return [fm removeItemAtURL:seed error:error];
 }
 @interface VIMMachine ()
 @property NSNumber *cachedDiskCapacity;
@@ -939,108 +818,17 @@ static BOOL RemovePreparedMedia(NSString *path, NSURL *owner) {
                  bootMedia:(NSURL *)bootMedia
                  qemuImage:(NSURL *)qemuImage
                      error:(NSError **)error {
-    if (!Supported(guest) || !NameValid(name)) {
-        Fail(error, @"Unsupported guest or invalid name.");
-        return nil;
-    }
-    NSFileManager *fm = NSFileManager.defaultManager;
-    library = [VIMLibraryLocation machinesURLForLibrary:library];
-    if (![fm createDirectoryAtURL:library withIntermediateDirectories:YES attributes:nil error:error])
-        return nil;
-    for (NSURL *input in @[ disk, firmware, nvram, bootMedia, qemuImage ]) {
-        NSNumber *regular = nil;
-        if (!input.isFileURL || ![input getResourceValue:&regular forKey:NSURLIsRegularFileKey error:error] ||
-            !regular.boolValue)
-            return nil;
-    }
-    NSString *identifier = NSUUID.UUID.UUIDString;
-    NSURL *stage = [library URLByAppendingPathComponent:[NSString stringWithFormat:@".%@.importing", identifier]];
-    NSURL *destination = [VIMMachineModel newPackageURLForName:name inLibrary:library];
-    name = destination.lastPathComponent.stringByDeletingPathExtension;
-    if (![fm createDirectoryAtURL:stage withIntermediateDirectories:NO attributes:nil error:error])
-        return nil;
-    // Import is a snapshot copy: qemu-img reads/locks the entire source chain.
-    // Never use -U (force-share), rebase originals, or copy a live writable disk.
-    NSURL *info = [stage URLByAppendingPathComponent:@"SourceDisk.json"];
-    if (!Run(qemuImage, @[ @"info", @"--output=json", disk.path ], info, error))
-        return nil;
-    NSData *infoData = [NSData dataWithContentsOfURL:info];
-    NSDictionary *metadata = infoData ? [NSJSONSerialization JSONObjectWithData:infoData options:0 error:error] : nil;
-    if (![metadata isKindOfClass:NSDictionary.class] || ![metadata[@"format"] isEqual:@"qcow2"] ||
-        ![metadata[@"virtual-size"] isKindOfClass:NSNumber.class]) {
-        Fail(error, @"Import requires a valid QCOW2 disk.");
-        return nil;
-    }
-    NSDictionary *space = [fm attributesOfFileSystemForPath:library.path error:error];
-    // Conservative worst-case admission; sparse output usually uses much less.
-    unsigned long long required = [metadata[@"virtual-size"] unsignedLongLongValue];
-    unsigned long long free = [space[NSFileSystemFreeSize] unsignedLongLongValue];
-    if (!required || free < required || free - required < (2ULL << 30)) {
-        Fail(error, @"The selected library needs more free space for a safe import.");
-        return nil;
-    }
-    for (NSString *directory in @[ @"Disks", @"Firmware", @"Logs", @"State" ])
-        if (![fm createDirectoryAtURL:[stage URLByAppendingPathComponent:directory]
-                withIntermediateDirectories:NO
-                                 attributes:nil
-                                      error:error])
-            return nil;
-    NSDictionary *journal = @{@"Phase" : @"importing", @"Source" : disk.path, @"Identifier" : identifier};
-    if (!Save(journal, [stage URLByAppendingPathComponent:@"State/Import.plist"], error))
-        return nil;
-    NSURL *target = [stage URLByAppendingPathComponent:@"Disks/System.qcow2"];
-    if (!Run(qemuImage, @[ @"convert", @"-p", @"-f", @"qcow2", @"-O", @"qcow2", disk.path, target.path ],
-             [stage URLByAppendingPathComponent:@"Logs/Import.log"], error))
-        return nil;
-    if (!Run(qemuImage, @[ @"info", @"--output=json", target.path ], [stage URLByAppendingPathComponent:@"Disk.json"],
-             error))
-        return nil;
-    NSDictionary *result = [NSJSONSerialization
-        JSONObjectWithData:[NSData dataWithContentsOfURL:[stage URLByAppendingPathComponent:@"Disk.json"]]
-                   options:0
-                     error:error];
-    if (![result isKindOfClass:NSDictionary.class] || result[@"backing-filename"] ||
-        ![result[@"virtual-size"] isEqual:metadata[@"virtual-size"]]) {
-        Fail(error, @"The imported disk did not pass the independence check.");
-        return nil;
-    }
-    NSArray *sources = @[ firmware, nvram, bootMedia ];
-    BOOL efiDisk = EFIDisk(bootMedia);
-    NSArray *paths =
-        @[ @"Firmware/CODE.fd", @"Firmware/NVRAM.fd", efiDisk ? @"Firmware/EFI.img" : @"Firmware/OpenCore.iso" ];
-    for (NSUInteger i = 1; i < 2; i++)
-        if (![fm copyItemAtURL:[sources[i] URLByResolvingSymlinksInPath]
-                         toURL:[stage URLByAppendingPathComponent:paths[i]]
-                         error:error])
-            return nil;
-    NSDictionary *c = VIMNetworkConfigurationWithDefaults(@{
-        @"FormatVersion" : @1,
-        @"Identifier" : identifier,
-        @"Guest" : guest,
-        @"Disk" : @"Disks/System.qcow2",
-        @"Firmware" : paths[0],
-        @"NVRAM" : paths[1],
-        @"BootMedia" : paths[2],
-        @"BootMediaKind" : efiDisk ? @"efi-disk" : @"legacy-opencore-iso",
-        @"CPUCount" : @4,
-        @"MemoryMiB" : @4096,
-        @"FirmwareSource" : @"application",
-        @"InstallState" : @"imported-prepared",
-        @"ImportedFrom" : disk.path
-    },
-                                                          library, destination);
-    if (!c) {
-        Fail(
-            error,
-            @"No local connection ports are available. Close unused virtual Macs or network services, then try again.");
-        return nil;
-    }
-    if (!Save(c, [stage URLByAppendingPathComponent:@"Machine.plist"], error) ||
-        !Save(@{@"Phase" : @"complete", @"Source" : disk.path},
-              [stage URLByAppendingPathComponent:@"State/Import.plist"], error) ||
-        ![fm moveItemAtURL:stage toURL:destination error:error])
-        return nil;
-    return [self loadURL:destination error:error];
+    NSURL *package = [VIMMachinePackages importDisk:disk
+                                              guest:guest
+                                               name:name
+                                            library:library
+                                           firmware:firmware
+                                              nvram:nvram
+                                          bootMedia:bootMedia
+                                          qemuImage:qemuImage
+                                    networkDefaults:NetworkDefaults
+                                              error:error];
+    return package ? [self loadURL:package error:error] : nil;
 }
 + (instancetype)createGuest:(NSString *)guest
                        name:(NSString *)name
@@ -1052,117 +840,18 @@ static BOOL RemovePreparedMedia(NSString *path, NSURL *owner) {
                   installer:(NSURL *)installer
                   qemuImage:(NSURL *)qemuImage
                       error:(NSError **)error {
-    if (!Supported(guest) || !NameValid(name) || diskGiB < 40 || diskGiB > 2048 || !library.isFileURL) {
-        Fail(error, @"Choose a supported macOS version, a name, and a disk size from 40 to 2048 GB.");
-        return nil;
-    }
-    NSFileManager *fm = NSFileManager.defaultManager;
-    library = [VIMLibraryLocation machinesURLForLibrary:library];
-    if (![fm createDirectoryAtURL:library withIntermediateDirectories:YES attributes:nil error:error])
-        return nil;
-    for (NSURL *input in @[ firmware, nvram, bootMedia, installer, qemuImage ]) {
-        NSNumber *regular = nil;
-        // Bundled per-OS firmware paths intentionally alias the shared image.
-        // Validate the actual file, just as copying and runtime lookup do;
-        // NSURLIsRegularFileKey on the alias itself reports a symbolic link.
-        if (!input.isFileURL ||
-            ![input.URLByResolvingSymlinksInPath getResourceValue:&regular forKey:NSURLIsRegularFileKey error:error] ||
-            !regular.boolValue) {
-            Fail(error, @"A required firmware, installer, or disk tool file is missing.");
-            return nil;
-        }
-    }
-    NSDictionary *attributes = [fm attributesOfItemAtPath:installer.path error:error];
-    NSDictionary *space = [fm attributesOfFileSystemForPath:library.path error:error];
-    if (!attributes || !space)
-        return nil;
-    uint64_t imageSize = [attributes[NSFileSize] unsignedLongLongValue];
-    uint64_t free = [space[NSFileSystemFreeSize] unsignedLongLongValue];
-    // Installer media is shared in place, not copied into every VM. The disk
-    // is sparse: require room for an installed system, not its full capacity.
-    uint64_t diskSize = MIN((uint64_t)diskGiB, 24ULL) << 30;
-    if (!imageSize || free < diskSize + (2ULL << 30)) {
-        Fail(error, @"The library needs enough free space for the requested disk.");
-        return nil;
-    }
-    NSString *identifier = NSUUID.UUID.UUIDString;
-    NSURL *stage = [library URLByAppendingPathComponent:[NSString stringWithFormat:@".%@.creating", identifier]];
-    NSURL *destination = [VIMMachineModel newPackageURLForName:name inLibrary:library];
-    name = destination.lastPathComponent.stringByDeletingPathExtension;
-    if (![fm createDirectoryAtURL:stage withIntermediateDirectories:NO attributes:nil error:error])
-        return nil;
-    for (NSString *folder in @[ @"Disks", @"Firmware", @"State", @"Logs", @"Installation" ])
-        if (![fm createDirectoryAtURL:[stage URLByAppendingPathComponent:folder]
-                withIntermediateDirectories:NO
-                                 attributes:nil
-                                      error:error])
-            return nil;
-    if (!Save(@{@"Phase" : @"creating", @"Identifier" : identifier},
-              [stage URLByAppendingPathComponent:@"State/Install.plist"], error))
-        return nil;
-    BOOL tigerResearch = [guest isEqual:@"tiger"] && OpenGLResearchEnabled();
-    // The new-disk identity is needed by native unattended installation too,
-    // independent of which graphics stack this release uses.
-    if (!CreateFormattedDisk(stage, qemuImage, diskGiB, YES, error))
-        return nil;
-    NSArray *sources = @[ firmware, nvram, bootMedia, installer ];
-    BOOL efiDisk = EFIDisk(bootMedia);
-    NSArray *paths = @[
-        @"Firmware/CODE.fd", @"Firmware/NVRAM.fd", efiDisk ? @"Firmware/EFI.img" : @"Firmware/OpenCore.iso",
-        installer.URLByResolvingSymlinksInPath.path
-    ];
-    for (NSUInteger i = tigerResearch ? 0 : 1; i < (tigerResearch ? 3 : 2); i++)
-        if (![fm copyItemAtURL:[sources[i] URLByResolvingSymlinksInPath]
-                         toURL:[stage URLByAppendingPathComponent:paths[i]]
-                         error:error])
-            return nil;
-    // Ownership identity is distinct from BootMedia. Later cleanup must verify
-    // it and authoritative guest completion; a desktop frame is not completion.
-    if (!Save(@{@"FormatVersion" : @1, @"MachineIdentifier" : identifier, @"Media" : paths[3], @"Size" : @(imageSize)},
-              [stage URLByAppendingPathComponent:@"Installation/Ownership.plist"], error))
-        return nil;
-    NSMutableDictionary *configuration = [VIMNetworkConfigurationWithDefaults(@{
-        @"FormatVersion" : @1,
-        @"Identifier" : identifier,
-        @"Guest" : guest,
-        @"CPUCount" : @4,
-        @"MemoryMiB" : @4096,
-        @"Disk" : @"Disks/System.qcow2",
-        @"DiskGiB" : @(diskGiB),
-        @"Firmware" : paths[0],
-        @"NVRAM" : paths[1],
-        @"BootMedia" : paths[2],
-        @"BootMediaKind" : efiDisk ? @"efi-disk" : @"legacy-opencore-iso",
-        @"FirmwareSource" : @"application",
-        @"InstallerMediaShared" : @YES,
-        @"InstallerMedia" : paths[3],
-        @"InstallerMediaKind" : EFIDisk(installer) ? @"disk" : @"optical",
-        @"InstallState" : @"installing"
-    },
-                                                                              library, destination) mutableCopy];
-    if (!configuration) {
-        Fail(
-            error,
-            @"No local connection ports are available. Close unused virtual Macs or network services, then try again.");
-        return nil;
-    }
-    if (tigerResearch) {
-        configuration[@"FirmwareSource"] = @"package";
-    }
-    if ([guest isEqual:@"tiger"]) {
-        configuration[@"LegacyDisplayAdapter"] = @"vmware";
-        configuration[@"DisplayMode"] = @"scaled";
-        configuration[@"PassthroughOpenGLEnabled"] = @NO;
-    }
-    if (VIMGuestUsesOpenGLDesktop(guest)) {
-        configuration[@"LegacyDisplayAdapter"] = @"vmware";
-        configuration[@"PassthroughOpenGLEnabled"] = @YES;
-    }
-    if (!Save(configuration, [stage URLByAppendingPathComponent:@"Machine.plist"], error) ||
-        !Save(@{@"Phase" : @"awaiting-os-install", @"Identifier" : identifier},
-              [stage URLByAppendingPathComponent:@"State/Install.plist"], error) ||
-        ![fm moveItemAtURL:stage toURL:destination error:error])
-        return nil;
-    return [self loadURL:destination error:error];
+    NSURL *package = [VIMMachinePackages createGuest:guest
+                                                name:name
+                                             diskGiB:(NSInteger)diskGiB
+                                             library:library
+                                            firmware:firmware
+                                               nvram:nvram
+                                           bootMedia:bootMedia
+                                           installer:installer
+                                           qemuImage:qemuImage
+                                            research:OpenGLResearchEnabled()
+                                     networkDefaults:NetworkDefaults
+                                               error:error];
+    return package ? [self loadURL:package error:error] : nil;
 }
 @end
