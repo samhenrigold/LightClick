@@ -740,6 +740,18 @@ public final class Engine {
         return true
     }
 
+    public func forgetAll() {
+        os_unfair_lock_lock(translatorLock)
+        tr_flush_parked()
+        gate.condition.lock()
+        for engine in gate.engines {
+            engine.ctx.pointee.tr_flushed = 1
+            engine.ctx.pointee.direct_flush = 1 // the next run drops its shadows too
+        }
+        gate.condition.unlock()
+        os_unfair_lock_unlock(translatorLock)
+    }
+
     public func unmapDirect(gpa: UInt64, bytes: UInt64) {
         let pageInfo = (priv + Int(kOffPageInfo)).assumingMemoryBound(to: UInt8.self)
         for frame in stride(from: gpa >> 12, to: (gpa + bytes) >> 12, by: 1) { pageInfo[Int(frame)] &= ~UInt8(PI_DIRECT) }

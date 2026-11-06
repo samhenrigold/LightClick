@@ -27,6 +27,7 @@
 #include "exec/translation-block.h"
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
+#include "system/reset.h"
 #include "hw/i386/apic.h"
 #include "hw/i386/apic_internal.h"
 #include "hw/i386/x86.h"
@@ -62,6 +63,7 @@ static struct {
 typedef struct {
     EngineHandle *engine;
     bool in_engine;
+    bool until_kernel; /* after a reset: firmware and boot loaders stay on TCG, as on a first boot */
     bool tcg_ran; /* normal TBs have been generated: engine writes may have made them stale, and nothing tells TCG */
     /* Pages TCG wrote since DIRTY_MEMORY_CODE was last cleared for them. Only the vCPU thread touches this. */
     ram_addr_t written[64];
@@ -657,6 +659,16 @@ static void hvdbt_set_ops(EngineMachineOps *ops, CPUState *cs)
 static void *hvdbt_watchdog(void *arg);
 static void hvdbt_find_kernel(CPUState *cs);
 
+/* A reset, which a snapshot load also starts with: RAM is about to change with nothing telling the engine. vCPUs are paused. */
+static void hvdbt_reset(void *opaque)
+{
+    engine_forget_all(hv.engine);
+    for (int i = 0; i < HVDBT_MAX_CPUS; i++) {
+        hv_cpus[i].until_kernel = true;
+        hv_cpus[i].protect_all = true;
+    }
+}
+
 static bool hvdbt_create(CPUState *cs)
 {
     MachineState *ms = current_machine;
@@ -697,6 +709,7 @@ static bool hvdbt_create(CPUState *cs)
     WITH_RCU_READ_LOCK_GUARD() {
         flatview_for_each_range(address_space_to_flatview(&address_space_memory), hvdbt_mark_device, ms);
     }
+    qemu_register_reset(hvdbt_reset, NULL);
     __atomic_store_n(&hv.engine, engine, __ATOMIC_RELEASE);
     if (!getenv("LC_HVDBT_NO_DIRECT")) {
         BQL_LOCK_GUARD();
@@ -756,6 +769,13 @@ static bool hvdbt_want_engine(CPUState *cs, vaddr pc, uint32_t flags)
     if (!cpu->engine && ((int64_t)pc >= 0 || (cs->cpu_index && !__atomic_load_n(&hv.engine, __ATOMIC_ACQUIRE)))) {
         cpu->tcg_ran = true;
         return false;
+    }
+    if (cpu->until_kernel) {
+        if ((int64_t)pc >= 0) {
+            cpu->tcg_ran = true;
+            return false;
+        }
+        cpu->until_kernel = false;
     }
     if (current_machine->smp.max_cpus > HVDBT_MAX_CPUS || !qemu_tcg_mttcg_enabled()) {
         error_report("hvdbt: needs at most %d vCPUs and -accel tcg,thread=multi", HVDBT_MAX_CPUS);

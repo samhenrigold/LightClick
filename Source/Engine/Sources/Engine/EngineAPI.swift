@@ -129,6 +129,11 @@ public func engine_map_direct(_ h: OpaquePointer, _ gpa: UInt64, _ host: UnsafeM
     handle(h).engine.mapDirect(gpa: gpa, host: host, bytes: bytes)
 }
 
+@_cdecl("engine_forget_all")
+public func engine_forget_all(_ h: OpaquePointer) {
+    handle(h).engine.forgetAll()
+}
+
 @_cdecl("engine_unmap_direct")
 public func engine_unmap_direct(_ h: OpaquePointer, _ gpa: UInt64, _ bytes: UInt64) {
     handle(h).engine.unmapDirect(gpa: gpa, bytes: bytes)

@@ -561,10 +561,18 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     }
     fetch_lo = ~0ULL;
     fetch_hi = 0;
+    // Before the bytes, as the mapping can move at any time: a frame walked after them could be one the block was never read from, and looking again later would agree with it.
+    u64 gpa0 = 0, gpa1 = ~0ULL;
+    fetch_walk(rip, &gpa0);
+    res.frames[0] = gpa0 & ~0xfffULL;
     do {
-        if (!single && (pc & 0xfff) > 4096 - 15 && frame_unprotected((pc | 0xfff) + 1, &frame)) {
-            res.unprotected = frame + 1;
-            return res;
+        if ((pc & 0xfff) > 4096 - 15) {
+            if (!fetch_walk((pc | 0xfff) + 1, &gpa1))
+                gpa1 = ~0ULL;
+            if (!single && frame_unprotected((pc | 0xfff) + 1, &frame)) {
+                res.unprotected = frame + 1;
+                return res;
+            }
         }
         x86_decode(pc, &list[count]);
         Insn *in = &list[count];
@@ -579,16 +587,11 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
         count++;
         if (in->next > page + 4096 && count > 0) {
             // Crossed into the next page: record it, end here.
-            u64 gpa;
-            if (fetch_walk(page + 4096, &gpa))
-                res.frames[1] = gpa & ~0xfffULL;
+            if (gpa1 != ~0ULL)
+                res.frames[1] = gpa1 & ~0xfffULL;
             break;
         }
     } while (!single && count < MAX_INSNS && !insn_is_terminator(&list[count - 1]) && (pc & ~0xfffULL) == page);
-
-    u64 gpa0 = 0;
-    fetch_walk(rip, &gpa0);
-    res.frames[0] = gpa0 & ~0xfffULL;
 
     Insn *last = &list[count - 1];
     bool fallthrough_end = !(last->op == OP_JMP || last->op == OP_JMPI || last->op == OP_RET || last->op == OP_BAD ||
