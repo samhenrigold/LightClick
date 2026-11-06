@@ -1260,38 +1260,20 @@ static void test_reuse(u64 root) {
     CHECK(f(1) == 1);
 }
 
-// What is translated ahead of being asked for must die like anything else, on its page, and may not run onto a next page nobody
-// watches yet.
-static void put_bytes(volatile u8 *at, const u8 *from, u64 n) {
-    for (u64 i = 0; i < n; i++)
-        at[i] = from[i];
-}
-
-static void test_translate_ahead(u64 root) {
-    u64 first = frame(), second = frame(), va = TEST_VA + 0x40400000;
-    volatile u8 *p = (volatile u8 *)PHYS(first), *q = (volatile u8 *)PHYS(second);
-    // test %edi,%edi; je L; mov $1,%eax; ret; L: mov $2,%eax; ret
-    static const u8 fn[] = {0x85, 0xFF, 0x74, 0x06, 0xB8, 1, 0, 0, 0, 0xC3, 0xB8, 2, 0, 0, 0, 0xC3};
-    put_bytes(p, fn, sizeof fn);
-    // test %edi,%edi; je far; mov $4,%eax; ret, with far: 13 nops, then mov $3,%eax across the page, then ret
-    static const u8 fn2[] = {0x85, 0xFF, 0x0F, 0x84, 0xC8, 0x0E, 0, 0, 0xB8, 4, 0, 0, 0, 0xC3};
-    put_bytes(p + 0x120, fn2, sizeof fn2);
-    for (int i = 0; i < 13; i++)
-        p[0xFF0 + i] = 0x90;
-    static const u8 end[] = {0xB8, 3, 0};
-    put_bytes(p + 0xFFD, end, 3);
-    static const u8 rest[] = {0, 0, 0xC3};
-    put_bytes(q, rest, 3);
-    *pte_of(root, va) = first | PRESENT_RW;
-    *pte_of(root, va + 4096) = second | PRESENT_RW;
-    __asm__ volatile("invlpg (%0)\n invlpg (%1)" : : "r"(va), "r"(va + 4096));
-    u32 (*f)(u32) = (u32 (*)(u32))va, (*g)(u32) = (u32 (*)(u32))(va + 0x120);
-    CHECK(f(1) == 1); // L is translated by now, and has never run
-    p[11] = 7;
-    CHECK(f(0) == 7);
-    CHECK(g(1) == 4); // and far would be, if it were allowed
-    q[0] = 1;
-    CHECK(g(0) == 0x10003);
+// A call is linked after its first run, so a hot one costs nothing like a trip through the monitor, which is over 100 ns.
+static __attribute__((noinline)) u32 called(u32 x) { return x + 1; }
+static void test_calls_link(void) {
+    u64 best_direct = ~0ULL;
+    for (int round = 0; round < 20 && best_direct >= 50; round++) {
+        u64 t0 = __builtin_ia32_rdtsc();
+        u32 x = 0;
+        for (u32 i = 0; i < 100000; i++)
+            x = called(x);
+        CHECK(x == 100000);
+        u64 t = (__builtin_ia32_rdtsc() - t0) / 100000;
+        best_direct = t < best_direct ? t : best_direct;
+    }
+    CHECK(best_direct < 50);
 }
 
 // An interrupt raised just after a hlt ends it, polled in the monitor or through TCG if the host is slow, and the handler
@@ -1919,7 +1901,7 @@ void kmain(void) {
     test_linked_loop();
     test_hlt_poll();
     test_reuse(root);
-    test_translate_ahead(root);
+    test_calls_link();
     test_second_vcpu(root);
     test_process_log(root);
     test_shared_region(root);

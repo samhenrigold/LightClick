@@ -145,7 +145,6 @@ public final class Engine {
         let environment = ProcessInfo.processInfo.environment
         config.no_bulk_rep = options.hybrid && environment["LC_HVDBT_NO_BULK"] == "1"
         config.no_reuse = environment["LC_HVDBT_NO_REUSE"] == "1"
-        config.no_ahead = environment["LC_HVDBT_NO_AHEAD"] == "1"
         config.no_return_prediction = options.hybrid && environment["LC_HVDBT_NO_RETURN_PREDICTION"] == "1"
         config.all_flags_live = options.hybrid && environment["LC_HVDBT_ALL_FLAGS"] == "1"
         config.precise_flags = options.preciseFlags
