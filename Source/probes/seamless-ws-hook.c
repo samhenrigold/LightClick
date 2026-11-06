@@ -63,9 +63,13 @@ static const char *const wanted[] = {"_CGXWindowByID",
                                      "_CGXWindowArrayEnumeratorNext",
                                      "_WSWindowGetScreenRect",
                                      "_CGXGetShadowMarginForWindow",
-                                     "_CGXGetCurrentSessionWindowData"};
-static void *resolved[16];
+                                     "_CGXGetCurrentSessionWindowData",
+                                     "_redraw_window",
+                                     "_CGRegionCreateWithRect",
+                                     "_CGRegionRelease"};
+static void *resolved[19];
 static void *(*session_data)(void);
+static void *placement_targets[3];
 struct RectResult {
     double x, y, width, height;
 };
@@ -219,6 +223,9 @@ static int resolve_symbols(void) {
     window_screen_rect = resolved[13];
     shadow_margin = resolved[14];
     session_data = resolved[15];
+    placement_targets[0] = resolved[16];
+    placement_targets[1] = resolved[17];
+    placement_targets[2] = resolved[18];
     note("symbols resolved: CGXWindowByID at %p\n", (void *)window_by_id);
     return 1;
 }
@@ -432,6 +439,71 @@ static void publish(void) {
     table->ticks_spent += mach_absolute_time() - now;
 }
 
+// redraw_window(state, window), which CGXUpdateDisplay calls for each window. The state already has what placement
+// needs: it offsets everything it draws by +0x70 and +0x74, clips to the region at +0x18, and skips shadows with +0x6b.
+// All of that is for the whole update, so this sets them for one window and puts them back.
+static const uint8_t redraw_prologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
+                                          0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0x28, 0x02, 0x00, 0x00};
+static char (*redraw_original)(char *, char *);
+static void *(*region_with_rect)(struct RectResult);
+static void (*region_release_fn)(void *);
+
+static char redraw_placed(char *state, char *window) {
+    const uint8_t *ro = window ? *(const uint8_t **)(window + 0xe0) : NULL;
+    uint32_t id = ro ? *(const uint32_t *)ro : 0;
+    const struct SWSPlacement *placement = NULL;
+    for (int i = 0; id && table && i < SWS_PLACEMENTS; i++)
+        if (table->placements[i].id == id)
+            placement = (const struct SWSPlacement *)&table->placements[i];
+    if (!placement)
+        return redraw_original(state, window);
+    int saved_x = *(int *)(state + 0x70), saved_y = *(int *)(state + 0x74);
+    void *saved_region = *(void **)(state + 0x18);
+    uint8_t saved_shadow = *(uint8_t *)(state + 0x6b);
+    struct RectResult everywhere = {0, 0, 16384, 16384};
+    void *region = region_with_rect(everywhere);
+    *(int *)(state + 0x70) = saved_x + placement->dx;
+    *(int *)(state + 0x74) = saved_y + placement->dy;
+    *(void **)(state + 0x18) = region;
+    *(uint8_t *)(state + 0x6b) = 1;
+    char result = redraw_original(state, window);
+    *(int *)(state + 0x70) = saved_x;
+    *(int *)(state + 0x74) = saved_y;
+    *(void **)(state + 0x18) = saved_region;
+    *(uint8_t *)(state + 0x6b) = saved_shadow;
+    region_release_fn(region);
+    table->placed_redraws++;
+    return result;
+}
+
+// Replaces the start of redraw_window with a jump here, keeping its first instructions in a page of their own to
+// continue from.
+static void hook_redraw(void *target) {
+    if (memcmp(target, redraw_prologue, sizeof(redraw_prologue))) {
+        note("redraw_window doesn't start as expected; no placement\n");
+        return;
+    }
+    uint8_t *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (page == MAP_FAILED)
+        return;
+    static const uint8_t jump[] = {0xff, 0x25, 0, 0, 0, 0}; // jmpq *0(%rip)
+    memcpy(page, redraw_prologue, sizeof(redraw_prologue));
+    memcpy(page + sizeof(redraw_prologue), jump, sizeof(jump));
+    uint64_t back = (uint64_t)target + sizeof(redraw_prologue), to = (uint64_t)redraw_placed;
+    memcpy(page + sizeof(redraw_prologue) + sizeof(jump), &back, 8);
+    redraw_original = (char (*)(char *, char *))page;
+    vm_address_t start = (vm_address_t)target & ~(vm_address_t)4095;
+    kern_return_t kr = vm_protect(mach_task_self(), start, 8192, 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr) {
+        note("can't write redraw_window: %d\n", kr);
+        return;
+    }
+    memcpy(target, jump, sizeof(jump));
+    memcpy((uint8_t *)target + sizeof(jump), &to, 8);
+    vm_protect(mach_task_self(), start, 8192, 0, VM_PROT_READ | VM_PROT_EXECUTE);
+    note("redraw_window hooked\n");
+}
+
 static pthread_t main_thread;
 static time_t next_sample;
 static int ready, in_sample, reached;
@@ -521,5 +593,11 @@ __attribute__((constructor)) static void start(void) {
         if (fd >= 0)
             close(fd);
         note("table %s\n", table ? "mapped" : "NOT mapped");
+        // Only for trying placement: it rewrites a function WindowServer's update calls, and isn't finished.
+        if (ready && table && build->full && !access("/var/tmp/seamless-ws-placement", F_OK)) {
+            region_with_rect = (void *(*)(struct RectResult))placement_targets[1];
+            region_release_fn = (void (*)(void *))placement_targets[2];
+            hook_redraw(placement_targets[0]);
+        }
     }
 }

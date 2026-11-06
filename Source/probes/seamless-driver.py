@@ -338,12 +338,31 @@ def mojave(seconds):
     (results/f'{tag}-hook.log').write_text(log)
 
 
+def placement():
+    # Does the hook's offset move a window in the display's frame, with nothing else about it changing?
+    for _ in range(120):
+        if request({'Executable': '/usr/bin/touch', 'Arguments': ['/var/tmp/seamless-ws-placement']}, 60).get('ExitCode') == 0:
+            break
+        time.sleep(5)
+    install_hook()
+    guest = stage(guest_tool)
+    run(guest, ['open-app', '--app', 'TextEdit'])
+    time.sleep(5)
+    print('before', capture(f'{tag}-before.png'), flush=True)
+    run(guest, ['place', '--app', 'TextEdit', '--dx', '500', '--dy', '300', '--wait', '5'])
+    print('after', capture(f'{tag}-after.png'), flush=True)
+    time.sleep(3)
+    print('later', capture(f'{tag}-later.png'), flush=True)
+    log = request({'Executable': '/bin/cat', 'Arguments': ['/var/tmp/seamless-ws-probe.log']}, 120).get('Stdout') or ''
+    print('\n'.join(line for line in log.splitlines() if 'redraw' in line or '== loaded' in line))
+
+
 def windowed(seconds):
     # The bar: frames the same page gets through windowed mode's own path, counted where they reach the app.
     guest = stage(guest_tool)
     print(run(guest, ['open-app', '--app', 'Safari'])[0], flush=True)
     time.sleep(15)
-        first = request({'Action': 'display-frames'}, 60)
+    first = request({'Action': 'display-frames'}, 60)
     started = time.time()
     time.sleep(seconds)
     last = request({'Action': 'display-frames'}, 60)
@@ -440,6 +459,8 @@ def proxy(seconds):
 
 if arguments[0] == 'capture-bench':
     capture_bench()
+elif arguments[0] == 'placement':
+    placement()
 elif arguments[0] == 'windowed':
     windowed(int(arguments[1]) if len(arguments) > 1 else 22)
 elif arguments[0] == 'mojave':

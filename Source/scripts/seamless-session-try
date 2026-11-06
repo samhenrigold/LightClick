@@ -115,7 +115,9 @@ def session(name, cancel=False):
             # With the display asleep WindowServer lists them as on screen even ordered out, so what counts is that they're clear.
             shown = [w for w in windows.splitlines() if f'pid={vm_pid} ' in w and ' alpha=0 ' not in w]
             check('none of its windows can be seen', not shown, '; '.join(shown)[:300])
-        if 'the guest\'s side ended' in said or 'ERROR the session stopped' in said:
+        # A session starts over if the guest restarts under it early in a boot, so that end isn't this run's.
+        ended = said.rfind('the guest\'s side ended')
+        if (ended >= 0 and said.find('# trying again', ended) < 0 and said.find('exit none', ended) < 0) or 'ERROR the session stopped' in said:
             break
         time.sleep(2)
     (results/f'seamless-session-{name}.log').write_text(said)

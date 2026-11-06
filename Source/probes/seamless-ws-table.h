@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 #define SWS_PATH "/var/tmp/seamless-ws.table"
-#define SWS_MAGIC 0x31535754u
+#define SWS_MAGIC 0x31535755u
 #define SWS_SLOTS 64
 #define SWS_ARENA (512u * 1024 * 1024)
 
@@ -36,6 +36,7 @@ struct SWSTreeEntry {
 };
 #define SWS_TREE 256
 #define SWS_FLUSHES 4096
+#define SWS_PLACEMENTS 64
 
 struct SWSTable {
     uint32_t magic, version;
@@ -49,6 +50,13 @@ struct SWSTable {
     struct SWSTreeEntry tree[SWS_TREE];
     // Surface flushes seen, by window ID modulo the size. A clash only means an extra capture.
     volatile uint32_t surface_flushes[SWS_FLUSHES];
+    // Where WindowServer's composite draws a window, by how far from where it is. Nothing else about the window
+    // changes.
+    struct SWSPlacement {
+        volatile uint32_t id;
+        volatile int32_t dx, dy; // Device pixels.
+    } placements[SWS_PLACEMENTS];
+    volatile uint64_t placed_redraws;
     uint8_t arena[SWS_ARENA];
 };
 #endif

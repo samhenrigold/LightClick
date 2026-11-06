@@ -58,6 +58,7 @@ def running(pattern):
 
 def session(label, extra):
     log.unlink(missing_ok=True)
+    (results/f'seamless-compare-{tag}-{label}.png').unlink(missing_ok=True)
     page = work/f'{label}.html'
     page.write_text('<title>Seamless page</title><style>@-webkit-keyframes m{to{-webkit-transform:translate3d(400px,0,0)}}'
                     'div{width:80px;height:80px;background:#28c;-webkit-animation:m 2s infinite alternate}</style>'

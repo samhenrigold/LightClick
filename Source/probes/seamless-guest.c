@@ -2199,6 +2199,24 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(command, "list"))
         return list_windows();
+    if (!strcmp(command, "place")) {
+        // Asks the hook to draw every window of an app this far from where it is, in device pixels.
+        if (geteuid() == 0 && !in_session)
+            return run_in_console_session(argc, argv, 1);
+        CGWindowID window = find_window(app);
+        int fd = open(SWS_PATH, O_RDWR);
+        struct SWSTable *placed =
+            fd >= 0 ? mmap(NULL, sizeof(struct SWSTable), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+        if (!window || placed == MAP_FAILED)
+            return 1;
+        placed->placements[0].dx = atoi(option(argc, argv, "--dx", "0"));
+        placed->placements[0].dy = atoi(option(argc, argv, "--dy", "0"));
+        placed->placements[0].id = window;
+        printf("# window %u placed; %llu placed redraws so far\n", window, placed->placed_redraws);
+        sleep(atoi(option(argc, argv, "--wait", "3")));
+        printf("# %llu placed redraws now\n", placed->placed_redraws);
+        return 0;
+    }
     if (!strcmp(command, "capture-bench")) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
