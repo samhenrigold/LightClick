@@ -341,12 +341,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         [self logNote:@"Session: %@ -> %@", before, self.state.lifecycleDescription];
 }
 - (void)updateInstallationActivity {
-    BOOL setup = self.machine.configuration[@"InstallerMedia"] != nil ||
-                 [self.machine.configuration[@"InstallState"] isEqual:@"patching"] ||
-                 [self.machine.configuration[@"InstallState"] isEqual:@"host-populated"];
-    BOOL active = self.task.running && ![VIMSessionRunState isHalted:self.lastRunState] &&
-                  (self.preparing || self.preparationRequested || self.installationRequested ||
-                   (setup && !self.completionGuestReport));
+    NSDictionary *config = self.machine.configuration;
+    BOOL active = [self.guestSessionState keepsHostAwakeWithInstallerMedia:config[@"InstallerMedia"] != nil
+                                                              installState:config[@"InstallState"]
+                                                          completionReport:self.completionGuestReport != nil];
     if (active && !self.sleepActivity)
         self.sleepActivity = [VIMInstallationActivity beginWithReason:@"Installing macOS in a virtual Mac"];
     else if (!active)
@@ -715,8 +713,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 }
 + (void)enableGuestRemoteLogin:(VIMMachine *)machine completion:(void (^)(NSError *))completion {
     VIMSession *session = sessions[SessionKey(machine)];
-    if (!session.task.running || session.preparing || session.state.guestPending || session.state.diagnosticPending ||
-        session.preparationRequested) {
+    if (!session.guestSessionState.mayRunGuestAction) {
         completion(VIMSessionError(@"Start this Mac and wait for setup to finish, then try again. You can also enable "
                                    @"Remote Login in the virtual Mac’s Sharing preferences."));
         return;
@@ -733,25 +730,16 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 }
 + (NSString *)statusForMachine:(VIMMachine *)machine {
     VIMSession *session = sessions[SessionKey(machine)];
-    if (session.task.running) {
-        if ([session.lastRunState isEqual:@"suspended"])
-            return @"Sleeping";
-        if ([session.lastRunState isEqual:@"paused"])
-            return @"Paused";
-        BOOL installing = machine.preMetalGuest
-                              ? ![machine.configuration[@"InstallState"] ?: @"installed" isEqual:@"installed"]
-                              : machine.requiresInstallerDisplay;
-        return installing ? @"Installing macOS" : @"Running";
-    }
     BOOL installing = machine.preMetalGuest
                           ? ![machine.configuration[@"InstallState"] ?: @"installed" isEqual:@"installed"]
                           : machine.requiresInstallerDisplay;
-    return installing ? @"Installation in progress" : @"Shut down";
+    return [VIMSessionRunState statusForRunning:session.task.running
+                                       runState:session.lastRunState
+                                     installing:installing];
 }
 + (void)openGuestPreferences:(NSString *)pane machine:(VIMMachine *)machine completion:(void (^)(NSError *))completion {
     VIMSession *session = sessions[SessionKey(machine)];
-    if (!session.task.running || session.preparing || session.state.guestPending || session.state.diagnosticPending ||
-        session.preparationRequested) {
+    if (!session.guestSessionState.mayRunGuestAction) {
         completion(VIMSessionError(@"Start this Mac, sign in and wait for setup to finish, then try again. You can "
                                    @"also open System Preferences inside the virtual Mac."));
         return;
@@ -791,9 +779,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [session servicePendingHostConnection];
 }
 - (void)servicePendingHostConnection {
-    if (!self.pendingHostConnectionURL || !self.task.running || self.preparing || self.state.guestPending ||
-        self.state.diagnosticPending || self.preparationRequested || self.state.bootPolicyPending ||
-        self.state.clipboardPending || [@[ @"paused", @"suspended" ] containsObject:self.lastRunState])
+    if (!self.pendingHostConnectionURL || !self.guestAgentFree)
         return;
     NSURL *URL = self.pendingHostConnectionURL;
     void (^completion)(NSError *) = self.pendingHostConnectionCompletion;
@@ -2367,6 +2353,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     state.running = self.task.running;
     state.preparing = self.preparing;
     state.preparationRequested = self.preparationRequested;
+    state.installationRequested = self.installationRequested;
+    state.runState = self.lastRunState;
     state.hasStatusTool = self.guestStatusTool.length > 0;
     state.hasModernSetup = self.modernSetup != nil;
     state.passthroughOpenGLEnabled = self.machine.passthroughOpenGLEnabled;
@@ -4216,9 +4204,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [VIMMachineSettings showForMachine:self.machine section:@"Hardware" category:@"Network" window:self.window];
 }
 - (BOOL)guestAgentFree {
-    return self.task.running && !self.preparing && !self.preparationRequested && !self.state.guestPending &&
-           !self.state.diagnosticPending && !self.state.clipboardPending && !self.state.bootPolicyPending &&
-           ![@[ @"paused", @"suspended" ] containsObject:self.lastRunState];
+    return self.guestSessionState.guestAgentFree;
 }
 - (void)applyGuestScreenSharing:(BOOL)enabled completion:(void (^)(NSError *))completion {
     NSArray *steps = [VIMMachineModel screenSharingCommandsForGuest:self.machine.guest enabling:enabled];
@@ -4297,9 +4283,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         self.clipboardRetryAfter = nil;
         return;
     }
-    if (!boot.length || (!powerOnly && !self.state.consoleUID) || !self.task.running || self.preparing ||
-        self.preparationRequested || self.installationRequested || self.state.clipboardPending ||
-        self.state.diagnosticPending || self.state.guestPending || self.state.bootPolicyPending)
+    if (!boot.length || (!powerOnly && !self.state.consoleUID) || !self.guestSessionState.mayProvisionHelpers)
         return;
     VIMClipboardBridge *current = powerOnly ? self.powerBridge : self.clipboard;
     if (current.isConnected && [boot isEqual:powerOnly ? self.powerConfiguredBoot : self.clipboardConfiguredBoot])

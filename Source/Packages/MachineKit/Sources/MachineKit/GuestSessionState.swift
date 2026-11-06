@@ -26,6 +26,9 @@ public struct GuestSessionState: Sendable {
 
     public var preparing = false
     public var preparationRequested = false
+    public var installationRequested = false
+    /// What QEMU last said its state was.
+    public var runState: String?
     public var repairRequested = false
     public var explicitRepair = false
     public var verifiedUpdateRepair = false
@@ -75,6 +78,30 @@ public struct GuestSessionState: Sendable {
     public var mayForceReset: Bool { running && !lifecycle.resetRequested }
     public var mayStartGraphicsAction: Bool { running && !preparing && !preparationRequested && !relaunchForGraphics }
     public var graphicsActionsEnabled: Bool { mayStartGraphicsAction && !guestPending }
+
+    /// A one-off user action in the guest, such as turning on Remote Login, may start. The guest may still be asleep.
+    public var mayRunGuestAction: Bool {
+        running && !preparing && !preparationRequested && !guestPending && !diagnosticPending
+    }
+
+    /// Nothing else has the agent or needs it, and the guest can answer it.
+    public var guestAgentFree: Bool {
+        mayRunGuestAction && !clipboardPending && !bootPolicyPending && runState != "paused"
+            && runState != "suspended"
+    }
+
+    /// The clipboard and display-power helpers may be set up in the guest. They wait for setup and for the agent, but not
+    /// for a guest that's merely asleep.
+    public var mayProvisionHelpers: Bool {
+        mayRunGuestAction && !installationRequested && !clipboardPending && !bootPolicyPending
+    }
+
+    /// Whether the host should stay awake for this session: it's installing something and isn't halted.
+    public func keepsHostAwake(hasInstallerMedia: Bool, installState: String?, hasCompletionReport: Bool) -> Bool {
+        let settingUp = hasInstallerMedia || installState == "patching" || installState == "host-populated"
+        return running && !SessionRunState.isHalted(runState)
+            && (preparing || preparationRequested || installationRequested || (settingUp && !hasCompletionReport))
+    }
 
     public var nextRefreshStep: GuestRefreshStep {
         if guestPending || preparing || shutdownRequested || !running { return .busy }
