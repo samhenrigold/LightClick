@@ -291,6 +291,14 @@ The first is built, and `LC_HVDBT_NO_REUSE=1` turns it off.
 
 Build the disk cache if the app launch measurement shows translation is more than about 20% of a first launch after these. Below that, it is a large change to every emitter for a few percent.
 
+### Cold code per exec, and the code cache
+
+Measured on a Mavericks exec loop at 4 vCPUs: 9.5M cold blocks in 89 s, of which 8.3M in high user memory outside the shared region, and 99.8% of those were a frame and offset already translated at some other rip. That is dyld, which each process maps at its own slide. A block holds absolute x86 addresses, so sharing them across slides needs the relocatable output described above, in every emitter. The gain is bounded: translating is about 1.6 ms of about 7 ms per exec of a program as small as `/usr/bin/true`, and a real application's launch runs dyld once. Not built. Mojave has the same shape in low user memory: 4.2M cold blocks in 174 s, 94% seen before.
+
+Code cache resets are the larger cost on Mojave: 19 in 174 s of launching six applications, each dropping the kernel and system libraries, with 2.6 GB of code generated through a 118 MB cache. 81 to 88% of cold kernel and shared blocks had been translated before. Splitting the cache, so that a process's own blocks could reset alone, did not help: the shared half fills by itself, with 22 full resets and 9 partial in the same run, and cold blocks unchanged at about 9M. So it was removed. The working set is simply larger than the cache. `b` and `bl` reach 128 MB, which is what holds it at 118, so a larger cache needs a part beyond reach with its own copy of the stubs. Not built.
+
+Direct calls between keys, such as from a program into a shared library, can't link, so each takes a trip through the monitor: 300,000 to 480,000 a second on Mojave's first vCPU. Patching the call's stub to do the lookup inline would avoid the trip, and a lookup is always right, so it risks no staleness. Not built.
+
 ### A fast hidden start: resuming a snapshot under the engine
 
 The goal is a guest that is at its desktop 1 to 2 s after the app asks, with no boot, for seamless apps. Nothing here has been run. What the code says, and what has to be found out:
