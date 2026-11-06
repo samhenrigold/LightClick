@@ -36,6 +36,32 @@ Look for: the real shadow and the sheet on quitting; whether the machine's windo
 
 Its log is `$TMPDIR/lc-<first 8 of the Identifier, lowercase>.log`. To remove it, delete the app from `~/Applications/Light Click`, and delete the clone.
 
+## Cropping windowed mode's frames
+
+**The bar is windowed mode, and this matches it.** `scripts/seamless-compare <app> <machine>` runs the same animated page in Safari, engine on, 2x, in clones of one machine, first windowed, then seamless, and fails below 90%. Frames whose pixels differ, per second, where each path's frames reach the app:
+
+| | Windowed | Seamless, cropped |
+| --- | --- | --- |
+| Mavericks | 59.9 | 60.0 |
+| Mojave | 59.9 | 59.8 |
+
+Capture reached 21 and 10 on the same page. WindowServer now composites once, for the display, as in windowed mode. The tool sends only where windows are, with no capture and no pixels over TCP. In the app's process, `SeamlessSession` puts the frame on one layer per guest window with its own `contentsRect`, and each proxy shows its layer through `CALayerHost`. It takes an `IOSurface` where the display path has one, and on the path that hands over shared memory it copies once, into a surface, on the host. One technique on both generations, needing no backing store and no Mojave hook. Capture remains the fallback (`LC_SEAMLESS_CAPTURE`).
+
+What this measures: frames reaching the app, not photons. The same page's frames arrive; whether Core Animation presents every one wasn't counted, and input-to-photon isn't measured. The proxy's window was checked on the real display, with `screencapture -l` on that window only: correctly cropped on both, once a first attempt showed `contentsRect` counts up from the surface's bottom. One Mojave windowed run came in at 24.7, and a rerun at 59.9; the 24.7 isn't explained.
+
+**Which windows crop.** Opaque, ordinary, titled windows no other window covers. They get the host's shadow and a 5-point corner, which is a shortcut: guest corners differ slightly. Everything else keeps a capture with real alpha and shadow: menus, popovers, sheets, panels, translucent windows, covered windows. So a covered window drops to capture speed, and a sheet's parent stays cropped, since the sheet's in the same place in both. The guest's wallpaper is what's behind a window's corners, under the mask.
+
+**Placement in the composite, tried once on Mavericks.** WindowServer's `redraw_window` keeps an offset at state `+0x70`/`+0x74`, a clip region at `+0x18` and a no-shadow flag at `+0x6b`. An inline hook sets those for one window, behind the flag file `/var/tmp/seamless-ws-placement`. It ran without a crash, and TextEdit's window really did land at its offset (in points) in the display's frame, with its guest coordinates untouched. **It isn't usable yet:** the original stays where it was and the placed copy is partial, without its text, because the update's dirty region, which is in on-screen coordinates, limits what's redrawn and flushed. That's what has to change next: dirtying the slot, not the window's place, and clearing the original. No slot layout, no Mojave equivalent, and nothing else about it has been run.
+
+**How much room there is for slots.** `seamless-try display`, 2x-capable modes offered by the host, selected by the guest:
+
+| | Largest selected | Next |
+| --- | --- | --- |
+| Mavericks, vmware-svga | 2560x1600 | 3840x2160 refused by CoreGraphics, error 1007 |
+| Mojave, PVG | 7680x4320 | 8192x5120 fails, exit 134 |
+
+So Mavericks has a single Retina panel's worth of room, 1280x800 points at 2x, which doesn't hold two large windows apart. Whether vmware-svga can go further wasn't looked into. Slots may only be practical on PVG, or need a larger svga mode first. Compositing cost at these sizes wasn't measured. Guests maximize to the display, which is why slots and the display's size are tied to each other; the windows above stay at their guest positions, at one rigid offset from the host's screen.
+
 ## Measured on a Mavericks clone
 
 `scripts/seamless-try hook <app> <machine>` boots one clone, loads the hook, and runs the same demo twice in that boot. Each window arrives
