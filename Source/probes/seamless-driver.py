@@ -429,7 +429,7 @@ def desktop():
         match = re.search(r'pid=(\d+)', found)
         return int(match.group(1)) if match else 0
 
-    check('the machine window shows before the press', machine_window() is not None)
+    check('the machine window shows before the press', bool(machine_window()))
     print(next(iter(rows()), ''), flush=True)
     pressed = time.time()
     request({'Action': 'seamless-toggle'}, 60)
@@ -447,7 +447,7 @@ def desktop():
     for _ in range(3):
         print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
         time.sleep(1)
-    check('the machine window hides', machine_window() is None)
+    check('the machine window hides', not machine_window())
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
         subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-{window}.png')])
@@ -504,7 +504,7 @@ def desktop():
     while time.time() - pressed < 30 and (not machine_window() or proxy_windows()):
         time.sleep(0.1)
     print(f'back after {time.time() - pressed:.1f} s', flush=True)
-    check('the machine window comes back', machine_window() is not None)
+    check('the machine window comes back', bool(machine_window()))
     check('the windows go', not proxy_windows())
     # A second go, which should be quick, since the tools are staged and the apps made.
     pressed = time.time()
@@ -512,7 +512,7 @@ def desktop():
     while time.time() - pressed < 60 and machine_window():
         time.sleep(0.1)
     print(f'second press hid the window after {time.time() - pressed:.1f} s', flush=True)
-    check('a second press works', machine_window() is None)
+    check('a second press works', not machine_window())
     request({'Action': 'seamless-toggle'}, 60)
     while time.time() - pressed < 120 and not machine_window():
         time.sleep(0.1)
