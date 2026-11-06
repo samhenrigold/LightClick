@@ -49,9 +49,9 @@ import Testing
     private let limits = SettingsHardwareLimits(physicalMemoryBytes: 16 << 30, processorCount: 6)
 
     @Test func theNumbersFollowTheHost() {
-        #expect(limits.maximumMemoryMiB == 16384)
-        #expect(limits.memorySliderMaximumGiB == 16)
-        #expect(limits.memorySliderMiddleGiB == 9)
+        #expect(limits.maximumMemoryMiB == 15360)
+        #expect(limits.memorySliderMaximumGiB == 15)
+        #expect(limits.memorySliderMiddleGiB == 8)
         #expect(limits.processorTitles == ["1", "2", "3", "4 (Recommended)", "5", "6"])
         #expect(
             limits.summary
@@ -65,19 +65,33 @@ import Testing
 
     @Test func typedMemoryMustFit() {
         #expect(limits.memoryMiB(from: "2048") == .success(2048))
-        #expect(limits.memoryMiB(from: " 16384 ") == .success(16384))
-        let issue = SettingsFieldIssue(message: "Use up to 6 processors or 16384 MB of memory.")
-        for text in ["1023", "16385", "", "4 GB", "4.5"] {
+        #expect(limits.memoryMiB(from: " 15360 ") == .success(15360))
+        let issue = SettingsFieldIssue(message: "Use up to 6 processors or 15360 MB of memory.")
+        for text in ["1023", "15361", "16384", "", "4 GB", "4.5"] {
             #expect(limits.memoryMiB(from: text) == .failure(issue))
         }
     }
 
+    @Test func settingsAndNewMachineShareALimit() {
+        for (bytes, cores): (UInt64, Int) in [(1 << 30, 1), (8 << 30, 4), (16 << 30, 6), (256 << 30, 32)] {
+            let host = HostCapacity(physicalMemoryBytes: bytes, processorCount: cores)
+            let limits = SettingsHardwareLimits(physicalMemoryBytes: bytes, processorCount: cores)
+            #expect(limits.maximumMemoryMiB == host.maximumMemoryGiB * 1024)
+            #expect(limits.memorySliderMaximumGiB == host.maximumMemoryGiB)
+        }
+    }
+
+    @Test func aSavedValuePastTheLimitStandsUntilItIsEdited() {
+        #expect(limits.memoryMiB(from: "16384", saved: 16384) == .success(16384))
+        let issue = SettingsFieldIssue(message: "Use up to 6 processors or 15360 MB of memory.")
+        #expect(limits.memoryMiB(from: "16000", saved: 16384) == .failure(issue))
+        #expect(limits.memoryMiB(from: "8192", saved: 16384) == .success(8192))
+    }
+
     @Test func theSliderRoundsAndStopsAtTheHost() {
         #expect(limits.memoryMiB(fromSliderGiB: 3.6) == 4096)
-        #expect(limits.memoryMiB(fromSliderGiB: 16) == 16384)
-        #expect(
-            SettingsHardwareLimits(physicalMemoryBytes: 1 << 34 - 1, processorCount: 1).memoryMiB(fromSliderGiB: 16)
-                == 16383)
+        #expect(limits.memoryMiB(fromSliderGiB: 15) == 15360)
+        #expect(limits.memoryMiB(fromSliderGiB: 16) == 15360)
     }
 }
 
