@@ -2,6 +2,7 @@
 // generated header: Swift gets those classes from the package itself, under their Swift names.
 #import "VIMAlerts.h"
 #import "VIMAutomaticSetup.h"
+#import "VIMDiagnostics.h"
 #import "VIMClipboardBridge.h"
 #import "VIMGuestFiles.h"
 #import "VIMHostAudio.h"
@@ -10,12 +11,15 @@
 #import "VIMImageSlots.h"
 #import "VIMInstallerAssembly.h"
 #import "VIMMachine.h"
+#import "VIMMenuController.h"
 #import "VIMMetalView.h"
+#import "VIMNetworkClient.h"
 #import "VIMNetworkDefaults.h"
 #import "VIMPlayButton.h"
 #import "VIMSMBService.h"
 #import "VIMSessionPrivate.h"
 #import "VIMSettingsIcon.h"
+#import "VIMUpdateChecker.h"
 #import "VIMUSBClient.h"
 
 @interface NSTextField (VIMGuestPasswordAutofill)

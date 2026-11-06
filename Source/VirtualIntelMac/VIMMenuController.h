@@ -1,5 +1,5 @@
 #import <Cocoa/Cocoa.h>
-@class VIMLibraryViewController;
 @interface VIMMenuController : NSObject <NSMenuDelegate, NSMenuItemValidation>
-- (instancetype)initWithLibrary:(VIMLibraryViewController *)library;
+// `library` is a VIMLibraryViewController, from Swift.
+- (instancetype)initWithLibrary:(id)library;
 @end

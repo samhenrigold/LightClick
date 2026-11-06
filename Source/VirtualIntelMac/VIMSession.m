@@ -3,7 +3,6 @@
 #import "VIMGuestFiles.h"
 #import "VIMGuestProfile.h"
 #import "VIMSymbolImages.h"
-#import "AppDelegate.h"
 #import "VIMMachine.h"
 #import "MachineKit-Swift.h"
 #import "VIMMetalView.h"
@@ -458,8 +457,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     // SDL device selection is currently next-start only. Keep it in Sound
     // settings, not among controls that imply a live device change.
     return @[
-        NSToolbarFlexibleSpaceItemIdentifier, @"GuestSeamless", @"GuestApps", @"GuestCPU", @"GuestUSB", @"GuestOptical", @"GuestNetwork",
-        @"GuestSharing", @"GuestControls", @"GuestSettings"
+        NSToolbarFlexibleSpaceItemIdentifier, @"GuestSeamless", @"GuestApps", @"GuestCPU", @"GuestUSB", @"GuestOptical",
+        @"GuestNetwork", @"GuestSharing", @"GuestControls", @"GuestSettings"
     ];
 }
 - (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
@@ -1646,10 +1645,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     // Something holding the agent for as long as it likes, such as Seamless, doesn't stop what doesn't need it.
     if (!self.diagnostics || (self.state.diagnosticPending && !self.agentHeldExclusively))
         return;
-    NSDictionary *command =
-        [self.diagnostics takeRequestWhileAgentBusy:self.state.guestPending || self.preparing ||
-                                                    self.state.bootPolicyPending || self.state.clipboardPending ||
-                                                    self.agentHeldExclusively];
+    NSDictionary *command = [self.diagnostics
+        takeRequestWhileAgentBusy:self.state.guestPending || self.preparing || self.state.bootPolicyPending ||
+                                  self.state.clipboardPending || self.agentHeldExclusively];
     if (!command)
         return;
     self.state.diagnosticPending = YES;

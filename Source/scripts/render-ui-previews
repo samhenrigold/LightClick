@@ -9,13 +9,11 @@ mkdir -p "$source_dir/Build/UIReview"
   -fobjc-arc -fmodules -Wno-incomplete-implementation -mmacosx-version-min=15.0 \
   -I "$source_dir/VirtualIntelMac" \
   "$source_dir/tools/ui-previews.m" \
-  "$source_dir/VirtualIntelMac/AppDelegate.m" \
   "$source_dir/VirtualIntelMac/VIMUpdateChecker.m" \
   "$source_dir/VirtualIntelMac/VIMSettingsIcon.m" \
   "$source_dir/VirtualIntelMac/VIMDiscImage.m" \
   "$source_dir/VirtualIntelMac/VIMMachine.m" \
   "$source_dir/VirtualIntelMac/VIMFirmwareBoot.m" \
-  "$source_dir/VirtualIntelMac/VIMLibraryLocation.m" \
   "$source_dir/VirtualIntelMac/VIMNetworkDefaults.m" \
   "$source_dir/VirtualIntelMac/VIMInstallerAssembly.m" \
   "$source_dir/VirtualIntelMac/VIMHostSupport.m" \
