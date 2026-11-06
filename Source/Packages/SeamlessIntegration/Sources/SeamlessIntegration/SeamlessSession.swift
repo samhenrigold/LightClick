@@ -133,9 +133,14 @@ public final class SeamlessSession {
 
     public func start() {
         signal(SIGPIPE, SIG_IGN)
-        FileManager.default.createFile(
-            atPath: configuration.log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        // A desktop's session for an app can start many times, and each keeps what the one before said.
+        if !drivesGuest, FileManager.default.fileExists(atPath: configuration.log.path) {
+        } else {
+            FileManager.default.createFile(
+                atPath: configuration.log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
         logHandle = try? FileHandle(forWritingTo: configuration.log)
+        _ = try? logHandle?.seekToEnd()
         guard listenForGuest(), listenForProxy() else {
             note("ERROR couldn't listen")
             finished()
@@ -409,6 +414,7 @@ public final class SeamlessSession {
             surfaces[id]?.surfaceOrigin = (x, y)
             if let surface = surfaces[id] { showCrops(of: [surface]) }
         case .gone(let id):
+            note("# window \(id) gone")
             surfaces[id] = nil
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
             onWindowsChanged?()

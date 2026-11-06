@@ -585,6 +585,8 @@ def desktop():
     capture(f'{tag}-desktop-after.png')
     said = request({'Executable': '/bin/sh', 'Arguments': ['-c', 'cat /tmp/seamless-leap-restore.log; /bin/ps -axo pid,ppid,pgid,command | /usr/bin/grep -E "/tmp/sg/" | /usr/bin/cut -c1-100']}, 60)
     print('restore log:', said.get('Stdout'), said.get('Error'), flush=True)
+    said = request({'Executable': '/bin/sh', 'Arguments': ['-c', '/usr/bin/grep -h -E "minimized|left the screen|back$" /tmp/sg/leap-*.log | /usr/bin/tail -20']}, 60)
+    print('tool logs:', said.get('Stdout'), said.get('Error'), flush=True)
     check('the guest\'s Dock and shadows are put back', 'dock: 0' in (said.get('Stdout') or ''))
     # Generated apps shouldn't stay known to the Mac after a clone's gone.
     for bundle in (source/'Build/bench'/tag).glob('**/Seamless Apps/*/*/*.app'):

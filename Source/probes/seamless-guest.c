@@ -984,6 +984,8 @@ static int drain_input(struct Stream *s) {
             swi_gesture(&context, g, point);
             s->gesture_events++;
         } else if (m.type == SWM_SET_MINIMIZED) {
+            printf("# %.1f host asks window %u minimized %u, app pid %d\n", now(), m.u.window_id, m.minimized, session_app_pid);
+            fflush(stdout);
             if (session_menu_tool && session_app_pid && !fork()) {
                 char pid[16], window[16];
                 snprintf(pid, sizeof(pid), "%d", session_app_pid);
@@ -1830,10 +1832,16 @@ static int tree_window_is_minimized(CGWindowID id, pid_t pid) {
     if (list)
         CFRelease(list);
     ProcessSerialNumber psn = {0, 0};
-    return exists && GetProcessForPID(pid, &psn) == noErr && IsProcessVisible(&psn);
+    OSStatus found = GetProcessForPID(pid, &psn);
+    int visible = found == noErr && IsProcessVisible(&psn);
+    printf("# %.1f window %u left the screen: exists %d, process %d, visible %d\n", now(), id, exists, (int)found, visible);
+    fflush(stdout);
+    return exists && visible;
 }
 
 static int tree_send_minimized(struct Stream *s, CGWindowID id, int minimized) {
+    printf("# %.1f window %u %s\n", now(), id, minimized ? "minimized" : "back");
+    fflush(stdout);
     uint8_t message[SWM_HEADER_SIZE + 8];
     swm_header(message, SWM_MINIMIZED, 8);
     swm_w32(message + SWM_HEADER_SIZE, id);
