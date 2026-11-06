@@ -3488,95 +3488,47 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     WithToolbarMenuTitle(menu, toolbarTitle);
     NSDictionary *config = self.machine.editableConfiguration;
     if ([menu.title isEqual:@"CD/DVD"]) {
-        NSArray *images = [VIMSession connectedImagesForMachine:self.machine];
-        if (!images.count)
-            [self addDeviceItem:@"No Images Connected" action:nil toMenu:menu].enabled = NO;
-        for (NSDictionary *image in images) {
-            NSString *path = image[@"Path"];
-            NSNumber *slot = image[@"Slot"];
-            if (images.count == 1) {
-                [self addDeviceItem:path.lastPathComponent action:nil toMenu:menu].enabled = NO;
-                [self addDeviceItem:@"Disconnect" action:@selector(ejectOpticalMedia:) toMenu:menu].representedObject =
-                    slot;
-            } else {
-                NSMenuItem *item =
-                    [self addDeviceItem:[NSString stringWithFormat:@"Disconnect “%@”", path.lastPathComponent]
-                                 action:@selector(ejectOpticalMedia:)
-                                 toMenu:menu];
-                item.representedObject = slot;
-                item.image = [NSImage imageWithSystemSymbolName:@"opticaldisc" accessibilityDescription:nil];
-            }
-        }
-        if (images.count < VIMImageSlotCount) {
-            [menu addItem:NSMenuItem.separatorItem];
-            [self addDeviceItem:@"Connect Image…" action:@selector(chooseOpticalMedia:) toMenu:menu];
-        }
-        [menu addItem:NSMenuItem.separatorItem];
-        [self addDeviceItem:@"Configure…" action:@selector(showOpticalSettings:) toMenu:menu];
-        return;
-    }
-    if ([menu.title isEqual:@"Network"]) {
+        [self addItems:[VIMDeviceMenus imagesMenuWithImages:[VIMSession connectedImagesForMachine:self.machine]
+                                                  slotCount:VIMImageSlotCount]
+                toMenu:menu];
+    } else if ([menu.title isEqual:@"Network"]) {
         BOOL connected = self.task.running ? self.state.networkLinkConnected
                                            : (!config[@"NetworkConnected"] || [config[@"NetworkConnected"] boolValue]);
-        NSString *mode = VIMNetworkMode(self.task.running ? self.machine.configuration : config);
-        NSMenuItem *off = [self addDeviceItem:@"Disconnect" action:@selector(changeNetworkConnection:) toMenu:menu];
-        off.tag = 0;
-        off.state = connected ? NSControlStateValueOff : NSControlStateValueOn;
-        [menu addItem:NSMenuItem.separatorItem];
-        NSArray *modes = @[ @"shared", @"host", @"bridged" ],
-                *titles = @[ @"Shared Network (Recommended)", @"Host-Only Network", @"Bridged Network" ];
-        for (NSUInteger i = 0; i < modes.count; i++) {
-            NSMenuItem *item = [self addDeviceItem:titles[i] action:@selector(changeNetworkConnection:) toMenu:menu];
-            item.tag = i + 1;
-            item.state = connected && [mode isEqual:modes[i]] ? NSControlStateValueOn : NSControlStateValueOff;
-        }
-        if (self.task.running && connected && self.guestIPAddresses.count) {
-            [menu addItem:NSMenuItem.separatorItem];
-            [self addDeviceItem:@"IP Addresses:" action:nil toMenu:menu].enabled = NO;
-            for (NSString *address in self.guestIPAddresses)
-                [self addDeviceItem:address action:@selector(copyGuestIPAddress:) toMenu:menu].representedObject =
-                    address;
-        }
-        [menu addItem:NSMenuItem.separatorItem];
-        if ([VIMMachineModel screenSharingAvailableOnConfiguration:config]) {
-            [self addDeviceItem:@"Share Screen" action:@selector(toggleScreenSharing:) toMenu:menu].state =
-                [config[@"ScreenSharingEnabled"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
-            [self addDeviceItem:@"Open Screen Sharing…" action:@selector(openScreenSharing:) toMenu:menu];
-            [menu addItem:NSMenuItem.separatorItem];
-        }
-        [self addDeviceItem:@"Configure…" action:@selector(showNetworkSettings:) toMenu:menu];
-        return;
-    }
-    if ([menu.title isEqual:@"Sound Output"] || [menu.title isEqual:@"Microphone"]) {
+        [self addItems:[VIMDeviceMenus
+                           networkMenuConnected:connected
+                                           mode:VIMNetworkMode(self.task.running ? self.machine.configuration : config)
+                                        running:self.task.running
+                                      addresses:self.guestIPAddresses
+                                  screenSharing:[VIMMachineModel screenSharingAvailableOnConfiguration:config]
+                                screenSharingOn:[config[@"ScreenSharingEnabled"] boolValue]]
+                toMenu:menu];
+    } else if ([menu.title isEqual:@"Sound Output"] || [menu.title isEqual:@"Microphone"]) {
         BOOL input = [menu.title isEqual:@"Microphone"];
-        NSString *selected = VIMAudioSelection(config, input);
-        NSMutableArray *choices = [NSMutableArray arrayWithArray:@[ @{@"Name" : @"Default", @"UID" : @"default"} ]];
-        [choices addObjectsFromArray:(input ? self.audioInputChoices : self.audioOutputChoices) ?: @[]];
-        for (NSDictionary *choice in choices) {
-            NSMenuItem *item = [self addDeviceItem:choice[@"Name"] action:@selector(changeAudioChoice:) toMenu:menu];
-            item.representedObject = @{@"Input" : @(input), @"UID" : choice[@"UID"]};
-            item.state = [selected isEqual:choice[@"UID"]] ? NSControlStateValueOn : NSControlStateValueOff;
-        }
-        [menu addItem:NSMenuItem.separatorItem];
-        NSMenuItem *off = [self addDeviceItem:@"Disconnected" action:@selector(changeAudioChoice:) toMenu:menu];
-        off.representedObject = @{@"Input" : @(input), @"UID" : @"disabled"};
-        off.state = [selected isEqual:@"disabled"] ? NSControlStateValueOn : NSControlStateValueOff;
+        [self addItems:[VIMDeviceMenus soundMenuForInput:input
+                                                selected:VIMAudioSelection(config, input)
+                                                 devices:input ? self.audioInputChoices : self.audioOutputChoices]
+                toMenu:menu];
         [self refreshAudioChoices];
-        return;
+    } else if ([menu.title isEqual:@"Keyboard"]) {
+        [self addItems:VIMDeviceMenus.keyboardMenu toMenu:menu];
     }
-    if ([menu.title isEqual:@"Keyboard"]) {
-        NSArray *shortcuts = @[
-            @[ @"Command–Option–Escape", @[ @"meta_l", @"alt", @"esc" ] ], @[ @"Command–Tab", @[ @"meta_l", @"tab" ] ],
-            @[ @"Command–Space", @[ @"meta_l", @"spc" ] ], @[ @"Control–Command–Q", @[ @"ctrl", @"meta_l", @"q" ] ],
-            @[ @"Control–Up Arrow", @[ @"ctrl", @"up" ] ], @[ @"Control–Down Arrow", @[ @"ctrl", @"down" ] ],
-            @[ @"Control–Left Arrow", @[ @"ctrl", @"left" ] ], @[ @"Control–Right Arrow", @[ @"ctrl", @"right" ] ],
-            @[ @"Shift–Command–3", @[ @"shift", @"meta_l", @"3" ] ],
-            @[ @"Shift–Command–4", @[ @"shift", @"meta_l", @"4" ] ],
-            @[ @"Shift–Command–5", @[ @"shift", @"meta_l", @"5" ] ]
-        ];
-        for (NSArray *shortcut in shortcuts)
-            [self addDeviceItem:shortcut[0] action:@selector(sendMenuShortcut:) toMenu:menu].representedObject =
-                shortcut[1];
+}
+- (void)addItems:(NSArray<VIMDeviceMenuItem *> *)items toMenu:(NSMenu *)menu {
+    for (VIMDeviceMenuItem *entry in items) {
+        if (entry.isSeparator) {
+            [menu addItem:NSMenuItem.separatorItem];
+            continue;
+        }
+        NSMenuItem *item = [self addDeviceItem:entry.title
+                                        action:entry.action ? NSSelectorFromString(entry.action) : nil
+                                        toMenu:menu];
+        item.enabled = entry.isEnabled;
+        item.state = entry.isOn ? NSControlStateValueOn : NSControlStateValueOff;
+        item.tag = entry.tag;
+        item.representedObject = entry.representedObject;
+        item.toolTip = entry.toolTip;
+        if (entry.symbol)
+            item.image = [NSImage imageWithSystemSymbolName:entry.symbol accessibilityDescription:nil];
     }
 }
 - (void)showOpticalSettings:(id)sender {
@@ -3646,35 +3598,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     NSString *toolbarTitle = ToolbarMenuTitle(menu);
     [menu removeAllItems];
     WithToolbarMenuTitle(menu, toolbarTitle);
-    NSArray *devices = VIMHostUSBDevices();
-    NSMutableSet *listed = [NSMutableSet set];
-    for (NSDictionary *device in devices) {
-        NSMenuItem *item = [menu addItemWithTitle:device[@"Name"] action:@selector(toggleUSBDevice:) keyEquivalent:@""];
-        item.target = self;
-        item.representedObject = device;
-        [listed addObject:device[@"Identifier"]];
-        item.state = self.usbAttached[device[@"Identifier"]] ? NSControlStateValueOn : NSControlStateValueOff;
-        item.enabled = !self.usbOperationPending;
-        if ([device[@"Vendor"] length])
-            item.toolTip = device[@"Vendor"];
-    }
-    // A device unplugged from the Mac while connected can still be released.
-    for (NSString *identifier in self.usbAttached)
-        if (![listed containsObject:identifier]) {
-            NSMenuItem *item =
-                [menu addItemWithTitle:[self.usbAttached[identifier] stringByAppendingString:@" (unplugged)"]
-                                action:@selector(toggleUSBDevice:)
-                         keyEquivalent:@""];
-            item.target = self;
-            item.representedObject = @{@"Identifier" : identifier, @"Name" : self.usbAttached[identifier]};
-            item.state = NSControlStateValueOn;
-        }
-    if (!devices.count && !self.usbAttached.count) {
-        NSMenuItem *empty = [menu addItemWithTitle:@"No USB Devices Connected to This Mac"
-                                            action:nil
-                                     keyEquivalent:@""];
-        empty.enabled = NO;
-    }
+    [self addItems:[VIMDeviceMenus usbMenuWithDevices:VIMHostUSBDevices()
+                                             attached:self.usbAttached
+                                              pending:self.usbOperationPending]
+            toMenu:menu];
 }
 - (void)ensureUSBClient {
     if (!self.usbClient) {
