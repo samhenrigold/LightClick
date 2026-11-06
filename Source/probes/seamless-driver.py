@@ -429,6 +429,8 @@ def desktop():
         match = re.search(r'pid=(\d+)', found)
         return int(match.group(1)) if match else 0
 
+    mojave = version_is_mojave()
+    print('before the press', request({'Action': 'seamless-state'}, 60), flush=True)
     check('the machine window shows before the press', bool(machine_window()))
     print(next(iter(rows()), ''), flush=True)
     pressed = time.time()
@@ -448,6 +450,8 @@ def desktop():
         print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
         time.sleep(1)
     check('the machine window hides', not machine_window())
+    if mojave:
+        check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
         subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-{window}.png')])

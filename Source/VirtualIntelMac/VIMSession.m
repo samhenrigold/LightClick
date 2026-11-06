@@ -1998,7 +1998,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     }
     if ([command[@"Action"] isEqual:@"seamless-state"]) {
-        finish(@{@"Active" : @([VIMSeamlessHost isActiveFor:self]), @"WindowVisible" : @(self.window.isVisible)});
+        finish(@{@"Active" : @([VIMSeamlessHost isActiveFor:self]), @"WindowVisible" : @(self.window.isVisible),
+                 @"OwnSurfaces" : @([VIMSeamlessHost hasOwnSurfacesFor:self])});
         return;
     }
     if ([command[@"Action"] isEqual:@"seamless-toggle"]) {

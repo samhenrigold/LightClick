@@ -183,7 +183,7 @@ public final class SeamlessDesktop {
         /usr/bin/grep -q seamless-ws-hook /System/Library/LaunchDaemons/com.apple.WindowServer.plist && exit 3
         pid=$(/usr/bin/pgrep -x WindowServer); [ -n "$pid" ] || exit 3
         boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed 's/.*sec = \\([0-9]*\\).*/\\1/')
-        marker=/var/tmp/seamless-ws-injected
+        marker=/var/tmp/seamless-ws-press
         said=$(/bin/cat $marker 2>/dev/null)
         [ "$said" = "$boot $pid ok" ] && exit 0
         case "$said" in "$boot "*) exit 4;; esac
@@ -192,7 +192,7 @@ public final class SeamlessDesktop {
         /bin/cp /tmp/sg/hook.dylib /usr/lib/seamless-ws-hook.dylib || exit 5
         /bin/chmod 755 /usr/lib/seamless-ws-hook.dylib
         /bin/rm -f /var/tmp/seamless-ws-probe.log
-        /tmp/sg/ws-inject /usr/lib/seamless-ws-hook.dylib || exit 6
+        /tmp/sg/ws-inject /usr/lib/seamless-ws-hook.dylib 2>&1 || exit 6
         for i in 1 2 3 4 5 6 7 8 9 10; do
             /usr/bin/grep -q "gpu: hooked" /var/tmp/seamless-ws-probe.log 2>/dev/null && break
             /bin/sleep 0.5

@@ -229,6 +229,7 @@ final class SeamlessHost: NSObject {
     }
 
     @objc static func isActive(for session: VIMSession) -> Bool { desktops[session.machinePath] != nil }
+    @objc static func hasOwnSurfaces(for session: VIMSession) -> Bool { windowSurfaces[session.machinePath]?.hasSurfaces ?? false }
 
     /// So the button's quick from the first press. Once the guest's agent answers, and not while something's measuring it or
     /// the app's only there to run one guest app.
