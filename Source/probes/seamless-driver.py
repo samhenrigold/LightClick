@@ -443,6 +443,9 @@ def desktop():
     for row in windows:
         print(row[:150], flush=True)
     check('windows appear for each app', len(windows) >= 2)
+    for _ in range(3):
+        print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
+        time.sleep(1)
     check('the machine window hides', machine_window() is None)
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
@@ -465,11 +468,15 @@ def desktop():
     else:
         check('input reaches a window', False)
     time.sleep(6)
+    for _ in range(4):
+        print('bounds', time.time() - pressed, next((row[-40:] for row in rows() if f'id={window} ' in row), ''), flush=True)
+        time.sleep(2)
     moving = subprocess.run([meter, window or '0', '8'], capture_output=True, text=True).stdout
     print('moving', moving, flush=True)
     # Moved on the host, past where the machine's window was: the guest's doesn't follow, it still moves, and a click still lands.
     def place(of):
         row = next((row for row in rows() if f'id={of} ' in row), '')
+        print('at', time.time() - pressed, row[-40:], flush=True)
         found = re.search(r'bounds=(-?[\d.]+),(-?[\d.]+)', row)
         return (float(found.group(1)), float(found.group(2))) if found else None
     if safari and window:

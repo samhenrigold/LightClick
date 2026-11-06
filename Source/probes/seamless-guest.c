@@ -2338,6 +2338,10 @@ static void leap_set_guest_shadows(int off) {
     typedef int (*GetOptions)(int *);
     SetOptions set = guest_symbol("CGSSetDebugOptions", "SLSSetDebugOptions");
     GetOptions get = guest_symbol("CGSGetDebugOptions", "SLSGetDebugOptions");
+    // With no connection to WindowServer yet, Mojave answers that it's an invalid one.
+    int (*connection)(void) = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
+    if (connection)
+        connection();
     int options = 0;
     if (get)
         get(&options);
