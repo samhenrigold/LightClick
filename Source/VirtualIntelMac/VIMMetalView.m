@@ -1,9 +1,9 @@
 #import "VIMMetalView.h"
 #import "VIMDisplayFingerprint.h"
+#import "GuestControl-Swift.h"
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CATransaction.h>
-#import <IOKit/hidsystem/IOLLEvent.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -76,7 +76,7 @@
 @property CFTimeInterval latencyEventAt, latencyHandledAt, latencyReplyAt;
 @property(copy) NSString *latencyKind;
 @property(nonatomic, copy) NSString *diagnosticsDirectory;
-@property NSMutableSet<NSString *> *pressedKeys;
+@property VIMGuestInputEvents *inputEvents;
 @property NSTrackingArea *mouseTracking;
 @property NSCursor *guestCursor;
 @property NSCursor *hiddenCursor;
@@ -93,8 +93,6 @@
 @property id focusObserver;
 @property CFMachPortRef eventTap;
 @property CFRunLoopSourceRef eventTapSource;
-@property CGFloat wheelRemainderX;
-@property CGFloat wheelRemainderY;
 - (void)routeCapturedKey:(NSEvent *)event;
 - (void)cancelPendingSurface;
 - (void)drainPendingSurface;
@@ -124,31 +122,6 @@ static CGEventRef VIMCapturedKey(CGEventTapProxy proxy, CGEventType type, CGEven
     [view routeCapturedKey:[NSEvent eventWithCGEvent:event]];
     return NULL;
 }
-static NSArray<NSArray *> *VIMModifierGroups(void) {
-    static NSArray *groups;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-      groups = @[
-          @[
-              @(NSEventModifierFlagCommand), @"meta_l", @"meta_r", @(NX_DEVICELCMDKEYMASK), @(NX_DEVICERCMDKEYMASK),
-              @55, @54
-          ],
-          @[
-              @(NSEventModifierFlagShift), @"shift", @"shift_r", @(NX_DEVICELSHIFTKEYMASK), @(NX_DEVICERSHIFTKEYMASK),
-              @56, @60
-          ],
-          @[
-              @(NSEventModifierFlagControl), @"ctrl", @"ctrl_r", @(NX_DEVICELCTLKEYMASK), @(NX_DEVICERCTLKEYMASK), @59,
-              @62
-          ],
-          @[
-              @(NSEventModifierFlagOption), @"alt", @"alt_r", @(NX_DEVICELALTKEYMASK), @(NX_DEVICERALTKEYMASK), @58, @61
-          ]
-      ];
-    });
-    return groups;
-}
-
 @implementation VIMMetalView {
     VIMPresentationTiming _presentationTiming;
     uint64_t _distinctGaps[256];
@@ -430,7 +403,10 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
         if (self.measureInputLatency ||
             [NSProcessInfo.processInfo.environment[@"VIM_DISPLAY_DISTINCT"] isEqualToString:@"1"])
             [self setFingerprintMeasurementEnabled:YES];
-        self.pressedKeys = [NSMutableSet set];
+        __weak VIMMetalView *inputTarget = self;
+        self.inputEvents = [[VIMGuestInputEvents alloc] initWithEmit:^(NSArray *events) {
+          [inputTarget emit:events];
+        }];
         self.guestCursorVisible = YES;
         self.wantsLayer = YES;
         self.layer.backgroundColor = NSColor.blackColor.CGColor;
@@ -515,8 +491,7 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
 - (void)releaseInputCapture {
     self.inputCaptured = NO;
     [self releasePressedKeys];
-    self.wheelRemainderX = 0;
-    self.wheelRemainderY = 0;
+    [self.inputEvents resetWheel];
     if (self.eventTap)
         CGEventTapEnable(self.eventTap, false);
     [self refreshNativeCursor];
@@ -554,7 +529,7 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
     BOOL resigned = [super resignFirstResponder];
     if (resigned) {
         self.ownsResponderFocus = NO;
-        if (self.inputCaptured || self.pressedKeys.count)
+        if (self.inputCaptured || self.inputEvents.pressedKeys.count)
             [self releaseInputCapture];
         else if (self.softwareCursor)
             [self refreshNativeCursor];
@@ -785,160 +760,6 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
     if (self.inputHandler)
         self.inputHandler(events);
 }
-- (void)sendKey:(NSString *)key down:(BOOL)down {
-    if ([self.pressedKeys containsObject:key] == down)
-        return;
-    [self emit:@[ @{@"type" : @"key", @"data" : @{@"down" : @(down), @"key" : @{@"type" : @"qcode", @"data" : key}}} ]];
-    if (down)
-        [self.pressedKeys addObject:key];
-    else
-        [self.pressedKeys removeObject:key];
-}
-- (NSString *)keyName:(unsigned short)code {
-    static NSDictionary *keys;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-      keys = @{
-          @0 : @"a",
-          @1 : @"s",
-          @2 : @"d",
-          @3 : @"f",
-          @4 : @"h",
-          @5 : @"g",
-          @6 : @"z",
-          @7 : @"x",
-          @8 : @"c",
-          @9 : @"v",
-          @10 : @"less",
-          @11 : @"b",
-          @12 : @"q",
-          @13 : @"w",
-          @14 : @"e",
-          @15 : @"r",
-          @16 : @"y",
-          @17 : @"t",
-          @18 : @"1",
-          @19 : @"2",
-          @20 : @"3",
-          @21 : @"4",
-          @22 : @"6",
-          @23 : @"5",
-          @24 : @"equal",
-          @25 : @"9",
-          @26 : @"7",
-          @27 : @"minus",
-          @28 : @"8",
-          @29 : @"0",
-          @30 : @"bracket_right",
-          @31 : @"o",
-          @32 : @"u",
-          @33 : @"bracket_left",
-          @34 : @"i",
-          @35 : @"p",
-          @36 : @"ret",
-          @37 : @"l",
-          @38 : @"j",
-          @39 : @"apostrophe",
-          @40 : @"k",
-          @41 : @"semicolon",
-          @42 : @"backslash",
-          @43 : @"comma",
-          @44 : @"slash",
-          @45 : @"n",
-          @46 : @"m",
-          @47 : @"dot",
-          @48 : @"tab",
-          @49 : @"spc",
-          @50 : @"grave_accent",
-          @51 : @"backspace",
-          @53 : @"esc",
-          @54 : @"meta_r",
-          @55 : @"meta_l",
-          @56 : @"shift",
-          @58 : @"alt",
-          @59 : @"ctrl",
-          @60 : @"shift_r",
-          @61 : @"alt_r",
-          @62 : @"ctrl_r",
-          @64 : @"f17",
-          @65 : @"kp_decimal",
-          @67 : @"kp_multiply",
-          @69 : @"kp_add",
-          @71 : @"num_lock",
-          @75 : @"kp_divide",
-          @76 : @"kp_enter",
-          @78 : @"kp_subtract",
-          @79 : @"f18",
-          @80 : @"f19",
-          @81 : @"kp_equals",
-          @82 : @"kp_0",
-          @83 : @"kp_1",
-          @84 : @"kp_2",
-          @85 : @"kp_3",
-          @86 : @"kp_4",
-          @87 : @"kp_5",
-          @88 : @"kp_6",
-          @89 : @"kp_7",
-          @90 : @"f20",
-          @91 : @"kp_8",
-          @92 : @"kp_9",
-          @93 : @"yen",
-          @94 : @"ro",
-          @95 : @"kp_comma",
-          @96 : @"f5",
-          @97 : @"f6",
-          @98 : @"f7",
-          @99 : @"f3",
-          @100 : @"f8",
-          @101 : @"f9",
-          @102 : @"lang2",
-          @103 : @"f11",
-          @104 : @"lang1",
-          @105 : @"f13",
-          @106 : @"f16",
-          @107 : @"f14",
-          @109 : @"f10",
-          @111 : @"f12",
-          @113 : @"f15",
-          @114 : @"insert",
-          @115 : @"home",
-          @116 : @"pgup",
-          @117 : @"delete",
-          @118 : @"f4",
-          @119 : @"end",
-          @120 : @"f2",
-          @121 : @"pgdn",
-          @122 : @"f1",
-          @123 : @"left",
-          @124 : @"right",
-          @125 : @"down",
-          @126 : @"up"
-      };
-    });
-    return keys[@(code)];
-}
-- (void)synchronizeModifiers:(NSEvent *)event {
-    // A key equivalent or focus transition can arrive without flagsChanged.
-    // Reconcile aggregate state without discarding a known right-hand modifier.
-    for (NSArray *group in VIMModifierGroups()) {
-        BOOL down = (event.modifierFlags & [group[0] unsignedIntegerValue]) != 0;
-        BOOL left = [self.pressedKeys containsObject:group[1]], right = [self.pressedKeys containsObject:group[2]];
-        NSUInteger leftMask = [group[3] unsignedIntegerValue], rightMask = [group[4] unsignedIntegerValue];
-        if (down && (event.modifierFlags & (leftMask | rightMask))) {
-            [self sendKey:group[1] down:(event.modifierFlags & leftMask) != 0];
-            [self sendKey:group[2] down:(event.modifierFlags & rightMask) != 0];
-            continue;
-        }
-        if (down && !left && !right)
-            [self sendKey:group[1] down:YES];
-        if (!down) {
-            if (left)
-                [self sendKey:group[1] down:NO];
-            if (right)
-                [self sendKey:group[2] down:NO];
-        }
-    }
-}
 - (void)keyDown:(NSEvent *)event {
     // Typing into a newly focused guest also counts as entering it. After the
     // release shortcut the view no longer owns first responder, so typing is
@@ -951,29 +772,17 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
     }
     if (!event.isARepeat)
         [self armInputLatency:event kind:@"key"];
-    [self synchronizeModifiers:event];
-    NSString *key = [self keyName:event.keyCode];
-    if (key && !event.isARepeat)
-        [self sendKey:key down:YES];
+    [self.inputEvents keyDown:event.keyCode repeating:event.isARepeat modifiers:event.modifierFlags];
 }
 - (void)keyUp:(NSEvent *)event {
     if (!self.inputCaptured)
         return;
-    [self synchronizeModifiers:event];
-    NSString *key = [self keyName:event.keyCode];
-    if (key)
-        [self sendKey:key down:NO];
+    [self.inputEvents keyUp:event.keyCode modifiers:event.modifierFlags];
 }
 - (BOOL)performKeyEquivalent:(NSEvent *)event {
     if (self.inputCaptured && self.window.firstResponder == self &&
         (event.modifierFlags & NSEventModifierFlagCommand)) {
-        // AppKit does not reliably deliver keyUp for consumed command equivalents.
-        [self synchronizeModifiers:event];
-        NSString *key = [self keyName:event.keyCode];
-        if (key) {
-            [self sendKey:key down:YES];
-            [self sendKey:key down:NO];
-        }
+        [self.inputEvents keyEquivalent:event.keyCode modifiers:event.modifierFlags];
         return YES;
     }
     return [super performKeyEquivalent:event];
@@ -981,50 +790,10 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
 - (void)flagsChanged:(NSEvent *)event {
     if (!self.inputCaptured)
         return;
-    BOOL hadCommand = [self.pressedKeys containsObject:@"meta_l"] || [self.pressedKeys containsObject:@"meta_r"];
-    if (event.keyCode == 57) {
-        [self sendKey:@"caps_lock" down:YES];
-        [self sendKey:@"caps_lock" down:NO];
-        return;
-    }
-    // Synthetic/focus modifier notifications can have keyCode 0. It is not an
-    // A key transition: only real modifier keycodes may be toggled here.
-    for (NSArray *group in VIMModifierGroups()) {
-        if (event.keyCode != [group[5] unsignedShortValue] && event.keyCode != [group[6] unsignedShortValue])
-            continue;
-        // Hardware events carry per-side bits. Synthetic aggregate-only events
-        // retain the physical-keycode fallback, but a cleared aggregate is
-        // always an UP, never a toggle which can manufacture a held modifier.
-        if (!(event.modifierFlags & ([group[3] unsignedIntegerValue] | [group[4] unsignedIntegerValue]))) {
-            NSString *key = [self keyName:event.keyCode];
-            [self sendKey:key
-                     down:(event.modifierFlags & [group[0] unsignedIntegerValue]) &&
-                          ![self.pressedKeys containsObject:key]];
-        }
-        break;
-    }
-    [self synchronizeModifiers:event];
-    if (hadCommand && !(event.modifierFlags & NSEventModifierFlagCommand)) {
-        // macOS can consume a command shortcut's key-up. Do not leave its
-        // ordinary key held when the final Command modifier is released.
-        NSSet *modifiers =
-            [NSSet setWithArray:@[ @"meta_l", @"meta_r", @"shift", @"shift_r", @"ctrl", @"ctrl_r", @"alt", @"alt_r" ]];
-        for (NSString *key in self.pressedKeys.allObjects)
-            if (![modifiers containsObject:key])
-                [self sendKey:key down:NO];
-    }
+    [self.inputEvents flagsChanged:event.keyCode modifiers:event.modifierFlags];
 }
 - (void)releasePressedKeys {
-    NSMutableArray *events = [NSMutableArray array];
-    for (NSString *key in self.pressedKeys)
-        [events
-            addObject:@{@"type" : @"key", @"data" : @{@"down" : @NO, @"key" : @{@"type" : @"qcode", @"data" : key}}}];
-    [self.pressedKeys removeAllObjects];
-    for (NSString *button in @[ @"left", @"right", @"middle" ])
-        [events addObject:@{@"type" : @"btn", @"data" : @{@"button" : button, @"down" : @NO}}];
-    // One ordered request, rather than a separate round trip for every held
-    // key/button when a menu opens or capture/focus is released.
-    [self emit:events];
+    [self.inputEvents releaseAll];
 }
 - (void)mouseMoved:(NSEvent *)event {
     if (!self.window.isKeyWindow)
@@ -1034,12 +803,8 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
     if (frame.size.width <= 0 || frame.size.height <= 0)
         return;
     [self armInputLatency:event kind:@"move"];
-    int x = (int)(MAX(0, MIN(1, (p.x - frame.origin.x) / frame.size.width)) * 32767);
-    int y = (int)(MAX(0, MIN(1, 1 - (p.y - frame.origin.y) / frame.size.height)) * 32767);
-    [self emit:@[
-        @{@"type" : @"abs", @"data" : @{@"axis" : @"x", @"value" : @(x)}},
-        @{@"type" : @"abs", @"data" : @{@"axis" : @"y", @"value" : @(y)}}
-    ]];
+    [self.inputEvents pointerAtX:(p.x - frame.origin.x) / frame.size.width
+                               y:1 - (p.y - frame.origin.y) / frame.size.height];
 }
 - (void)button:(NSString *)button event:(NSEvent *)event down:(BOOL)down {
     [self.window makeFirstResponder:self];
@@ -1047,7 +812,7 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
         [self captureInput];
     [self mouseMoved:event];
     [self armInputLatency:event kind:@"button"];
-    [self emit:@[ @{@"type" : @"btn", @"data" : @{@"button" : button, @"down" : @(down)}} ]];
+    [self.inputEvents button:button down:down];
 }
 - (void)mouseDown:(NSEvent *)e {
     [self button:@"left" event:e down:YES];
@@ -1078,46 +843,20 @@ static NSArray<NSArray *> *VIMModifierGroups(void) {
 }
 - (void)scrollWheel:(NSEvent *)e {
     if (e.phase == NSEventPhaseCancelled) {
-        self.wheelRemainderX = 0;
-        self.wheelRemainderY = 0;
+        [self.inputEvents resetWheel];
         return;
     }
     // Precise scrollingDelta values are points, not wheel detents. AppKit's
     // legacy delta representation supplies its device-normalized wheel scale
-    // without assuming a fixed points-per-line setting. Conserve fractions:
-    // rounding every tiny Magic Mouse event UP amplifies motion and jitter.
+    // without assuming a fixed points-per-line setting.
     CGFloat x = e.hasPreciseScrollingDeltas ? e.deltaX : e.scrollingDeltaX;
     CGFloat y = e.hasPreciseScrollingDeltas ? e.deltaY : e.scrollingDeltaY;
     if (!isfinite(x) || !isfinite(y))
         return;
-    if (e.phase == NSEventPhaseBegan) {
-        self.wheelRemainderX = 0;
-        self.wheelRemainderY = 0;
-    }
-    // Send physical direction exactly once; macOS in the guest applies its
-    // own natural-scrolling preference. Include both axes for diagonal motion.
+    if (e.phase == NSEventPhaseBegan)
+        [self.inputEvents resetWheel];
     CGFloat direction = e.isDirectionInvertedFromDevice ? -1 : 1;
-    CGFloat totals[2] = {self.wheelRemainderX + x * direction, self.wheelRemainderY + y * direction};
-    NSMutableArray *events = [NSMutableArray array];
-    for (NSUInteger axis = 0; axis < 2; axis++) {
-        // Bound anomalous/accelerated inputs to one <=64-event request. Don't
-        // retain a large backlog that would scroll after the gesture ends.
-        CGFloat total = MAX(-16, MIN(16, totals[axis]));
-        NSUInteger count = (NSUInteger)floor(fabs(total) + 1e-9);
-        NSString *button =
-            axis == 0 ? (total > 0 ? @"wheel-left" : @"wheel-right") : (total > 0 ? @"wheel-up" : @"wheel-down");
-        for (NSUInteger i = 0; i < count; i++) {
-            [events addObject:@{@"type" : @"btn", @"data" : @{@"button" : button, @"down" : @YES}}];
-            [events addObject:@{@"type" : @"btn", @"data" : @{@"button" : button, @"down" : @NO}}];
-        }
-        totals[axis] = total - copysign((CGFloat)count, total);
-        if (fabs(totals[axis]) < 1e-9)
-            totals[axis] = 0;
-    }
-    self.wheelRemainderX = totals[0];
-    self.wheelRemainderY = totals[1];
-    if (events.count)
-        [self emit:events];
+    [self.inputEvents scrollX:x * direction y:y * direction];
 }
 - (BOOL)installFrameDescriptor:(int)fd length:(NSUInteger)length error:(NSError **)error {
     NSAssert(NSThread.isMainThread, @"Metal view state is main-thread owned");
