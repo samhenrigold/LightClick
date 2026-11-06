@@ -574,7 +574,8 @@ static void link_block(u32 idx) {
     hb->on_frame = hb->on_page = hb->on_view = true;
 }
 
-static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
+static TrResult do_translate(int key, int view, u64 cr3, int cpl, u64 rip, bool single) {
+    (void)view;
     u64 t0 = mach_absolute_time();
     TrResult res = {0};
     res.frames[0] = res.frames[1] = ~0ULL;
@@ -586,7 +587,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
         flush_everything();
         res.flushed = true;
     }
-    cur_part = KEY_PART(block_key(view, cr3, cpl, rip));
+    cur_part = KEY_PART(key);
     tr_cc = cc_cursor[cur_part];
     int count = 0;
     u64 pc = rip, page = rip & ~0xfffULL, frame;
@@ -595,7 +596,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
             res.unprotected = frame + 1;
             return res;
         }
-        if (reuse_dead_block((u32)block_key(view, cr3, cpl, rip), cpl, rip, &res)) {
+        if (reuse_dead_block((u32)key, cpl, rip, &res)) {
             stats.translate_ns += mach_absolute_time() - t0;
             return res;
         }
@@ -768,7 +769,7 @@ static TrResult do_translate(int view, u64 cr3, int cpl, u64 rip, bool single) {
     HostBlock *hb = &hblocks[idx];
     memset(hb, 0, sizeof *hb);
     hb->rip = rip;
-    hb->view = (u32)block_key(view, cr3, cpl, rip);
+    hb->view = (u32)key; // one reading: the tables can change under this, and which part of the cache it's in goes by this
     hb->entry_word = (u32)(start - cc_base);
     hb->frame[0] = res.frames[0];
     hb->frame[1] = res.frames[1];
@@ -1157,7 +1158,7 @@ TrResult tr_translate(int view, uint64_t cr3, int cpl, bool compat, uint64_t rip
             return r;
         }
     }
-    TrResult r = do_translate(view, cr3, cpl, rip, single);
+    TrResult r = do_translate(key, view, cr3, cpl, rip, single);
     if ((key & KEY_DOMAIN) && cpl == 3 && !r.unprotected)
         stats.shared_blocks++;
     r.key = key;
@@ -1215,6 +1216,8 @@ void tr_link(uint64_t site, int kind, uint64_t arm, int key) {
     if (!from || (int)from->view != key || site == arm || (kind != SVC_CALL && (was & 0xFFE0001Fu) != 0xD4000001u)) // a dead block's entry may have come back: that site runs on as it is
         return;
     i64 d = ((i64)arm - (i64)site) >> 2;
+    if (d < -(1 << 25) || d >= (1 << 25)) // the parts of the cache are out of reach of each other
+        return;
     if (!__atomic_compare_exchange_n(s, &was, (kind == SVC_CALL ? 0x94000000u : 0x14000000u) | ((u32)d & 0x3ffffff), false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
         return;
     sys_icache_invalidate(s, 4);

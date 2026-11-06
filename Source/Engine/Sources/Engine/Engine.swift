@@ -251,30 +251,36 @@ public final class Engine {
         let privL2 = table()
         slot(bootRoot, Int((kPrivVA >> 39) & 0x1FF)).pointee = ipa(privL1) | valid
         slot(privL1, Int((kPrivVA >> 30) & 0x1FF)).pointee = ipa(privL2) | valid
+        let privL2High = table()
+        slot(privL1, Int((kPrivVA >> 30) & 0x1FF) + 1).pointee = ipa(privL2High) | valid
+        func block2M(_ off: UInt64) -> UnsafeMutablePointer<UInt64> { slot(off >> 30 == 0 ? privL2 : privL2High, Int((off >> 21) & 0x1FF)) }
         var off: UInt64 = 0
         while off < kPrivSize {
             var attrs: UInt64
             switch off {
             case kOffMonText..<kOffMonData: attrs = apEL1RO | uxn  // monitor text: EL1 execute
             case kOffStubs..<(kOffCC + kCCSize), kOffStubs2..<(kOffCC2 + kCCSize): attrs = apEL1RW | pxn  // stubs and code: EL0 execute-only
-            case kOffCtx..<kOffRStacks: attrs = apRW | uxn | pxn
-            case kOffHash..<kOffBlocks: attrs = apRO | uxn | pxn
+            case kOffCtx..<kOffCtxEnd: attrs = apRW | uxn | pxn
+            case kOffHash..<kOffRStacks: attrs = apRO | uxn | pxn
             default: attrs = apEL1RW | uxn | pxn
             }
             if off == kOffStubs || off == kOffStubs2 { attrs = apEL1RO | pxn }
-            slot(privL2, Int(off >> 21)).pointee = ipa(off) | block | attrs
+            block2M(off).pointee = ipa(off) | block | attrs
             off += 2 << 20
         }
         // Return stacks grow down: each slot is an unmapped guard, then the writable part.
         for cpu in 0..<UInt32(MAX_VCPUS) {
             let stacks = engine_off_rstacks(cpu)
-            let rstackL3 = table()
-            slot(privL2, Int((stacks >> 21) & 0x1FF)).pointee = ipa(rstackL3) | valid
+            var rstackL3: UInt64 = 0
             var page: UInt64 = 0
-            while page < 2 << 20 {
+            while page < UInt64(MAX_VIEWS) * kRStackSlot {
+                if page % (2 << 20) == 0 {
+                    rstackL3 = table()
+                    block2M(stacks + page).pointee = ipa(rstackL3) | valid
+                }
                 let inSlot = page % kRStackSlot
                 if inSlot >= kRStackSlot - kRStackBytes {
-                    slot(rstackL3, Int(page >> 12)).pointee =
+                    slot(rstackL3, Int((page >> 12) & 0x1FF)).pointee =
                         ipa(stacks + page) | valid | af | sh | apRW | uxn | pxn
                 }
                 page += 4096
