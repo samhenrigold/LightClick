@@ -13,6 +13,12 @@ Labels: **[measured]** by a probe here. **[read]** seen in code or a binary. **[
 
 ## Try it on your Mac
 
+Open any machine, wait for its desktop, then press **Seamless** in its toolbar, or **Actions > Seamless**. The window goes, and each guest app with a window becomes a host app of its own, with a Dock tile and a Cmd-Tab entry, in the same place on the screen, in the same running machine. Nothing's installed and nothing restarts. To come back: **Show in Light Click Window** in any of those apps' own menu or Dock menu, Quit from one's Dock menu, or a click on Light Click's Dock tile. Quitting an app from its menu or with Cmd-Q quits it in the guest; when the last window's gone, the machine's window returns. So does it if a proxy dies, or the guest's side ends, or the machine stops. The window stays until something's there to take its place, and if nothing is, it says so.
+
+`scripts/seamless-desktop-try <app> <machine>` runs that in a clone and says PASS or FAIL for each step, reading windows by ID. Its log is `$TMPDIR/lc-seamless-<first 8 of the Identifier>.log`, with one more per app. It needs the machine's networking on. Windows keep their guest size, so a machine window showing the guest scaled would put them slightly out of place; that hasn't been tried.
+
+### A saved Dock app
+
 A normal build has this now. **Use a clone: making a Dock app changes the machine.** It adds a library to its WindowServer, in `/System/Library/LaunchDaemons/com.apple.WindowServer.plist`. Mavericks is what's been tested in full, at 2x and 1x, and Mojave at 2x with no drag in. Only 10.9 gets the hook. Nothing yet has been seen on a display.
 
 1. Build, from `Source`:

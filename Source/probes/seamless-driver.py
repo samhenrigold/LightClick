@@ -485,7 +485,7 @@ def desktop():
     while time.time() - pressed < 120 and not machine_window():
         time.sleep(0.1)
     # Generated apps shouldn't stay known to the Mac after a clone's gone.
-    for bundle in (source/'Build/bench'/tag).glob('**/Seamless Apps/*/*.app'):
+    for bundle in (source/'Build/bench'/tag).glob('**/Seamless Apps/*/*/*.app'):
         subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', str(bundle)])
     print('PASS seamless button' if all(checks) and machine_window() else 'FAIL seamless button', flush=True)
 

@@ -240,7 +240,13 @@ public final class SeamlessDesktop {
             bundle = saved
         } else {
             socketPath = Self.socketPath(for: app, machine: configuration.machine.identifier)
-            let folder = configuration.bundles
+            // A proxy from another build mightn't speak this one's protocol.
+            let built = (try? configuration.proxyExecutable.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate?.timeIntervalSince1970 ?? 0
+            let folder = configuration.bundles.appending(path: String(Int(built)))
+            if !FileManager.default.fileExists(atPath: folder.path) {
+                try? FileManager.default.removeItem(at: configuration.bundles)
+            }
             let existing = folder.appending(path: proxy.bundleName)
             if FileManager.default.fileExists(atPath: existing.appending(path: "Contents/Info.plist").path) {
                 bundle = existing

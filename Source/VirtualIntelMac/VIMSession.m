@@ -231,6 +231,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property NSTask *task;
 @property NSFileHandle *log;
 @property VIMMetalView *displayView;
+@property BOOL agentHeldExclusively;
 @property VIMDisplayConnection *displayConnection;
 @property VIMQMPConnection *control;
 @property VIMGuestAgent *guestAgent;
@@ -1769,17 +1770,19 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (void)serviceDiagnosticRequest {
     // Explicit development opt-in. Reuse the app-owned serial connection;
     // a second QGA client would steal replies and interrupt guest setup.
-    if (!self.diagnostics || self.state.diagnosticPending)
+    // Something holding the agent for as long as it likes, such as Seamless, doesn't stop what doesn't need it.
+    if (!self.diagnostics || (self.state.diagnosticPending && !self.agentHeldExclusively))
         return;
     NSDictionary *command =
         [self.diagnostics takeRequestWhileAgentBusy:self.state.guestPending || self.preparing ||
-                                                    self.state.bootPolicyPending || self.state.clipboardPending];
+                                                    self.state.bootPolicyPending || self.state.clipboardPending ||
+                                                    self.agentHeldExclusively];
     if (!command)
         return;
     self.state.diagnosticPending = YES;
     void (^finish)(NSDictionary *) = ^(NSDictionary *result) {
       [self.diagnostics writeResult:result];
-      self.state.diagnosticPending = NO;
+      self.state.diagnosticPending = self.agentHeldExclusively;
       // Resume provisioning deferred while this command owned the agent.
       // In particular, an explicit clipboard-on request must not wait for
       // the next minute-long status refresh after releasing that ownership.
@@ -4101,10 +4104,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         self.state.bootPolicyPending || self.state.clipboardPending)
         return nil;
     self.state.diagnosticPending = YES;
+    self.agentHeldExclusively = YES;
     return self.guestAgent;
 }
 - (void)endExclusiveGuestAgentUse {
     self.state.diagnosticPending = NO;
+    self.agentHeldExclusively = NO;
     [self updateClipboardForBoot:self.state.usernameBoot];
 }
 - (void)setFrameObserver:(void (^)(IOSurfaceRef, const void *, NSUInteger, NSUInteger, NSUInteger))observer {
