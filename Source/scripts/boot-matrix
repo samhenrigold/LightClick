@@ -364,12 +364,12 @@ class Boot:
                     report = plistlib.load(file).get('Report', {})
             except (OSError, plistlib.InvalidFileException):
                 report = {}
-            if report.get('DesktopRunning') is not True and self.channel.is_dir() and time.monotonic() >= next_probe:
+            if not report.get('DesktopRunning') and self.channel.is_dir() and time.monotonic() >= next_probe:
                 result = self.request({'Action': 'status-probe'}, deadline-time.monotonic()) or {}
                 report = result.get('Report') or {}
                 last = result.get('Error') or (f'DesktopRunning is {report["DesktopRunning"]}' if report else last)
                 next_probe = time.monotonic()+10
-            if report.get('DesktopRunning') is True:
+            if report.get('DesktopRunning'):
                 self.desktop_seconds = int(time.monotonic()-self.started)
                 return True
             time.sleep(1)
