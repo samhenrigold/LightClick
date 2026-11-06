@@ -1,0 +1,21 @@
+#!/bin/zsh
+# Builds seamless-integration-guest for a 10.9 guest, and the host proxy and probe, into OUTPUT_DIRECTORY.
+set -euo pipefail
+source_root=${0:A:h:h}
+output=${1:?Usage: build-seamless-integration OUTPUT_DIRECTORY}
+mkdir -p "$output"
+# AppKit and HIServices only, and CoreDrag, which both guest generations export. Checked against their images by
+# scripts/test-seamless-integration.
+# Compiled and linked apart: the driver would add libarclite at link, which the SDK no longer has and 10.9 doesn't need.
+xcrun clang -c -arch x86_64 -mmacosx-version-min=10.9 -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter \
+  -Wno-deprecated-declarations "$source_root/probes/seamless-integration-guest.m" -o "$output/seamless-integration-guest.o"
+xcrun clang -arch x86_64 -mmacosx-version-min=10.9 -framework AppKit -framework Carbon -framework ApplicationServices \
+  -lobjc "$output/seamless-integration-guest.o" -o "$output/seamless-integration-guest"
+rm "$output/seamless-integration-guest.o"
+codesign --force --sign - "$output/seamless-integration-guest"
+swift build -c release --package-path "$source_root/Packages/SeamlessIntegration" \
+  --scratch-path "$source_root/Build/seamless-integration-swift" --product SeamlessProxy >&2
+swift build -c release --package-path "$source_root/Packages/SeamlessIntegration" \
+  --scratch-path "$source_root/Build/seamless-integration-swift" --product seamless-integration-probe >&2
+cp "$source_root/Build/seamless-integration-swift/release/SeamlessProxy" "$output/SeamlessProxy"
+cp "$source_root/Build/seamless-integration-swift/release/seamless-integration-probe" "$output/seamless-integration-probe"

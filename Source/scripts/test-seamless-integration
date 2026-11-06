@@ -1,0 +1,20 @@
+#!/bin/zsh
+# Tests seamless integration with nothing booted: unit tests, the NFS server's escapes, then the whole host side against a
+# fake session, driven by synthetic events. It moves the pointer and shows the app switcher and Mission Control for about
+# a minute, so leave the Mac alone; it cancels a drag rather than drop on anything it didn't expect.
+#
+#     scripts/test-seamless-integration [--guest-root MOUNT ...]    A read-only mount of a guest disk gives real icons,
+#                                                                   and checks the guest tool's imports against it.
+set -euo pipefail
+source_root=${0:A:h:h}
+work=$source_root/Build/seamless
+swift test --package-path "$source_root/Packages/SeamlessIntegration" --scratch-path "$source_root/Build/seamless-integration-swift" 2>&1 | tail -1
+python3 "$source_root/probes/nfs3-server.py" --self-test 2>/dev/null
+"$source_root/scripts/build-seamless-integration" "$work" 2>/dev/null
+for ((i = 1; i < $#; i++)); do
+    if [[ ${@[$i]} == --guest-root ]]; then
+        python3 "$source_root/probes/check-guest-imports.py" "$work/seamless-integration-guest" "${@[$((i + 1))]}"
+    fi
+done
+exec "$work/seamless-integration-probe" --proxy "$work/SeamlessProxy" --helper "$work/seamless-integration-guest" \
+    --out "$work/integration-host" "$@"
