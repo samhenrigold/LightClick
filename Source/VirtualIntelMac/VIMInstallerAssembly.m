@@ -1,6 +1,5 @@
 #import "VIMInstallerAssembly.h"
 #import "VIMGuestFiles.h"
-#import "VIMGuestProfile.h"
 #import <signal.h>
 #import <fcntl.h>
 #import <unistd.h>
@@ -22,16 +21,6 @@ static BOOL AssemblyError(NSError **error, VIMAssemblyFailure failure) {
         *error = [VIMAssemblyFailureError errorForFailure:failure];
     return NO;
 }
-static BOOL NativeAutomatedRecovery(NSString *guest) {
-    return [VIMGuestMediaPlan planForGuest:guest].usesNativeInstaller;
-}
-static BOOL SerialRecovery(NSString *guest) { return [VIMGuestMediaPlan planForGuest:guest].usesSerialAgent; }
-static NSInteger OpenGLBootstrapMediaVersion(NSString *guest) {
-    // Earlier Leopard images can fall through to the manual language picker
-    // before Disk Arbitration publishes the already attached setup medium.
-    // Sierra's updated helpers recover a lost native first-login handoff.
-    return [@[ @"leopard", @"sierra" ] containsObject:guest] ? 5 : 4;
-}
 static BOOL RegularFile(NSURL *URL) {
     NSNumber *regular = nil;
     return URL.isFileURL && [URL getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil] && regular.boolValue;
@@ -40,53 +29,6 @@ static BOOL NonemptyFile(NSURL *URL) {
     NSNumber *size = nil;
     return RegularFile(URL) && [URL getResourceValue:&size forKey:NSURLFileSizeKey error:nil] &&
            size.unsignedLongLongValue > 0;
-}
-static BOOL FileHasApplePartitionMap(int fd) {
-    // Old BaseSystem images use a driver-descriptor block followed by APM.
-    // Its block size can be 2048, not the 512-byte sectors used by GPT.
-    uint8_t header[4], partition[2];
-    BOOL found = pread(fd, header, sizeof(header), 0) == sizeof(header) && header[0] == 'E' && header[1] == 'R';
-    unsigned block = found ? ((unsigned)header[2] << 8) | header[3] : 0;
-    found = found && block >= 512 && block <= 65536 && !(block & (block - 1)) &&
-            pread(fd, partition, sizeof(partition), block) == sizeof(partition) && partition[0] == 'P' &&
-            partition[1] == 'M';
-    return found;
-}
-static BOOL RawApplePartitionMap(NSURL *image) {
-    int fd = open(image.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0)
-        return NO;
-    BOOL found = FileHasApplePartitionMap(fd);
-    close(fd);
-    return found;
-}
-// Only recognize the disk containers we publish. A matching receipt/length
-// cannot detect a damaged primary header (observed on generated Catalina
-// media). This reads a few boot sectors, not a whole-image hash or a seal on
-// replacement user installers; those still follow normal installer detection.
-static BOOL PreparedImageHasBootBlocks(NSURL *URL) {
-    int fd = open(URL.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0)
-        return NO;
-    unsigned char blocks[1536] = {0};
-    ssize_t count;
-    do {
-        count = pread(fd, blocks, sizeof(blocks), 0);
-    } while (count < 0 && errno == EINTR);
-    BOOL recognizable =
-        count == sizeof(blocks) &&
-        (!memcmp(blocks + 512, "EFI PART", 8) || (!memcmp(blocks, "ER", 2) && FileHasApplePartitionMap(fd)) ||
-         !memcmp(blocks + 1024, "H+", 2) || !memcmp(blocks + 1024, "HX", 2) || !memcmp(blocks + 1024, "BD", 2));
-    if (!recognizable) {
-        unsigned char descriptor[6] = {0};
-        do {
-            count = pread(fd, descriptor, sizeof(descriptor), 32768);
-        } while (count < 0 && errno == EINTR);
-        recognizable =
-            count == sizeof(descriptor) && (!memcmp(descriptor + 1, "CD001", 5) || !memcmp(descriptor + 1, "BEA01", 5));
-    }
-    close(fd);
-    return recognizable;
 }
 // Only for newly generated output, never an original installer or VM disk.
 // A successful image-tool exit and mounted readback can both see cached data.
@@ -123,27 +65,6 @@ static NSNumber *FlushGeneratedImage(NSURL *URL, NSError **error) {
     }
     return @(after.st_size);
 }
-static BOOL VerifyOpenGLSupport(NSURL *directory, NSString *guest, NSError **error) {
-    NSArray *files = [NSFileManager.defaultManager subpathsAtPath:directory.path];
-    for (NSString *name in @[
-             @"opengl-guest-agent", @"opengl-install-bootstrap", @"opengl-create-account", @"guest-ssh",
-             @"guest-host-connection"
-         ])
-        if (!NonemptyFile([directory URLByAppendingPathComponent:name]))
-            return AssemblyError(error, VIMAssemblyFailureGuestSupportMissing);
-    for (NSString *name in files) {
-        NSURL *file = [directory URLByAppendingPathComponent:name];
-        struct stat st;
-        if (!lstat(file.fileSystemRepresentation, &st) && S_ISDIR(st.st_mode))
-            continue;
-        if (![file.URLByResolvingSymlinksInPath.path
-                hasPrefix:[directory.URLByResolvingSymlinksInPath.path stringByAppendingString:@"/"]] ||
-            lstat(file.fileSystemRepresentation, &st) || !S_ISREG(st.st_mode) || st.st_size < 0 ||
-            st.st_size > 64 * 1024 * 1024)
-            return AssemblyError(error, VIMAssemblyFailureGuestSupportInvalid);
-    }
-    return YES;
-}
 // WRITES a file on the generated working copy, never a source installer. Keeps
 // its inode and catalog owner, and adds write permission only while saving.
 static BOOL RewriteGeneratedFile(NSURL *file, NSData *bytes, NSError **error) {
@@ -165,63 +86,21 @@ static BOOL RewriteGeneratedFile(NSURL *file, NSData *bytes, NSError **error) {
     }
     return saved;
 }
-static BOOL InstallerPackageImage(NSURL *URL) {
-    int fd = open(URL.fileSystemRepresentation, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0)
-        return NO;
-    char magic[4];
-    ssize_t count = pread(fd, magic, sizeof(magic), 0);
-    close(fd);
-    return count == sizeof(magic) && !memcmp(magic, "xar!", sizeof(magic));
-}
-static NSDictionary<NSString *, NSString *> *InstallerIdentifiers(void) {
-    // These identify the OS being installed, unlike CFBundleShortVersionString
-    // (the InstallAssistant app version). Big Sur includes "macOS" in its ID.
-    return @{
-        @"lion" : @"com.apple.InstallAssistant.Lion",
-        @"mountainlion" : @"com.apple.InstallAssistant.MountainLion",
-        @"mavericks" : @"com.apple.InstallAssistant.Mavericks",
-        @"yosemite" : @"com.apple.InstallAssistant.Yosemite",
-        @"elcapitan" : @"com.apple.InstallAssistant.ElCapitan",
-        @"sierra" : @"com.apple.InstallAssistant.Sierra",
-        @"highsierra" : @"com.apple.InstallAssistant.HighSierra",
-        @"mojave" : @"com.apple.InstallAssistant.Mojave",
-        @"catalina" : @"com.apple.InstallAssistant.Catalina",
-        @"bigsur" : @"com.apple.InstallAssistant.macOSBigSur"
-    };
-}
-static BOOL InstallerVersionMatches(id version, NSString *guest) {
-    if (![version isKindOfClass:NSString.class])
-        return NO;
-    NSString *family = VIMGuestVersion(guest);
-    if (!family)
-        return NO;
-    NSArray *components = [version componentsSeparatedByString:@"."];
-    for (NSString *component in components)
-        if (!component.length ||
-            [component
-                rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789"] invertedSet]]
-                    .location != NSNotFound)
-            return NO;
-    if ([guest isEqual:@"bigsur"] && ([version isEqual:@"10.16"] || [version hasPrefix:@"10.16."]))
-        return YES;
-    return [version isEqual:family] || [version hasPrefix:[family stringByAppendingString:@"."]];
-}
 static BOOL UnlinkedDirectory(NSURL *URL) {
     struct stat st;
     return !lstat(URL.fileSystemRepresentation, &st) && S_ISDIR(st.st_mode);
 }
-static BOOL LeopardRestoreProfile(NSURL *mount, NSError **error) {
-    NSDictionary *version =
-        [NSDictionary dictionaryWithContentsOfURL:
-                          [mount URLByAppendingPathComponent:@"System/Library/CoreServices/SystemVersion.plist"]];
-    BOOL matches =
-        InstallerVersionMatches(version[@"ProductVersion"], @"leopard") &&
-        RegularFile([mount URLByAppendingPathComponent:@"System/Library/CoreServices/boot.efi"]) &&
-        (InstallerPackageImage([mount URLByAppendingPathComponent:@"System/Installation/Packages/OSInstall.mpkg"]) ||
-         RegularFile(
-             [mount URLByAppendingPathComponent:@"System/Installation/Packages/OSInstall.mpkg/Contents/Info.plist"]));
-    return matches || AssemblyError(error, VIMAssemblyFailureIncompleteLeopardDisc);
+static BOOL LeopardRestoreProfile(NSURL *mount, NSString *guest, NSError **error) {
+    return [VIMInstallerInspection restoreDiscIsCompleteAtMount:mount guest:guest] ||
+           AssemblyError(error, VIMAssemblyFailureIncompleteLeopardDisc);
+}
+// Receipts are written last, so one's presence means everything before it finished.
+static BOOL WriteReceipt(NSDictionary *receipt, NSURL *URL, NSError **error) {
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:receipt
+                                                              format:NSPropertyListXMLFormat_v1_0
+                                                             options:0
+                                                               error:error];
+    return data && [data writeToURL:URL options:NSDataWritingAtomic error:error];
 }
 static NSURL *MountDirectory(NSError **error) {
     // macOS rejected our mount point beneath the external exFAT volume.
@@ -246,7 +125,10 @@ static NSURL *MountDirectory(NSError **error) {
 @property NSTimeInterval workEstimate;
 @property NSString *stage;
 @property NSString *progressGuest;
-- (NSURL *)assembleMavericks:(NSURL *)esd jobDirectory:(NSURL *)directory error:(NSError **)error;
+- (NSURL *)assembleMavericks:(NSURL *)esd
+                       guest:(NSString *)guest
+                jobDirectory:(NSURL *)directory
+                       error:(NSError **)error;
 - (NSURL *)assembleClassicDiskImage:(NSURL *)image
                               guest:(NSString *)guest
                        jobDirectory:(NSURL *)directory
@@ -354,43 +236,14 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         script, [[VIMRecoveryText raisingRAMDiskBudgets:text] dataUsingEncoding:NSUTF8StringEncoding], error);
 }
 + (BOOL)validatePreparedMedia:(NSURL *)URL guest:(NSString *)guest error:(NSError **)error {
-    struct stat image, record;
-    if (!URL.isFileURL || lstat(URL.fileSystemRepresentation, &image) || !S_ISREG(image.st_mode) || image.st_size <= 0)
-        return AssemblyError(error, VIMAssemblyFailurePreparedMediaUnavailable);
-    NSURL *receipt = [URL.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"Media.plist"];
-    if (lstat(receipt.fileSystemRepresentation, &record)) {
-        if (errno == ENOENT)
-            return YES; // An ordinary image, not our prepared output.
-        return AssemblyError(error, VIMAssemblyFailurePreparationRecordUnreadable);
-    }
-    NSDictionary *info = S_ISREG(record.st_mode) && record.st_size > 0 && record.st_size <= 65536
-                             ? [NSDictionary dictionaryWithContentsOfURL:receipt]
-                             : nil;
-    if (![info[@"FormatVersion"] isEqual:@1] || ![info[@"Stage"] isEqual:@"media-created"] ||
-        ![info[@"Guest"] isEqual:guest] || ![info[@"Media"] isEqual:URL.lastPathComponent] ||
-        ![info[@"Size"] isKindOfClass:NSNumber.class] || [info[@"Size"] longLongValue] != image.st_size ||
-        (VIMGuestHasTrait(guest, VIMGuestTraitRestoreDVD) && ![info[@"PartitionedInstaller"] isEqual:@YES]) ||
-        ([guest isEqual:@"tiger"] &&
-         (![info[@"TigerRestorePolicyVersion"] isEqual:@1] || ![info[@"TigerControlBootstrapVersion"] isEqual:@8] ||
-          ![info[@"DiscTwoExcluded"] isEqual:@YES] || ![info[@"RestoreModelRestrictionRemoved"] isEqual:@YES])))
-        return AssemblyError(error, VIMAssemblyFailurePreparedMediaChanged);
-    if (!PreparedImageHasBootBlocks(URL))
-        return AssemblyError(error, VIMAssemblyFailurePreparedMediaHeaderUnreadable);
-    return YES;
+    return [VIMInstallerInspection validatePreparedMedia:URL guest:guest error:error];
 }
 + (void)retireCompletedDownloads:(NSDictionary<NSString *, NSURL *> *)files {
     NSFileManager *fm = NSFileManager.defaultManager;
     for (NSURL *file in files.allValues) {
         NSURL *directory = file.URLByDeletingLastPathComponent;
-        // Downloads are SHA-256 keyed, with a fixed payload basename. Do not
-        // follow symlinks or remove arbitrary caller-provided sources.
-        NSString *key = directory.lastPathComponent;
-        if (![file.lastPathComponent isEqual:@"Payload.pkg"] ||
-            ![directory.URLByDeletingLastPathComponent.lastPathComponent isEqual:@"Downloads"] || key.length != 64 ||
-            [key rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"]
-                                             invertedSet]]
-                    .location != NSNotFound ||
-            !UnlinkedDirectory(directory))
+        // Do not follow symlinks or remove arbitrary caller-provided sources.
+        if (![VIMDownloadRetirement isOwnedPayload:file] || !UnlinkedDirectory(directory))
             continue;
         int fd = open([directory URLByAppendingPathComponent:@"Download.lock"].fileSystemRepresentation,
                       O_RDWR | O_NOFOLLOW | O_CLOEXEC);
@@ -402,12 +255,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         }
         NSDictionary *record =
             [NSDictionary dictionaryWithContentsOfURL:[directory URLByAppendingPathComponent:@"Download.plist"]];
-        NSURL *source =
-            [NSURL URLWithString:[record[@"SourceURL"] isKindOfClass:NSString.class] ? record[@"SourceURL"] : @""];
-        if ([record[@"FormatVersion"] isEqual:@1] && [record[@"Complete"] isEqual:@YES] &&
-            [record[@"Length"] isKindOfClass:NSNumber.class] && [VIMInstallerSource isApprovedURL:source] &&
-            !lstat(file.fileSystemRepresentation, &st) && S_ISREG(st.st_mode) && st.st_nlink == 1 && st.st_size > 0 &&
-            st.st_size == [record[@"Length"] longLongValue]) {
+        if (!lstat(file.fileSystemRepresentation, &st) && S_ISREG(st.st_mode) && st.st_nlink == 1 &&
+            [VIMDownloadRetirement record:record allowsRemovalOfPayloadWithSize:st.st_size]) {
             // Payload first, then the completion record: interruption leaves a
             // stale record, which beginTransfer can safely restart below.
             if ([fm removeItemAtURL:file error:nil])
@@ -436,27 +285,9 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         NSURL *mediaDir = [attempt URLByAppendingPathComponent:@"Media"];
         NSDictionary *media =
             [NSDictionary dictionaryWithContentsOfURL:[mediaDir URLByAppendingPathComponent:@"Media.plist"]];
-        if (!found[@"Media"] && [media[@"FormatVersion"] isEqual:@1] && [media[@"Guest"] isEqual:guest] &&
-            [media[@"Stage"] isEqual:@"media-created"] &&
-            (![@[
-                @"leopard", @"snowleopard", @"lion", @"mountainlion", @"mavericks", @"yosemite", @"elcapitan",
-                @"sierra", @"highsierra"
-            ] containsObject:guest] ||
-             ([media[@"LegacyBootstrapVersion"] isEqual:@(OpenGLBootstrapMediaVersion(guest))] &&
-              [media[@"ReadbackVerified"] isEqual:@YES] && [media[@"OpenGLSupportVersion"] isEqual:@1])) &&
-            (![guest isEqual:@"bigsur"] || [media[@"SignedSharedSupportPackage"] isEqual:@YES]) &&
-            (!SerialRecovery(guest) || [media[@"SerialRecoveryVersion"] isEqual:@2]) &&
-            (![guest isEqual:@"leopard"] || [media[@"LeopardRecoveryMemoryVersion"] isEqual:@1]) &&
-            (!NativeAutomatedRecovery(guest) ||
-             [media[@"NativeRecoverySystemVersion"] isEqual:([guest isEqual:@"highsierra"] ? @6 : @1)]) &&
-            (!VIMGuestHasTrait(guest, VIMGuestTraitRestoreDVD) || [media[@"PartitionedInstaller"] isEqual:@YES]) &&
-            (![guest isEqual:@"tiger"] ||
-             ([media[@"TigerRestorePolicyVersion"] isEqual:@1] && [media[@"TigerControlBootstrapVersion"] isEqual:@8] &&
-              [media[@"DiscTwoExcluded"] isEqual:@YES] && [media[@"RestoreModelRestrictionRemoved"] isEqual:@YES] &&
-              [media[@"ReadbackVerified"] isEqual:@YES])) &&
-            [@[ @"Installer.iso", @"Installer.img" ] containsObject:media[@"Media"]] &&
-            [media[@"Size"] isKindOfClass:NSNumber.class]) {
-            NSURL *url = [mediaDir URLByAppendingPathComponent:media[@"Media"]];
+        NSString *mediaName = [VIMPreparationRecords retainedImageNameInRecord:media guest:guest];
+        if (!found[@"Media"] && mediaName) {
+            NSURL *url = [mediaDir URLByAppendingPathComponent:mediaName];
             struct stat st;
             if (UnlinkedDirectory(mediaDir) && !lstat(url.fileSystemRepresentation, &st) && S_ISREG(st.st_mode) &&
                 st.st_size > 0 && st.st_size == [media[@"Size"] longLongValue])
@@ -465,10 +296,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         NSURL *assembly = [attempt URLByAppendingPathComponent:@"Assembly"];
         NSDictionary *record =
             [NSDictionary dictionaryWithContentsOfURL:[assembly URLByAppendingPathComponent:@"Assembly.plist"]];
-        NSString *name = record[@"Installer"];
-        if (!found[@"SourceInstaller"] && [record[@"FormatVersion"] isEqual:@1] && [record[@"Guest"] isEqual:guest] &&
-            [record[@"Stage"] isEqual:@"assembled"] && [name isKindOfClass:NSString.class] &&
-            [name isEqual:name.lastPathComponent]) {
+        NSString *name = [VIMPreparationRecords installerNameInRecord:record guest:guest];
+        if (!found[@"SourceInstaller"] && name) {
             NSURL *url = [assembly URLByAppendingPathComponent:name];
             if (UnlinkedDirectory(assembly) && UnlinkedDirectory(url) &&
                 [self validateInstallerApplication:url guest:guest error:nil])
@@ -483,7 +312,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     if (RegularFile(URL) && ![URL.pathExtension.lowercaseString isEqual:@"app"]) {
         // Selection is a worker operation: inspect the actual read-only DVD,
         // never infer its OS from a filename or the selected creation row.
-        if (![self validateInstallerApplication:URL guest:@"leopard" error:error])
+        if (![VIMInstallerInspection validateRestoreDiscImage:URL error:error])
             return nil;
         NSURL *mount = MountDirectory(error), *logs = MountDirectory(error);
         if (!mount || !logs) {
@@ -502,20 +331,14 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
             NSDictionary *version = [NSDictionary
                 dictionaryWithContentsOfURL:
                     [mount URLByAppendingPathComponent:@"System/Library/CoreServices/SystemVersion.plist"]];
-            if (InstallerVersionMatches(version[@"ProductVersion"], @"tiger") &&
-                VIMTigerValidateRestoreDVD(mount, error))
-                guest = @"tiger";
-            else if (InstallerVersionMatches(version[@"ProductVersion"], @"leopard") &&
-                     LeopardRestoreProfile(mount, error))
-                guest = @"leopard";
-            else if (InstallerVersionMatches(version[@"ProductVersion"], @"snowleopard") &&
-                     RegularFile([mount URLByAppendingPathComponent:@"System/Library/CoreServices/boot.efi"]) &&
-                     (InstallerPackageImage(
-                          [mount URLByAppendingPathComponent:@"System/Installation/Packages/OSInstall.mpkg"]) ||
-                      RegularFile([mount URLByAppendingPathComponent:
-                                             @"System/Installation/Packages/OSInstall.mpkg/Contents/Info.plist"])))
-                guest = @"snowleopard";
-            else if (!guest)
+            // Versions name one disc each, so nothing falls through to another's checks.
+            NSString *candidate = [VIMInstallerInspection restoreDiscGuestForProductVersion:version[@"ProductVersion"]];
+            BOOL complete = [VIMGuestMediaPlan planForGuest:candidate].restoreDisc == VIMRestoreDiscKindTiger
+                                ? VIMTigerValidateRestoreDVD(mount, error)
+                                : [VIMInstallerInspection restoreDiscIsCompleteAtMount:mount guest:candidate];
+            if (complete)
+                guest = candidate;
+            else
                 AssemblyError(error, VIMAssemblyFailureUnsupportedRestoreDisc);
         }
         NSError *detachError = nil;
@@ -533,14 +356,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     }
     NSDictionary *info =
         [NSDictionary dictionaryWithContentsOfURL:[URL URLByAppendingPathComponent:@"Contents/Info.plist"]];
-    NSString *identifier = info[@"CFBundleIdentifier"];
-    NSString *guest = nil;
-    if ([identifier isKindOfClass:NSString.class])
-        for (NSString *candidate in InstallerIdentifiers())
-            if ([identifier isEqual:InstallerIdentifiers()[candidate]]) {
-                guest = candidate;
-                break;
-            }
+    NSString *guest = [VIMInstallerInspection guestForBundleIdentifier:info[@"CFBundleIdentifier"]];
     if (!guest) {
         AssemblyError(error, VIMAssemblyFailureUnsupportedInstaller);
         return nil;
@@ -548,49 +364,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     return [self validateInstallerApplication:URL guest:guest error:error] ? guest : nil;
 }
 + (BOOL)validateInstallerApplication:(NSURL *)URL guest:(NSString *)guest error:(NSError **)error {
-    if (VIMGuestHasTrait(guest, VIMGuestTraitRestoreDVD)) {
-        // Resume gate only: media creation mounts the original read-only and
-        // verifies 10.6, boot.efi, packages and the measured restore policy.
-        // Snow's complete source is a DVD, not an InstallAssistant bundle.
-        int fd = open(URL.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        struct stat st;
-        // A retail DVD may be raw ISO/CDR rather than a UDIF DMG. Actual
-        // mounted boot/package contents determine acceptance below; filename,
-        // original disc model and a particular container trailer do not.
-        BOOL valid = fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size > 512;
-        if (fd >= 0)
-            close(fd);
-        return valid || AssemblyError(error, VIMAssemblyFailureIncompleteRestoreDiscImage);
-    }
-    NSString *identifier = InstallerIdentifiers()[guest];
-    NSDictionary *info =
-        [NSDictionary dictionaryWithContentsOfURL:[URL URLByAppendingPathComponent:@"Contents/Info.plist"]];
-    NSURL *support = [URL URLByAppendingPathComponent:@"Contents/SharedSupport"];
-    NSURL *installURL = [support URLByAppendingPathComponent:@"InstallInfo.plist"];
-    NSDictionary *install = [NSDictionary dictionaryWithContentsOfURL:installURL];
-    NSDictionary *system =
-        [install[@"System Image Info"] isKindOfClass:NSDictionary.class] ? install[@"System Image Info"] : nil;
-    id version = system[@"version"];
-    BOOL splitInstaller = ![guest isEqual:@"bigsur"];
-    BOOL classic =
-        [@[ @"lion", @"mountainlion", @"mavericks", @"yosemite", @"elcapitan", @"sierra" ] containsObject:guest];
-    BOOL complete =
-        (classic || NonemptyFile([URL URLByAppendingPathComponent:@"Contents/Resources/createinstallmedia"])) &&
-        NonemptyFile([support URLByAppendingPathComponent:splitInstaller ? @"InstallESD.dmg" : @"SharedSupport.dmg"]) &&
-        (!splitInstaller || classic || NonemptyFile([support URLByAppendingPathComponent:@"BaseSystem.dmg"]));
-    // Big Sur ships only SharedSupport.dmg, with OSVersion inside its asset
-    // manifest. Media preparation checks that manifest before using boot files.
-    // Do not reject Apple's complete app merely because InstallInfo is absent.
-    BOOL versionMatches =
-        ((!splitInstaller || classic) && ![NSFileManager.defaultManager fileExistsAtPath:installURL.path]) ||
-        InstallerVersionMatches(version, guest);
-    BOOL matches = identifier && URL.isFileURL && [URL.pathExtension.lowercaseString isEqual:@"app"] &&
-                   [info[@"CFBundleIdentifier"] isEqual:identifier] && versionMatches;
-    if (!matches || !complete)
-        return AssemblyError(error, VIMAssemblyFailureIncompleteInstallerApplication);
-    if (!splitInstaller && !InstallerPackageImage([support URLByAppendingPathComponent:@"SharedSupport.dmg"]))
-        return AssemblyError(error, VIMAssemblyFailureBigSurPackageMissing);
-    return YES;
+    return [VIMInstallerInspection validateInstaller:URL guest:guest error:error];
 }
 - (void)report:(NSString *)stage {
     self.stage = stage;
@@ -626,7 +400,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     // hook, not a hardcoded model list or arbitrary JavaScript body.
     NSFileManager *fm = NSFileManager.defaultManager;
     NSURL *package = [mount URLByAppendingPathComponent:@"System/Installation/Packages/OSInstall.mpkg"];
-    BOOL flat = InstallerPackageImage(package);
+    BOOL flat = [VIMInstallerInspection fileIsInstallerPackage:package];
     NSURL *expanded = [self.job URLByAppendingPathComponent:@"RestoreDistribution"];
     if (flat && (![fm createDirectoryAtURL:expanded withIntermediateDirectories:NO attributes:nil error:error] ||
                  ![self perform:[VIMToolInvocation extractArchive:package.path into:expanded.path] error:error]))
@@ -931,25 +705,16 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return nil;
     if (![fm removeItemAtURL:expanded error:error])
         return nil;
-    NSDictionary *receipt = @{
-        @"FormatVersion" : @1,
-        @"Guest" : guest,
-        @"Stage" : @"assembled",
-        @"Installer" : name,
-        @"OriginalImagePinned" : @YES
-    };
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:receipt
-                                                              format:NSPropertyListXMLFormat_v1_0
-                                                             options:0
-                                                               error:error];
-    if (!data || ![data writeToURL:[directory URLByAppendingPathComponent:@"Assembly.plist"]
-                           options:NSDataWritingAtomic
-                             error:error])
+    if (!WriteReceipt([VIMPreparationRecords pinnedImageReceiptForGuest:guest installer:name],
+                      [directory URLByAppendingPathComponent:@"Assembly.plist"], error))
         return nil;
     [self completedWork:.45];
     return app;
 }
-- (NSURL *)assembleMavericks:(NSURL *)esd jobDirectory:(NSURL *)directory error:(NSError **)error {
+- (NSURL *)assembleMavericks:(NSURL *)esd
+                       guest:(NSString *)guest
+                jobDirectory:(NSURL *)directory
+                       error:(NSError **)error {
     NSFileManager *fm = NSFileManager.defaultManager;
     if (!RegularFile(esd) || !directory.isFileURL || [fm fileExistsAtPath:directory.path]) {
         AssemblyError(error, VIMAssemblyFailureIncompleteMavericksDownload);
@@ -969,9 +734,9 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return nil;
     self.job = directory;
     self.step = 0;
-    self.progressGuest = @"mavericks";
+    self.progressGuest = guest;
     [self report:@"Verifying the Mavericks installer…"];
-    NSString *location = [VIMInstallerCatalog fileForGuest:@"mavericks" role:@"esd"][@"URL"];
+    NSString *location = [VIMInstallerCatalog fileForGuest:guest role:@"esd"][@"URL"];
     if (!location) {
         AssemblyError(error, VIMAssemblyFailureNoMavericksCatalogRecord);
         return nil;
@@ -1006,11 +771,12 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         NSDictionary *version =
             [NSDictionary dictionaryWithContentsOfURL:
                               [base URLByAppendingPathComponent:@"System/Library/CoreServices/SystemVersion.plist"]];
-        if (!InstallerVersionMatches(version[@"ProductVersion"], @"mavericks")) {
+        VIMGuestMediaPlan *plan = [VIMGuestMediaPlan planForGuest:guest];
+        if (![plan matchesProductVersion:version[@"ProductVersion"]]) {
             AssemblyError(error, VIMAssemblyFailureMavericksVersionMismatch);
             return nil;
         }
-        app = [directory URLByAppendingPathComponent:@"Install OS X Mavericks.app"];
+        app = [directory URLByAppendingPathComponent:plan.installerApplicationName];
         [self report:@"Preparing the original Mavericks installer…"];
         [self nextWorkTo:.2 seconds:10];
         if (![self perform:[VIMToolInvocation copy:[base URLByAppendingPathComponent:app.lastPathComponent].path
@@ -1041,17 +807,12 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
             ![data writeToURL:[support URLByAppendingPathComponent:@"InstallInfo.plist"]
                       options:NSDataWritingAtomic
                         error:error] ||
-            ![self.class validateInstallerApplication:app guest:@"mavericks" error:error])
+            ![self.class validateInstallerApplication:app guest:guest error:error])
             return nil;
-        completedReceipt = @{
-            @"FormatVersion" : @1,
-            @"Guest" : @"mavericks",
-            @"Stage" : @"assembled",
-            @"Installer" : app.lastPathComponent,
-            @"ProductVersion" : version[@"ProductVersion"],
-            @"ProductBuildVersion" : version[@"ProductBuildVersion"],
-            @"RecoveryPayloadPinned" : @YES
-        };
+        completedReceipt = [VIMPreparationRecords recoveryPayloadReceiptForGuest:guest
+                                                                       installer:app.lastPathComponent
+                                                                  productVersion:version[@"ProductVersion"]
+                                                                    productBuild:version[@"ProductBuildVersion"]];
         success = YES;
     } @finally {
         for (NSURL *mount in base ? @[ base, outer ] : @[ outer ]) {
@@ -1072,13 +833,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         }
     }
     if (success) {
-        NSData *data = [NSPropertyListSerialization dataWithPropertyList:completedReceipt
-                                                                  format:NSPropertyListXMLFormat_v1_0
-                                                                 options:0
-                                                                   error:error];
-        if (!data || ![data writeToURL:[directory URLByAppendingPathComponent:@"Assembly.plist"]
-                               options:NSDataWritingAtomic
-                                 error:error])
+        if (!WriteReceipt(completedReceipt, [directory URLByAppendingPathComponent:@"Assembly.plist"], error))
             return nil;
         [self completedWork:.45];
         return app;
@@ -1105,7 +860,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return files[@"diskimage"];
     }
     if (plan.route == VIMAssemblyRouteRecoveryESD)
-        return [self assembleMavericks:files[@"esd"] jobDirectory:directory error:error];
+        return [self assembleMavericks:files[@"esd"] guest:guest jobDirectory:directory error:error];
     if (plan.route == VIMAssemblyRouteClassicDiskImage)
         return [self assembleClassicDiskImage:files[@"diskimage"] guest:guest jobDirectory:directory error:error];
     BOOL splitInstaller = plan.route == VIMAssemblyRouteSplitPackages;
@@ -1264,14 +1019,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     if (![self perform:[VIMToolInvocation imageInfoForImage:[support URLByAppendingPathComponent:payload].path]
                  error:error])
         return nil;
-    NSDictionary *receipt = @{@"FormatVersion" : @1, @"Guest" : guest, @"Stage" : @"assembled", @"Installer" : name};
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:receipt
-                                                              format:NSPropertyListXMLFormat_v1_0
-                                                             options:0
-                                                               error:error];
-    if (!data || ![data writeToURL:[directory URLByAppendingPathComponent:@"Assembly.plist"]
-                           options:NSDataWritingAtomic
-                             error:error])
+    if (!WriteReceipt([VIMPreparationRecords assembledReceiptForGuest:guest installer:name],
+                      [directory URLByAppendingPathComponent:@"Assembly.plist"], error))
         return nil;
     [self report:@"Installer assembled. Bootable media preparation is next."];
     [self completedWork:.45];
@@ -1294,7 +1043,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     BOOL classic = plan.bootsCDISInstaller, bootstrap = plan.usesBootstrap;
     NSURL *openGLSupport =
         self.openGLSupportDirectory ?: VIMGuestFileURL([@"OpenGLGuests/" stringByAppendingString:guest]);
-    if (bootstrap && !VerifyOpenGLSupport(openGLSupport, guest, error))
+    if (bootstrap && ![VIMInstallerInspection validateGuestSupport:openGLSupport error:error])
         return nil;
     if (tiger && (!VIMTigerControlPayload(openGLSupport, error) || !VIMTigerInstallerGraphics(openGLSupport, error) ||
                   !VIMTigerInstallerAudio(openGLSupport, error)))
@@ -1376,7 +1125,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         BOOL sourceAttached = [self perform:[VIMToolInvocation attachReadOnlyIgnoringOwnersImage:base.path
                                                                                       mountPoint:original.path]
                                       error:error];
-        if (sourceAttached && LeopardRestoreProfile(original, error) &&
+        if (sourceAttached && LeopardRestoreProfile(original, guest, error) &&
             [self perform:[VIMToolInvocation deviceInfoForMountPoint:original.path] error:error]) {
             VIMImagePartitionDevice *device =
                 [VIMImagePartitionDevice deviceFromInfo:[NSDictionary dictionaryWithContentsOfURL:self.lastLog]
@@ -1415,7 +1164,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return nil;
     }
     BOOL volumeOnly = leopard && modernImages;
-    if (modernImages && RawApplePartitionMap(working)) {
+    if (modernImages && [VIMInstallerInspection fileHasApplePartitionMap:working]) {
         // macOS27's image resize supports GPT or a naked filesystem, not APM.
         // Resizing APM can grow the container, then fail with the HFS volume
         // unchanged. Normalize only that format, not a particular OS/model.
@@ -1444,7 +1193,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         version =
             [NSDictionary dictionaryWithContentsOfURL:
                               [mount URLByAppendingPathComponent:@"System/Library/CoreServices/SystemVersion.plist"]];
-        if (InstallerVersionMatches(version[@"ProductVersion"], guest) &&
+        if ([plan matchesProductVersion:version[@"ProductVersion"]] &&
             RegularFile([mount URLByAppendingPathComponent:@"System/Library/CoreServices/boot.efi"])) {
             if (classic) {
                 // This generation boots the genuine CDIS installer against a
@@ -1464,7 +1213,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                     copied = [fm fileExistsAtPath:[packages URLByAppendingPathComponent:@"OSInstall.mpkg"].path] &&
                              [self removeRestoreModelRestrictionAtMount:mount error:error];
                 if (leopard)
-                    copied = LeopardRestoreProfile(mount, error) &&
+                    copied = LeopardRestoreProfile(mount, guest, error) &&
                              [self prepareLeopardRecoveryMemoryAtMount:mount error:error] &&
                              [self removeRestoreModelRestrictionAtMount:mount error:error];
                 if (tiger && VIMTigerValidateRestoreDVD(mount, error)) {
@@ -1547,7 +1296,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                 if (removed)
                     copied = [self perform:[VIMToolInvocation copy:installer.path to:stub.path timeout:1800]
                                      error:error];
-                if (copied && SerialRecovery(guest))
+                if (copied && plan.usesSerialAgent)
                     copied = [self prepareSerialRecoveryAtMount:mount error:error];
             }
         } else
@@ -1603,7 +1352,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSNumber *imageSize = FlushGeneratedImage(image, error);
     if (!imageSize)
         return nil;
-    if (!PreparedImageHasBootBlocks(image)) {
+    if (![VIMInstallerInspection fileIsRecognizableDisk:image]) {
         AssemblyError(error, VIMAssemblyFailureImageNotReadable);
         return nil;
     }
@@ -1653,41 +1402,16 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     if ([base.URLByDeletingLastPathComponent isEqual:directory] &&
         [base.lastPathComponent isEqual:@"Original-BaseSystem.dmg"] && ![fm removeItemAtURL:base error:error])
         return nil;
-    NSMutableDictionary *receipt = [@{
-        @"FormatVersion" : @1,
-        @"Guest" : guest,
-        @"Stage" : @"media-created",
-        @"Media" : image.lastPathComponent,
-        @"Size" : imageSize,
-        @"ProductVersion" : version[@"ProductVersion"],
-        @"BootValidated" : @NO,
-        @"FilesystemMetadataPreserved" : @YES,
-        @"ReadbackVerified" : @YES,
-        @"LegacyBootstrapVersion" : @(bootstrap ? OpenGLBootstrapMediaVersion(guest) : 0)
-    } mutableCopy];
-    if (bootstrap)
-        receipt[@"OpenGLSupportVersion"] = @1;
-    if (SerialRecovery(guest))
-        receipt[@"SerialRecoveryVersion"] = @2;
-    if (NativeAutomatedRecovery(guest))
-        receipt[@"NativeRecoverySystemVersion"] = [guest isEqual:@"highsierra"] ? @6 : @1;
-    if (partitionedInstaller)
-        receipt[@"PartitionedInstaller"] = @YES;
-    if (leopard) {
-        receipt[@"RestoreHardwareProfile"] = @"MacBookPro5,3";
-        receipt[@"LeopardRecoveryMemoryVersion"] = @1;
-    }
+    NSMutableDictionary *receipt = [[VIMPreparationRecords recoveryReceiptForGuest:guest
+                                                                             media:image.lastPathComponent
+                                                                              size:imageSize.longLongValue
+                                                                    productVersion:version[@"ProductVersion"]
+                                                                       partitioned:partitionedInstaller] mutableCopy];
     if (tiger && tigerPolicy)
         [receipt addEntriesFromDictionary:tigerPolicy];
     if (tiger && tigerControls)
         [receipt addEntriesFromDictionary:tigerControls];
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:receipt
-                                                              format:NSPropertyListXMLFormat_v1_0
-                                                             options:0
-                                                               error:error];
-    if (!data || ![data writeToURL:[directory URLByAppendingPathComponent:@"Media.plist"]
-                           options:NSDataWritingAtomic
-                             error:error])
+    if (!WriteReceipt(receipt, [directory URLByAppendingPathComponent:@"Media.plist"], error))
         return nil;
     [self completedWork:1];
     return image;
@@ -1697,7 +1421,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         AssemblyError(error, VIMAssemblyFailureMainThreadMedia);
         return nil;
     }
-    if (![self.class validateInstallerApplication:installer guest:@"bigsur" error:error])
+    if (![self.class validateInstallerApplication:installer guest:VIMHybridMedia.guest error:error])
         return nil;
     NSFileManager *fm = NSFileManager.defaultManager;
     NSURL *support = [installer URLByAppendingPathComponent:@"Contents/SharedSupport/SharedSupport.dmg"];
@@ -1723,7 +1447,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         return nil;
     self.job = directory;
     self.step = 0;
-    self.progressGuest = @"bigsur";
+    self.progressGuest = VIMHybridMedia.guest;
     [self report:@"Checking Apple’s signed installation package…"];
     if (![self perform:[VIMToolInvocation checkSignatureOfPackage:support.path] error:error])
         return nil;
@@ -1747,15 +1471,12 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     BOOL attached = [self perform:[VIMToolInvocation attachReadOnlyImage:support.path mountPoint:mount.path]
                             error:error];
     BOOL extractedOK = NO;
-    NSDictionary *asset = nil;
+    VIMHybridAsset *asset = nil;
     if (attached) {
         NSURL *assetDirectory = [mount URLByAppendingPathComponent:VIMHybridMedia.assetDirectory];
         NSDictionary *metadata = [NSDictionary
             dictionaryWithContentsOfURL:[assetDirectory URLByAppendingPathComponent:VIMHybridMedia.assetMetadata]];
-        NSArray *assets = metadata[@"Assets"];
-        if ([assets isKindOfClass:NSArray.class] && assets.count == 1 &&
-            [assets.firstObject isKindOfClass:NSDictionary.class])
-            asset = assets.firstObject;
+        asset = [VIMHybridAsset assetFromMetadata:metadata];
         NSMutableArray *archives = [NSMutableArray array];
         for (NSURL *URL in [fm contentsOfDirectoryAtURL:assetDirectory
                              includingPropertiesForKeys:nil
@@ -1763,8 +1484,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                                   error:nil])
             if ([URL.pathExtension isEqual:@"zip"] && RegularFile(URL))
                 [archives addObject:URL];
-        if (archives.count == 1 && InstallerVersionMatches(asset[@"OSVersion"], @"bigsur") &&
-            [asset[@"Build"] isKindOfClass:NSString.class]) {
+        if (archives.count == 1 && asset) {
             [self nextWorkTo:.60 seconds:50];
             extractedOK = [self perform:[VIMToolInvocation unzip:[archives.firstObject path]
                                                          members:VIMHybridMedia.archiveMembers
@@ -1813,8 +1533,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                   error:error])
         return nil;
     NSDictionary *cookie = [VIMHybridMedia installerCookieForApplication:installer.lastPathComponent
-                                                          productVersion:asset[@"OSVersion"]
-                                                            productBuild:asset[@"Build"]];
+                                                          productVersion:asset.productVersion
+                                                            productBuild:asset.build];
     for (NSArray *entry in @[
              @[ VIMHybridMedia.bootPlist, bootPlist ],
              @[ cookie, [stage URLByAppendingPathComponent:VIMHybridMedia.installerCookiePath] ]
@@ -1851,31 +1571,17 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSNumber *imageSize = FlushGeneratedImage(image, error);
     if (!imageSize)
         return nil;
-    if (!PreparedImageHasBootBlocks(image)) {
+    if (![VIMInstallerInspection fileIsRecognizableDisk:image]) {
         AssemblyError(error, VIMAssemblyFailureImageNotReadable);
         return nil;
     }
     // Staged files are now inside the image and are never reused.
     if (![fm removeItemAtURL:stage error:error])
         return nil;
-    NSDictionary *receipt = @{
-        @"FormatVersion" : @1,
-        @"Guest" : @"bigsur",
-        @"Stage" : @"media-created",
-        @"Media" : @"Installer.iso",
-        @"Size" : imageSize,
-        @"ProductVersion" : asset[@"OSVersion"],
-        @"ProductBuildVersion" : asset[@"Build"],
-        @"BootValidated" : @NO,
-        @"SignedSharedSupportPackage" : @YES
-    };
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:receipt
-                                                              format:NSPropertyListXMLFormat_v1_0
-                                                             options:0
-                                                               error:error];
-    if (!data || ![data writeToURL:[directory URLByAppendingPathComponent:@"Media.plist"]
-                           options:NSDataWritingAtomic
-                             error:error])
+    if (!WriteReceipt([VIMPreparationRecords hybridReceiptForMedia:image.lastPathComponent
+                                                              size:imageSize.longLongValue
+                                                             asset:asset],
+                      [directory URLByAppendingPathComponent:@"Media.plist"], error))
         return nil;
     [self completedWork:1];
     return image;

@@ -107,6 +107,7 @@ public final class RecoveryTextBridge: NSObject {
 
 @objc(VIMHybridMedia)
 public final class HybridMediaBridge: NSObject {
+    @objc public class var guest: String { Guest.bigSur.rawValue }
     @objc public class var volumeName: String { HybridMedia.volumeName }
     @objc public class var assetDirectory: String { HybridMedia.assetDirectory }
     @objc public class var assetMetadata: String { HybridMedia.assetMetadata }
