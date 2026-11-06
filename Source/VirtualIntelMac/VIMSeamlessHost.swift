@@ -81,6 +81,8 @@ private final class WindowSurfaces: SeamlessPixelSource {
         noDisplayFile = directory.appending(path: "nodisplay")
         try? FileManager.default.removeItem(at: noDisplayFile)
         receiver = try? GuestWindowSurfaceReceiver(service: Self.service(machineIdentifier)) { [weak self] frame in
+            // shortcut: a shape is for masking a host material, and nothing here puts one behind a window yet.
+            guard !frame.isShape else { return }
             let surface = UnsafeTransfer(frame.surface)
             let window = frame.window
             DispatchQueue.main.async {
