@@ -52,6 +52,7 @@ public final class SeamlessDesktop {
     private let logHandle: FileHandle?
     private let environment = ProcessInfo.processInfo.environment
     private static var staged: Set<String> = []
+    private static var preparing: [String: Task<Bool, Never>] = [:]
 
     public static let leaveTitle = "Show in Light Click Window"
 
@@ -100,28 +101,39 @@ public final class SeamlessDesktop {
     // MARK: The guest's side
 
     private func runInGuest() async {
-        let key = configuration.machine.path
-        // The folder goes with the guest's next start, and the tools with this app's next build.
-        let present = await guest.run("/bin/sh", ["-c", "test -x /tmp/sg/g && test -x /tmp/sg/ig"]).exitCode == 0
+        let began = CFAbsoluteTimeGetCurrent()
+        let ready = await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path)
+        note(String(format: "# tools in the guest after %.1f s", CFAbsoluteTimeGetCurrent() - began))
         if stopped { return }
-        if !present || !Self.staged.contains(key) {
-            guard let tool = await guest.stage(configuration.tools.appending(path: "seamless-guest")),
-                let menuTool = await guest.stage(configuration.tools.appending(path: "seamless-integration-guest"))
-            else {
-                finish("This Mac isn’t ready yet. Wait for it to finish starting, then try again.")
-                return
-            }
-            if stopped { return }
-            let setup = await guest.run("/bin/sh", ["-c", SeamlessSession.setupScript, "sh", tool, menuTool])
-            note("# set up: exit \(setup.exitCode.map(String.init) ?? "none"), \(setup.output)\(setup.failure ?? "")")
-            Self.staged.insert(key)
+        guard ready else {
+            finish("This Mac isn’t ready yet. Wait for it to finish starting, then try again.")
+            return
         }
-        if stopped { return }
         let ran = await guest.run(
             "/usr/bin/env",
             ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--port", String(port), "--menu-tool", "/tmp/sg/ig"])
         note("# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")")
         finish(ran.exitCode == 3 ? "This Mac couldn’t reach Light Click. Seamless needs its networking on." : nil)
+    }
+
+    /// Puts the programs in the guest, once for each of its starts, and sooner than a press if the app wants that to be quick.
+    public static func prepare(guest: any SeamlessGuest, tools: URL, machine: String) async -> Bool {
+        if let running = preparing[machine] { return await running.value }
+        let task = Task<Bool, Never> { @MainActor in
+            defer { preparing[machine] = nil }
+            // The folder goes with the guest's next start, and the tools with this app's next build.
+            let present = await guest.run("/bin/sh", ["-c", "test -x /tmp/sg/g && test -x /tmp/sg/ig"]).exitCode == 0
+            if present, staged.contains(machine) { return true }
+            guard let tool = await guest.stage(tools.appending(path: "seamless-guest")),
+                let menuTool = await guest.stage(tools.appending(path: "seamless-integration-guest"))
+            else { return false }
+            let setup = await guest.run("/bin/sh", ["-c", SeamlessSession.setupScript, "sh", tool, menuTool])
+            guard setup.exitCode == 0 else { return false }
+            staged.insert(machine)
+            return true
+        }
+        preparing[machine] = task
+        return await task.value
     }
 
     private func listen() -> Bool {

@@ -1514,6 +1514,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         }];
       });
     };
+    [VIMSeamlessHost prepareFor:self];
     if (![self.task launchAndReturnError:error]) {
         [self cleanUp];
         return NO;

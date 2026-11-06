@@ -157,6 +157,28 @@ final class SeamlessHost: NSObject {
 
     @objc static func isActive(for session: VIMSession) -> Bool { desktops[session.machinePath] != nil }
 
+    /// So the button's quick from the first press. Once the guest's agent answers, and not while something's measuring it or
+    /// the app's only there to run one guest app.
+    @objc static func prepare(for session: VIMSession) {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard !arguments.contains("--guest-diagnostics-root"), !arguments.contains("--seamless-session"),
+            !arguments.contains("--seamless-make-proxy")
+        else { return }
+        let path = session.machinePath
+        Task {
+            let guest = AgentGuest(machinePath: path)
+            try? await Task.sleep(for: .seconds(20))
+            for _ in 0..<60 {
+                guard VIMSession.running(forMachinePath: path) != nil else { return }
+                if await guest.run("/usr/bin/uname", ["-r"]).exitCode == 0 {
+                    _ = await SeamlessDesktop.prepare(guest: guest, tools: tools, machine: path)
+                    return
+                }
+                try? await Task.sleep(for: .seconds(15))
+            }
+        }
+    }
+
     /// Takes the machine's window away, leaving its guest apps' windows in its place, or puts it back.
     @objc static func toggle(for session: VIMSession) {
         let path = session.machinePath

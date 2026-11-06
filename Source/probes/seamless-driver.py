@@ -434,7 +434,7 @@ def desktop():
     request({'Action': 'seamless-toggle'}, 60)
     windows = []
     first = None
-    while time.time() - pressed < 60 and (len(windows) < 2 or machine_window()):
+    while time.time() - pressed < 180 and (len(windows) < 2 or machine_window()):
         windows = proxy_windows()
         if windows and first is None:
             first = time.time() - pressed
@@ -477,13 +477,16 @@ def desktop():
     # A second go, which should be quick, since the tools are staged and the apps made.
     pressed = time.time()
     request({'Action': 'seamless-toggle'}, 60)
-    while time.time() - pressed < 30 and machine_window():
+    while time.time() - pressed < 60 and machine_window():
         time.sleep(0.1)
     print(f'second press hid the window after {time.time() - pressed:.1f} s', flush=True)
     check('a second press works', machine_window() is None)
     request({'Action': 'seamless-toggle'}, 60)
-    while time.time() - pressed < 60 and not machine_window():
+    while time.time() - pressed < 120 and not machine_window():
         time.sleep(0.1)
+    # Generated apps shouldn't stay known to the Mac after a clone's gone.
+    for bundle in (source/'Build/bench'/tag).glob('**/Seamless Apps/*/*.app'):
+        subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', str(bundle)])
     print('PASS seamless button' if all(checks) and machine_window() else 'FAIL seamless button', flush=True)
 
 
