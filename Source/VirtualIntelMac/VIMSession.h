@@ -50,6 +50,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property(readonly) NSString *machinePath;
 - (void)endExclusiveGuestAgentUse;
 - (IBAction)makeDockApp:(nullable id)sender;
+@property(readonly) NSUInteger distinctFrames;
+/// The frames windowed mode shows, for a seamless session to crop from instead.
+- (void)setFrameObserver:(nullable void (^)(IOSurfaceRef _Nullable surface, const void *_Nullable bytes,
+                                            NSUInteger width, NSUInteger height, NSUInteger stride))observer;
 - (IBAction)forceStop:(id)sender;
 - (IBAction)showInstallationGuide:(id)sender;
 - (IBAction)showSessionDetails:(id)sender;

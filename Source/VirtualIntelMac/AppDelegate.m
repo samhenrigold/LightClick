@@ -325,8 +325,11 @@
             else if (!(repair ? [VIMSession repairMachine:machine error:&error]
                               : (install ? [VIMSession installMachine:machine error:&error]
                                          : (prepare ? [VIMSession prepareMachine:machine error:&error]
-                                                    : [VIMSession openMachine:machine error:&error]))))
-                VIMPresentError(error, nil);
+                                                    : [VIMSession openMachine:machine error:&error])))) {
+                // A session says this through its proxy, which is what the user can see.
+                if (![arguments containsObject:@"--seamless-session"])
+                    VIMPresentError(error, nil);
+            }
         } else if (error)
             VIMPresentError(error, nil);
         else

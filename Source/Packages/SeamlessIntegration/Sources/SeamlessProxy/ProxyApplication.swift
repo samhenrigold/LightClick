@@ -76,7 +76,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         configuration.createsNewApplicationInstance = true
         // Sessions run on the engine, if this app's QEMU has it, and a test's private home has to reach the app.
         configuration.environment = ProcessInfo.processInfo.environment.filter {
-            ["CFFIXED_USER_HOME", "LC_SEAMLESS_TEST"].contains($0.key)
+                        $0.key == "CFFIXED_USER_HOME" || $0.key.hasPrefix("LC_SEAMLESS_")
         }.merging(["LC_HVDBT": "1"]) { current, _ in current }
         NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, error in
             guard let error else { return }
@@ -100,15 +100,26 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         switch command {
         case .setMenuBar(let items): setMenuBar(items)
         case .setDockMenu(let items): mirror.apply(items, to: dockMenu)
-        case .setBadge(let label): NSApp.dockTile.badgeLabel = label
+        case .setBadge(let label):
+            NSApp.dockTile.badgeLabel = label
+            send(.tileBadge(NSApp.dockTile.badgeLabel))
         case .requestAttention(let critical):
             _ = NSApp.requestUserAttention(critical ? .criticalRequest : .informationalRequest)
         case .notify(let title, let body, let identifier): post(title: title, body: body, identifier: identifier)
         case .noteRecentDocument(let path):
             NSDocumentController.shared.noteNewRecentDocumentURL(URL(fileURLWithPath: path))
         case .activate: NSApp.activate()
+        case .showError(let message):
+            // A test has nobody to answer it.
+            guard ProcessInfo.processInfo.environment["LC_SEAMLESS_TEST"] == nil else { break }
+            let alert = NSAlert()
+            alert.messageText = message
+            alert.runModal()
         case .terminate:
             quitting = true
+            // Once, on Mojave after a cancelled quit, this didn't end the process, and a proxy that stays blocks its next launch.
+            // shortcut: exit regardless after a while, until the sample `seamless-session-try` keeps says why.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { exit(0) }
             NSApp.terminate(nil)
         case .beginDragOut(let names, let image):
             NSApp.keyWindow.flatMap { window in dropViews.first { $0.value.window === window }?.value }?
@@ -214,7 +225,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         surface.host.frame = CGRect(origin: .zero, size: frame.size)
         CATransaction.commit()
         window.level = NSWindow.Level(rawValue: level)
-        window.alphaValue = alpha
+                window.alphaValue = alpha
+        // Cropped from the guest's display there's no guest shadow to show, so the window gets the host's own.
+        window.hasShadow = margin == 0
         window.title = title
         SeamlessInputViewSetGuestOffset(surface.input, offset)
         setEventShape(of: window, margin: margin, size: frame.size)
@@ -227,7 +240,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
             first.window.makeKey()
             first.window.makeFirstResponder(first.input)
         }
-        if isFirstSurface { NSApp.activate() }
+                // A measurement mustn't take the Mac from whoever is using it.
+        if isFirstSurface && ProcessInfo.processInfo.environment["LC_SEAMLESS_QUIET"] == nil { NSApp.activate() }
     }
 
     /// Real NSEvents through the real input view, from the window's middle. It doesn't exercise WindowServer's delivery,

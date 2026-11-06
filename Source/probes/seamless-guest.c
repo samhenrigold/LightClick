@@ -131,20 +131,97 @@ static CGWindowID find_window(const char *app) {
     return found;
 }
 
+// Sending through the guest's network takes as long as capturing does, and they needn't take turns: the guest has the
+// cores. So everything goes in order through one thread, and a capture only waits when this queue is full.
+struct Outgoing {
+    struct Outgoing *next;
+    int fd;
+    size_t size;
+    uint8_t bytes[];
+};
+enum { OUTGOING_LIMIT = 64 * 1024 * 1024 };
+static struct Outgoing *outgoing_first, *outgoing_last;
+static size_t outgoing_bytes;
+static int outgoing_failed, outgoing_busy;
+static double outgoing_seconds;
+static pthread_mutex_t outgoing_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t outgoing_changed = PTHREAD_COND_INITIALIZER;
+
+static void *sender_thread(void *unused) {
+    (void)unused;
+    pthread_mutex_lock(&outgoing_lock);
+    for (;;) {
+        while (!outgoing_first)
+            pthread_cond_wait(&outgoing_changed, &outgoing_lock);
+        struct Outgoing *item = outgoing_first;
+        outgoing_busy = 1;
+        pthread_mutex_unlock(&outgoing_lock);
+        double started = now();
+        const uint8_t *p = item->bytes;
+        size_t left = item->size;
+        int failed = 0;
+        while (left && !failed) {
+            ssize_t n = send(item->fd, p, left, 0);
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n <= 0)
+                failed = 1;
+            else {
+                p += n;
+                left -= (size_t)n;
+            }
+        }
+        pthread_mutex_lock(&outgoing_lock);
+        outgoing_seconds += now() - started;
+        outgoing_failed |= failed;
+        outgoing_first = item->next;
+        if (!outgoing_first)
+            outgoing_last = NULL;
+        outgoing_bytes -= item->size;
+        outgoing_busy = 0;
+        free(item);
+        pthread_cond_broadcast(&outgoing_changed);
+    }
+    return NULL;
+}
+
 static int send_all(int fd, const void *data, size_t size) {
     if (fd < 0)
         return 0; // Measuring capture alone, with the host unreachable.
-    const uint8_t *p = data;
-    while (size) {
-        ssize_t n = send(fd, p, size, 0);
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0)
-            return -1;
-        p += n;
-        size -= (size_t)n;
+    static int started;
+    struct Outgoing *item = malloc(sizeof(*item) + size);
+    if (!item)
+        return -1;
+    item->next = NULL;
+    item->fd = fd;
+    item->size = size;
+    memcpy(item->bytes, data, size);
+    pthread_mutex_lock(&outgoing_lock);
+    if (!started) {
+        started = 1;
+        pthread_t thread;
+        pthread_create(&thread, NULL, sender_thread, NULL);
     }
-    return 0;
+    while (outgoing_bytes > OUTGOING_LIMIT && !outgoing_failed)
+        pthread_cond_wait(&outgoing_changed, &outgoing_lock);
+    int failed = outgoing_failed;
+    if (outgoing_last)
+        outgoing_last->next = item;
+    else
+        outgoing_first = item;
+    outgoing_last = item;
+    outgoing_bytes += size;
+    pthread_cond_broadcast(&outgoing_changed);
+    pthread_mutex_unlock(&outgoing_lock);
+    return failed ? -1 : 0;
+}
+
+// Waits for everything queued to have gone, before the tool's exit would drop it.
+static void send_all_finish(void) {
+    pthread_mutex_lock(&outgoing_lock);
+    while ((outgoing_first || outgoing_busy) && !outgoing_failed)
+        pthread_cond_wait(&outgoing_changed, &outgoing_lock);
+    pthread_mutex_unlock(&outgoing_lock);
 }
 
 struct Stream {
@@ -161,6 +238,7 @@ struct Stream {
     int buttons_down;
     unsigned pointer_events, key_events, gesture_events, menu_presses, captures, frames_changed;
     double capture_seconds, capture_worst;
+    double get_seconds, read_seconds, compare_seconds, send_seconds; // Where a frame's time goes.
     uint64_t bytes_sent;
     uint32_t order, group, alpha, margin;
 };
@@ -258,25 +336,67 @@ static int send_window(struct Stream *s, const char *title, const char *owner, i
 static int send_changes(struct Stream *s, uint8_t *pixels, uint32_t width, uint32_t height) {
     int resized = !s->previous;
     uint32_t first = 0, last = height ? height - 1 : 0;
+    double compare_started = now();
     if (!resized) {
         while (first < height && !memcmp(pixels + first * width * 4, s->previous + first * width * 4, width * 4))
             first++;
         if (first == height) {
             free(pixels);
+            s->compare_seconds += now() - compare_started;
             return 0;
         }
         while (last > first && !memcmp(pixels + last * width * 4, s->previous + last * width * 4, width * 4))
             last--;
     }
-    struct SWMFrame f = {s->window, ++s->sequence, width, height, 0, first, width, last - first + 1, NULL};
+    // And only the columns that did: a moving box in a wide window is a small part of its rows.
+    uint32_t left = 0, right = width ? width - 1 : 0;
+    if (!resized) {
+        left = width;
+        right = 0;
+        for (uint32_t y = first; y <= last; y++) {
+            const uint32_t *now_row = (const uint32_t *)(pixels + y * width * 4),
+                           *was_row = (const uint32_t *)(s->previous + y * width * 4);
+            uint32_t x = 0;
+            while (x < left && now_row[x] == was_row[x])
+                x++;
+            left = x < left ? x : left;
+            x = width;
+            while (x > right + 1 && now_row[x - 1] == was_row[x - 1])
+                x--;
+            right = x > right + 1 ? x - 1 : right;
+        }
+        if (left >= width)
+            left = 0;
+        if (right < left)
+            right = left;
+    }
+    s->compare_seconds += now() - compare_started;
+    uint32_t columns = right - left + 1;
+    struct SWMFrame f = {s->window, ++s->sequence, width, height, left, first, columns, last - first + 1, NULL};
     uint8_t prefix[SWM_FRAME_PREFIX];
     swm_put_frame_prefix(prefix, &f);
-    int failed = send_all(s->fd, prefix, sizeof(prefix)) ||
-                 send_all(s->fd, pixels + first * width * 4, (size_t)width * f.height * 4);
+    double send_started = now();
+    int failed = send_all(s->fd, prefix, sizeof(prefix));
+    if (columns == width && !failed) {
+        failed = send_all(s->fd, pixels + first * width * 4, (size_t)width * f.height * 4);
+    } else if (!failed) {
+        // Tightly packed, as a frame's rows are.
+        uint8_t *band = malloc((size_t)columns * f.height * 4);
+        if (!band)
+            failed = 1;
+        for (uint32_t y = 0; band && y < f.height; y++)
+            memcpy(band + (size_t)y * columns * 4, pixels + ((size_t)(first + y) * width + left) * 4,
+                   (size_t)columns * 4);
+        if (band) {
+            failed = send_all(s->fd, band, (size_t)columns * f.height * 4);
+            free(band);
+        }
+    }
+    s->send_seconds += now() - send_started;
     free(s->previous);
     s->previous = pixels;
     s->frames_changed++;
-    s->bytes_sent += sizeof(prefix) + (uint64_t)width * f.height * 4;
+    s->bytes_sent += sizeof(prefix) + (uint64_t)columns * f.height * 4;
     return failed ? -1 : 0;
 }
 
@@ -1296,7 +1416,8 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
-    double animating_until;
+    int cropping;
+    double look_every;
     uint32_t surface_flushes;
     CGWindowID id;
     uint32_t seed, order;
@@ -1571,6 +1692,18 @@ static int tree_items_from_hook(struct TreeItem *items, const char *app, pid_t p
 
 // With `pid`, only that process's windows. The clock starts at the first window, since an app can take a long time to
 // start under emulation, and a run that sees none says what it did see.
+static int no_pixels;
+
+static double display_scale(void) {
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
+    double scale = mode && CGDisplayModeGetWidth(mode)
+                       ? (double)CGDisplayModeGetPixelWidth(mode) / CGDisplayModeGetWidth(mode)
+                       : 1;
+    if (mode)
+        CGDisplayModeRelease(mode);
+    return scale;
+}
+
 static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps, double seconds) {
     tree_connection = guest_symbol("CGSMainConnectionID", "SLSMainConnectionID");
     tree_flush_seed = guest_symbol("CGSGetWindowFlushSeed", "SLSGetWindowFlushSeed");
@@ -1651,16 +1784,31 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             CGRect bounds = item->bounds;
             const char *title = item->title, *owner = item->owner;
             int alpha = item->alpha, layer = item->layer;
-            int margin = item->margin;
+            //             // The host crops a window from the display's own frames if that shows it right: an opaque,
+            //             ordinary window that no
+            // other window in front of it covers. Its shape is a rectangle with the corners the host gives it, and its
+            // shadow is the host's. Anything else, such as a menu, a popover, a sheet or a covered window, keeps its
+            // capture, with real alpha.
+            int crop = no_pixels && item->layer == 0 && item->title[0] && item->alpha == 0x10000;
+            for (int k = 0; crop && k < i; k++) {
+                const struct TreeItem *front = &items[k];
+                if (front->layer == 0 && front->title[0] && CGRectIntersectsRect(front->bounds, item->bounds) &&
+                    tree_group(front->id) != tree_group(id))
+                    crop = 0;
+            }
+            int margin = crop ? 0 : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
                 sized = !CGSizeEqualToSize(bounds.size, w->bounds.size) || margin != w->margin;
             uint32_t seed = 0;
             int have_seed = tree_flush_seed && tree_connection && !tree_flush_seed(tree_connection(), id, &seed);
             seed_answers += have_seed;
             // A seed doesn't cover GL or video surfaces in a window, so look anyway once a second.
-            // A seed misses what's composited in the server: on Mojave a page's CSS animation leaves it still for 22 s.
-            // So the once-a-second look that finds a change without one looks faster for a while.
-            double look_every = tick < w->animating_until ? 1.0 / 15 : 1;
+            //             // A seed misses what's composited in the server: on Mojave a page's CSS animation leaves it
+            //             still for 22 s. So
+            // looking is steered by what looks find: faster when one finds a change the seed missed, up to 15 Hz, and
+            // half as fast when it finds nothing, down to once a second. A caret's blink settles a few looks a second;
+            // animation climbs.
+            double look_every = w->look_every > 0 ? w->look_every : 1;
             int seed_moved = have_seed && seed != w->seed;
             int stale =
                 !have_seed || seed_moved || sized || fresh || !w->previous || tick - w->last_capture > look_every;
@@ -1687,6 +1835,42 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             s->order = order;
             s->alpha = (uint32_t)alpha;
             s->margin = margin;
+            if (no_pixels && !crop && w->cropping) {
+                // Back to captures, starting with a whole one.
+                w->cropping = 0;
+                free(w->previous);
+                w->previous = NULL;
+                stale = 1;
+            }
+            if (crop) {
+                if (fresh || moved || sized || order != w->order || alpha != w->alpha || strcmp(title, w->title)) {
+                    s->pixel_width = w->pixel_width = (uint32_t)(bounds.size.width * display_scale() + 0.5);
+                    s->pixel_height = w->pixel_height = (uint32_t)(bounds.size.height * display_scale() + 0.5);
+                    s->group = tree_group(id);
+                    if (send_window(s, title, owner, layer))
+                        goto done;
+                }
+                if (!w->cropping) {
+                    w->cropping = 1;
+                    uint8_t message[SWM_HEADER_SIZE + SWM_GONE_SIZE];
+                    if (send_all(s->fd, message, swm_put_u32_message(message, sizeof(message), SWM_CROP, id)))
+                        goto done;
+                }
+                if (fresh) {
+                    if (!roster)
+                        first_window = tick;
+                    roster++;
+                    printf("# window %u layer %d %s \"%s\" %gx%g group %u at %.1f s\n", id, layer, owner, title,
+                           bounds.size.width, bounds.size.height, s->group, tick - started);
+                }
+                w->bounds = bounds;
+                w->order = order;
+                w->alpha = alpha;
+                w->margin = margin;
+                snprintf(w->title, sizeof(w->title), "%s", title);
+                order++;
+                continue;
+            }
             if (!stale) {
                 skipped++;
                 uint32_t scale =
@@ -1716,10 +1900,13 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 uint32_t width = 0, height = 0;
                 CGImageRef image =
                     CGWindowListCreateImage(rect, kCGWindowListOptionIncludingWindow, id, kCGWindowImageDefault);
+                double got = now();
                 uint8_t *pixels = image ? copy_pixels(image, &width, &height) : NULL;
                 if (image)
                     CGImageRelease(image);
                 double spent = now() - before;
+                s->get_seconds += got - before;
+                s->read_seconds += now() - got;
                 s->capture_seconds += spent;
                 s->capture_worst = spent > s->capture_worst ? spent : s->capture_worst;
                 s->captures++;
@@ -1769,8 +1956,10 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 }
                 w->previous = s->previous;
                 s->previous = NULL;
-                if (s->frames_changed != changed_before && !seed_moved && !sized)
-                    w->animating_until = tick + 2;
+                if (!seed_moved && !sized) {
+                    double next = s->frames_changed != changed_before ? look_every / 2 : look_every * 2;
+                    w->look_every = next < 1.0 / 15 ? 1.0 / 15 : next > 1 ? 1 : next;
+                }
                 if (fresh) {
                     if (!roster)
                         first_window = tick;
@@ -1855,6 +2044,9 @@ done:;
     printf("frames_sent_rate %.1f /s\n", s->frames_changed / elapsed);
     printf("sent %.2f MB/s\n", s->bytes_sent / elapsed / 1e6);
     printf("capture_share %.0f %%\n", s->capture_seconds / elapsed * 100);
+    printf("time_share get %.0f, read %.0f, compare %.0f, queue %.0f, sender %.0f %%\n", s->get_seconds / elapsed * 100,
+           s->read_seconds / elapsed * 100, s->compare_seconds / elapsed * 100, s->send_seconds / elapsed * 100,
+           outgoing_seconds / elapsed * 100);
     struct rusage usage;
     getrusage(RUSAGE_SELF, &usage);
     printf("tool_cpu %.0f %%\n", ((double)usage.ru_utime.tv_sec + usage.ru_utime.tv_usec / 1e6 + usage.ru_stime.tv_sec +
@@ -2036,6 +2228,24 @@ int main(int argc, char **argv) {
                (now() - started) * 1000 / made);
         return 0;
     }
+    if (!strcmp(command, "place")) {
+        // Asks the hook to draw every window of an app this far from where it is, in device pixels.
+        if (geteuid() == 0 && !in_session)
+            return run_in_console_session(argc, argv, 1);
+        CGWindowID window = find_window(app);
+        int fd = open(SWS_PATH, O_RDWR);
+        struct SWSTable *placed =
+            fd >= 0 ? mmap(NULL, sizeof(struct SWSTable), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+        if (!window || placed == MAP_FAILED)
+            return 1;
+        placed->placements[0].dx = atoi(option(argc, argv, "--dx", "0"));
+        placed->placements[0].dy = atoi(option(argc, argv, "--dy", "0"));
+        placed->placements[0].id = window;
+        printf("# window %u placed; %llu placed redraws so far\n", window, placed->placed_redraws);
+        sleep(atoi(option(argc, argv, "--wait", "3")));
+        printf("# %llu placed redraws now\n", placed->placed_redraws);
+        return 0;
+    }
     if (!strcmp(command, "capture-bench")) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
@@ -2082,6 +2292,7 @@ int main(int argc, char **argv) {
             return run_in_console_session(argc, argv, 1);
         // A session lasts as long as the app does, and the rest are runs that mustn't outlive a stuck guest.
         session_app = flag(argc, argv, "--session") ? app : NULL;
+        no_pixels = flag(argc, argv, "--no-pixels");
         alarm(session_app ? 0 : 600);
         pid_t child = 0, gl_child = 0;
         if (demo) {
@@ -2134,6 +2345,7 @@ int main(int argc, char **argv) {
         }
         int result = stream_tree(&s, target, demo && !gl_child ? child : 0, atof(option(argc, argv, "--fps", "30")),
                                  atof(option(argc, argv, "--seconds", "20")));
+        send_all_finish();
         if (gl_child > 0) {
             // A GL app in trouble says where, before it goes.
             char command_line[128];

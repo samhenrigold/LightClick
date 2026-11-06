@@ -890,6 +890,10 @@ void qemu_system_guest_pvshutdown(void)
 
 void qemu_system_reset_request(ShutdownCause reason)
 {
+    if (current_cpu && current_cpu->cpu_index >= 0) {
+        fprintf(stderr, "reset requested, cause %d, on vCPU %d:\n", reason, current_cpu->cpu_index);
+        cpu_dump_state(current_cpu, stderr, CPU_DUMP_CODE | CPU_DUMP_CCOP);
+    }
     if (reboot_action == REBOOT_ACTION_SHUTDOWN &&
         reason != SHUTDOWN_CAUSE_SUBSYSTEM_RESET) {
         shutdown_requested = reason;

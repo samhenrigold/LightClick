@@ -310,6 +310,10 @@ def motion():
     tree(32, guest, hook=True, command=['program-tree', '--gl'])
 
 
+def version_is_mojave():
+    return request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60).get('Stdout', '').startswith('18.')
+
+
 def tree_bench(seconds):
     # The windows the hook can't read, plus what it can, once each in one boot, to compare a machine's settings.
     install_hook()
@@ -318,6 +322,8 @@ def tree_bench(seconds):
     request({'Executable': '/bin/sh', 'Arguments': ['-c', copy, 'sh', guest]}, 120)
     for name, command in {'Safari': ['tree', '--app', 'Safari', '--open'], 'TextEdit': ['tree', '--app', 'TextEdit', '--open'],
                           'Demo': ['program-tree', '--gl']}.items():
+        if name == 'Demo' and version_is_mojave():
+            continue
         print(f'=== {name}', flush=True)
         tree(seconds, '/tmp/sg/g', hook=True, command=command)
 
@@ -330,6 +336,39 @@ def mojave(seconds):
     tree(seconds, guest, hook=True, command=['tree', '--app', 'Safari', '--open'])
     log = request({'Executable': '/bin/cat', 'Arguments': ['/var/tmp/seamless-ws-probe.log']}, 120).get('Stdout') or ''
     (results/f'{tag}-hook.log').write_text(log)
+
+
+def placement():
+    # Does the hook's offset move a window in the display's frame, with nothing else about it changing?
+    for _ in range(120):
+        if request({'Executable': '/usr/bin/touch', 'Arguments': ['/var/tmp/seamless-ws-placement']}, 60).get('ExitCode') == 0:
+            break
+        time.sleep(5)
+    install_hook()
+    guest = stage(guest_tool)
+    run(guest, ['open-app', '--app', 'TextEdit'])
+    time.sleep(5)
+    print('before', capture(f'{tag}-before.png'), flush=True)
+    run(guest, ['place', '--app', 'TextEdit', '--dx', '500', '--dy', '300', '--wait', '5'])
+    print('after', capture(f'{tag}-after.png'), flush=True)
+    time.sleep(3)
+    print('later', capture(f'{tag}-later.png'), flush=True)
+    log = request({'Executable': '/bin/cat', 'Arguments': ['/var/tmp/seamless-ws-probe.log']}, 120).get('Stdout') or ''
+    print('\n'.join(line for line in log.splitlines() if 'redraw' in line or '== loaded' in line))
+
+
+def windowed(seconds):
+    # The bar: frames the same page gets through windowed mode's own path, counted where they reach the app.
+    guest = stage(guest_tool)
+    print(run(guest, ['open-app', '--app', 'Safari'])[0], flush=True)
+    time.sleep(15)
+    first = request({'Action': 'display-frames'}, 60)
+    started = time.time()
+    time.sleep(seconds)
+    last = request({'Action': 'display-frames'}, 60)
+    spent = time.time() - started
+    print(f'windowed_frames {(last.get("Arrived", 0) - first.get("Arrived", 0)) / spent:.1f} /s', flush=True)
+    print(f'windowed_distinct {(last.get("Distinct", 0) - first.get("Distinct", 0)) / spent:.1f} /s', flush=True)
 
 
 def capture_bench():
@@ -420,6 +459,10 @@ def proxy(seconds):
 
 if arguments[0] == 'capture-bench':
     capture_bench()
+elif arguments[0] == 'placement':
+    placement()
+elif arguments[0] == 'windowed':
+    windowed(int(arguments[1]) if len(arguments) > 1 else 22)
 elif arguments[0] == 'mojave':
     mojave(int(arguments[1]) if len(arguments) > 1 else 22)
 elif arguments[0] == 'tree-bench':

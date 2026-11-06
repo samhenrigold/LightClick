@@ -7,6 +7,8 @@ public enum ProxyEvent: Codable, Hashable, Sendable {
     case reopen
     case quit
     case activated
+    /// What the Dock tile's label says after a `setBadge`, as AppKit has it.
+    case tileBadge(String?)
     case menuChosen(path: [String], viaKey: Bool)
     case menuWillOpen(path: [String])
     /// The host's drag, in window points with a top-left origin, for the guest's helper to mirror.
@@ -38,6 +40,8 @@ public enum SessionCommand: Codable, Hashable, Sendable {
     case noteRecentDocument(path: String)
     case activate
     case terminate
+    /// The app can't run, and why. The proxy is what the user is looking at, as nothing else of the session shows.
+    case showError(String)
     /// A guest drag has reached the edge of a window: start the host's drag, with these names promised.
     case beginDragOut(names: [String], imagePNG: Data?)
     case promiseFulfilled(id: Int, error: String?)

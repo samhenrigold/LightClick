@@ -1390,8 +1390,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     // nobody can see. shortcut: a seamless session has no microphone, until QEMU opens it when the guest does.
     BOOL seamless = [NSProcessInfo.processInfo.arguments containsObject:@"--seamless-session"];
     // Don't touch the microphone until it's been granted, so a boot never involves it. Settings asks for it.
-    BOOL microphoneAllowed = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] ==
-                             AVAuthorizationStatusAuthorized;
+    BOOL microphoneAllowed =
+        [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] == AVAuthorizationStatusAuthorized;
     launch.audioInputSelection = seamless || !microphoneAllowed ? @"disabled" : VIMAudioSelection(config, YES);
     launch.audioOutputRate = (NSInteger)VIMHostOutputSampleRate(VIMAudioSelection(config, NO));
     launch.audioInputRate = (NSInteger)VIMHostInputSampleRate(launch.audioInputSelection);
@@ -1984,6 +1984,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                        @"Mode" : self.displayMode,
                                        @"Observed" : observed ?: @{}});
                     }];
+        return;
+    }
+    if ([command[@"Action"] isEqual:@"display-frames"]) {
+        finish(@{@"Arrived" : @(self.displayView.arrivedFrames), @"Distinct" : @(self.displayView.differentFrames)});
         return;
     }
     if ([command[@"Action"] isEqual:@"display-request"]) {
@@ -4091,6 +4095,12 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (void)endExclusiveGuestAgentUse {
     self.state.diagnosticPending = NO;
     [self updateClipboardForBoot:self.state.usernameBoot];
+}
+- (void)setFrameObserver:(void (^)(IOSurfaceRef, const void *, NSUInteger, NSUInteger, NSUInteger))observer {
+    self.displayView.frameObserver = observer;
+}
+- (NSUInteger)distinctFrames {
+    return self.displayView.differentFrames;
 }
 - (IBAction)makeDockApp:(id)sender {
     [VIMSeamlessHost makeProxyFor:self];

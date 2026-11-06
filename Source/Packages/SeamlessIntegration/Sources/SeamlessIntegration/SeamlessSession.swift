@@ -1,11 +1,14 @@
 import AppKit
 import Darwin
+import IOSurface
 import QuartzCore
 
 /// What a session needs of the machine it runs on: the guest agent the app already holds.
 @MainActor
 public protocol SeamlessGuest: AnyObject {
     func run(_ path: String, _ arguments: [String]) async -> SeamlessGuestRun
+    /// Whether the machine got as far as running. A machine another app has open never does.
+    var isMachineRunning: Bool { get }
     /// Puts a host file in the guest, and says where.
     func stage(_ file: URL) async -> String?
 }
@@ -46,6 +49,7 @@ public final class SeamlessSession {
         let context: NSObject
         let layer: CALayer
         var image: CGImage?
+        var cropped = false
         init(window: SessionWire.Window, context: NSObject, layer: CALayer) {
             self.window = window
             self.context = context
@@ -71,6 +75,16 @@ public final class SeamlessSession {
     private var guestDragFiles: [String] = []
     private var logHandle: FileHandle?
     public var test: SeamlessSessionTest?
+    /// Crop each window from the frames windowed mode shows, rather than capture it. Set before `start`.
+    public var usesDisplayFrames = false
+    /// For measuring: quit the guest app this long after its first window.
+    public var stopAfter: Double?
+    private var frame: (surface: IOSurfaceRef, width: Int, height: Int)?
+    private var copies: [IOSurfaceRef] = []
+    private var copyIndex = 0
+    private var arrived = 0
+    private var measuring: (started: CFAbsoluteTime, arrived: Int, distinct: Int)?
+    public var distinctFrames: (() -> Int)?
     private var testStarted = false
 
     public init(configuration: Configuration, guest: any SeamlessGuest, finished: @escaping () -> Void) {
@@ -115,6 +129,18 @@ public final class SeamlessSession {
 
     private func runInGuest() async -> SeamlessGuestRun? {
         let started = CFAbsoluteTimeGetCurrent()
+        // Starting is asynchronous, so give it a moment before believing it didn't.
+        while !guest.isMachineRunning {
+            if CFAbsoluteTimeGetCurrent() - started > 30 {
+                proxy?.send(
+                    SessionCommand.showError(
+                        "This app’s Mac couldn’t start. If it’s open in Light Click, shut it down there, then try again."
+                    ))
+                fail("the machine isn't running")
+                return nil
+            }
+            try? await Task.sleep(for: .seconds(1))
+        }
         // The agent isn't there until well into the boot, and answers with an error until it is.
         while await guest.run("/usr/bin/uname", ["-r"]).exitCode != 0 {
             if CFAbsoluteTimeGetCurrent() - started > 900 {
@@ -138,6 +164,7 @@ public final class SeamlessSession {
             "--menu-tool", "/tmp/sg/ig", "--port", String(port), "--seconds", "0"
         ]
         if test != nil { arguments.append("--test-badge") }
+        if usesDisplayFrames { arguments.append("--no-pixels") }
         return await guest.run("/usr/bin/env", arguments)
     }
 
@@ -296,11 +323,23 @@ public final class SeamlessSession {
         case .frame(let frame):
             guard let surface = surfaces[frame.window], let image else { return }
             surface.image = image
+            surface.cropped = false
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             surface.layer.contents = image
+            surface.layer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+            surface.layer.cornerRadius = 0
             CATransaction.commit()
             CATransaction.flush()
+        case .crop(let id):
+            surfaces[id]?.cropped = true
+            if let surface = surfaces[id], let frame {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                crop(surface, from: frame)
+                CATransaction.commit()
+                CATransaction.flush()
+            }
         case .gone(let id):
             surfaces[id] = nil
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
@@ -343,6 +382,29 @@ public final class SeamlessSession {
         }
         surface.window = window
         tellProxy(surface)
+        if let stopAfter, measuring == nil {
+            measuring = (CFAbsoluteTimeGetCurrent(), arrived, distinctFrames?() ?? 0)
+            // Past the window's opening, then over the same time windowed mode was measured for.
+            DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter - 22) {
+                MainActor.assumeIsolated {
+                    self.measuring = (CFAbsoluteTimeGetCurrent(), self.arrived, self.distinctFrames?() ?? 0)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + stopAfter) {
+                MainActor.assumeIsolated {
+                    if let measuring = self.measuring {
+                        let seconds = CFAbsoluteTimeGetCurrent() - measuring.started
+                        let distinct = Double((self.distinctFrames?() ?? 0) - measuring.distinct)
+                        self.note(
+                            String(
+                                format: "# frames: %.1f/s, %.1f distinct, over %.0f s",
+                                Double(self.arrived - measuring.arrived) / seconds,
+                                distinct / seconds, seconds))
+                    }
+                    self.handle(.quit)
+                }
+            }
+        }
         // A guest whose menu can't be read still gets its test.
         if test != nil, !testStarted {
             DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
@@ -394,6 +456,7 @@ public final class SeamlessSession {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         surface.layer.frame = CGRect(x: 0, y: 0, width: width, height: height)
+        if let frame, surface.cropped { crop(surface, from: frame) }
         CATransaction.commit()
         CATransaction.flush()
         proxy?.send(
@@ -405,6 +468,61 @@ public final class SeamlessSession {
                 offsetY: offset.y))
     }
 
+    //     // MARK: Windowed mode's frames
+
+    /// One frame of the guest's display, as windowed mode gets it. Everything shows the same surface, each through its own crop.
+    public func frameArrived(surface: IOSurfaceRef?, bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) {
+        arrived += 1
+        guard usesDisplayFrames, let current = surface ?? copy(bytes, width: width, height: height, stride: stride)
+        else { return }
+        frame = (current, width, height)
+        guard !surfaces.isEmpty else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for surface in surfaces.values where surface.cropped { crop(surface, from: (current, width, height)) }
+        CATransaction.commit()
+        CATransaction.flush()
+    }
+
+    private func crop(_ surface: Surface, from frame: (surface: IOSurfaceRef, width: Int, height: Int)) {
+        let window = surface.window
+        let scale = window.width > 0 ? Double(window.pixelWidth) / Double(window.width) : 1
+        let fullWidth = Double(frame.width)
+        let fullHeight = Double(frame.height)
+        surface.layer.contents = frame.surface
+        // contentsRect counts up from the bottom of the surface, and guest windows down from the top of the display.
+        surface.layer.contentsRect = CGRect(
+            x: Double(window.x) * scale / fullWidth,
+            y: (fullHeight - (Double(window.y) + Double(window.height)) * scale) / fullHeight,
+            width: Double(window.width) * scale / fullWidth, height: Double(window.height) * scale / fullHeight)
+        // shortcut: the same corners all round, where a window's own differ a little, until they're read from its shape.
+        surface.layer.cornerRadius = 5
+        surface.layer.masksToBounds = true
+        // A surface a producer has drawn into again is the same object, which on its own wouldn't refresh.
+        surface.layer.perform(NSSelectorFromString("setContentsChanged"))
+    }
+
+    /// The display path that hands over shared memory rather than a surface: two surfaces, so one is never being read as it's written.
+    private func copy(_ bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) -> IOSurfaceRef? {
+        guard let bytes else { return nil }
+        if copies.first.map({ IOSurfaceGetWidth($0) != width || IOSurfaceGetHeight($0) != height }) ?? true {
+            let properties: [CFString: Any] = [
+                kIOSurfaceWidth: width, kIOSurfaceHeight: height, kIOSurfaceBytesPerElement: 4,
+                kIOSurfacePixelFormat: 0x4247_5241
+            ]
+            copies = (0..<2).compactMap { _ in IOSurfaceCreate(properties as CFDictionary) }
+        }
+        guard copies.count == 2 else { return nil }
+        copyIndex = 1 - copyIndex
+        let target = copies[copyIndex]
+        IOSurfaceLock(target, [], nil)
+        let row = IOSurfaceGetBytesPerRow(target)
+        let base = IOSurfaceGetBaseAddress(target)
+        for y in 0..<height { memcpy(base + y * row, bytes + y * stride, min(row, stride)) }
+        IOSurfaceUnlock(target, [], nil)
+        return target
+    }
+
     // MARK: The proxy's side
 
     private func listenForProxy() -> Bool {
@@ -413,7 +531,8 @@ public final class SeamlessSession {
         let path = Array(configuration.socketPath.utf8CString)
         guard path.count <= MemoryLayout.size(ofValue: address.sun_path) else { return false }
         withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: path.map { UInt8(bitPattern: $0) }) }
-        unlink(configuration.socketPath)
+        // Whatever's left at this path in our private folder is no use now. The proxy only starts us if nothing answers there.
+        try? FileManager.default.removeItem(atPath: configuration.socketPath)
         let listener = socket(AF_UNIX, SOCK_STREAM, 0)
         let bound = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -454,6 +573,7 @@ public final class SeamlessSession {
             proxyPID = pid
             note("# proxy said hello, pid \(pid)")
         case .input(let bytes): sendToGuest(bytes)
+        case .tileBadge(let label): note("# the proxy's tile says \"\(label ?? "")\"")
         case .activated:
             if let id = surfaces.values.min(by: { $0.window.order < $1.window.order })?.window.id {
                 sendToGuest(SessionWire.value(.focus, id))
@@ -594,7 +714,9 @@ public final class SeamlessSession {
             }
         }
         func frontPlace() -> (id: Int, x: Double, y: Double) {
-            let front = surfaces.values.filter { $0.window.level == 0 }.min { $0.window.order < $1.window.order }
+            let front = surfaces.values.filter { $0.window.level == 0 && !$0.window.title.isEmpty }.min {
+                $0.window.order < $1.window.order
+            }
             let window = front?.window
             let margin = Double(window?.margin ?? 0)
             return (
@@ -620,9 +742,10 @@ public final class SeamlessSession {
             let place = frontPlace()
             handle(.dragDropped(windowID: place.id, x: place.x, y: place.y))
         }
+        // A file made for this, so a pasteboard left from anything before can't look like it.
         after(60) { [self] in
             let place = frontPlace()
-            handle(.dragEntered(paths: [test.dragPath], windowID: place.id, x: place.x, y: place.y))
+            handle(.dragEntered(paths: [test.markerPath], windowID: place.id, x: place.x, y: place.y))
         }
         after(72) { [self] in
             let place = frontPlace()
@@ -630,7 +753,7 @@ public final class SeamlessSession {
             handle(.pointerLeftWithButtonDown(windowID: place.id))
         }
         after(82) { [self] in
-            let name = (test.dragPath as NSString).lastPathComponent
+            let name = (test.markerPath as NSString).lastPathComponent
             handle(.promiseRequested(id: 1, destination: (test.dragOutFolder as NSString).appendingPathComponent(name)))
         }
         after(92) { [self] in
@@ -643,15 +766,35 @@ public final class SeamlessSession {
             }
             note("# test: at the prompt, windows are: \(titles.joined(separator: "; "))")
             compose(to: test.screenshot)
-            // Return: the default button, Save.
-            sendToGuest(SessionWire.key(code: 36, down: true))
-            sendToGuest(SessionWire.key(code: 36, down: false))
+            guard test.cancelFirst else {
+                answer(code: 36)  // Return: the default button, Save.
+                return
+            }
+            answer(code: 53)  // Escape: Cancel.
+            note("# test: cancelled the prompt")
+        }
+        if test.cancelFirst {
+            after(123) { [self] in
+                let proxyAlive = NSRunningApplication(processIdentifier: proxyPID) != nil
+                note(
+                    "# test: after Cancel, the proxy \(proxyAlive ? "is running" : "has gone"), \(surfaces.count) windows"
+                )
+                NSRunningApplication(processIdentifier: proxyPID)?.terminate()
+            }
+            // The first launch has saved under the name this offers, and a clone keeps that, so this one types its own.
+            after(139) { [self] in answer(code: 6) }
+            after(141) { [self] in answer(code: 36) }
         }
         after(200) { [self] in
             note("# ERROR test: the guest app didn't exit after the answer")
             // Ends the guest's side normally, which brings its log back with it.
             shutdown(guestDescriptor, SHUT_RDWR)
         }
+    }
+
+    private func answer(code: UInt16) {
+        sendToGuest(SessionWire.key(code: code, down: true))
+        sendToGuest(SessionWire.key(code: code, down: false))
     }
 
     /// Every window's exact pixels at its position and order, over gray, so it works with the Mac's display asleep. It isn't
@@ -695,14 +838,17 @@ public final class SeamlessSession {
 
 /// What a test wants of a session, from the environment.
 public struct SeamlessSessionTest: Sendable {
-    public var dragPath, dragOutFolder, screenshot: String
+    public var dragPath, markerPath, dragOutFolder, screenshot: String
+    public var cancelFirst: Bool
 
-    /// `LC_SEAMLESS_TEST`: three paths, on lines of their own.
+    /// `LC_SEAMLESS_TEST`: four paths on lines of their own, then whether to cancel the first prompt.
     public init?(environment value: String?) {
         let parts = value?.components(separatedBy: "\n") ?? []
-        guard parts.count == 3 else { return nil }
+        guard parts.count == 5 else { return nil }
         dragPath = parts[0]
-        dragOutFolder = parts[1]
-        screenshot = parts[2]
+        markerPath = parts[1]
+        dragOutFolder = parts[2]
+        screenshot = parts[3]
+        cancelFirst = parts[4] == "cancel"
     }
 }

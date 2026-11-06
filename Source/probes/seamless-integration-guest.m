@@ -613,8 +613,12 @@ static int dragIn(NSArray *paths, const char *backend, BOOL image, const char *d
       fflush(stdout);
     });
     [NSApp activateIgnoringOtherApps:YES];
-    printf("ready backend %s\n", backend);
-    fflush(stdout);
+    // After the shields have reached the screen, which they haven't yet on Mojave: until then a press goes straight
+    // through.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), dispatch_get_main_queue(), ^{
+      printf("ready backend %s\n", backend);
+      fflush(stdout);
+    });
     if (driveTo) {
         double x, y;
         if (sscanf(driveTo, "%lf,%lf", &x, &y) == 2)
