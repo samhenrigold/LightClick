@@ -149,6 +149,14 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         case .removeSurface(let id):
             surfaces.removeValue(forKey: id)?.window.close()
             dropViews.removeValue(forKey: id)
+        case .minimizeSurface(let id, let minimized):
+            guard let window = surfaces[id]?.window, window.isMiniaturized != minimized else { break }
+            guestMinimizing.insert(id)
+            if minimized {
+                window.miniaturize(nil)
+            } else {
+                window.deminiaturize(nil)
+            }
         case .testInput: testInput()
         }
     }
@@ -256,6 +264,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     }
 
     private var surfaces: [Int: Surface] = [:]
+    /// Windows whose trip to or from the host's Dock started in the guest, so the guest needn't be told.
+    private var guestMinimizing: Set<Int> = []
     private var clickSignal: DispatchSourceSignal?
     private var moveSignal: DispatchSourceSignal?
 
@@ -292,6 +302,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         let frontToBack = surfaces.values.sorted { $0.order < $1.order }
         let quiet = ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil
         for other in frontToBack.reversed() {
+            // Ordering one front would bring it back from the Dock.
+            if other.window.isMiniaturized { continue }
             // A measurement's windows stay behind what whoever's at the Mac is using, where their pointer can't reach them.
             if quiet { other.window.orderBack(nil) } else { other.window.orderFront(nil) }
         }
@@ -346,6 +358,25 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
             MainActor.assumeIsolated {
                 guard let self, let front = self.surfaces.max(by: { Self.area($0.value) < Self.area($1.value) }) else { return }
                 let command = (try? String(contentsOfFile: self.testCommandPath, encoding: .utf8)) ?? ""
+                if command.hasPrefix("host-minimize") {
+                    front.value.window.miniaturize(nil)
+                    return
+                }
+                if command.hasPrefix("host-restore") {
+                    front.value.window.deminiaturize(nil)
+                    return
+                }
+                if command.hasPrefix("guest-minimize") {
+                    // Command-M, to the guest, as the key.
+                    if let key = NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                        windowNumber: front.value.window.windowNumber, context: nil, characters: "m",
+                        charactersIgnoringModifiers: "m", isARepeat: false, keyCode: 46)
+                    {
+                        SeamlessInputViewForwardKeyEquivalent(front.value.input, key)
+                    }
+                    return
+                }
                 if command.hasPrefix("resize") {
                     self.testResize(front.value)
                     return
@@ -420,7 +451,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     }
 
     private func makeSurface(id: Int, frame: NSRect) -> Surface {
-        let window = SurfaceWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
+        let window = SurfaceWindow(contentRect: frame, styleMask: [.borderless, .miniaturizable], backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
@@ -440,6 +471,18 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         drop.autoresizingMask = [.width, .height]
         input.addSubview(drop)
         window.observer = drop
+        for (name, minimized) in [
+            (NSWindow.didMiniaturizeNotification, true), (NSWindow.didDeminiaturizeNotification, false)
+        ] {
+            NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if self.guestMinimizing.remove(id) == nil {
+                        self.send(.surfaceMinimized(windowID: id, minimized: minimized))
+                    }
+                }
+            }
+        }
         dropViews[id] = drop
         return Surface(window: window, host: host, input: input, order: 0)
     }

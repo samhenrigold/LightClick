@@ -133,9 +133,14 @@ public final class SeamlessSession {
 
     public func start() {
         signal(SIGPIPE, SIG_IGN)
-        FileManager.default.createFile(
-            atPath: configuration.log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        // A desktop's session for an app can start many times, and each keeps what the one before said.
+        if !drivesGuest, FileManager.default.fileExists(atPath: configuration.log.path) {
+        } else {
+            FileManager.default.createFile(
+                atPath: configuration.log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
         logHandle = try? FileHandle(forWritingTo: configuration.log)
+        _ = try? logHandle?.seekToEnd()
         guard listenForGuest(), listenForProxy() else {
             note("ERROR couldn't listen")
             finished()
@@ -402,10 +407,14 @@ public final class SeamlessSession {
         case .covers(let id, let rects):
             surfaces[id]?.guestCovers = rects
             if let surface = surfaces[id] { showCrops(of: [surface]) }
+        case .minimized(let id, let minimized):
+            note("# window \(id) \(minimized ? "minimized" : "back")")
+            proxy?.send(SessionCommand.minimizeSurface(id: Int(id), minimized: minimized))
         case .surfaceOrigin(let id, let x, let y):
             surfaces[id]?.surfaceOrigin = (x, y)
             if let surface = surfaces[id] { showCrops(of: [surface]) }
         case .gone(let id):
+            note("# window \(id) gone")
             surfaces[id] = nil
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
             onWindowsChanged?()
@@ -758,6 +767,8 @@ public final class SeamlessSession {
             if let id = surfaces.values.min(by: { $0.window.order < $1.window.order })?.window.id {
                 sendToGuest(SessionWire.value(.focus, id))
             }
+        case .surfaceMinimized(let id, let minimized):
+            sendToGuest(SessionWire.setMinimized(window: UInt32(clamping: id), minimized))
         case .surfaceMoved(let id, let x, let y):
             guard let surface = surfaces[UInt32(clamping: id)] else { return }
             let side = Double(surface.window.margin)

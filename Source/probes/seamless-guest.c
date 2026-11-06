@@ -983,6 +983,17 @@ static int drain_input(struct Stream *s) {
                                       : CGPointMake(g->x / 16.0, g->y / 16.0);
             swi_gesture(&context, g, point);
             s->gesture_events++;
+        } else if (m.type == SWM_SET_MINIMIZED) {
+            printf("# %.1f host asks window %u minimized %u, app pid %d\n", now(), m.u.window_id, m.minimized, session_app_pid);
+            fflush(stdout);
+            if (session_menu_tool && session_app_pid && !fork()) {
+                char pid[16], window[16];
+                snprintf(pid, sizeof(pid), "%d", session_app_pid);
+                snprintf(window, sizeof(window), "%u", m.u.window_id);
+                execl(session_menu_tool, session_menu_tool, "set-minimized", "--pid", pid, "--window", window, "--state",
+                      m.minimized ? "1" : "0", (char *)NULL);
+                _exit(127);
+            }
         } else if (m.type == SWM_FOCUS)
             activate_owner(s);
         offset += used;
@@ -1422,6 +1433,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
+    int minimized;
     int surface_x, surface_y, has_surface, cover_count;
     uint32_t covers_hash;
     int cropping, covered; // cropping: the message the host last had, if it's taking this from the display.
@@ -1812,6 +1824,32 @@ static int tree_send_covers(struct Stream *s, struct TreeWindow *w, const struct
     return send_all(s->fd, message, SWM_HEADER_SIZE + size);
 }
 
+// Asks the app, as a minimized window isn't in WindowServer's list by its number, even when asked for by that number.
+static int tree_window_is_minimized(CGWindowID id, pid_t pid) {
+    if (!session_menu_tool)
+        return 0;
+    char pid_text[16], window[16];
+    snprintf(pid_text, sizeof(pid_text), "%d", pid);
+    snprintf(window, sizeof(window), "%u", id);
+    char *const ask[] = {(char *)session_menu_tool, "is-minimized", "--pid", pid_text, "--window", window, NULL};
+    char *said = run_tool(ask);
+    int minimized = said && strstr(said, "minimized yes");
+    printf("# %.1f window %u left the screen: %s\n", now(), id, said ? said : "(no answer)");
+    fflush(stdout);
+    free(said);
+    return minimized;
+}
+
+static int tree_send_minimized(struct Stream *s, CGWindowID id, int minimized) {
+    printf("# %.1f window %u %s\n", now(), id, minimized ? "minimized" : "back");
+    fflush(stdout);
+    uint8_t message[SWM_HEADER_SIZE + 8];
+    swm_header(message, SWM_MINIMIZED, 8);
+    swm_w32(message + SWM_HEADER_SIZE, id);
+    swm_w32(message + SWM_HEADER_SIZE + 4, (uint32_t)minimized);
+    return send_all(s->fd, message, sizeof(message));
+}
+
 static int tree_surface_has_shadow(CGWindowID id) {
     for (uint32_t i = 0; i < tree_gpu_table->gpu_row_count && i < SWS_TREE; i++) {
         const struct SWSGPURow *row = &tree_gpu_table->gpu_rows[i];
@@ -1894,6 +1932,11 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                     w = &windows[k];
             if (!w)
                 continue;
+            if (w->minimized) {
+                w->minimized = 0;
+                if (tree_send_minimized(s, id, 0))
+                    goto done;
+            }
             int fresh = w->id != id;
             w->id = id;
             w->seen = 1;
@@ -2123,6 +2166,17 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             }
             order++;
         }
+        for (int i = 0; i < TREE_MAX_WINDOWS; i++)
+            if (windows[i].id && !windows[i].seen && tree_shared &&
+                (windows[i].minimized || tree_window_is_minimized(windows[i].id, windows[i].pid))) {
+                // Once it's known, only its coming back, or the app's going, changes that.
+                if (!windows[i].minimized) {
+                    windows[i].minimized = 1;
+                    if (tree_send_minimized(s, windows[i].id, 1))
+                        goto done;
+                }
+                windows[i].seen = 1;
+            }
         for (int i = 0; i < TREE_MAX_WINDOWS; i++)
             if (windows[i].id && !windows[i].seen) {
                 uint8_t gone[SWM_HEADER_SIZE + SWM_GONE_SIZE];
