@@ -164,7 +164,8 @@ final class SeamlessHost: NSObject {
     private static func make(appNamed name: String, machinePath: String) async -> String? {
         let guest = AgentGuest(machinePath: machinePath)
         // From the command line the machine has only just started, and its agent answers with an error until it's up.
-        for _ in 0..<180 where await guest.run("/usr/bin/uname", ["-r"]).exitCode != 0 {
+        let started = CFAbsoluteTimeGetCurrent()
+        while await guest.run("/usr/bin/uname", ["-r"]).exitCode != 0, CFAbsoluteTimeGetCurrent() - started < 900 {
             try? await Task.sleep(for: .seconds(5))
         }
         guard let app = await installedApps(guest)?.first(where: { $0.name == name }) else { return nil }
@@ -172,14 +173,19 @@ final class SeamlessHost: NSObject {
     }
 
     private static func toolInGuest(_ guest: AgentGuest) async -> Bool {
-        guard let staged = await guest.stage(tools.appending(path: "seamless-integration-guest")) else { return false }
+        guard let staged = await guest.stage(tools.appending(path: "seamless-integration-guest")) else {
+            NSLog("Couldn't stage the integration tool")
+            return false
+        }
         let copy = "mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp \"$1\" /tmp/sg/ig; chmod 755 /tmp/sg/ig"
         return await guest.run("/bin/sh", ["-c", copy, "sh", staged]).exitCode == 0
     }
 
     private static func installedApps(_ guest: AgentGuest) async -> [GuestApp]? {
         guard await toolInGuest(guest) else { return nil }
-        let listing = await guest.run("/tmp/sg/ig", ["apps"]).output
+        let run = await guest.run("/tmp/sg/ig", ["apps"])
+        let listing = run.output
+        if run.exitCode != 0 { NSLog("The guest's app listing failed: %@", run.failure ?? String(listing.prefix(500))) }
         guard let line = listing.split(separator: "\n").first(where: { $0.hasPrefix("[") }) else { return nil }
         return (try? JSONDecoder().decode([GuestApp].self, from: Data(line.utf8)))?.sorted { $0.name < $1.name }
     }

@@ -438,7 +438,8 @@
                                    [timer invalidate];
                                    weakSelf.quitTimer = nil;
                                    // Nobody can see this app in a session, so it mustn't stay to ask.
-                                   if ([NSProcessInfo.processInfo.arguments containsObject:@"--seamless-session"]) {
+                                   if ([NSProcessInfo.processInfo.arguments containsObject:@"--seamless-session"] ||
+                                       [NSProcessInfo.processInfo.arguments containsObject:@"--seamless-make-proxy"]) {
                                        weakSelf.quitApproved = YES;
                                        [NSApp terminate:nil];
                                        return;
