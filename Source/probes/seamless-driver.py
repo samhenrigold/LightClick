@@ -1,9 +1,13 @@
 # Host side of scripts/seamless-try. Runs inside scripts/guest-bench, which supplies arguments, channel, request, source,
 # stage and tag, and has already booted the clone.
+import base64
+import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
+import threading
 import time
 
 results = source/'Build/seamless'
@@ -153,7 +157,16 @@ def input_live(seconds):
     save(output)
 
 
-def tree(seconds, guest=None, hook=False):
+def windowserver_seconds():
+    text = request({'Executable': '/bin/ps', 'Arguments': ['-axco', 'time=,command=']}, 60).get('Stdout', '')
+    for line in text.splitlines():
+        if line.split()[1:] == ['WindowServer']:
+            minutes, seconds = line.split()[0].split(':')
+            return int(minutes) * 60 + float(seconds)
+    return 0
+
+
+def tree(seconds, guest=None, hook=False, command=None):
     label = 'with the hook' if hook else 'by capture'
     print(f'== Every window of a demo app, {label}, for {seconds} s', flush=True)
     guest = guest or stage(guest_tool)
@@ -165,9 +178,14 @@ def tree(seconds, guest=None, hook=False):
     viewer = subprocess.Popen([str(results/'seamless-viewer'), '--tree', '--port', str(port), '--exit-after', str(seconds + 5),
                                '--png', str(prefix), '--screenshots', str(results/f'{name}-screen'),
                                # The demo's Anchor button, on a 10.9 title bar: it adds "clicked" to the title.
-                               '--test-input', '365,156'],
+                               '--test-input', '365,156', '--test-motion'],
                               stdout=subprocess.PIPE, text=True)
-    status, _ = run(guest, ['program-tree', '--port', str(port), '--seconds', str(seconds)] + (['--hook'] if hook else []))
+    time.sleep(1)  # A busy host takes a moment to bind, and a guest that arrives first measures nothing.
+    server_before = windowserver_seconds()
+    started = time.time()
+    status, _ = run(guest, (command or ['program-tree']) + ['--port', str(port), '--seconds', str(seconds)] +
+                    (['--hook'] if hook else []))
+    print(f'windowserver_cpu {(windowserver_seconds() - server_before) / (time.time() - started) * 100:.0f} %')
     print(f'# guest exit {status}', flush=True)
     try:
         report, _ = viewer.communicate(timeout=30)
@@ -209,10 +227,15 @@ def install_hook():
             print(f'# waiting: {stuck}', flush=True)
             continue
         log = result.get('Stdout') or ''
-        if log.count('-- sample') >= 2 or 'refusing' in log or 'not calling any' in log:
+        if log.count('-- sample') >= 2 or 'refusing' in log or 'not calling any' in log or log.count('== loaded') > 2:
             break
         time.sleep(15)
     (results/f'{tag}.log').write_text(log)
+    if log.count('== loaded') > 1:
+        print(f'# ERROR WindowServer restarted: loaded {log.count("== loaded")} times. Newest crash:')
+        crash = request({'Executable': '/bin/sh', 'Arguments': ['-c', 'cd /Library/Logs/DiagnosticReports && f=$(ls -t WindowServer* | head -1) && '
+                                                                     'sed -n 1,70p "$f"']}, 60)
+        print((crash.get('Stdout') or crash.get('Stderr') or '')[:5000], flush=True)
     state = request({'Executable': '/usr/bin/pgrep', 'Arguments': ['-lx', 'WindowServer']}, 60)
     print(f'# WindowServer: {state.get("Stdout", "").strip() or "NOT RUNNING"}')
     print('\n'.join(log.splitlines()[:6]))
@@ -224,7 +247,7 @@ def hook(seconds):
     # The staging folder doesn't survive a reboot.
     guest = stage(guest_tool)
     tree(seconds, guest)
-    tree(seconds, guest, hook=True)
+    tree(seconds, guest, hook=True, command=['program-tree', '--gl'] if 'gl' in arguments else None)
     log = request({'Executable': '/bin/cat', 'Arguments': ['/var/tmp/seamless-ws-probe.log']}, 120).get('Stdout') or ''
     (results/f'{tag}.log').write_text(log)
 
@@ -256,7 +279,128 @@ def diag():
     print(capture(f'{tag}-frame.png'))
 
 
-if arguments[0] == 'diag':
+def gl():
+    # Does a GL view show on the guest's own display, as opposed to in a capture of its window?
+    guest = stage(guest_tool)
+    copy = 'mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp "$1" /tmp/sg/g; chmod 755 /tmp/sg/g'
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', copy, 'sh', guest]}, 120)
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', '/tmp/sg/g program-gl >/tmp/sg/gl.log 2>&1 &']}, 60)
+    time.sleep(90)
+    print('whole guest frame', capture(f'{tag}-guest-frame.png'), flush=True)
+    r = request({'Executable': '/tmp/sg/g', 'Arguments': ['png-window', '--app', 'seamless-guest', '--out', '/tmp/sg/capture.png']}, 120)
+    print(r.get('Stdout'), r.get('Stderr'))
+    print(request({'Executable': '/bin/cat', 'Arguments': ['/tmp/sg/gl.log']}, 60).get('Stdout'))
+
+
+def safari(seconds):
+    install_hook()
+    guest = stage(guest_tool)
+    tree(seconds, guest, hook=True, command=['tree', '--app', 'Safari', '--open'])
+
+
+def motion():
+    install_hook()
+    guest = stage(guest_tool)
+    tree(32, guest, hook=True, command=['program-tree', '--gl'])
+
+
+def capture_bench():
+    guest = stage(guest_tool)
+    run(guest, ['capture-bench', '--app', 'Safari', '--open'])
+    run(guest, ['capture-bench', '--app', 'TextEdit', '--open'])
+
+
+def proxy(seconds):
+    # One guest app as a host app: a generated .app with its own Dock tile, its windows, its menu and its input, with the VM
+    # hidden. The Mac's display may be asleep, so what's checked is what WindowServer and LaunchServices report.
+    install_hook()
+    guest = stage(guest_tool)
+    tool = stage(results/'seamless-integration-guest')
+    setup = (f'mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp "$1" /tmp/sg/g; cp "$2" /tmp/sg/ig; chmod 755 /tmp/sg/g /tmp/sg/ig; '
+             '/usr/bin/sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "'
+             + ' '.join(f"INSERT OR REPLACE INTO access (service,client,client_type,allowed,prompt_count) VALUES "
+                        f"('kTCCServiceAccessibility','{client}',1,1,1);"
+                        for client in ('/private/tmp/sg/ig', '/tmp/sg/ig', '/private/tmp/sg/g', '/usr/bin/sudo', '/usr/bin/env',
+                                       # 10.9 asks TCC about the responsible process, and from a daemon that's the agent.
+                                       '/Library/Application Support/Virtual Intel Mac/GuestTools/opengl-install-bootstrap')) +
+             '"; /usr/bin/killall tccd; sleep 2')
+    print(request({'Executable': '/bin/sh', 'Arguments': ['-c', setup, 'sh', guest, tool]}, 120), flush=True)
+    apps = request({'Executable': '/tmp/sg/ig', 'Arguments': ['apps']}, 300).get('Stdout', '')
+    line = next((l for l in apps.splitlines() if l.startswith('[')), '[]')
+    (results/f'{tag}-apps.json').write_text(line)
+    icon = base64.b64decode(request({'Executable': '/tmp/sg/ig', 'Arguments': ['icon', '--path', '/Applications/TextEdit.app']}, 300).get('Stdout', '').strip() or b'')
+    (results/f'{tag}.icns').write_bytes(icon)
+    socket_path = f'/tmp/lc-seamless-{os.getpid()}.sock'
+    bundles = results/'proxies'
+    shutil.rmtree(bundles, ignore_errors=True)
+    made = subprocess.run([str(results/'SeamlessMakeProxy'), 'write', str(results/f'{tag}-apps.json'), 'TextEdit', 'clone', 'Mavericks', '/nonexistent',
+                           str(bundles), str(results/'SeamlessProxy'), socket_path, str(results/f'{tag}.icns')], capture_output=True, text=True)
+    print('# proxy:', made.stdout, made.stderr, flush=True)
+    bundle = made.stdout.strip()
+    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+    app_pid = next((line.split()[0] for line in listing.splitlines() if f'Build/bench/{tag}/' in line and 'Contents/MacOS/Light Click' in line), '0')
+    port = free_port()
+    prefix = results/f'{tag}-window'
+    for old in list(results.glob(f'{tag}-window-*.png')) + list(results.glob(f'{tag}-screen-*.png')):
+        old.unlink()
+    viewer = subprocess.Popen([str(results/'seamless-viewer'), '--tree', '--port', str(port), '--exit-after', str(seconds + 5), '--png', str(prefix),
+                               '--screenshots', str(results/f'{tag}-screen'), '--session-socket', socket_path, '--hide-pid', app_pid,
+                               '--test-input', '200,100', '--test-menu', 'Edit/Select All'], stdout=subprocess.PIPE, text=True)
+    time.sleep(1)
+    subprocess.run(['/usr/bin/open', bundle], check=True)
+    evidence = []
+
+    def look():
+        time.sleep(seconds * 0.7)
+        rows = subprocess.run(['/bin/sh', '-c', 'lsappinfo list | grep -A4 "TextEdit (Mavericks)"'], capture_output=True, text=True).stdout
+        evidence.append(rows)
+        windows = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
+        evidence.append('\n'.join(w for w in windows.splitlines() if 'TextEdit (' in w or f'pid={app_pid} ' in w))
+        evidence.append(f'(VM app pid {app_pid}: any row above with it is still on screen)')
+        # The proxy's own menu bar, read back through the host's Accessibility.
+        menu = subprocess.run([str(results/'seamless-integration-guest'), 'menu', '--app', 'TextEdit (Mavericks)'], capture_output=True, text=True).stdout
+        tree = next((row for row in menu.splitlines() if row.startswith('[')), '')
+        try:
+            import json
+            top = json.loads(tree)
+            evidence.append('Host menu bar of the proxy: ' + ', '.join(item.get('title', '') for item in top) +
+                            f' ({sum(len(item.get("children") or []) for item in top)} items in those menus)')
+        except ValueError:
+            evidence.append(f'Host menu bar of the proxy: unreadable: {menu[:300]}')
+
+    watcher = threading.Thread(target=look)
+    watcher.start()
+    status, _ = run('/usr/bin/env', ['SEAMLESS_RUN_IN_PLACE=1', '/tmp/sg/g', 'tree', '--app', 'TextEdit', '--open', '--hook', '--menu-tool', '/tmp/sg/ig', '--port', str(port), '--seconds', str(seconds)])
+    watcher.join()
+    print(f'# guest exit {status}', flush=True)
+    try:
+        report, _ = viewer.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        viewer.terminate()
+        report, _ = viewer.communicate()
+    print(f'== Session on the host, exit {viewer.returncode}')
+    print(report)
+    print('== What the host reports about the proxy')
+    print('\n'.join(evidence), flush=True)
+    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+    for row in listing.splitlines():
+        if f'{bundle}/Contents/MacOS/SeamlessProxy' in row:
+            os.kill(int(row.split()[0]), signal.SIGKILL)
+    time.sleep(1)
+    print(subprocess.run([str(results/'SeamlessMakeProxy'), 'remove', bundle], capture_output=True, text=True).stdout)
+
+
+if arguments[0] == 'capture-bench':
+    capture_bench()
+elif arguments[0] == 'proxy':
+    proxy(int(arguments[1]) if len(arguments) > 1 else 28)
+elif arguments[0] == 'motion':
+    motion()
+elif arguments[0] == 'gl':
+    gl()
+elif arguments[0] == 'safari':
+    safari(int(arguments[1]) if len(arguments) > 1 else 22)
+elif arguments[0] == 'diag':
     diag()
 elif arguments[0] == 'stream':
     stream(int(arguments[1]) if len(arguments) > 1 else 20)
@@ -267,6 +411,6 @@ elif arguments[0] == 'input-live':
 elif arguments[0] == 'tree':
     tree(int(arguments[1]) if len(arguments) > 1 else 22)
 elif arguments[0] == 'hook':
-    hook(int(arguments[1]) if len(arguments) > 1 else 22)
+    hook(int(arguments[1]) if len(arguments) > 1 and arguments[1].isdigit() else 22)
 else:
     display(arguments[1:] or default_ladder)

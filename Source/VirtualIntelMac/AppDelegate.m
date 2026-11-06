@@ -6,11 +6,11 @@
 #import "VIMMachine.h"
 #import "VIMInstallerWindow.h"
 #import "VIMHostSupport.h"
-#import "VIMNewMachineWindow.h"
+#import "Light_Click-Swift.h"
 #import "VIMAlerts.h"
 #import "VIMMenuController.h"
-#import "VIMMachineSettings.h"
 #import "VIMDiagnostics.h"
+#import "VIMSeamlessSession.h"
 #import "VIMUSBClient.h"
 #import "VIMNetworkClient.h"
 #include <sys/sysctl.h>
@@ -84,6 +84,9 @@
     return NO;
 }
 
+- (void)applicationWillFinishLaunching:(NSNotification *)aNotification {
+    [VIMSeamlessSession prepareIfRequested];
+}
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
     // Let AppKit resolve the compiled Icon Composer asset, including the
     // system's appearance-specific rendition, instead of overriding the Dock.
@@ -338,6 +341,9 @@
                 nil);
         openIndex++;
     }
+    [VIMSeamlessSession startIfRequested:^{
+      [self waitForShutdown];
+    }];
     int translated = 0;
     size_t translatedSize = sizeof(translated);
     if (sysctlbyname("sysctl.proc_translated", &translated, &translatedSize, NULL, 0) == 0 && translated) {

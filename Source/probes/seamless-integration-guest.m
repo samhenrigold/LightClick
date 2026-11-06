@@ -25,6 +25,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <Carbon/Carbon.h>
 #include <copyfile.h>
+#include "seamless-session-join.h"
 #include <mach-o/dyld.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -136,7 +137,15 @@ static int runInSession(int argc, char **argv) {
     pid_t child = fork();
     if (child == 0) {
         freopen("/dev/null", "r", stdin);
-        execv(arguments[0], arguments);
+        if (modern) {
+            execv(arguments[0], arguments);
+        } else if (join_session_of(finder)) {
+            printf("# ERROR couldn't join the session of Finder, pid %d: %s\n", finder, strerror(errno));
+            fflush(stdout);
+        } else {
+            // Past launchctl: see seamless-session-join.h.
+            execv(arguments[3], arguments + 3);
+        }
         _exit(127);
     }
     int status = 1;

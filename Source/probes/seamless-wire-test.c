@@ -314,6 +314,27 @@ static void fuzz(void) {
     }
 }
 
+static void menus(void) {
+    uint8_t out[64];
+    struct SWMMessage m;
+    size_t used;
+    swm_header(out, SWM_MENU_PRESS, 6);
+    memcpy(out + SWM_HEADER_SIZE, "File/A", 6);
+    every_prefix_needs_more(out, SWM_HEADER_SIZE + 6);
+    assert(swm_parse(out, SWM_HEADER_SIZE + 6, &m, &used) == SWM_OK && m.type == SWM_MENU_PRESS);
+    assert(m.u.data.length == 6 && !memcmp(m.u.data.bytes, "File/A", 6));
+    size_t prefix = swm_put_document_prefix(out, 7, 1, "a.txt", 5, 2);
+    memcpy(out + prefix, "hi", 2);
+    assert(swm_parse(out, prefix + 2, &m, &used) == SWM_OK && m.type == SWM_DOCUMENT && used == prefix + 2);
+    assert(m.u.data.length == SWM_DOCUMENT_FIXED + 7 && swm_r32(m.u.data.bytes) == 7 && m.u.data.bytes[4] == 1);
+    swm_put_u32_message(out, sizeof(out), SWM_APP_GONE, 0);
+    assert(swm_parse(out, SWM_HEADER_SIZE + 4, &m, &used) == SWM_OK && m.type == SWM_APP_GONE);
+    swm_header(out, SWM_MENU, 0); // Empty.
+    assert(swm_parse(out, SWM_HEADER_SIZE, &m, &used) == SWM_BAD);
+    swm_header(out, SWM_MENU, SWM_MAX_MENU + 1); // Lying, judged from the header alone.
+    assert(swm_parse(out, SWM_HEADER_SIZE, &m, &used) == SWM_BAD);
+}
+
 static void slots(void) {
     struct SWMSlotLayout l = {8192, 4608, 1600, 1200, 64};
     int x, y;
@@ -342,6 +363,7 @@ static void slots(void) {
 }
 
 int main(void) {
+    menus();
     slots();
     round_trips();
     input_round_trips();

@@ -54,8 +54,29 @@ static const char *const wanted[] = {"_CGXWindowByID",
                                      "_CGXBackingStoreHeight",
                                      "_CGXBackingStoreBitsPerPixel",
                                      "_CGXBackingStoreHasAlpha",
-                                     "_CGXBackingStoreDataIndexed"};
-static void *resolved[9];
+                                     "_CGXBackingStoreDataIndexed",
+                                     "_WSGetVisibleWindowArray",
+                                     "_CGXWindowArraySubArray",
+                                     "_CGXWindowArrayEnumeratorSubArray",
+                                     "_CGXWindowArrayEnumeratorNext",
+                                     "_WSWindowGetScreenRect",
+                                     "_CGXGetShadowMarginForWindow",
+                                     "_CGXGetCurrentSessionWindowData"};
+static void *resolved[16];
+static void *(*session_data)(void);
+struct RectResult {
+    double x, y, width, height;
+};
+struct WindowArray {
+    void **items;
+    long count;
+};
+static void *(*visible_array)(void);
+static struct WindowArray (*array_sub)(void *);
+static void *(*enumerator_init)(void *, struct WindowArray *);
+static char *(*enumerator_next)(void *);
+static struct RectResult (*window_screen_rect)(void *);
+static void (*shadow_margin)(void *, int *, int *, int *, int *);
 
 static const struct mach_header_64 *loaded_coregraphics(void) {
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
@@ -154,6 +175,13 @@ static int resolve_symbols(void) {
     backing_bits = resolved[6];
     backing_has_alpha = resolved[7];
     backing_data = resolved[8];
+    visible_array = resolved[9];
+    array_sub = resolved[10];
+    enumerator_init = resolved[11];
+    enumerator_next = resolved[12];
+    window_screen_rect = resolved[13];
+    shadow_margin = resolved[14];
+    session_data = resolved[15];
     note("symbols resolved: CGXWindowByID at %p\n", (void *)window_by_id);
     return 1;
 }
@@ -203,6 +231,53 @@ static void sample(void) {
 
 static struct SWSTable *table;
 
+// Everything a window list says, read where it's kept. The window's read-only state at +0xe0 holds its ID, connection,
+// level, alpha and surface flag, at the offsets CGSWindowROStateGet* read; the rect comes the way kCGWindowBounds'
+// does. The shadow's parameters at +0x134 to +0x148 feed the key, as CGXGetShadowMarginForWindow reads them.
+static void walk_windows(void) {
+    // Before a session exists, the array this asks for is at address 0x20.
+    if (!session_data())
+        return;
+    uint64_t enumerator[8] = {0};
+    struct WindowArray sub = array_sub(visible_array());
+    if (!sub.items)
+        return;
+    enumerator_init(enumerator, &sub);
+    table->tree_generation++;
+    uint32_t count = 0;
+    for (char *window; count < SWS_TREE && (window = enumerator_next(enumerator));) {
+        const uint8_t *state = *(const uint8_t **)(window + 0xe0);
+        if (!state)
+            continue;
+        struct SWSTreeEntry *t = &table->tree[count++];
+        t->id = *(const uint32_t *)state;
+        t->connection = *(const uint32_t *)(state + 4);
+        t->level = *(const int32_t *)(state + 0x10);
+        t->alpha = *(const float *)(state + 0x18);
+        t->has_surfaces = state[0xb];
+        struct RectResult rect = window_screen_rect(window);
+        t->x = rect.x;
+        t->y = rect.y;
+        t->width = rect.width;
+        t->height = rect.height;
+        t->margin = 0;
+        uint32_t key = 2166136261u;
+        if (window_has_shadow(window)) {
+            int side[4] = {0, 0, 0, 0};
+            shadow_margin(window, &side[0], &side[1], &side[2], &side[3]);
+            for (int i = 0; i < 4; i++) {
+                uint32_t size = (uint32_t)abs(side[i]);
+                t->margin = size > t->margin ? size : t->margin;
+            }
+            for (int i = 0x134; i < 0x148; i++)
+                key = (key ^ (uint8_t)window[i]) * 16777619u;
+        }
+        t->shadow_key = key;
+    }
+    table->tree_count = count;
+    table->tree_generation++;
+}
+
 // Copies the rows of each wanted window's backing that changed, for windows whose flush seed moved. Runs at most once
 // per 8 ms of WindowServer's main thread, between requests, where its structures are consistent.
 static void publish(void) {
@@ -212,6 +287,11 @@ static void publish(void) {
         return;
     next = now + 8000000ull * table->ticks_denom / table->ticks_numer;
     table->passes++;
+    static uint64_t next_walk;
+    if (now >= next_walk) {
+        next_walk = now + 33000000ull * table->ticks_denom / table->ticks_numer;
+        walk_windows();
+    }
     for (int i = 0; i < SWS_SLOTS; i++) {
         struct SWSEntry *e = &table->slots[i];
         if (!e->id)

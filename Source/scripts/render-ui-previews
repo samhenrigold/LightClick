@@ -12,14 +12,12 @@ mkdir -p "$source_dir/Build/UIReview"
   "$source_dir/VirtualIntelMac/AppDelegate.m" \
   "$source_dir/VirtualIntelMac/VIMUpdateChecker.m" \
   "$source_dir/VirtualIntelMac/VIMLibraryViewController.m" \
-  "$source_dir/VirtualIntelMac/VIMMachineSettings.m" \
   "$source_dir/VirtualIntelMac/VIMSettingsIcon.m" \
   "$source_dir/VirtualIntelMac/VIMDiscImage.m" \
   "$source_dir/VirtualIntelMac/VIMMachine.m" \
   "$source_dir/VirtualIntelMac/VIMFirmwareBoot.m" \
   "$source_dir/VirtualIntelMac/VIMLibraryLocation.m" \
   "$source_dir/VirtualIntelMac/VIMNetworkDefaults.m" \
-  "$source_dir/VirtualIntelMac/VIMNewMachineWindow.m" \
   "$source_dir/VirtualIntelMac/VIMInstallerAssembly.m" \
   "$source_dir/VirtualIntelMac/VIMHostSupport.m" \
   "$source_dir/VirtualIntelMac/VIMAlerts.m" \

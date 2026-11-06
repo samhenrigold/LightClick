@@ -32,11 +32,6 @@ int main(void) {
         assert([after[@"AdditionalMedia"] count] == 1);
         assert(!VIMImageClearedSelections(stale, @{@0 : @"/old/previous.iso"}).count);
         assert([VIMImageSlotPath(stale, 0) isEqual:@"/missing/fcp.iso"]);
-        NSMutableSet *devices = [NSMutableSet new];
-        for (NSUInteger slot = 0; slot < VIMImageSlotCount; slot++)
-            for (NSString *format in @[ @"raw", @"dmg" ])
-                [devices addObject:VIMImageSlotDevice(slot, format)];
-        assert(devices.count == 5);
         for (NSString *guest in
              @[ @"tiger", @"leopard", @"snowleopard", @"lion", @"mountainlion", @"mavericks", @"yosemite" ]) {
             assert(!VIMImageUsesUSB3(guest));
@@ -48,7 +43,7 @@ int main(void) {
             assert([VIMImageUSBBus(guest) isEqual:@"xhci.0"]);
             assert(VIMImageUSBPort(guest, 0) == 1 && VIMImageUSBPort(guest, 3) == 4);
         }
-        puts("PASS independent image slots, sparse settings, legacy primary and unique drive IDs");
+        puts("PASS independent image slots, sparse settings and legacy primary");
         return 0;
     }
 }

@@ -2,6 +2,8 @@
 NS_ASSUME_NONNULL_BEGIN
 /// Extracts trusted Apple installer inputs without executing their installer scripts.
 /// The caller supplies a new job directory on its capacity-checked scratch volume.
+/// Its blocking operations run on a worker; its callbacks arrive on the main thread.
+NS_SWIFT_SENDABLE
 @interface VIMInstallerAssembly : NSObject
 /// Worker operation: installer apps or read-only Tiger/Leopard/Snow restore DVDs.
 + (nullable NSString *)guestForInstallerApplication:(NSURL *)URL error:(NSError **)error;

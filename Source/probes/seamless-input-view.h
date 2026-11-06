@@ -67,6 +67,10 @@ static inline uint8_t SWIMomentumFromNSEvent(NSEventPhase phase) {
 @interface SeamlessInputView : NSView <NSTextInputClient>
 @property(copy) void (^send)(const uint8_t *bytes, size_t size);
 @property uint32_t guestWindow;
+// With `absolute`, events carry guest screen points: this window's position on the host's screen, less this offset. For
+// a window that follows the guest's, where window-relative points chase themselves during a drag.
+@property BOOL absolute;
+@property NSPoint guestOffset;
 // Whether the host's input method composes, with commits sent as text. Otherwise raw keys go to the guest's own, which
 // needs the same input source there: see forwardInputSource. Set from what the guest says it has.
 @property BOOL hostComposes;
@@ -160,9 +164,16 @@ static inline uint8_t SWIMomentumFromNSEvent(NSEventPhase phase) {
 
 // ---- Pointer ----
 
+- (NSPoint)wirePointFor:(NSEvent *)event {
+    if (!self.absolute)
+        return [self convertPoint:event.locationInWindow fromView:nil];
+    NSPoint screen = [self.window convertPointToScreen:event.locationInWindow];
+    return NSMakePoint(screen.x - self.guestOffset.x,
+                       NSScreen.screens.firstObject.frame.size.height - screen.y - self.guestOffset.y);
+}
 - (void)sendPointer:(uint8_t)kind button:(uint8_t)button event:(NSEvent *)event {
-    NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    struct SWMPointer e = {self.guestWindow,
+    NSPoint p = [self wirePointFor:event];
+    struct SWMPointer e = {self.absolute ? 0 : self.guestWindow,
                            kind,
                            button,
                            (uint8_t)MIN(kind == SWM_MOVE ? 0 : event.clickCount, 255),
@@ -208,10 +219,19 @@ static inline uint8_t SWIButton(NSEvent *event) { return event.buttonNumber > 2 
 // ---- Trackpad ----
 
 - (void)sendGesture:(uint8_t)kind event:(NSEvent *)event a:(double)a b:(double)b c:(double)c stage:(uint8_t)stage {
-    NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-    struct SWMGesture g = {
-        self.guestWindow,          kind,     0,        0,        stage, (int32_t)lround(p.x * 16),
-        (int32_t)lround(p.y * 16), (float)a, (float)b, (float)c, 0,     (uint32_t)event.modifierFlags};
+    NSPoint p = [self wirePointFor:event];
+    struct SWMGesture g = {self.absolute ? 0 : self.guestWindow,
+                           kind,
+                           0,
+                           0,
+                           stage,
+                           (int32_t)lround(p.x * 16),
+                           (int32_t)lround(p.y * 16),
+                           (float)a,
+                           (float)b,
+                           (float)c,
+                           0,
+                           (uint32_t)event.modifierFlags};
     if (event.type == NSEventTypeScrollWheel) {
         g.flags = (event.hasPreciseScrollingDeltas ? SWG_PRECISE : 0) |
                   (event.isDirectionInvertedFromDevice ? SWG_INVERTED : 0);

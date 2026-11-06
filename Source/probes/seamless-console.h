@@ -2,8 +2,7 @@
 // seamless-input-guest. Includers define now() and darwin_major() first.
 #ifndef SEAMLESS_CONSOLE_H
 #define SEAMLESS_CONSOLE_H
-#include <bsm/audit.h>
-#include <mach/mach.h>
+#include "seamless-session-join.h"
 static pid_t console_finder(uid_t uid) {
     char command[64];
     snprintf(command, sizeof(command), "/usr/bin/pgrep -x -U %u Finder", uid);
@@ -15,22 +14,6 @@ static pid_t console_finder(uid_t uid) {
         pclose(pipe);
     }
     return pid;
-}
-
-// launchctl bsexec only moves a process's bootstrap port, and it prints "bsexec failed" on 10.9. WindowServer works out
-// a client's GUI session from its audit session, which stays the system's, so it answers every session query with
-// nothing: no window list, though the connection and display calls still work. So join Finder's audit session too.
-static int join_session_of(pid_t pid) {
-    mach_port_t task = MACH_PORT_NULL, bootstrap = MACH_PORT_NULL, session = MACH_PORT_NULL;
-    audit_token_t token;
-    mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
-    if (task_for_pid(mach_task_self(), pid, &task) || task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&token, &count) ||
-        task_get_bootstrap_port(task, &bootstrap))
-        return -1;
-    // The session ID's place in an audit token: uid, gid, ruid, rgid, pid, asid, ...
-    if (audit_session_port((au_asid_t)token.val[6], &session) == -1 || audit_session_join(session) == -1)
-        return -1;
-    return task_set_bootstrap_port(mach_task_self(), bootstrap) ? -1 : 0;
 }
 
 // The guest agent runs programs as root in the system session, which can't reach WindowServer. This runs the program
@@ -62,6 +45,8 @@ static int run_in_console_session(int argc, char **argv, int as_user) {
     snprintf(account, sizeof(account), "#%u", console.st_uid);
     if (chmod(directory, 0755) || copyfile(self, copy, NULL, COPYFILE_DATA) || chmod(copy, 0755))
         return 74;
+    // A caller that has already put this where the user can run it may have granted that path permissions. Stay there.
+    const char *run_from = getenv("SEAMLESS_RUN_IN_PLACE") ? self : copy;
     int modern = darwin_major() >= 14;
     snprintf(target, sizeof(target), "%d", modern ? (int)console.st_uid : finder);
     char *arguments[64];
@@ -80,7 +65,7 @@ static int run_in_console_session(int argc, char **argv, int as_user) {
     arguments[n++] = "/usr/bin/env";
     arguments[n++] = "-i";
     arguments[n++] = "PATH=/usr/bin:/bin:/usr/sbin:/sbin";
-    arguments[n++] = copy;
+    arguments[n++] = (char *)run_from;
     for (int i = 1; i < argc && n < 62; i++)
         arguments[n++] = argv[i];
     arguments[n++] = "--in-session";

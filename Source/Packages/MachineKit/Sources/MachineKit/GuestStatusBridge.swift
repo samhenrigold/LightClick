@@ -30,6 +30,24 @@ public final class GuestSessionStateBridge: NSObject {
         get { state.preparationRequested }
         set { state.preparationRequested = newValue }
     }
+    public var installationRequested: Bool {
+        get { state.installationRequested }
+        set { state.installationRequested = newValue }
+    }
+    public var runState: String? {
+        get { state.runState }
+        set { state.runState = newValue }
+    }
+    public var controlConnected: Bool {
+        get { state.controlConnected }
+        set { state.controlConnected = newValue }
+    }
+    public var controlStalled: Bool { state.controlStalled }
+    public static var controlStallSeconds: TimeInterval { GuestSessionState.controlStallSeconds }
+    public static var controlStallNotice: String { GuestSessionState.controlStallNotice }
+    public var mayRunGuestAction: Bool { state.mayRunGuestAction }
+    public var guestAgentFree: Bool { state.guestAgentFree }
+    public var mayProvisionHelpers: Bool { state.mayProvisionHelpers }
     public var repairRequested: Bool {
         get { state.repairRequested }
         set { state.repairRequested = newValue }
@@ -166,6 +184,18 @@ public final class GuestSessionStateBridge: NSObject {
     @objc(sleepPolicyArgumentsWithNativeIdleGuard:)
     public func sleepPolicyArguments(nativeIdleGuard: Bool) -> [String]? {
         state.sleepPolicyArguments(nativeIdleGuard: nativeIdleGuard)
+    }
+
+    @objc(keepsHostAwakeWithInstallerMedia:installState:completionReport:)
+    public func keepsHostAwake(hasInstallerMedia: Bool, installState: Any?, hasCompletionReport: Bool) -> Bool {
+        state.keepsHostAwake(
+            hasInstallerMedia: hasInstallerMedia, installState: installState as? String,
+            hasCompletionReport: hasCompletionReport)
+    }
+
+    @objc(enablesMenuAction:controlReady:)
+    public func enablesMenuAction(_ action: String, controlReady: Bool) -> NSNumber? {
+        state.enablesMenuAction(action, controlReady: controlReady).map { $0 as NSNumber }
     }
 
     @objc(presentsSetupFailure:)

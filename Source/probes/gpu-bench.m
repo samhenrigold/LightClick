@@ -11,8 +11,8 @@
 //
 // The guest agent runs programs as root in the system session, where AppKit can't reach the window server. So as root
 // this waits for the desktop, copies itself out of the agent's private staging folder and re-enters the console user's
-// session: launchctl asuser from 10.10, as tools/guest-progress.m does, and bsexec into their Finder before that, as
-// tools/guest-clipboard.m does. Run by a logged-in user, it just runs.
+// session: launchctl asuser from 10.10, as tools/guest-progress.m does, and joining their Finder's session before that,
+// as seamless-session-join.h explains. Run by a logged-in user, it just runs.
 //
 // Each test prints <name>_fps in frames/s, <name>_p50, _p95 and _p99 in ms over all frames but the first, <name>_first
 // in ms (allocation and first import), and <name> in MB/s if it moves pixels. Tests suffixed _present show each frame;
@@ -28,6 +28,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <OpenGL/gl.h>
 #include <copyfile.h>
+#include "seamless-session-join.h"
 #include <mach-o/dyld.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -612,7 +613,15 @@ static int run_in_console_session(char **argv) {
     if (child == 0) {
         // -S with no input can't prompt.
         freopen("/dev/null", "r", stdin);
-        execv(arguments[0], arguments);
+        if (modern) {
+            execv(arguments[0], arguments);
+        } else if (join_session_of(finder)) {
+            printf("# ERROR couldn't join the session of Finder, pid %d: %s\n", finder, strerror(errno));
+            fflush(stdout);
+        } else {
+            // Past launchctl: see seamless-session-join.h.
+            execv(arguments[3], arguments + 3);
+        }
         _exit(127);
     }
     int status = 1;

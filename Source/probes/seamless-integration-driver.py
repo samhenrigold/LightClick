@@ -76,7 +76,10 @@ def setup():
     # guest preparation would. The grant names the tool and what launches it into the session.
     database = '/Library/Application Support/com.apple.TCC/TCC.db'
     rows = []
-    for client in (tool, '/usr/bin/sudo', '/usr/bin/env', '/bin/launchctl'):
+    # 10.9 asks about the responsible process, which from a daemon is the agent, so that needs a row too. A row for the tool
+    # alone didn't work on Mavericks.
+    for client in (tool, '/usr/bin/sudo', '/usr/bin/env', '/bin/launchctl',
+                   '/Library/Application Support/Virtual Intel Mac/GuestTools/opengl-install-bootstrap'):
         rows.append(f"INSERT OR REPLACE INTO access (service,client,client_type,allowed,prompt_count) VALUES "
                     f"('kTCCServiceAccessibility','{client}',1,1,1);")
     status, output, _ = shell(f"/usr/bin/sqlite3 '{database}' \"{' '.join(rows)}\"; /usr/bin/killall tccd; sleep 2")

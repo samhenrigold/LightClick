@@ -1,3 +1,4 @@
+#import <AVFoundation/AVFoundation.h>
 #import "VIMSession.h"
 #import "VIMGuestFiles.h"
 #import "VIMGuestProfile.h"
@@ -19,7 +20,6 @@
 #import "VIMGuestBootPolicy.h"
 #import "VIMGuestProgress.h"
 #import "VIMHostSupport.h"
-#import "VIMMachineSettings.h"
 #import "VIMPlayButton.h"
 #import "VIMAlerts.h"
 #import "VIMDiscImage.h"
@@ -111,32 +111,6 @@ static BOOL VIMPrepareOpenGLSurfaceEndpoint(VIMDisplayConnection *connection, pi
         }
     }
     return YES;
-}
-static NSString *VIMMultiMachineDiagnosticDirectory(NSArray<NSString *> *arguments, VIMMachine *machine) {
-    NSUInteger option = [arguments indexOfObject:@"--guest-diagnostics-root"];
-    if (option == NSNotFound || option + 1 >= arguments.count || ![arguments[option + 1] isAbsolutePath])
-        return nil;
-    NSUUID *identifier = [[NSUUID alloc] initWithUUIDString:machine.configuration[@"Identifier"]];
-    if (!identifier)
-        return nil;
-    NSString *root = arguments[option + 1];
-    NSString *directory = [root stringByAppendingPathComponent:identifier.UUIDString];
-    // Explicit developer opt-in only. Each session retains its own serialized
-    // QMP/QGA owners and command files; no shared Result.json/second client.
-    for (NSString *path in @[ root, directory ]) {
-        NSError *error = nil;
-        struct stat info;
-        if (![NSFileManager.defaultManager createDirectoryAtPath:path
-                                     withIntermediateDirectories:YES
-                                                      attributes:@{
-                                                          NSFilePosixPermissions : @0700
-                                                      }
-                                                           error:&error] ||
-            lstat(path.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode) || info.st_uid != getuid() ||
-            (info.st_mode & 077))
-            return nil;
-    }
-    return directory;
 }
 @interface VIMStoppedMacView : NSView
 @property NSImageView *wallpaper;
@@ -277,6 +251,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property(copy) void (^pendingHostConnectionCompletion)(NSError *);
 - (void)servicePendingHostConnection;
 @property NSString *diagnosticDirectory;
+@property VIMSessionDiagnostics *diagnostics;
 @property NSDictionary *observedDisplayMode;
 - (void)applyDisplayMode:(NSString *)mode completion:(void (^)(NSDictionary *, NSError *))completion;
 @property(weak) NSWindow *diagnosticAboutWindow;
@@ -302,7 +277,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property VIMClipboardBridge *powerBridge;
 @property NSString *powerConfiguredBoot;
 @property NSDate *powerRetryAfter;
-@property NSUInteger audioTraceEpoch;
 @property VIMSMBService *smbService;
 @property VIMNetworkClient *networkClient;
 @property BOOL networkStarting;
@@ -322,6 +296,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property BOOL wakePending;
 @property VIMModernSetup *modernSetup;
 @property NSTimer *controlRetryTimer;
+@property NSTimer *controlStallTimer;
+@property BOOL controlStallShown;
 @property VIMUSBClient *usbClient;
 - (void)ensureUSBClient;
 @property BOOL usbOperationPending;
@@ -332,11 +308,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property(nonatomic) BOOL retinaEnabled;
 @property(nonatomic) NSString *displayMode;
 @property NSString *displayToolDirectory;
-@property NSString *insertedMediaPath;
-@property NSString *insertedMediaFormat;
-@property BOOL mediaChangePending;
-@property NSMutableDictionary<NSNumber *, NSDictionary *> *additionalMedia;
-@property NSMutableSet<NSNumber *> *imageDevices;
+@property VIMImageDrives *imageDrives;
 @end
 @implementation VIMSession
 + (void)initialize {
@@ -372,12 +344,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         [self logNote:@"Session: %@ -> %@", before, self.state.lifecycleDescription];
 }
 - (void)updateInstallationActivity {
-    BOOL setup = self.machine.configuration[@"InstallerMedia"] != nil ||
-                 [self.machine.configuration[@"InstallState"] isEqual:@"patching"] ||
-                 [self.machine.configuration[@"InstallState"] isEqual:@"host-populated"];
-    BOOL active = self.task.running && ![VIMSessionRunState isHalted:self.lastRunState] &&
-                  (self.preparing || self.preparationRequested || self.installationRequested ||
-                   (setup && !self.completionGuestReport));
+    NSDictionary *config = self.machine.configuration;
+    BOOL active = [self.guestSessionState keepsHostAwakeWithInstallerMedia:config[@"InstallerMedia"] != nil
+                                                              installState:config[@"InstallState"]
+                                                          completionReport:self.completionGuestReport != nil];
     if (active && !self.sleepActivity)
         self.sleepActivity = [VIMInstallationActivity beginWithReason:@"Installing macOS in a virtual Mac"];
     else if (!active)
@@ -703,8 +673,11 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                 if (!session.networkStarting)
                                     return;
                                 session.networkStarting = NO;
-                                if (!failure && [session launch:&failure])
+                                if (!failure && [session launch:&failure]) {
+                                    [session continueFromSession:existing];
+                                    [session recordOpened:cleanupError];
                                     return;
+                                }
                                 [session cleanUp];
                                 [session showStoppedScreen];
                                 if (failure)
@@ -717,23 +690,37 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             [session showStoppedScreen];
         return NO;
     }
+    [session continueFromSession:existing];
     if (existing) {
         existing.window = nil;
         session.window.windowController = session;
         session.window.delegate = session;
     }
-    if (cleanupError) {
-        session.guestStatus.stringValue =
-            [NSString stringWithFormat:@"Installer cleanup pending: %@", cleanupError.localizedDescription];
-        [session logNote:@"Cleanup retry: %@", cleanupError.localizedDescription];
-    }
     sessions[key] = session;
+    [session recordOpened:cleanupError];
+    return YES;
+}
+/// A relaunch can get here after a Rosetta check, once the old session's exit handler has moved on, so what the new
+/// session needs waits on the old one until it has started.
+- (void)continueFromSession:(VIMSession *)previous {
+    self.recentGuestReboots = previous.recentGuestReboots;
+    self.pendingHostConnectionURL = previous.pendingHostConnectionURL;
+    self.pendingHostConnectionCompletion = previous.pendingHostConnectionCompletion;
+    previous.pendingHostConnectionURL = nil;
+    previous.pendingHostConnectionCompletion = nil;
+}
+/// A session has started, whichever way it got there.
+- (void)recordOpened:(NSError *)cleanupError {
+    if (cleanupError) {
+        self.guestStatus.stringValue =
+            [NSString stringWithFormat:@"Installer cleanup pending: %@", cleanupError.localizedDescription];
+        [self logNote:@"Cleanup retry: %@", cleanupError.localizedDescription];
+    }
     NSMutableDictionary *opened = [[NSUserDefaults.standardUserDefaults dictionaryForKey:@"VIMLastOpened"] mutableCopy]
                                       ?: [NSMutableDictionary dictionary];
-    opened[SessionKey(machine)] = NSDate.date;
+    opened[SessionKey(self.machine)] = NSDate.date;
     [NSUserDefaults.standardUserDefaults setObject:opened forKey:@"VIMLastOpened"];
     [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
-    return YES;
 }
 + (BOOL)hasRunningMachines {
     for (VIMSession *session in sessions.allValues)
@@ -746,8 +733,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 }
 + (void)enableGuestRemoteLogin:(VIMMachine *)machine completion:(void (^)(NSError *))completion {
     VIMSession *session = sessions[SessionKey(machine)];
-    if (!session.task.running || session.preparing || session.state.guestPending || session.state.diagnosticPending ||
-        session.preparationRequested) {
+    if (!session.guestSessionState.mayRunGuestAction) {
         completion(VIMSessionError(@"Start this Mac and wait for setup to finish, then try again. You can also enable "
                                    @"Remote Login in the virtual Mac’s Sharing preferences."));
         return;
@@ -760,64 +746,20 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       [session refreshGuestStatus];
       completion(error);
     };
-    [session.guestAgent connectWithCompletion:^(NSError *error) {
-      if (error) {
-          finish(error);
-          return;
-      }
-      [session.guestAgent
-          runExecutable:@"/usr/sbin/systemsetup"
-              arguments:@[ @"-setremotelogin", @"on" ]
-                timeout:30
-             completion:^(NSDictionary *result, NSError *failure) {
-               if (failure || ![result[@"exitcode"] isEqual:@0]) {
-                   finish(failure
-                              ?: VIMSessionError(@"macOS could not enable Remote Login automatically. In the virtual "
-                                                 @"Mac, open System Preferences → Sharing and select Remote Login."));
-                   return;
-               }
-               // systemsetup can print an authorization failure yet exit zero.
-               // Confirm the actual setting rather than trusting its exit code.
-               [session.guestAgent
-                   runExecutable:@"/usr/sbin/systemsetup"
-                       arguments:@[ @"-getremotelogin" ]
-                         timeout:15
-                      completion:^(NSDictionary *check, NSError *checkError) {
-                        NSString *text = [[NSString alloc] initWithData:check[@"stdout"] ?: NSData.data
-                                                               encoding:NSUTF8StringEncoding];
-                        BOOL enabled = [check[@"exitcode"] isEqual:@0] && text.length &&
-                                       [text rangeOfString:@"Remote Login: On"].location != NSNotFound;
-                        finish(checkError
-                                   ?: (!enabled
-                                           ? VIMSessionError(
-                                                 @"Remote Login is still off. Enable it in the virtual Mac’s System "
-                                                 @"Preferences → Sharing; macOS may require your approval there.")
-                                           : nil));
-                      }];
-             }];
-    }];
+    [session.guestAgent enableRemoteLoginWithCompletion:finish];
 }
 + (NSString *)statusForMachine:(VIMMachine *)machine {
     VIMSession *session = sessions[SessionKey(machine)];
-    if (session.task.running) {
-        if ([session.lastRunState isEqual:@"suspended"])
-            return @"Sleeping";
-        if ([session.lastRunState isEqual:@"paused"])
-            return @"Paused";
-        BOOL installing = machine.preMetalGuest
-                              ? ![machine.configuration[@"InstallState"] ?: @"installed" isEqual:@"installed"]
-                              : machine.requiresInstallerDisplay;
-        return installing ? @"Installing macOS" : @"Running";
-    }
     BOOL installing = machine.preMetalGuest
                           ? ![machine.configuration[@"InstallState"] ?: @"installed" isEqual:@"installed"]
                           : machine.requiresInstallerDisplay;
-    return installing ? @"Installation in progress" : @"Shut down";
+    return [VIMSessionRunState statusForRunning:session.task.running
+                                       runState:session.lastRunState
+                                     installing:installing];
 }
 + (void)openGuestPreferences:(NSString *)pane machine:(VIMMachine *)machine completion:(void (^)(NSError *))completion {
     VIMSession *session = sessions[SessionKey(machine)];
-    if (!session.task.running || session.preparing || session.state.guestPending || session.state.diagnosticPending ||
-        session.preparationRequested) {
+    if (!session.guestSessionState.mayRunGuestAction) {
         completion(VIMSessionError(@"Start this Mac, sign in and wait for setup to finish, then try again. You can "
                                    @"also open System Preferences inside the virtual Mac."));
         return;
@@ -857,9 +799,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [session servicePendingHostConnection];
 }
 - (void)servicePendingHostConnection {
-    if (!self.pendingHostConnectionURL || !self.task.running || self.preparing || self.state.guestPending ||
-        self.state.diagnosticPending || self.preparationRequested || self.state.bootPolicyPending ||
-        self.state.clipboardPending || [@[ @"paused", @"suspended" ] containsObject:self.lastRunState])
+    if (!self.pendingHostConnectionURL || !self.guestAgentFree)
         return;
     NSURL *URL = self.pendingHostConnectionURL;
     void (^completion)(NSError *) = self.pendingHostConnectionCompletion;
@@ -1061,16 +1001,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             *error = VIMSessionError(@"The Mojave shader compiler repair resource is missing.");
         return NO;
     }
-    // Keep the lock file in place: unlinking it would allow two processes to
-    // lock different inodes for the same package. Do not follow a planted link.
     NSURL *lockURL = [self.machine.URL URLByAppendingPathComponent:@"State/Session.lock"];
-    self.machineLock = open(lockURL.fileSystemRepresentation, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
-    struct stat lockInfo;
-    if (self.machineLock < 0 || fstat(self.machineLock, &lockInfo) || !S_ISREG(lockInfo.st_mode) ||
-        lockInfo.st_nlink != 1 || flock(self.machineLock, LOCK_EX | LOCK_NB)) {
-        if (self.machineLock >= 0)
-            close(self.machineLock);
-        self.machineLock = -1;
+    self.machineLock = [VIMLaunchMedia acquireSessionLockAtPath:lockURL.path];
+    if (self.machineLock < 0) {
         if (error)
             *error = VIMSessionError(@"This Mac is already in use, or its session lock could not be opened. Close its "
                                      @"other session before starting it here.");
@@ -1203,57 +1136,47 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       VIMSession *session = eventSession;
       if (!session)
           return;
-      NSString *kind = event[@"event"];
-      if ([kind isEqual:@"DEVICE_DELETED"])
-          [session.usbClient deviceWasDeleted:event[@"data"][@"device"] control:session.control];
-      if ([kind isEqual:@"DEVICE_DELETED"])
-          for (NSUInteger slot = 1; slot < VIMImageSlotCount; slot++)
-              if ([event[@"data"][@"device"] isEqual:[NSString stringWithFormat:@"image-usb-%lu", (unsigned long)slot]])
-                  [session.imageDevices removeObject:@(slot)];
-      if ([kind isEqual:@"RESET"]) {
-          session.guestIPAddresses = nil;
-          session.displayToolDirectory = nil;
-          session.displayView.displaySleeping = YES;
-          session.displayView.displaySleeping = NO;
-      } else if ([kind isEqual:@"SUSPEND"] || [kind isEqual:@"SHUTDOWN"]) {
-          if ([kind isEqual:@"SHUTDOWN"] &&
-              [@[ @"guest-reset", @"host-qmp-system-reset" ] containsObject:event[@"data"][@"reason"] ?: @""])
-              [session applyLifecycleEvent:VIMSessionEventGuestRebootExpected];
-          session.displayView.displaySleeping = YES;
-          session.statePanel.hidden = YES;
-          if ([kind isEqual:@"SUSPEND"]) {
-              session.lastRunState = @"suspended";
-              session.status.stringValue = @"Sleeping";
-          }
-      } else if ([kind isEqual:@"WAKEUP"]) {
-          session.lastRunState = @"running";
-          session.displayView.displaySleeping = NO;
-          session.statePanel.hidden = YES;
-          session.status.stringValue = @"Running";
-      } else if ([kind isEqual:@"DEVICE_TRAY_MOVED"] && [event[@"data"][@"tray-open"] isEqual:@YES] &&
-                 !session.mediaChangePending) {
-          NSString *identifier = event[@"data"][@"id"] ?: event[@"data"][@"device"];
-          NSMutableDictionary *removed = [NSMutableDictionary new];
-          if ([identifier isEqual:VIMImageSlotDevice(0, session.insertedMediaFormat)]) {
-              if (session.insertedMediaPath.length)
-                  removed[@0] = session.insertedMediaPath;
-              session.insertedMediaPath = @"";
-              session.insertedMediaFormat = nil;
-          }
-          for (NSUInteger slot = 1; slot < VIMImageSlotCount; slot++)
-              if ([identifier isEqual:VIMImageSlotDevice(slot, @"raw")] ||
-                  [identifier isEqual:VIMImageSlotDevice(slot, @"dmg")]) {
-                  NSString *path = session.additionalMedia[@(slot)][@"Path"];
-                  if (path.length)
-                      removed[@(slot)] = path;
-                  [session.additionalMedia removeObjectForKey:@(slot)];
+      VIMQMPEvent *qmp = [[VIMQMPEvent alloc] initWithEvent:event];
+      switch (qmp.kind) {
+          case VIMQMPEventKindDeviceDeleted:
+              [session.usbClient deviceWasDeleted:event[@"data"][@"device"] control:session.control];
+              [session.imageDrives deviceDeleted:qmp.device];
+              break;
+          case VIMQMPEventKindReset:
+              session.guestIPAddresses = nil;
+              session.displayToolDirectory = nil;
+              session.displayView.displaySleeping = YES;
+              session.displayView.displaySleeping = NO;
+              break;
+          case VIMQMPEventKindSuspend:
+          case VIMQMPEventKindShutdown:
+              if (qmp.expectsGuestReboot)
+                  [session applyLifecycleEvent:VIMSessionEventGuestRebootExpected];
+              session.displayView.displaySleeping = YES;
+              session.statePanel.hidden = YES;
+              if (qmp.kind == VIMQMPEventKindSuspend) {
+                  session.lastRunState = @"suspended";
+                  session.status.stringValue = @"Sleeping";
               }
-          NSDictionary *settings = VIMImageClearedSelections(session.machine.editableConfiguration, removed);
-          NSError *failure = nil;
-          if (settings.count && ![session.machine saveSettings:settings error:&failure])
-              VIMPresentError(failure, session.window);
-          if (settings.count)
-              [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
+              break;
+          case VIMQMPEventKindWakeup:
+              session.lastRunState = @"running";
+              session.displayView.displaySleeping = NO;
+              session.statePanel.hidden = YES;
+              session.status.stringValue = @"Running";
+              break;
+          case VIMQMPEventKindTrayOpened: {
+              NSDictionary *removed = [session.imageDrives trayOpenedOnDevice:qmp.device];
+              NSDictionary *settings = VIMImageClearedSelections(session.machine.editableConfiguration, removed);
+              NSError *failure = nil;
+              if (settings.count && ![session.machine saveSettings:settings error:&failure])
+                  VIMPresentError(failure, session.window);
+              if (settings.count)
+                  [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
+              break;
+          }
+          case VIMQMPEventKindOther:
+              break;
       }
       NSData *json = [NSJSONSerialization dataWithJSONObject:event options:0 error:NULL];
       NSString *line = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
@@ -1315,89 +1238,41 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.retinaEnabled = ![self.displayMode isEqual:@"scaled"];
     self.observedDisplayMode = nil;
     self.state.networkLinkConnected = !config[@"NetworkConnected"] || [config[@"NetworkConnected"] boolValue];
-    NSString *firmwareRoot =
-        root.length ? [root stringByAppendingPathComponent:@"Build/DevelopmentFirmware"]
-                    : [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Runtime/Firmware"];
-    NSString *commonFirmware = [firmwareRoot stringByAppendingPathComponent:@"Common"];
+    NSArray *launchArguments = NSProcessInfo.processInfo.arguments;
+    VIMLaunchOptions *options = [[VIMLaunchOptions alloc] initWithArguments:launchArguments
+                                                               appleSilicon:appleSilicon
+                                                              researchGuest:self.machine.openGLResearchGuest
+                                                                      error:error];
+    if (!options) {
+        [self cleanUp];
+        return NO;
+    }
     BOOL packageResearchFirmware =
         self.machine.openGLResearchGuest && ![config[@"FirmwareSource"] isEqual:@"application"];
-    firmwareRoot =
-        [firmwareRoot stringByAppendingPathComponent:packageResearchFirmware ? @"mojave" : self.machine.guest];
-    // One immutable EFI per OS. OpenCore reads these eight bytes once through
-    // QEMU fw_cfg, after OpenCore's baseline and before macOS starts.
-    // No generated EFI, copied template or separate policy variable in NVRAM.
-    NSString *firmwareCode = [firmwareRoot stringByAppendingPathComponent:@"CODE.fd"];
-    if (![NSFileManager.defaultManager fileExistsAtPath:firmwareCode])
-        firmwareCode = [commonFirmware stringByAppendingPathComponent:@"CODE.fd"];
-    NSString *firmwareEFI = [commonFirmware stringByAppendingPathComponent:@"EFI.img"];
-    if (![NSFileManager.defaultManager fileExistsAtPath:firmwareEFI])
-        firmwareEFI = [firmwareRoot stringByAppendingPathComponent:@"EFI.img"];
+    // Old research guests retain their own known-compatible OpenCore and CODE
+    // files. Never apply the supported guests' EFI boot policy or root patches.
+    NSString *efiOverride =
+        options.guestEFI
+            ?: (packageResearchFirmware ? [self.machine.URL.path stringByAppendingPathComponent:config[@"BootMedia"]]
+                                        : nil);
+    VIMLaunchFirmware *firmware = [[VIMLaunchFirmware alloc]
+        initWithDirectory:root.length
+                              ? [root stringByAppendingPathComponent:@"Build/DevelopmentFirmware"]
+                              : [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Runtime/Firmware"]
+           guestDirectory:packageResearchFirmware ? @"mojave" : self.machine.guest
+                bootMedia:efiOverride
+                    error:error];
+    if (!firmware) {
+        [self cleanUp];
+        return NO;
+    }
     BOOL signatureOnly =
         [VIMGuestBootPolicy readyAtURL:[self.machine.URL URLByAppendingPathComponent:@"State/BootPolicy.plist"]
                                  guest:self.machine.guest
                             identifier:config[@"Identifier"]];
-    // Old research guests retain their own known-compatible OpenCore and CODE
-    // files. Never apply the supported guests' EFI boot policy or root patches.
-    NSString *efiOverride =
-        packageResearchFirmware ? [self.machine.URL.path stringByAppendingPathComponent:config[@"BootMedia"]] : nil;
-    NSArray *launchArguments = NSProcessInfo.processInfo.arguments;
-    NSUInteger overrideIndex = [launchArguments indexOfObject:@"--guest-efi"];
-    if (overrideIndex != NSNotFound) {
-        efiOverride = overrideIndex + 1 < launchArguments.count ? launchArguments[overrideIndex + 1] : nil;
-        int fd = efiOverride.isAbsolutePath
-                     ? open(efiOverride.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-                     : -1;
-        char signature[8] = {0};
-        struct stat information;
-        BOOL valid = fd >= 0 && !fstat(fd, &information) && S_ISREG(information.st_mode) &&
-                     pread(fd, signature, 8, 512) == 8 && !memcmp(signature, "EFI PART", 8);
-        if (fd >= 0)
-            close(fd);
-        if (!valid) {
-            if (error)
-                *error = VIMSessionError(@"--guest-efi requires an absolute path to a regular GPT EFI disk image. The "
-                                         @"VM’s firmware was not changed.");
-            [self cleanUp];
-            return NO;
-        }
-    }
-    for (NSString *file in @[ firmwareCode, efiOverride ?: firmwareEFI ])
-        if (![NSFileManager.defaultManager fileExistsAtPath:file]) {
-            if (error)
-                *error = VIMSessionError(@"This app is missing its firmware. Rebuild or reinstall the complete app.");
-            [self cleanUp];
-            return NO;
-        }
     NSString * (^machinePath)(NSString *) = ^NSString *(NSString *key) {
       return [self.machine.URL.path stringByAppendingPathComponent:config[key]];
     };
-    NSUInteger openGLCPUOption = [launchArguments indexOfObject:@"--opengl-cpu-model"];
-    NSString *researchCPUModel = nil;
-    if (openGLCPUOption != NSNotFound) {
-        NSString *model = openGLCPUOption + 1 < launchArguments.count ? launchArguments[openGLCPUOption + 1] : @"";
-        if (appleSilicon || !self.machine.openGLResearchGuest || ![@[ @"penryn", @"haswell" ] containsObject:model]) {
-            if (error)
-                *error = VIMSessionError(@"--opengl-cpu-model requires an Intel-host research Mac and penryn or "
-                                         @"haswell. The Mac was not started.");
-            [self cleanUp];
-            return NO;
-        }
-        researchCPUModel = model;
-        [self logNote:@"Research CPU comparison: %@", model];
-    }
-    NSUInteger diskOption = [launchArguments indexOfObject:@"--system-disk-interface"];
-    NSString *systemDiskInterface = nil;
-    if (diskOption != NSNotFound) {
-        NSString *interface = diskOption + 1 < launchArguments.count ? launchArguments[diskOption + 1] : @"";
-        if (![@[ @"sata", @"nvme" ] containsObject:interface]) {
-            if (error)
-                *error = VIMSessionError(@"--system-disk-interface requires sata or nvme. The Mac was not started.");
-            [self cleanUp];
-            return NO;
-        }
-        systemDiskInterface = interface;
-        [self logNote:@"Development system disk interface: %@", interface];
-    }
     self.task = [NSTask new];
     self.task.executableURL = [NSURL fileURLWithPath:qemu];
     // Interactive VM execution is user-initiated work, not a maintenance job.
@@ -1406,50 +1281,39 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.task.qualityOfService = NSQualityOfServiceUserInitiated;
     if (self.networkClient.socket)
         self.task.standardInput = self.networkClient.socket;
-    NSString *optical = config[@"OpticalMedia"];
-    NSError *opticalFailure = nil;
-    NSString *opticalFormat = optical.length ? VIMOpticalImageFormat(optical, &opticalFailure) : nil;
-    NSMutableDictionary<NSNumber *, NSString *> *unavailableImages = [NSMutableDictionary new];
-    if (optical.length && !opticalFormat) {
-        // Removable media can disappear when a library moves to another Mac.
-        // Boot with an empty drive and forget the unavailable optional image
-        // below. This never applies to the system disk or required installer.
-        if ([opticalFailure.domain isEqual:NSPOSIXErrorDomain] &&
-            (opticalFailure.code == ENOENT || opticalFailure.code == ENOTDIR)) {
-            unavailableImages[@0] = optical;
-            optical = nil;
-        } else {
-            if (error)
-                *error = VIMFriendlyDiscImageError(optical, opticalFailure);
-            [self cleanUp];
-            return NO;
-        }
+    NSMutableArray<NSString *> *savedImages = [NSMutableArray new];
+    for (NSUInteger slot = 0; slot < VIMImageSlotCount; slot++)
+        [savedImages addObject:VIMImageSlotPath(config, slot)];
+    VIMLaunchMedia *media = [[VIMLaunchMedia alloc] initWithPaths:savedImages
+                                                          inspect:^id(NSString *path) {
+                                                            NSError *failure = nil;
+                                                            return VIMOpticalImageFormat(path, &failure) ?: failure;
+                                                          }];
+    if (media.refusal) {
+        if (error)
+            *error = VIMFriendlyDiscImageError(media.refusedPath, media.refusal);
+        [self cleanUp];
+        return NO;
     }
-    self.insertedMediaPath = optical ?: @"";
-    self.insertedMediaFormat = opticalFormat;
-    self.additionalMedia = [NSMutableDictionary new];
-    self.imageDevices = [NSMutableSet new];
+    NSDictionary<NSNumber *, NSString *> *unavailableImages = media.unavailable;
+    self.imageDrives = [[VIMImageDrives alloc] initWithControl:self.control
+                                                           bus:VIMImageUSBBus(self.machine.guest)
+                                                      basePort:(NSInteger)VIMImageUSBPort(self.machine.guest, 0)
+                                                     slotCount:VIMImageSlotCount];
+    self.imageDrives.describeFailure = ^NSError *(NSString *path, NSError *failure) {
+      return VIMFriendlyDiscImageError(path, failure);
+    };
+    NSString *optical = nil, *opticalFormat = nil;
     NSMutableArray<LaunchImage *> *additionalImages = [NSMutableArray new];
-    for (NSUInteger slot = 1; slot < VIMImageSlotCount; slot++) {
-        NSString *path = VIMImageSlotPath(config, slot);
-        NSError *failure = nil;
-        NSString *format = path.length ? VIMOpticalImageFormat(path, &failure) : nil;
-        if (failure) {
-            if ([failure.domain isEqual:NSPOSIXErrorDomain] && (failure.code == ENOENT || failure.code == ENOTDIR)) {
-                unavailableImages[@(slot)] = path;
-                path = @"";
-            } else {
-                if (error)
-                    *error = VIMFriendlyDiscImageError(path, failure);
-                [self cleanUp];
-                return NO;
-            }
-        }
-        if (path.length)
-            self.additionalMedia[@(slot)] = @{@"Path" : path, @"Format" : format};
-        if (path.length) {
-            [additionalImages addObject:[[LaunchImage alloc] initWithSlot:(NSInteger)slot path:path format:format]];
-            [self.imageDevices addObject:@(slot)];
+    for (VIMLaunchMediaImage *image in media.images) {
+        [self.imageDrives startWithImage:image.path format:image.format slot:image.slot];
+        if (image.slot) {
+            [additionalImages addObject:[[LaunchImage alloc] initWithSlot:image.slot
+                                                                     path:image.path
+                                                                   format:image.format]];
+        } else {
+            optical = image.path;
+            opticalFormat = image.format;
         }
     }
     NSString *setupMedia = nil;
@@ -1467,26 +1331,17 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     }
     NSMutableDictionary<NSNumber *, NSString *> *audioDeviceNames = [NSMutableDictionary new];
     for (NSNumber *input in @[ @NO, @YES ]) {
-        NSString *uid = VIMAudioSelection(config, input.boolValue);
-        if ([@[ @"default", @"disabled" ] containsObject:uid])
-            continue;
-        NSArray *devices = VIMHostAudioDevices(input.boolValue);
-        NSDictionary *choice = nil;
-        for (NSDictionary *device in devices)
-            if ([device[@"UID"] isEqual:uid])
-                choice = device;
-        NSUInteger matches = 0;
-        for (NSDictionary *device in devices)
-            if ([device[@"Name"] isEqual:choice[@"Name"]])
-                matches++;
-        if (!choice || matches != 1) {
-            if (error)
-                *error = VIMSessionError(@"The selected sound device is unavailable or has a duplicate name. Choose "
-                                         @"Default or another device in Sound settings.");
+        NSString *name = [VIMLaunchMedia audioDeviceNameForSelection:VIMAudioSelection(config, input.boolValue)
+                                                             devices:^NSArray * {
+                                                               return VIMHostAudioDevices(input.boolValue);
+                                                             }
+                                                               error:error];
+        if (!name) {
             [self cleanUp];
             return NO;
         }
-        audioDeviceNames[input] = choice[@"Name"];
+        if (name.length)
+            audioDeviceNames[input] = name;
     }
     LaunchInput *launch = [LaunchInput new];
     launch.guest = self.machine.guest;
@@ -1504,9 +1359,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     launch.bootPolicySignatureOnly = signatureOnly;
     launch.bootMediaOverridden = efiOverride != nil;
     launch.biosPath = bios;
-    launch.firmwarePath = packageResearchFirmware ? machinePath(@"Firmware") : firmwareCode;
+    launch.firmwarePath = packageResearchFirmware ? machinePath(@"Firmware") : firmware.codePath;
     launch.nvramPath = machinePath(@"NVRAM");
-    launch.bootMediaPath = efiOverride ?: firmwareEFI;
+    launch.bootMediaPath = firmware.bootMediaPath;
     launch.diskPath = machinePath(@"Disk");
     if (config[@"InstallerMedia"])
         launch.installerPath =
@@ -1528,12 +1383,18 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     launch.legacyDisplayRefreshMS = [NSUserDefaults.standardUserDefaults integerForKey:@"VIMLegacyDisplayRefreshMS"];
     launch.networkMode = VIMNetworkMode(config);
     launch.macAddress = VIMNetworkMACAddress(config);
-    launch.researchCPUModel = researchCPUModel;
-    launch.systemDiskInterface = systemDiskInterface;
+    launch.researchCPUModel = options.researchCPUModel;
+    launch.systemDiskInterface = options.systemDiskInterface;
     launch.audioOutputSelection = VIMAudioSelection(config, NO);
-    launch.audioInputSelection = VIMAudioSelection(config, YES);
+    // Opening the microphone blocks QEMU until TCC answers, and a session has no window to ask from.
+    // shortcut: a seamless session has no microphone, until QEMU can open it when the guest does.
+    BOOL seamless = [NSProcessInfo.processInfo.arguments containsObject:@"--seamless-session"];
+    // Without a grant, opening the microphone waits on a TCC answer before the guest can start. Settings asks for it.
+    BOOL microphoneAllowed = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] ==
+                             AVAuthorizationStatusAuthorized;
+    launch.audioInputSelection = seamless || !microphoneAllowed ? @"disabled" : VIMAudioSelection(config, YES);
     launch.audioOutputRate = (NSInteger)VIMHostOutputSampleRate(VIMAudioSelection(config, NO));
-    launch.audioInputRate = (NSInteger)VIMHostInputSampleRate(VIMAudioSelection(config, YES));
+    launch.audioInputRate = (NSInteger)VIMHostInputSampleRate(launch.audioInputSelection);
     launch.audioOutputDeviceName = audioDeviceNames[@NO];
     launch.audioInputDeviceName = audioDeviceNames[@YES];
     if (optical.length) {
@@ -1572,6 +1433,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.task.standardError = self.log;
     [self logNote:@"Memory ordering: normal runtime barriers"];
     [self logNote:@"%@ runtime: %@", root.length ? @"Development override" : @"Bundled", qemu];
+    if (options.researchCPUModel)
+        [self logNote:@"Research CPU comparison: %@", options.researchCPUModel];
+    if (options.systemDiskInterface)
+        [self logNote:@"Development system disk interface: %@", options.systemDiskInterface];
     self.task.terminationHandler = ^(NSTask *task) {
       dispatch_async(dispatch_get_main_queue(), ^{
         VIMSession *session = weakSelf;
@@ -1588,7 +1453,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           session.stateLabel.stringValue = exitPlan.stateText;
           session.statePanel.hidden = NO;
           session.stateAction.hidden = NO;
-          session.recentGuestReboots = exitPlan.recentGuestReboots;
+          // For the session that replaces this one to carry on with: see continueFromSession.
+          session.recentGuestReboots = exitPlan.guestReboot ? exitPlan.recentGuestReboots : nil;
           NSURL *waitingURL = relaunch ? session.pendingHostConnectionURL : nil;
           void (^waitingCompletion)(NSError *) = relaunch ? session.pendingHostConnectionCompletion : nil;
           if (relaunch) {
@@ -1625,12 +1491,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
               // The new session chooses its own safe display hardware. A valid
               // setup/privacy restart must also work before graphics publishing;
               // requiring acceleration here strands an otherwise bootable VM.
+              session.pendingHostConnectionURL = waitingURL;
+              session.pendingHostConnectionCompletion = waitingCompletion;
               if (fresh && [VIMSession openMachine:fresh error:&failure]) {
                   VIMSession *replacement = sessions[SessionKey(fresh)];
-                  replacement.pendingHostConnectionURL = waitingURL;
-                  replacement.pendingHostConnectionCompletion = waitingCompletion;
-                  if (exitPlan.guestReboot)
-                      replacement.recentGuestReboots = exitPlan.recentGuestReboots;
                   [replacement.window setFrame:previousFrame display:YES];
                   if (replacement.window != previousWindow)
                       [previousWindow close];
@@ -1639,6 +1503,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                       failure.localizedDescription ?: @"Restart paused: graphics installation needs recovery.";
                   VIMFailCreateGuest(session.guestStatus.stringValue);
                   [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
+                  session.pendingHostConnectionURL = nil;
+                  session.pendingHostConnectionCompletion = nil;
                   if (waitingCompletion)
                       waitingCompletion(
                           failure ?: VIMSessionError(@"The virtual Mac couldn’t restart to open the connection."));
@@ -1711,19 +1577,11 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         BOOL forgotten = !settings.count || [self.machine saveSettings:settings error:&failure];
         if (settings.count)
             [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
+        VIMUnavailableImagesNotice *notice = [[VIMUnavailableImagesNotice alloc] initWithImages:unavailableImages
+                                                                                      forgotten:forgotten];
         NSAlert *alert = [NSAlert new];
-        alert.messageText = forgotten ? (unavailableImages.count == 1 ? @"An unavailable image was disconnected"
-                                                                      : @"Unavailable images were disconnected")
-                                      : @"An image couldn’t be found";
-        NSMutableArray *names = [NSMutableArray new];
-        for (NSNumber *slot in [unavailableImages.allKeys sortedArrayUsingSelector:@selector(compare:)])
-            [names addObject:[unavailableImages[slot] lastPathComponent]];
-        alert.informativeText = [NSString
-            stringWithFormat:
-                @"Your virtual Mac started without %@. %@", [names componentsJoinedByString:@", "],
-                forgotten ? @"To reconnect an image, choose its current location when its file or drive is available."
-                          : @"Its saved selection couldn’t be cleared. You can still disconnect it from CD/DVD or "
-                            @"choose it again when its drive is available."];
+        alert.messageText = notice.title;
+        alert.informativeText = notice.detail;
         [alert addButtonWithTitle:@"OK"];
         [alert addButtonWithTitle:@"Connect Image…"];
         VIMPresentAlert(alert, self.window, ^(NSModalResponse response) {
@@ -1732,10 +1590,17 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         });
     }
     self.resizeArmed = !installerDisplay || (openGLDirectDisplay && !classicInstaller);
+    // Before QMP, QEMU can be stuck in device setup with nothing on the display. Say so, and leave the emulator alone.
+    self.controlStallTimer = [NSTimer scheduledTimerWithTimeInterval:VIMGuestSessionState.controlStallSeconds
+                                                             repeats:NO
+                                                               block:^(NSTimer *timer) {
+                                                                 [weakSelf noteControlStall];
+                                                               }];
     [self connectControlWithCompletion:^(NSError *failure) {
       VIMSession *session = weakSelf;
       if (!session.task.running)
           return;
+      [session noteControlAnswered];
       session.status.stringValue = failure ? failure.localizedDescription : @"Running";
       session.shutdownButton.enabled = failure == nil;
       if (!failure) {
@@ -1786,29 +1651,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                     }];
                 return;
             }
-            NSUInteger trim = weakSelf.tabletTrim;
-            if (trim) {
-                // IOHIDEventDriver splits its removal percentage between both
-                // ends of the tablet range. An installed override may be zero.
-                NSMutableArray *calibrated = nil;
-                const int64_t maximum = 32767, inset = maximum * trim / 200, span = maximum - 2 * inset;
-                for (NSUInteger index = 0; index < events.count; index++) {
-                    NSDictionary *event = events[index], *data = event[@"data"];
-                    NSNumber *value = data[@"value"];
-                    NSString *axis = data[@"axis"];
-                    if (![event[@"type"] isEqual:@"abs"] || (![@"x" isEqual:axis] && ![@"y" isEqual:axis]) ||
-                        ![value isKindOfClass:NSNumber.class] || value.longLongValue < 0 ||
-                        value.longLongValue > maximum)
-                        continue;
-                    if (!calibrated)
-                        calibrated = [events mutableCopy];
-                    NSMutableDictionary *mapped = [data mutableCopy];
-                    mapped[@"value"] = @(inset + (value.longLongValue * span + maximum / 2) / maximum);
-                    calibrated[index] = @{@"type" : @"abs", @"data" : mapped};
-                }
-                if (calibrated)
-                    events = calibrated;
-            }
+            events = [VIMTabletCalibration eventsFrom:events trim:(NSInteger)weakSelf.tabletTrim];
             // Research workloads account for one reply per input they queue.
             if (motionCoalescer && !weakSelf.displayView.diagnosticInputObserver)
                 [motionCoalescer submitEvents:events];
@@ -1855,22 +1698,46 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                                                     [weakSelf servicePendingHostConnection];
                                                                     [weakSelf serviceDiagnosticRequest];
                                                                   }];
-          NSArray *args = NSProcessInfo.processInfo.arguments;
-          NSUInteger debug = [args indexOfObject:@"--guest-diagnostics"];
-          NSUInteger target = NSNotFound;
-          for (NSString *operation in @[ @"--open-vm", @"--repair-vm", @"--install-vm", @"--prepare-vm" ])
-              if (target == NSNotFound)
-                  target = [args indexOfObject:operation];
-          BOOL selected = target != NSNotFound && target + 1 < args.count &&
-                          [[args[target + 1] stringByResolvingSymlinksInPath]
-                              isEqual:session.machine.URL.URLByResolvingSymlinksInPath.path];
-          if ([args containsObject:@"--guest-diagnostics-root"])
-              session.diagnosticDirectory = VIMMultiMachineDiagnosticDirectory(args, session.machine);
-          else if (selected && debug != NSNotFound && debug + 1 < args.count && [args[debug + 1] isAbsolutePath])
-              session.diagnosticDirectory = args[debug + 1];
+          session.diagnosticDirectory =
+              [VIMSessionDiagnostics directoryForArguments:NSProcessInfo.processInfo.arguments
+                                               machinePath:session.machine.URL.URLByResolvingSymlinksInPath.path
+                                                identifier:session.machine.configuration[@"Identifier"]];
+          if (session.diagnosticDirectory) {
+              session.diagnostics = [[VIMSessionDiagnostics alloc]
+                  initWithDirectory:session.diagnosticDirectory
+                            control:session.control
+                              agent:session.guestAgent
+                         statusTool:session.guestStatusTool
+                          memoryMiB:[session.machine.configuration[@"MemoryMiB"] unsignedLongLongValue]];
+              session.diagnostics.isRunning = ^BOOL {
+                return weakSelf.task.running;
+              };
+          }
       }
     }];
     return YES;
+}
+- (void)noteControlStall {
+    if (!self.guestSessionState.controlStalled)
+        return;
+    self.controlStallShown = YES;
+    NSString *notice = VIMGuestSessionState.controlStallNotice;
+    [self logNote:@"QEMU has not answered on its control connection after %.0f seconds.",
+                  VIMGuestSessionState.controlStallSeconds];
+    self.status.stringValue = notice;
+    self.stateLabel.stringValue = notice;
+    self.stateAction.hidden = YES;
+    self.statePanel.hidden = NO;
+}
+- (void)noteControlAnswered {
+    self.state.controlConnected = YES;
+    [self.controlStallTimer invalidate];
+    self.controlStallTimer = nil;
+    if (!self.controlStallShown)
+        return;
+    self.controlStallShown = NO;
+    self.statePanel.hidden = YES;
+    [self logNote:@"QEMU answered on its control connection."];
 }
 - (void)connectControlWithCompletion:(void (^)(NSError *))completion {
     if (!self.task.running)
@@ -1900,38 +1767,16 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (void)serviceDiagnosticRequest {
     // Explicit development opt-in. Reuse the app-owned serial connection;
     // a second QGA client would steal replies and interrupt guest setup.
-    if (!self.diagnosticDirectory || self.state.diagnosticPending)
+    if (!self.diagnostics || self.state.diagnosticPending)
         return;
-    NSString *request = [self.diagnosticDirectory stringByAppendingPathComponent:@"Request.json"];
-    struct stat st;
-    if (lstat(request.fileSystemRepresentation, &st) || !S_ISREG(st.st_mode) || st.st_uid != getuid() ||
-        st.st_size > 65536)
-        return;
-    NSData *data = [NSData dataWithContentsOfFile:request];
-    NSDictionary *command = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    if (![command isKindOfClass:NSDictionary.class])
-        return;
-    // Framebuffer/emulator reports need no guest agent. Explicit process-only
-    // inspection can also coexist with a provisioning child on the existing
-    // multiplexed owner; it never stages files or changes that transaction.
-    BOOL independent = [@[
-        @"capture", @"inspect-hardware", @"guest-processes", @"guest-process-sample", @"installer-log", @"cursor-state",
-        @"network-details", @"configuration", @"display-state", @"display-fingerprint", @"display-buffer-count",
-        @"display-acquire-async", @"pointer-workload", @"key-workload", @"fullscreen",
-        @"passthrough-opengl-release-bql", @"opengl-pirq-f-pic"
-    ] containsObject:command[@"Action"] ?: @""];
-    if (!independent &&
-        (self.state.guestPending || self.preparing || self.state.bootPolicyPending || self.state.clipboardPending))
-        return;
-    NSString *consumed = [self.diagnosticDirectory stringByAppendingPathComponent:@"Running.json"];
-    if (rename(request.fileSystemRepresentation, consumed.fileSystemRepresentation))
+    NSDictionary *command =
+        [self.diagnostics takeRequestWhileAgentBusy:self.state.guestPending || self.preparing ||
+                                                    self.state.bootPolicyPending || self.state.clipboardPending];
+    if (!command)
         return;
     self.state.diagnosticPending = YES;
-    NSString *output = [self.diagnosticDirectory stringByAppendingPathComponent:@"Result.json"];
     void (^finish)(NSDictionary *) = ^(NSDictionary *result) {
-      [[NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted
-                                         error:nil] writeToFile:output atomically:YES];
-      unlink(consumed.fileSystemRepresentation);
+      [self.diagnostics writeResult:result];
       self.state.diagnosticPending = NO;
       // Resume provisioning deferred while this command owned the agent.
       // In particular, an explicit clipboard-on request must not wait for
@@ -2341,17 +2186,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     }
     if ([command[@"Action"] isEqual:@"insert-disc"]) {
+        NSString *issue = [VIMSessionDiagnostics issueWithImageRequest:command slotCount:VIMImageSlotCount];
+        if (issue) {
+            finish(@{@"Error" : issue});
+            return;
+        }
         NSString *path = command[@"Path"];
-        if (![path isKindOfClass:NSString.class] || (path.length && !path.isAbsolutePath)) {
-            finish(@{@"Error" : @"Choose an absolute disc-image path, or an empty path to eject."});
-            return;
-        }
         NSNumber *slot = command[@"Slot"] ?: @0;
-        if (![slot isKindOfClass:NSNumber.class] || slot.doubleValue != slot.unsignedIntegerValue ||
-            slot.unsignedIntegerValue >= VIMImageSlotCount) {
-            finish(@{@"Error" : @"Choose an image drive from0 to3."});
-            return;
-        }
         [VIMSession insertImage:path
                            slot:slot.unsignedIntegerValue
                         machine:self.machine
@@ -2373,7 +2214,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                        finish(@{
                            @"Inserted" : @(path.length > 0),
                            @"Images" : images,
-                           @"MediaChangePending" : @(self.mediaChangePending)
+                           @"MediaChangePending" : @(self.imageDrives.changePending)
                        });
                      }];
         return;
@@ -2413,342 +2254,14 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         finish(@{@"Requested" : @YES});
         return;
     }
-    if ([command[@"Action"] isEqual:@"status-probe"]) {
-        // Time the exact read-only production status path without creating a
-        // second guest-agent connection or triggering installation/repair.
-        double started = NSProcessInfo.processInfo.systemUptime;
-        [self.guestAgent connectWithCompletion:^(NSError *error) {
-          if (error) {
-              finish(@{@"Error" : error.localizedDescription});
-              return;
-          }
-          [self.guestAgent collectStatusWithTool:self.guestStatusTool
-                                      completion:^(NSDictionary *report, NSError *failure) {
-                                        finish(failure ? @{@"Error" : failure.localizedDescription} : @{
-                                            @"Report" : report,
-                                            @"Seconds" : @(NSProcessInfo.processInfo.systemUptime - started)
-                                        });
-                                      }];
-        }];
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"installer-log"]) {
-        // Recovery may lack the privileged installed-system status probe.
-        // Read the current tail through the same serialized owner. Verbose
-        // PackageKit logs can exceed the agent's bounded JSON response when
-        // captured in full; an oversized diagnostic must not drop control.
-        [self.guestAgent connectWithCompletion:^(NSError *error) {
-          if (error) {
-              finish(@{@"Error" : error.localizedDescription});
-              return;
-          }
-          [self.guestAgent
-              runExecutable:@"/usr/bin/tail"
-                  arguments:@[ @"-c", @"49152", @"/var/log/install.log" ]
-                    timeout:30
-                 completion:^(NSDictionary *result, NSError *failure) {
-                   if (failure) {
-                       finish(@{@"Error" : failure.localizedDescription});
-                       return;
-                   }
-                   NSData *bytes = result[@"stdout"] ?: NSData.data;
-                   // The byte-bounded tail can begin within a UTF-8 character.
-                   const uint8_t *start = bytes.bytes;
-                   NSUInteger skip = 0;
-                   while (skip < bytes.length && skip < 3 && (start[skip] & 0xc0) == 0x80)
-                       ++skip;
-                   if (skip)
-                       bytes = [bytes subdataWithRange:NSMakeRange(skip, bytes.length - skip)];
-                   NSString *text = [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding]
-                                        ?: [[NSString alloc] initWithData:bytes encoding:NSISOLatin1StringEncoding];
-                   NSString *detail = [[NSString alloc] initWithData:result[@"stderr"] ?: NSData.data
-                                                            encoding:NSUTF8StringEncoding];
-                   finish(@{@"Log" : text ?: @"", @"Stderr" : detail ?: @"", @"ExitCode" : result[@"exitcode"] ?: @-1});
-                 }];
-        }];
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"open-guest-preferences"]) {
-        [self.guestAgent connectWithCompletion:^(NSError *error) {
-          if (error) {
-              finish(@{@"Error" : error.localizedDescription});
-              return;
-          }
-          [self.guestAgent
-              openPreferencesPane:command[@"Pane"]
-                       completion:^(NSError *failure) {
-                         finish(failure ? @{@"Error" : failure.localizedDescription} : @{@"Opened" : @YES});
-                       }];
-        }];
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"trace-usb"]) {
-        // Metadata-only, bounded, on the existing production QMP owner.
-        // This never turns on usbredir's payload/hex-dump logging.
-        BOOL enabled = [command[@"Enabled"] boolValue];
-        NSArray *events = @[ @"usb_xhci_xfer_*", @"usb_xhci_ep_*", @"usb_xhci_irq_*" ];
-        __block NSError *failure = nil;
-        for (NSString *event in events)
-            [self.control execute:@"trace-event-set-state"
-                        arguments:@{@"name" : event, @"enable" : @(enabled)}
-                       completion:^(id result, NSError *error) {
-                         if (error && !failure)
-                             failure = error;
-                         if ([event isEqual:events.lastObject]) {
-                             if (failure) {
-                                 finish(@{@"Error" : failure.localizedDescription});
-                                 return;
-                             }
-                             // QMP dynamic state alone does not enable the log backend's
-                             // LOG_TRACE mask. Fixed HMP command; no client-supplied text.
-                             NSString *log = enabled
-                                                 ? @"log trace:usb_xhci_xfer_*,trace:usb_xhci_ep_*,trace:usb_xhci_irq_*"
-                                                 : @"log none";
-                             [self.control execute:@"human-monitor-command"
-                                         arguments:@{@"command-line" : log}
-                                        completion:^(id output, NSError *error) {
-                                          finish(error ? @{@"Error" : error.localizedDescription}
-                                                       : @{@"Enabled" : @(enabled),
-                                                           @"AutomaticStopSeconds" : @15});
-                                        }];
-                         }
-                       }];
-        if (enabled)
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-              [self.control execute:@"human-monitor-command"
-                          arguments:@{@"command-line" : @"log none"}
-                         completion:^(id result, NSError *error){
-                         }];
-              for (NSString *event in events)
-                  [self.control execute:@"trace-event-set-state"
-                              arguments:@{
-                                  @"name" : event,
-                                  @"enable" : @NO
-                              }
-                             completion:^(id result, NSError *error){
-                             }];
-            });
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"trace-sound"] || [command[@"Action"] isEqual:@"trace-sound-mix"] ||
-        [command[@"Action"] isEqual:@"trace-audio-gaps"]) {
-        // Development diagnostics use the existing serialized control channel.
-        // Exclude per-buffer logging: tracing must not itself stall the audio.
-        BOOL enabled = [command[@"Enabled"] boolValue];
-        if ([command[@"Action"] isEqual:@"trace-audio-gaps"]) {
-            // Exceptional gaps plus one continuity summary per second. FIFO
-            // clock adjustment can run every backend callback: leave that
-            // trace off, especially with the session log on external storage.
-            NSArray *events =
-                @[ @"audio_sdl_underrun", @"audio_timer_delayed", @"hda_audio_overrun", @"audio_sdl_continuity" ];
-            NSUInteger epoch = ++self.audioTraceEpoch;
-            __block NSError *failure = nil;
-            for (NSString *event in events)
-                [self.control execute:@"trace-event-set-state"
-                            arguments:@{@"name" : event, @"enable" : @(enabled)}
-                           completion:^(id result, NSError *error) {
-                             if (error && !failure)
-                                 failure = error;
-                             if ([event isEqual:events.lastObject])
-                                 finish(failure ? @{@"Error" : failure.localizedDescription}
-                                                : @{@"Enabled" : @(enabled),
-                                                    @"AutomaticStopSeconds" : @15});
-                           }];
-            if (enabled)
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                  if (self.audioTraceEpoch != epoch || !self.task.running)
-                      return;
-                  for (NSString *event in events)
-                      [self.control execute:@"trace-event-set-state"
-                                  arguments:@{
-                                      @"name" : event,
-                                      @"enable" : @NO
-                                  }
-                                 completion:^(id result, NSError *error){
-                                 }];
-                });
-            return;
-        }
-        [self.control execute:@"trace-event-set-state"
-                    arguments:@{
-                        @"name" : [command[@"Action"] isEqual:@"trace-sound-mix"] ? @"audio_sw_write"
-                                                                                  : @"virtio_snd_handle_code",
-                        @"enable" : @(enabled)
-                    }
-                   completion:^(id result, NSError *error) {
-                     finish(error ? @{@"Error" : error.localizedDescription} : @{@"Enabled" : @(enabled)});
-                   }];
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"network-link"]) {
-        // Explicit diagnostics only. Isolate device link negotiation without
-        // rewriting the guest's DHCP, DNS or user network preferences.
-        BOOL enabled = [command[@"Enabled"] isEqual:@YES];
-        [VIMSession setNetworkConnected:enabled
-                                machine:self.machine
-                             completion:^(NSError *error) {
-                               finish(error ? @{@"Error" : error.localizedDescription} : @{@"Enabled" : @(enabled)});
-                             }];
-        return;
-    }
-    if ([@[ @"guest-processes", @"guest-process-sample" ] containsObject:command[@"Action"] ?: @""]) {
-        // Explicit read-only development diagnostics while native setup owns
-        // a long-running child. Reuse the SAME multiplexed agent owner; no
-        // staging, account mutation, input data or second socket is admitted.
-        BOOL sample = [command[@"Action"] isEqual:@"guest-process-sample"];
-        NSNumber *pid = command[@"PID"];
-        if (sample && (![pid isKindOfClass:NSNumber.class] || pid.longLongValue < 2 || pid.longLongValue > INT_MAX)) {
-            finish(@{@"Error" : @"Choose a guest process identifier greater than one."});
-            return;
-        }
-        NSArray *arguments = sample ? @[ pid.stringValue, @"1", @"-file", @"/dev/stdout" ]
-                                    : @[ @"-axo", @"pid,ppid,state,etime,time,comm" ];
-        [self.guestAgent connectWithCompletion:^(NSError *failure) {
-          if (failure) {
-              finish(@{@"Error" : failure.localizedDescription});
-              return;
-          }
-          [self.guestAgent runExecutable:sample ? @"/usr/bin/sample" : @"/bin/ps"
-                               arguments:arguments
-                                 timeout:0
-                              completion:^(NSDictionary *reply, NSError *error) {
-                                if (error) {
-                                    finish(@{@"Error" : error.localizedDescription});
-                                    return;
-                                }
-                                NSString *text = [[NSString alloc] initWithData:reply[@"stdout"] ?: NSData.data
-                                                                       encoding:NSUTF8StringEncoding];
-                                NSString *detail = [[NSString alloc] initWithData:reply[@"stderr"] ?: NSData.data
-                                                                         encoding:NSUTF8StringEncoding];
-                                finish(@{
-                                    @"ExitCode" : reply[@"exitcode"] ?: @(-1),
-                                    @"Stdout" : text ?: @"",
-                                    @"Stderr" : detail ?: @""
-                                });
-                              }];
-        }];
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"inspect-hardware"]) {
-        if ([@[ @"memory-map", @"devices" ] containsObject:command[@"Component"] ?: @""]) {
-            [self.control
-                   execute:@"human-monitor-command"
-                 arguments:@{
-                     @"command-line" : [command[@"Component"] isEqual:@"devices"] ? @"info qtree" : @"info mtree -f"
-                 }
-                completion:^(id result, NSError *error) {
-                  finish(error ? @{@"Error" : error.localizedDescription} : @{@"Report" : result ?: @""});
-                }];
-            return;
-        }
-        // Whitelisted read-only QMP reports through the production owner.
-        // Available before the guest agent/OS boots; never opens another socket.
-        if ([@[ @"physical-memory", @"kernel-memory" ] containsObject:command[@"Component"] ?: @""]) {
-            BOOL kernel = [command[@"Component"] isEqual:@"kernel-memory"];
-            NSNumber *address = command[@"Address"], *words = command[@"Words"];
-            uint64_t ram = [self.machine.configuration[@"MemoryMiB"] unsignedLongLongValue] << 20;
-            if (![address isKindOfClass:NSNumber.class] || ![words isKindOfClass:NSNumber.class] ||
-                words.longLongValue < 1 || words.unsignedLongLongValue > 64 ||
-                (kernel ? (address.unsignedLongLongValue < UINT64_C(0xffffff8000000000) ||
-                           address.unsignedLongLongValue > UINT64_MAX - words.unsignedLongLongValue * 8)
-                        : (address.longLongValue < 0 ||
-                           address.unsignedLongLongValue > ram - words.unsignedLongLongValue * 8))) {
-                finish(@{
-                    @"Error" : @"Choose 1–64 words within this virtual Mac’s RAM or its identified x86 kernel mapping."
-                });
-                return;
-            }
-            NSString *read = [NSString stringWithFormat:@"%@ /%llugx 0x%llx", kernel ? @"x" : @"xp",
-                                                        words.unsignedLongLongValue, address.unsignedLongLongValue];
-            [self.control execute:@"human-monitor-command"
-                        arguments:@{@"command-line" : read}
-                       completion:^(id result, NSError *error) {
-                         finish(error ? @{@"Error" : error.localizedDescription} : @{@"Report" : result ?: @""});
-                       }];
-            return;
-        }
-        if ([@[ @"phy", @"link-history" ] containsObject:command[@"Component"] ?: @""]) {
-            [self.control execute:@"qom-get"
-                        arguments:@{
-                            @"path" : @"/machine/peripheral/ethernet",
-                            @"property" : [command[@"Component"] isEqual:@"phy"] ? @"x-phy-state" : @"x-link-history"
-                        }
-                       completion:^(id result, NSError *error) {
-                         finish(error ? @{@"Error" : error.localizedDescription} : @{@"Report" : result ?: @""});
-                       }];
-            return;
-        }
-        if ([command[@"Component"] isEqual:@"registers"]) {
-            [self.control execute:@"human-monitor-command"
-                        arguments:@{@"command-line" : @"info registers -a"}
-                       completion:^(id result, NSError *error) {
-                         finish(error ? @{@"Error" : error.localizedDescription} : @{@"Report" : result ?: @""});
-                       }];
-            return;
-        }
-        if ([command[@"Component"] isEqual:@"serial"]) {
-            // Explicit metadata-only UART inspection. Do not read RBR/FIFOs,
-            // IIR, LSR or MSR: those reads consume data or clear status. These
-            // three configuration registers are non-destructive even if DLAB
-            // is set (IER then aliases the divisor's high configuration byte).
-            NSArray *ports = @[ @0x3f9, @0x3fb, @0x3fc, @0x2f9, @0x2fb, @0x2fc ];
-            NSMutableArray *values = [NSMutableArray array];
-            __block void (^next)(NSUInteger);
-            next = ^(NSUInteger index) {
-              if (index == ports.count) {
-                  finish(@{@"Registers" : values});
-                  next = nil;
-                  return;
-              }
-              NSNumber *port = ports[index];
-              NSString *read = [NSString stringWithFormat:@"i /b 0x%lx", port.unsignedLongValue];
-              [self.control execute:@"human-monitor-command"
-                          arguments:@{@"command-line" : read}
-                         completion:^(id result, NSError *error) {
-                           if (error) {
-                               finish(@{@"Error" : error.localizedDescription});
-                               next = nil;
-                               return;
-                           }
-                           [values addObject:@{@"Port" : port, @"Report" : result ?: @""}];
-                           next(index + 1);
-                         }];
-            };
-            next(0);
-            return;
-        }
-        NSString *report = @{
-            @"cpu" : @"query-cpus-fast",
-            @"pci" : @"query-pci",
-            @"media" : @"query-block",
-            @"network" : @"x-query-network",
-            @"interrupts" : @"x-query-interrupt-controllers"
-        }[command[@"Component"] ?: @""];
-        if (!report) {
-            finish(@{@"Error" : @"Choose cpu, pci, network, interrupts, registers, serial, phy, or link-history."});
-            return;
-        }
-        [self.control execute:report
-                    arguments:@{}
-                   completion:^(id result, NSError *error) {
-                     finish(error ? @{@"Error" : error.localizedDescription} : @{@"Report" : result ?: @""});
-                   }];
-        return;
-    }
     if ([command[@"Action"] isEqual:@"input"]) {
         NSArray *events = command[@"Events"];
-        if (!self.task.running || !self.displayView.inputHandler || ![events isKindOfClass:NSArray.class] ||
-            !events.count || events.count > 64) {
-            finish(@{@"Error" : @"The guest is not ready for this input batch."});
+        NSString *issue =
+            [VIMSessionDiagnostics issueWithInputBatch:events ready:self.task.running && self.displayView.inputHandler];
+        if (issue) {
+            finish(@{@"Error" : issue});
             return;
         }
-        for (id event in events)
-            if (![event isKindOfClass:NSDictionary.class] ||
-                ![@[ @"abs", @"btn", @"key" ] containsObject:event[@"type"]] ||
-                ![event[@"data"] isKindOfClass:NSDictionary.class]) {
-                finish(@{@"Error" : @"Invalid guest input event."});
-                return;
-            }
         self.displayView.inputHandler(events);
         finish(@{@"Queued" : @YES});
         return;
@@ -2776,115 +2289,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         });
         return;
     }
-    if ([command[@"Action"] isEqual:@"stage-probe"]) {
-        NSURL *input =
-            [NSURL fileURLWithPath:[self.diagnosticDirectory stringByAppendingPathComponent:@"Transfer.bin"]];
-        double start = NSProcessInfo.processInfo.systemUptime;
-        [self.guestAgent connectWithCompletion:^(NSError *error) {
-          if (error) {
-              finish(@{@"Error" : error.localizedDescription});
-              return;
-          }
-          // Exercise the production private staging and acknowledged transfer.
-          // stageFiles confines output to a fresh root-owned staging dir.
-          [self.guestAgent
-              stageFiles:@{@"Transfer.bin" : input}
-                progress:nil
-              completion:^(NSDictionary *receipt, NSError *failure) {
-                if (failure) {
-                    finish(@{@"Error" : failure.localizedDescription});
-                    return;
-                }
-                finish(@{@"Transfer" : receipt, @"Seconds" : @(NSProcessInfo.processInfo.systemUptime - start)});
-              }];
-        }];
-        return;
-    }
-    NSString *path = command[@"Executable"];
-    NSArray *arguments = command[@"Arguments"];
-    if (![path isKindOfClass:NSString.class] || !path.isAbsolutePath || ![arguments isKindOfClass:NSArray.class]) {
-        finish(@{@"Error" : @"Invalid command"});
-        return;
-    }
-    for (id argument in arguments)
-        if (![argument isKindOfClass:NSString.class]) {
-            finish(@{@"Error" : @"Invalid argument"});
-            return;
-        }
-    NSData *standardInput = nil;
-    if (command[@"PrivateInput"]) {
-        // Development-only cold operation: secrets go through the existing
-        // agent's stdin, never argv/Request.json or diagnostic output. Consume
-        // a single private, bounded file inside the already-validated local
-        // diagnostics directory; never follow an arbitrary path or symlink.
-        if (![command[@"PrivateInput"] isEqual:@"Input.bin"]) {
-            finish(@{@"Error" : @"Invalid private input"});
-            return;
-        }
-        NSString *inputPath = [self.diagnosticDirectory stringByAppendingPathComponent:@"Input.bin"];
-        int fd = open(inputPath.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        struct stat inputInfo;
-        NSMutableData *input = [NSMutableData data];
-        BOOL valid = fd >= 0;
-        if (valid)
-            valid = !fstat(fd, &inputInfo) && S_ISREG(inputInfo.st_mode) && inputInfo.st_uid == getuid() &&
-                    inputInfo.st_nlink == 1 && !(inputInfo.st_mode & 0077) && inputInfo.st_size >= 0 &&
-                    inputInfo.st_size <= 16384;
-        if (valid) {
-            unsigned char chunk[2048];
-            ssize_t count;
-            while ((count = read(fd, chunk, sizeof(chunk))) != 0) {
-                if (count < 0) {
-                    if (errno == EINTR)
-                        continue;
-                    valid = NO;
-                    break;
-                }
-                if (input.length + (NSUInteger)count > 16384) {
-                    valid = NO;
-                    break;
-                }
-                [input appendBytes:chunk length:(NSUInteger)count];
-            }
-            if (valid)
-                valid = input.length == (NSUInteger)inputInfo.st_size;
-        }
-        if (fd >= 0)
-            close(fd);
-        if (!valid || unlink(inputPath.fileSystemRepresentation)) {
-            finish(@{@"Error" : @"Private input could not be consumed safely"});
-            return;
-        }
-        standardInput = input;
-    }
-    [self.guestAgent connectWithCompletion:^(NSError *error) {
-      if (error) {
-          finish(@{@"Error" : error.localizedDescription});
-          return;
-      }
-      // An observation deadline must not discard the process handle for a
-      // native installer/cache rebuild which is still legitimately running.
-      // The diagnostic CLI can stop observing without cancelling this task.
-      [self.guestAgent runExecutable:path
-                           arguments:arguments
-                       standardInput:standardInput
-                             timeout:0
-                          completion:^(NSDictionary *result, NSError *failure) {
-                            if (failure) {
-                                finish(@{@"Error" : failure.localizedDescription});
-                                return;
-                            }
-                            finish(@{
-                                @"ExitCode" : result[@"exitcode"] ?: @(-1),
-                                @"Stdout" : [[NSString alloc] initWithData:result[@"stdout"] ?: NSData.data
-                                                                  encoding:NSUTF8StringEncoding]
-                                    ?: @"",
-                                @"Stderr" : [[NSString alloc] initWithData:result[@"stderr"] ?: NSData.data
-                                                                  encoding:NSUTF8StringEncoding]
-                                    ?: @""
-                            });
-                          }];
-    }];
+    [self.diagnostics handleCommand:command finish:finish];
 }
 - (void)enforceGuestSleepPolicyForBoot:(NSString *)boot nativeIdleGuard:(BOOL)guarded {
     if (!boot.length || [boot isEqual:self.sleepDisabledBoot] || !self.task.running)
@@ -2919,6 +2324,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     state.running = self.task.running;
     state.preparing = self.preparing;
     state.preparationRequested = self.preparationRequested;
+    state.installationRequested = self.installationRequested;
+    state.runState = self.lastRunState;
     state.hasStatusTool = self.guestStatusTool.length > 0;
     state.hasModernSetup = self.modernSetup != nil;
     state.passthroughOpenGLEnabled = self.machine.passthroughOpenGLEnabled;
@@ -3040,27 +2447,11 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [self.window makeFirstResponder:self.displayView];
 }
 - (void)showSetupNoticeAutomatic:(BOOL)automatic automaticLogin:(BOOL)automaticLogin restarting:(BOOL)restarting {
-    NSString *title = automatic ? @"Automatic Setup in Progress…" : @"Installing Graphics Drivers…";
-    NSString *detail;
-    if (automatic) {
-        NSString *waiting = self.machine.preMetalGuest
-                                ? @"The language selection screen is expected to stay visible during Automatic Setup."
-                                : @"The first setup screen may stay visible during Automatic Setup.";
-        NSString *restart = automaticLogin ? @"Your virtual Mac will restart and sign in automatically when it’s ready."
-                            : self.machine.preMetalGuest
-                                ? @"Your virtual Mac will restart and sign in automatically this first time."
-                                : @"Your virtual Mac will restart automatically when it’s ready. If you see the login "
-                                  @"screen, sign in with the account you chose.";
-        detail = [NSString
-            stringWithFormat:@"Please do not interact with Setup Assistant. %@\n\n%@ Setup may take up to 30 minutes.",
-                             waiting, restart];
-    } else {
-        detail = restarting ? @"Your virtual Mac will restart to finish installing the graphics drivers. Sign in when "
-                              @"it starts again. This may take up to 30 minutes."
-                            : @"Keep your virtual Mac running while the graphics drivers install. This may take up to "
-                              @"30 minutes. If a restart is needed, you’ll be asked first.";
-    }
-    [self showSetupNoticeWithTitle:title detail:detail];
+    VIMSetupNoticeCopy *copy = [[VIMSetupNoticeCopy alloc] initWithAutomatic:automatic
+                                                              automaticLogin:automaticLogin
+                                                                  restarting:restarting
+                                                               preMetalGuest:self.machine.preMetalGuest];
+    [self showSetupNoticeWithTitle:copy.title detail:copy.detail];
 }
 - (void)showSetupNoticeWithTitle:(NSString *)heading detail:(NSString *)message {
     if (self.previewSetupNotice && (self.setupNotice || self.closedSetupNoticeHeading))
@@ -3301,44 +2692,14 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (void)retireOpenGLSetupDiscWithReport:(NSDictionary *)report {
     if (!self.openGLSetupMediaAttached)
         return;
-    // Only the dedicated configuration-media slot belongs to this flow.
-    // The user-controlled CD/DVD drive (including an arbitrary repair disc)
-    // is never force-ejected or changed merely because setup has completed.
     NSURL *receipt = [self.machine.URL URLByAppendingPathComponent:@"State/LegacySetupMedia.plist"];
-    NSDictionary *owner = [NSDictionary dictionaryWithContentsOfURL:receipt];
-    if (![owner[@"MachineIdentifier"] isEqual:self.machine.configuration[@"Identifier"]] ||
-        ![owner[@"VolumeUUID"] isEqual:report[@"VolumeUUID"]] || ![report[@"PixelChecksPassed"] isEqual:@YES])
-        return;
-    // XML plist output is native to every supported period guest; Snow's
-    // plutil predates JSON conversion. Parse on the host without weakening
-    // the owned-media identity and successful-graphics checks below.
-    [self.guestAgent
-        runExecutable:@"/usr/bin/plutil"
-            arguments:@[ @"-convert", @"xml1", @"-o", @"-", @"/Volumes/VIM Setup/VirtualIntelMac.plist" ]
-              timeout:0
-           completion:^(NSDictionary *result, NSError *error) {
-             id policy = [NSPropertyListSerialization propertyListWithData:result[@"stdout"] ?: NSData.data
-                                                                   options:NSPropertyListImmutable
-                                                                    format:NULL
-                                                                     error:nil];
-             if (error || ![result[@"exitcode"] isEqual:@0] || ![policy isKindOfClass:NSDictionary.class] ||
-                 ![policy[@"MachineIdentifier"] isEqual:owner[@"MachineIdentifier"]] ||
-                 ![policy[@"VolumeUUID"] isEqual:owner[@"VolumeUUID"]])
-                 return;
-             [self.guestAgent runExecutable:@"/usr/sbin/diskutil"
-                                  arguments:@[ @"eject", @"/Volumes/VIM Setup" ]
-                                    timeout:0
-                                 completion:^(NSDictionary *ejected, NSError *failure) {
-                                   if (failure || ![ejected[@"exitcode"] isEqual:@0])
-                                       return; // Never force a mounted image.
-                                   [self.control execute:@"eject"
-                                               arguments:@{@"id" : @"opengl-setup-device"}
-                                              completion:^(id ignored, NSError *unused) {
-                                                if (!unused)
-                                                    self.openGLSetupMediaAttached = NO;
-                                              }];
-                                 }];
-           }];
+    [self.guestAgent retireSetupDiscOwnedBy:[NSDictionary dictionaryWithContentsOfURL:receipt]
+                          machineIdentifier:self.machine.configuration[@"Identifier"]
+                                     report:report
+                                    control:self.control
+                                    ejected:^{
+                                      self.openGLSetupMediaAttached = NO;
+                                    }];
 }
 - (BOOL)prepareMavericksSMBForBoot:(NSString *)boot {
     if (![self.machine.guest isEqual:@"mavericks"] || [self.mavericksSMBCheckedBoot isEqual:boot] ||
@@ -3352,49 +2713,18 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.state.guestPending = YES;
     VIMGuestAgent *agent = self.guestAgent;
     __weak VIMSession *weakSelf = self;
-    void (^finished)(NSString *) = ^(NSString *failure) {
-      VIMSession *session = weakSelf;
-      if (session.guestAgent != agent || !session.task.running)
-          return;
-      session.state.guestPending = NO;
-      if (failure)
-          [session logNote:@"Mavericks File Sharing compatibility could not be applied: %@", failure];
-      [session refreshGuestStatus];
-    };
-    [agent stageFiles:@{@"mavericks-smb-compat" : tool, @"codesign_allocate" : allocator}
-             progress:nil
-           completion:^(NSDictionary *receipt, NSError *issue) {
-             if (issue || !receipt) {
-                 finished(issue.localizedDescription ?: @"staging returned nothing");
-                 return;
-             }
-             NSString *program = [receipt[@"Directory"] stringByAppendingPathComponent:@"mavericks-smb-compat"];
-             NSString *allocatorProgram = [receipt[@"Directory"] stringByAppendingPathComponent:@"codesign_allocate"];
-             [agent runExecutable:@"/bin/chmod"
-                        arguments:@[ @"0700", program, allocatorProgram ]
-                          timeout:0
-                       completion:^(NSDictionary *mode, NSError *failure) {
-                         if (failure || ![mode[@"exitcode"] isEqual:@0]) {
-                             finished(failure.localizedDescription ?: @"chmod failed");
-                             return;
-                         }
-                         [agent runExecutable:program
-                                    arguments:@[ allocatorProgram ]
-                                      timeout:0
-                                   completion:^(NSDictionary *reply, NSError *failure) {
-                                     if (!failure && [reply[@"exitcode"] isEqual:@0]) {
-                                         finished(nil);
-                                         return;
-                                     }
-                                     NSString *detail = [[NSString alloc] initWithData:reply[@"stderr"] ?: NSData.data
-                                                                              encoding:NSUTF8StringEncoding];
-                                     finished(failure.localizedDescription
-                                                  ?: [NSString stringWithFormat:@"exit %@, signal %@: %@",
-                                                                                reply[@"exitcode"], reply[@"signal"],
-                                                                                detail]);
-                                   }];
-                       }];
-           }];
+    [agent applySMBCompatibilityTool:tool
+                           allocator:allocator
+                          completion:^(NSString *failure) {
+                            VIMSession *session = weakSelf;
+                            if (session.guestAgent != agent || !session.task.running)
+                                return;
+                            session.state.guestPending = NO;
+                            if (failure)
+                                [session
+                                    logNote:@"Mavericks File Sharing compatibility could not be applied: %@", failure];
+                            [session refreshGuestStatus];
+                          }];
     return YES;
 }
 - (void)finishGuestStatus:(NSDictionary *)report error:(NSError *)error {
@@ -3752,10 +3082,16 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                           session.completionGuestReport = report;
                           // The owned backend remains open until shutdown/cleanup,
                           // but its installer volumes need not stay on the desktop.
-                          [session ejectInstallerVolumes:@[
+                          __weak VIMSession *weakCurrent = session;
+                          [session.guestAgent ejectEmulatedVolumes:@[
                               @"/Volumes/macOS Base System", @"/Volumes/Install macOS Mojave",
                               @"/Volumes/Install macOS Catalina", @"/Volumes/Install macOS Big Sur"
-                          ]];
+                          ]
+                                                             while:^BOOL {
+                                                               VIMSession *current = weakCurrent;
+                                                               return current.task.running &&
+                                                                      current.completionGuestReport;
+                                                             }];
                       }
                       NSString *message = failure.localizedDescription
                                               ?: [VIMMachineModel reconciliationMessageForResult:result
@@ -4104,31 +3440,19 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [self refreshGuestStatus];
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
-    if (item.action == @selector(startAgain:)) {
+    if (item.action == @selector(startAgain:))
         item.state = self.task.running ? NSControlStateValueOn : NSControlStateValueOff;
-        return !self.task.running;
-    }
-    if (item.action == @selector(resetMachine:))
-        return self.guestSessionState.mayForceReset;
-    if (item.action == @selector(sendForceQuitKey:) || item.action == @selector(takeScreenshot:))
-        return self.task.running && !self.preparing;
-    if ([@[ @"undo:", @"cut:", @"copy:", @"paste:", @"selectAll:" ] containsObject:NSStringFromSelector(item.action)])
-        return self.task.running;
-    if (item.action == @selector(shutdown:))
-        return self.guestSessionState.mayRequestShutdown && self.shutdownButton.enabled;
-    if (item.action == @selector(forceStop:))
-        return self.task.running;
-    if (item.action == @selector(toggleUSBDevice:))
-        return self.task.running && self.shutdownButton.enabled;
+    NSNumber *rule = [self.guestSessionState enablesMenuAction:NSStringFromSelector(item.action)
+                                                  controlReady:self.shutdownButton.enabled];
+    if (rule)
+        return rule.boolValue;
     if (item.action == @selector(copyGuestIPAddress:))
         return self.task.running && self.state.networkLinkConnected &&
                [self.guestIPAddresses containsObject:item.representedObject];
     if (item.action == @selector(ejectOpticalMedia:))
-        return !self.mediaChangePending &&
+        return !self.imageDrives.changePending &&
                [self.class imageRecordForMachine:self.machine
                                             slot:[item.representedObject unsignedIntegerValue]] != nil;
-    if (item.action == @selector(sendMenuShortcut:))
-        return self.task.running && !self.preparing;
     if (item.action == @selector(changeRetinaMode:)) {
         item.state = [self.displayMode isEqual:@[ @"space", @"retina", @"scaled" ][item.tag]] ? NSControlStateValueOn
                                                                                               : NSControlStateValueOff;
@@ -4144,8 +3468,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     BOOL idle = self.guestSessionState.graphicsActionsEnabled;
     BOOL recorded = [NSFileManager.defaultManager
         fileExistsAtPath:[self.machine.URL URLByAppendingPathComponent:@"State/GuestInstallation.plist"].path];
-    if (item.action == @selector(toggleScreenSharing:))
-        return self.guestAgentFree;
     if (item.action == @selector(openScreenSharing:))
         return self.guestAgentFree && [self.machine.editableConfiguration[@"ScreenSharingEnabled"] boolValue] &&
                [VIMMachineModel screenSharingURLForConfiguration:self.machine.configuration];
@@ -4160,41 +3482,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     // Toolbar menus can be opened without AppKit requesting menuNeedsUpdate.
     // Enumerate metadata at opening, just like the menu-bar Devices submenu.
     [self menuNeedsUpdate:menu];
-}
-- (void)ejectInstallerVolumes:(NSArray<NSString *> *)volumes {
-    if (!volumes.count || !self.task.running || !self.completionGuestReport)
-        return;
-    NSString *volume = volumes.firstObject;
-    __weak VIMSession *weakSelf = self;
-    // Resolve and check the mounted installer before ejecting. A physical USB
-    // volume with the same name must never be mistaken for our QEMU media.
-    [self.guestAgent runExecutable:@"/usr/sbin/diskutil"
-                         arguments:@[ @"info", @"-plist", volume ]
-                           timeout:15
-                        completion:^(NSDictionary *result, NSError *error) {
-                          NSDictionary *info = (!error && [result[@"exitcode"] isEqual:@0])
-                                                   ? [NSPropertyListSerialization propertyListWithData:result[@"stdout"]
-                                                                                               options:0
-                                                                                                format:NULL
-                                                                                                 error:nil]
-                                                   : nil;
-                          NSArray *remaining = [volumes subarrayWithRange:NSMakeRange(1, volumes.count - 1)];
-                          NSString *media = info[@"MediaName"];
-                          BOOL installer = [info[@"MountPoint"] isEqual:volume] &&
-                                           [media isKindOfClass:NSString.class] && [media hasPrefix:@"QEMU "];
-                          if (!installer) {
-                              [weakSelf ejectInstallerVolumes:remaining];
-                              return;
-                          }
-                          [weakSelf.guestAgent runExecutable:@"/usr/sbin/diskutil"
-                                                   arguments:@[ @"eject", volume ]
-                                                     timeout:30
-                                                  completion:^(NSDictionary *ignored, NSError *issue) {
-                                                    // Never force/retry an uncertain guest eject; stopped-VM cleanup
-                                                    // remains authoritative for releasing/deleting the owned ISO.
-                                                    [weakSelf ejectInstallerVolumes:remaining];
-                                                  }];
-                        }];
 }
 - (NSMenu *)deviceMenuForKind:(NSString *)kind {
     VIMLiveDeviceMenu *menu = [[VIMLiveDeviceMenu alloc] initWithTitle:[kind isEqual:@"USB"] ? VIMUSBMenuTitle : kind];
@@ -4233,95 +3520,47 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     WithToolbarMenuTitle(menu, toolbarTitle);
     NSDictionary *config = self.machine.editableConfiguration;
     if ([menu.title isEqual:@"CD/DVD"]) {
-        NSArray *images = [VIMSession connectedImagesForMachine:self.machine];
-        if (!images.count)
-            [self addDeviceItem:@"No Images Connected" action:nil toMenu:menu].enabled = NO;
-        for (NSDictionary *image in images) {
-            NSString *path = image[@"Path"];
-            NSNumber *slot = image[@"Slot"];
-            if (images.count == 1) {
-                [self addDeviceItem:path.lastPathComponent action:nil toMenu:menu].enabled = NO;
-                [self addDeviceItem:@"Disconnect" action:@selector(ejectOpticalMedia:) toMenu:menu].representedObject =
-                    slot;
-            } else {
-                NSMenuItem *item =
-                    [self addDeviceItem:[NSString stringWithFormat:@"Disconnect “%@”", path.lastPathComponent]
-                                 action:@selector(ejectOpticalMedia:)
-                                 toMenu:menu];
-                item.representedObject = slot;
-                item.image = [NSImage imageWithSystemSymbolName:@"opticaldisc" accessibilityDescription:nil];
-            }
-        }
-        if (images.count < VIMImageSlotCount) {
-            [menu addItem:NSMenuItem.separatorItem];
-            [self addDeviceItem:@"Connect Image…" action:@selector(chooseOpticalMedia:) toMenu:menu];
-        }
-        [menu addItem:NSMenuItem.separatorItem];
-        [self addDeviceItem:@"Configure…" action:@selector(showOpticalSettings:) toMenu:menu];
-        return;
-    }
-    if ([menu.title isEqual:@"Network"]) {
+        [self addItems:[VIMDeviceMenus imagesMenuWithImages:[VIMSession connectedImagesForMachine:self.machine]
+                                                  slotCount:VIMImageSlotCount]
+                toMenu:menu];
+    } else if ([menu.title isEqual:@"Network"]) {
         BOOL connected = self.task.running ? self.state.networkLinkConnected
                                            : (!config[@"NetworkConnected"] || [config[@"NetworkConnected"] boolValue]);
-        NSString *mode = VIMNetworkMode(self.task.running ? self.machine.configuration : config);
-        NSMenuItem *off = [self addDeviceItem:@"Disconnect" action:@selector(changeNetworkConnection:) toMenu:menu];
-        off.tag = 0;
-        off.state = connected ? NSControlStateValueOff : NSControlStateValueOn;
-        [menu addItem:NSMenuItem.separatorItem];
-        NSArray *modes = @[ @"shared", @"host", @"bridged" ],
-                *titles = @[ @"Shared Network (Recommended)", @"Host-Only Network", @"Bridged Network" ];
-        for (NSUInteger i = 0; i < modes.count; i++) {
-            NSMenuItem *item = [self addDeviceItem:titles[i] action:@selector(changeNetworkConnection:) toMenu:menu];
-            item.tag = i + 1;
-            item.state = connected && [mode isEqual:modes[i]] ? NSControlStateValueOn : NSControlStateValueOff;
-        }
-        if (self.task.running && connected && self.guestIPAddresses.count) {
-            [menu addItem:NSMenuItem.separatorItem];
-            [self addDeviceItem:@"IP Addresses:" action:nil toMenu:menu].enabled = NO;
-            for (NSString *address in self.guestIPAddresses)
-                [self addDeviceItem:address action:@selector(copyGuestIPAddress:) toMenu:menu].representedObject =
-                    address;
-        }
-        [menu addItem:NSMenuItem.separatorItem];
-        if ([VIMMachineModel screenSharingAvailableOnConfiguration:config]) {
-            [self addDeviceItem:@"Share Screen" action:@selector(toggleScreenSharing:) toMenu:menu].state =
-                [config[@"ScreenSharingEnabled"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
-            [self addDeviceItem:@"Open Screen Sharing…" action:@selector(openScreenSharing:) toMenu:menu];
-            [menu addItem:NSMenuItem.separatorItem];
-        }
-        [self addDeviceItem:@"Configure…" action:@selector(showNetworkSettings:) toMenu:menu];
-        return;
-    }
-    if ([menu.title isEqual:@"Sound Output"] || [menu.title isEqual:@"Microphone"]) {
+        [self addItems:[VIMDeviceMenus
+                           networkMenuConnected:connected
+                                           mode:VIMNetworkMode(self.task.running ? self.machine.configuration : config)
+                                        running:self.task.running
+                                      addresses:self.guestIPAddresses
+                                  screenSharing:[VIMMachineModel screenSharingAvailableOnConfiguration:config]
+                                screenSharingOn:[config[@"ScreenSharingEnabled"] boolValue]]
+                toMenu:menu];
+    } else if ([menu.title isEqual:@"Sound Output"] || [menu.title isEqual:@"Microphone"]) {
         BOOL input = [menu.title isEqual:@"Microphone"];
-        NSString *selected = VIMAudioSelection(config, input);
-        NSMutableArray *choices = [NSMutableArray arrayWithArray:@[ @{@"Name" : @"Default", @"UID" : @"default"} ]];
-        [choices addObjectsFromArray:(input ? self.audioInputChoices : self.audioOutputChoices) ?: @[]];
-        for (NSDictionary *choice in choices) {
-            NSMenuItem *item = [self addDeviceItem:choice[@"Name"] action:@selector(changeAudioChoice:) toMenu:menu];
-            item.representedObject = @{@"Input" : @(input), @"UID" : choice[@"UID"]};
-            item.state = [selected isEqual:choice[@"UID"]] ? NSControlStateValueOn : NSControlStateValueOff;
-        }
-        [menu addItem:NSMenuItem.separatorItem];
-        NSMenuItem *off = [self addDeviceItem:@"Disconnected" action:@selector(changeAudioChoice:) toMenu:menu];
-        off.representedObject = @{@"Input" : @(input), @"UID" : @"disabled"};
-        off.state = [selected isEqual:@"disabled"] ? NSControlStateValueOn : NSControlStateValueOff;
+        [self addItems:[VIMDeviceMenus soundMenuForInput:input
+                                                selected:VIMAudioSelection(config, input)
+                                                 devices:input ? self.audioInputChoices : self.audioOutputChoices]
+                toMenu:menu];
         [self refreshAudioChoices];
-        return;
+    } else if ([menu.title isEqual:@"Keyboard"]) {
+        [self addItems:VIMDeviceMenus.keyboardMenu toMenu:menu];
     }
-    if ([menu.title isEqual:@"Keyboard"]) {
-        NSArray *shortcuts = @[
-            @[ @"Command–Option–Escape", @[ @"meta_l", @"alt", @"esc" ] ], @[ @"Command–Tab", @[ @"meta_l", @"tab" ] ],
-            @[ @"Command–Space", @[ @"meta_l", @"spc" ] ], @[ @"Control–Command–Q", @[ @"ctrl", @"meta_l", @"q" ] ],
-            @[ @"Control–Up Arrow", @[ @"ctrl", @"up" ] ], @[ @"Control–Down Arrow", @[ @"ctrl", @"down" ] ],
-            @[ @"Control–Left Arrow", @[ @"ctrl", @"left" ] ], @[ @"Control–Right Arrow", @[ @"ctrl", @"right" ] ],
-            @[ @"Shift–Command–3", @[ @"shift", @"meta_l", @"3" ] ],
-            @[ @"Shift–Command–4", @[ @"shift", @"meta_l", @"4" ] ],
-            @[ @"Shift–Command–5", @[ @"shift", @"meta_l", @"5" ] ]
-        ];
-        for (NSArray *shortcut in shortcuts)
-            [self addDeviceItem:shortcut[0] action:@selector(sendMenuShortcut:) toMenu:menu].representedObject =
-                shortcut[1];
+}
+- (void)addItems:(NSArray<VIMDeviceMenuItem *> *)items toMenu:(NSMenu *)menu {
+    for (VIMDeviceMenuItem *entry in items) {
+        if (entry.isSeparator) {
+            [menu addItem:NSMenuItem.separatorItem];
+            continue;
+        }
+        NSMenuItem *item = [self addDeviceItem:entry.title
+                                        action:entry.action ? NSSelectorFromString(entry.action) : nil
+                                        toMenu:menu];
+        item.enabled = entry.isEnabled;
+        item.state = entry.isOn ? NSControlStateValueOn : NSControlStateValueOff;
+        item.tag = entry.tag;
+        item.representedObject = entry.representedObject;
+        item.toolTip = entry.toolTip;
+        if (entry.symbol)
+            item.image = [NSImage imageWithSystemSymbolName:entry.symbol accessibilityDescription:nil];
     }
 }
 - (void)showOpticalSettings:(id)sender {
@@ -4391,35 +3630,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     NSString *toolbarTitle = ToolbarMenuTitle(menu);
     [menu removeAllItems];
     WithToolbarMenuTitle(menu, toolbarTitle);
-    NSArray *devices = VIMHostUSBDevices();
-    NSMutableSet *listed = [NSMutableSet set];
-    for (NSDictionary *device in devices) {
-        NSMenuItem *item = [menu addItemWithTitle:device[@"Name"] action:@selector(toggleUSBDevice:) keyEquivalent:@""];
-        item.target = self;
-        item.representedObject = device;
-        [listed addObject:device[@"Identifier"]];
-        item.state = self.usbAttached[device[@"Identifier"]] ? NSControlStateValueOn : NSControlStateValueOff;
-        item.enabled = !self.usbOperationPending;
-        if ([device[@"Vendor"] length])
-            item.toolTip = device[@"Vendor"];
-    }
-    // A device unplugged from the Mac while connected can still be released.
-    for (NSString *identifier in self.usbAttached)
-        if (![listed containsObject:identifier]) {
-            NSMenuItem *item =
-                [menu addItemWithTitle:[self.usbAttached[identifier] stringByAppendingString:@" (unplugged)"]
-                                action:@selector(toggleUSBDevice:)
-                         keyEquivalent:@""];
-            item.target = self;
-            item.representedObject = @{@"Identifier" : identifier, @"Name" : self.usbAttached[identifier]};
-            item.state = NSControlStateValueOn;
-        }
-    if (!devices.count && !self.usbAttached.count) {
-        NSMenuItem *empty = [menu addItemWithTitle:@"No USB Devices Connected to This Mac"
-                                            action:nil
-                                     keyEquivalent:@""];
-        empty.enabled = NO;
-    }
+    [self addItems:[VIMDeviceMenus usbMenuWithDevices:VIMHostUSBDevices()
+                                             attached:self.usbAttached
+                                              pending:self.usbOperationPending]
+            toMenu:menu];
 }
 - (void)ensureUSBClient {
     if (!self.usbClient) {
@@ -4858,9 +4072,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [VIMMachineSettings showForMachine:self.machine section:@"Hardware" category:@"Network" window:self.window];
 }
 - (BOOL)guestAgentFree {
-    return self.task.running && !self.preparing && !self.preparationRequested && !self.state.guestPending &&
-           !self.state.diagnosticPending && !self.state.clipboardPending && !self.state.bootPolicyPending &&
-           ![@[ @"paused", @"suspended" ] containsObject:self.lastRunState];
+    return self.guestSessionState.guestAgentFree;
 }
 - (void)applyGuestScreenSharing:(BOOL)enabled completion:(void (^)(NSError *))completion {
     NSArray *steps = [VIMMachineModel screenSharingCommandsForGuest:self.machine.guest enabling:enabled];
@@ -4874,37 +4086,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       [self refreshGuestStatus];
       completion(error);
     };
-    [self.guestAgent connectWithCompletion:^(NSError *error) {
-      if (error)
-          finish(error);
-      else
-          [self runScreenSharingSteps:steps enabled:enabled finish:finish];
-    }];
-}
-- (void)runScreenSharingSteps:(NSArray<NSArray<NSString *> *> *)steps
-                      enabled:(BOOL)enabled
-                       finish:(void (^)(NSError *))finish {
-    NSArray<NSString *> *step = steps.firstObject;
-    [self.guestAgent
-        runExecutable:step.firstObject
-            arguments:[step subarrayWithRange:NSMakeRange(1, step.count - 1)]
-              timeout:30
-           completion:^(NSDictionary *result, NSError *failure) {
-             if (failure) {
-                 finish(failure);
-             } else if (steps.count > 1) {
-                 [self runScreenSharingSteps:[steps subarrayWithRange:NSMakeRange(1, steps.count - 1)]
-                                     enabled:enabled
-                                      finish:finish];
-             } else {
-                 finish([result[@"exitcode"] isEqual:@0] == enabled
-                            ? nil
-                            : VIMSessionError(enabled ? @"Screen Sharing is still off. Turn it on in the virtual Mac’s "
-                                                        @"System Preferences → Sharing."
-                                                      : @"Screen Sharing is still on. Turn it off in the virtual "
-                                                        @"Mac’s System Preferences → Sharing."));
-             }
-           }];
+    [self.guestAgent applyScreenSharingSteps:steps enabling:enabled completion:finish];
 }
 - (void)toggleScreenSharing:(id)sender {
     NSDictionary *settings = self.machine.editableConfiguration;
@@ -4969,9 +4151,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         self.clipboardRetryAfter = nil;
         return;
     }
-    if (!boot.length || (!powerOnly && !self.state.consoleUID) || !self.task.running || self.preparing ||
-        self.preparationRequested || self.installationRequested || self.state.clipboardPending ||
-        self.state.diagnosticPending || self.state.guestPending || self.state.bootPolicyPending)
+    if (!boot.length || (!powerOnly && !self.state.consoleUID) || !self.guestSessionState.mayProvisionHelpers)
         return;
     VIMClipboardBridge *current = powerOnly ? self.powerBridge : self.clipboard;
     if (current.isConnected && [boot isEqual:powerOnly ? self.powerConfiguredBoot : self.clipboardConfiguredBoot])
@@ -5060,14 +4240,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     else
         self.clipboardRetryAfter = [NSDate dateWithTimeIntervalSinceNow:60];
     __weak VIMSession *weakSelf = self;
-    __block NSString *step = @"transfer";
-    void (^finish)(BOOL) = ^(BOOL ok) {
+    void (^finish)(NSString *) = ^(NSString *failedStep) {
       VIMSession *session = weakSelf;
       session.state.clipboardPending = NO;
       VIMClipboardBridge *bridge = powerOnly ? session.powerBridge : session.clipboard;
       if (![bridge.token isEqual:token])
           return;
-      if (ok) {
+      if (!failedStep) {
           if (powerOnly)
               session.powerConfiguredBoot = boot;
           else {
@@ -5075,92 +4254,39 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
               session.clipboardConfiguredBoot = boot;
           }
           [bridge awaitGuestHandshake];
-      } else {
-          NSString *message = [NSString stringWithFormat:@"Guest %@ %@ did not finish.",
-                                                         powerOnly ? @"display-power observer" : @"clipboard", step];
-          if (![session.clipboardFailure isEqual:message])
-              [session logNote:@"%@", message];
-          [bridge stop];
+          // Let the independent clipboard provision after display setup releases
+          // ownership; do not wait another minute or race the guest-agent channel.
           if (powerOnly)
-              session.powerBridge = nil;
-          else {
-              session.clipboardFailure = message;
-              session.clipboard = nil;
-          }
+              [session updateBridgeForBoot:boot displayPowerOnly:NO];
+          else
+              [session restoreDisplaySelectionForBoot:boot];
+          return;
       }
-      // Let the independent clipboard provision after display setup releases
-      // ownership; do not wait another minute or race the guest-agent channel.
-      if (powerOnly && ok)
-          [session updateBridgeForBoot:boot displayPowerOnly:NO];
-      if (!powerOnly && ok)
-          [session restoreDisplaySelectionForBoot:boot];
+      NSString *message = [NSString stringWithFormat:@"Guest %@ %@ did not finish.",
+                                                     powerOnly ? @"display-power observer" : @"clipboard", failedStep];
+      if (![session.clipboardFailure isEqual:message])
+          [session logNote:@"%@", message];
+      [bridge stop];
+      if (powerOnly)
+          session.powerBridge = nil;
+      else {
+          session.clipboardFailure = message;
+          session.clipboard = nil;
+      }
     };
     if (self.machine.preMetalGuest) {
-        step = @"installed GUI helper setup";
-        [self.guestAgent
-            runExecutable:@"/Library/Application Support/Virtual Intel Mac/GuestTools/guest-clipboard"
-                arguments:@[ @"--provision-stdin" ]
-            standardInput:data
-                  timeout:0
-               completion:^(NSDictionary *result, NSError *error) {
-                 if (result[@"exitcode"])
-                     step = [NSString stringWithFormat:@"installed GUI helper setup (exit %@)", result[@"exitcode"]];
-                 finish(!error && [result[@"exitcode"] isEqual:@0]);
-               }];
+        [self.guestAgent provisionInstalledHelperWithConfiguration:data completion:finish];
         return;
     }
-    [self.guestAgent stageFiles:@{
-        @"guest-clipboard" : [tools URLByAppendingPathComponent:@"guest-clipboard"],
-        configName : configuration
-    }
-                       progress:nil
-                     completion:^(NSDictionary *receipt, NSError *error) {
-                       VIMSession *session = weakSelf;
-                       if (error || !session.task.running ||
-                           ![(powerOnly ? session.powerBridge : session.clipboard).token isEqual:token]) {
-                           finish(NO);
-                           return;
-                       }
-                       step = @"executable preparation";
-                       NSString *directory = receipt[@"Directory"],
-                                *helper = [directory stringByAppendingPathComponent:@"guest-clipboard"];
-                       [session.guestAgent
-                           runExecutable:@"/bin/chmod"
-                               arguments:@[ @"0700", helper ]
-                                 timeout:10
-                              completion:^(NSDictionary *mode, NSError *issue) {
-                                if (issue || ![mode[@"exitcode"] isEqual:@0]) {
-                                    finish(NO);
-                                    return;
-                                }
-                                step = @"private configuration preparation";
-                                NSString *configuration = [directory stringByAppendingPathComponent:configName];
-                                // guest-file-open follows the agent's umask, not the source file's
-                                // mode. Tighten the private configuration explicitly before its
-                                // native validator reads it (the staging directory is root-only).
-                                [weakSelf.guestAgent
-                                    runExecutable:@"/bin/chmod"
-                                        arguments:@[ @"0600", configuration ]
-                                          timeout:10
-                                       completion:^(NSDictionary *privacy, NSError *privacyError) {
-                                         if (privacyError || ![privacy[@"exitcode"] isEqual:@0]) {
-                                             finish(NO);
-                                             return;
-                                         }
-                                         step = @"GUI helper setup";
-                                         [weakSelf.guestAgent
-                                             runExecutable:helper
-                                                 arguments:@[ @"--provision", configuration ]
-                                                   timeout:30
-                                                completion:^(NSDictionary *result, NSError *problem) {
-                                                  if (result[@"exitcode"])
-                                                      step = [NSString stringWithFormat:@"GUI helper setup (exit %@)",
-                                                                                        result[@"exitcode"]];
-                                                  finish(!problem && [result[@"exitcode"] isEqual:@0]);
-                                                }];
-                                       }];
-                              }];
-                     }];
+    [self.guestAgent provisionHelper:[tools URLByAppendingPathComponent:@"guest-clipboard"]
+                       configuration:configuration
+                               named:configName
+                         stillWanted:^BOOL {
+                           VIMSession *session = weakSelf;
+                           return session.task.running &&
+                                  [(powerOnly ? session.powerBridge : session.clipboard).token isEqual:token];
+                         }
+                          completion:finish];
 }
 + (void)setNetworkConnected:(BOOL)connected machine:(VIMMachine *)machine completion:(void (^)(NSError *))completion {
     VIMSession *session = sessions[SessionKey(machine)];
@@ -5318,11 +4444,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return nil;
     VIMSession *session = sessions[SessionKey(machine)];
     if (session.task.running) {
-        NSDictionary *active =
-            slot ? session.additionalMedia[@(slot)]
-                 : (session.insertedMediaPath.length
-                        ? @{@"Path" : session.insertedMediaPath, @"Format" : session.insertedMediaFormat ?: @"raw"}
-                        : nil);
+        NSDictionary *active = [session.imageDrives mediaInSlot:(NSInteger)slot];
         if (active)
             return active;
         NSString *saved = VIMImageSlotPath(machine.editableConfiguration, slot);
@@ -5359,7 +4481,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
              if (!error)
                  return;
              VIMSession *session = sessions[SessionKey(machine)];
-             if (!session.task.running || session.mediaChangePending) {
+             if (!session.task.running || session.imageDrives.changePending) {
                  VIMPresentError(error, window);
                  return;
              }
@@ -5422,7 +4544,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
           save(nil);
           return;
       }
-      [session changeRemovableMedia:path format:format slot:slot completion:save];
+      [session.imageDrives changeImage:path format:format slot:(NSInteger)slot completion:save];
     };
     if (!path.length) {
         apply(nil);
@@ -5440,212 +4562,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     }
     VIMCheckOpticalImage(path, format, [tool stringByAppendingPathComponent:@"qemu-img"], apply);
-}
-- (void)ensureImageDevice:(NSUInteger)slot completion:(void (^)(NSError *))completion {
-    if (!slot || [self.imageDevices containsObject:@(slot)]) {
-        completion(nil);
-        return;
-    }
-    NSString *transport = [NSString stringWithFormat:@"image-usb-%lu", (unsigned long)slot];
-    NSString *backend = [NSString stringWithFormat:@"image-backend-%lu", (unsigned long)slot];
-    // QMP blockdev-add creates a media node, not an empty BlockBackend.
-    // QEMU's fixed native drive_add command creates that removable backend;
-    // no shell, user-supplied monitor text or filename is passed through HMP.
-    NSString *add = [NSString stringWithFormat:@"drive_add 0 id=%@,if=none,media=disk,readonly=on", backend];
-    [self.control
-           execute:@"human-monitor-command"
-         arguments:@{@"command-line" : add}
-        completion:^(id result, NSError *error) {
-          if (!error && (![result isKindOfClass:NSString.class] ||
-                         ![[result stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
-                             isEqual:@"OK"]))
-              error = VIMSessionError(@"The virtual image drive could not be created.");
-          if (error) {
-              completion(error);
-              return;
-          }
-          __block BOOL transportCreated = NO;
-          void (^finish)(NSError *) = ^(NSError *failure) {
-            if (!failure) {
-                [self.imageDevices addObject:@(slot)];
-                completion(nil);
-                return;
-            }
-            void (^releaseBackend)(void) = ^{
-              [self.control execute:@"human-monitor-command"
-                          arguments:@{@"command-line" : [@"drive_del " stringByAppendingString:backend]}
-                         completion:^(id result, NSError *ignored) {
-                           completion(failure);
-                         }];
-            };
-            if (transportCreated)
-                [self.control execute:@"device_del"
-                            arguments:@{@"id" : transport}
-                           completion:^(id result, NSError *ignored) {
-                             releaseBackend();
-                           }];
-            else
-                releaseBackend();
-          };
-          __block void (^claimPort)(NSUInteger);
-          claimPort = ^(NSUInteger port) {
-            [self.control execute:@"device_add"
-                arguments:@{
-                    @"driver" : @"usb-bot",
-                    @"id" : transport,
-                    @"bus" : VIMImageUSBBus(self.machine.guest),
-                    @"port" : @(port).stringValue
-                }
-                completion:^(id result, NSError *failure) {
-                  // Explicit root ports avoid QEMU silently adding its USB1 hub on
-                  // the last free port. Only retry actual occupied-port errors.
-                  if (failure && port < VIMImageUSBPort(self.machine.guest, VIMImageSlotCount - 1) &&
-                      [failure.localizedDescription containsString:@"not found (in use?)"]) {
-                      claimPort(port + 1);
-                      return;
-                  }
-                  claimPort = nil;
-                  if (failure) {
-                      finish(failure);
-                      return;
-                  }
-                  transportCreated = YES;
-                  [self.control execute:@"device_add"
-                      arguments:@{
-                          @"driver" : @"scsi-hd",
-                          @"id" : VIMImageSlotDevice(slot, @"raw"),
-                          @"bus" : [transport stringByAppendingString:@".0"],
-                          @"drive" : backend,
-                          @"removable" : @YES,
-                          @"logical_block_size" : @512,
-                          @"physical_block_size" : @512
-                      }
-                      completion:^(id result, NSError *failure) {
-                        if (failure) {
-                            finish(failure);
-                            return;
-                        }
-                        // Hot-plugged usb-bot stays detached until its child is ready.
-                        [self.control execute:@"qom-set"
-                            arguments:@{
-                                @"path" : [@"/machine/peripheral/" stringByAppendingString:transport],
-                                @"property" : @"attached",
-                                @"value" : @YES
-                            }
-                            completion:^(id result, NSError *failure) {
-                              finish(failure);
-                            }];
-                      }];
-                }];
-          };
-          claimPort(VIMImageUSBPort(self.machine.guest, 1));
-        }];
-}
-- (void)changeRemovableMedia:(NSString *)path
-                      format:(NSString *)format
-                        slot:(NSUInteger)slot
-                  completion:(void (^)(NSError *))completion {
-    if (self.mediaChangePending) {
-        completion(VIMSessionError(@"Wait for the current disc change to finish, then try again."));
-        return;
-    }
-    self.mediaChangePending = YES;
-    // The public/UI record may describe an unavailable saved choice. Only
-    // actual live media can require a QMP eject or own a device to unplug.
-    NSDictionary *previous =
-        slot ? self.additionalMedia[@(slot)]
-             : (self.insertedMediaPath.length
-                    ? @{@"Path" : self.insertedMediaPath, @"Format" : self.insertedMediaFormat ?: @"raw"}
-                    : nil);
-    NSString *oldPath = previous[@"Path"] ?: @"", *oldFormat = previous[@"Format"];
-    void (^record)(NSString *, NSString *) = ^(NSString *file, NSString *kind) {
-      if (!slot) {
-          self.insertedMediaPath = file;
-          self.insertedMediaFormat = kind;
-      } else if (file.length)
-          self.additionalMedia[@(slot)] = @{@"Path" : file, @"Format" : kind};
-      else
-          [self.additionalMedia removeObjectForKey:@(slot)];
-    };
-    void (^finish)(NSError *) = ^(NSError *error) {
-      self.mediaChangePending = NO;
-      if (error && [error.localizedDescription.localizedLowercaseString containsString:@"locked"])
-          error = [NSError errorWithDomain:@"VirtualIntelMac.Media"
-                                      code:1
-                                  userInfo:@{
-                                      NSLocalizedDescriptionKey : @"This disc is in use",
-                                      NSLocalizedRecoverySuggestionErrorKey :
-                                          @"In the virtual Mac, eject the disc in Finder, then try again. Close any "
-                                          @"apps using it first. Your image hasn’t been changed.",
-                                      NSUnderlyingErrorKey : error
-                                  }];
-      if (error && path.length)
-          error = VIMFriendlyDiscImageError(path, error);
-      completion(error);
-    };
-    void (^insert)(NSString *, NSString *, void (^)(NSError *)) =
-        ^(NSString *file, NSString *kind, void (^done)(NSError *)) {
-          [self.control execute:@"blockdev-change-medium"
-                      arguments:@{
-                          @"id" : VIMImageSlotDevice(slot, kind),
-                          @"filename" : file,
-                          @"format" : kind,
-                          @"read-only-mode" : @"read-only"
-                      }
-                     completion:^(id result, NSError *error) {
-                       done(error);
-                     }];
-        };
-    void (^disconnect)(void) = ^{
-      if (!slot || ![self.imageDevices containsObject:@(slot)]) {
-          record(@"", nil);
-          finish(nil);
-          return;
-      }
-      [self.control execute:@"device_del"
-                  arguments:@{@"id" : [NSString stringWithFormat:@"image-usb-%lu", (unsigned long)slot]}
-                 completion:^(id result, NSError *error) {
-                   if (!error) {
-                       [self.imageDevices removeObject:@(slot)];
-                       record(@"", nil);
-                   }
-                   finish(error);
-                 }];
-    };
-    if (!path.length) {
-        if (!oldPath.length) {
-            disconnect();
-            return;
-        }
-        [self.control execute:@"eject"
-                    arguments:@{@"id" : VIMImageSlotDevice(slot, oldFormat)}
-                   completion:^(id result, NSError *error) {
-                     if (error) {
-                         finish(error);
-                         return;
-                     }
-                     disconnect();
-                   }];
-        return;
-    }
-    if (oldPath.length) {
-        finish([oldPath isEqual:path]
-                   ? nil
-                   : VIMSessionError(@"Disconnect this drive’s current image before choosing another."));
-        return;
-    }
-    [self ensureImageDevice:slot
-                 completion:^(NSError *failure) {
-                   if (failure) {
-                       finish(failure);
-                       return;
-                   }
-                   insert(path, format, ^(NSError *error) {
-                     if (!error)
-                         record(path, format);
-                     finish(error);
-                   });
-                 }];
 }
 - (void)chooseOpticalMedia:(id)sender {
     [VIMSession chooseOpticalMediaForMachine:self.machine window:self.window];
@@ -5895,6 +4811,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             VIMSessionError(@"The virtual Mac stopped before the connection could open. Start it and try again."));
     [self.controlRetryTimer invalidate];
     self.controlRetryTimer = nil;
+    [self.controlStallTimer invalidate];
+    self.controlStallTimer = nil;
     self.state.bootPolicyPending = NO;
     self.state.bootPolicyCheckedBoot = nil;
     self.networkStarting = NO;
