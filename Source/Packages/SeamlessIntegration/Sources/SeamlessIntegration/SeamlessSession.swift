@@ -402,6 +402,9 @@ public final class SeamlessSession {
         case .covers(let id, let rects):
             surfaces[id]?.guestCovers = rects
             if let surface = surfaces[id] { showCrops(of: [surface]) }
+        case .minimized(let id, let minimized):
+            note("# window \(id) \(minimized ? "minimized" : "back")")
+            proxy?.send(SessionCommand.minimizeSurface(id: Int(id), minimized: minimized))
         case .surfaceOrigin(let id, let x, let y):
             surfaces[id]?.surfaceOrigin = (x, y)
             if let surface = surfaces[id] { showCrops(of: [surface]) }
@@ -758,6 +761,8 @@ public final class SeamlessSession {
             if let id = surfaces.values.min(by: { $0.window.order < $1.window.order })?.window.id {
                 sendToGuest(SessionWire.value(.focus, id))
             }
+        case .surfaceMinimized(let id, let minimized):
+            sendToGuest(SessionWire.setMinimized(window: UInt32(clamping: id), minimized))
         case .surfaceMoved(let id, let x, let y):
             guard let surface = surfaces[UInt32(clamping: id)] else { return }
             let side = Double(surface.window.margin)

@@ -983,6 +983,15 @@ static int drain_input(struct Stream *s) {
                                       : CGPointMake(g->x / 16.0, g->y / 16.0);
             swi_gesture(&context, g, point);
             s->gesture_events++;
+        } else if (m.type == SWM_SET_MINIMIZED) {
+            if (session_menu_tool && session_app_pid && !fork()) {
+                char pid[16], window[16];
+                snprintf(pid, sizeof(pid), "%d", session_app_pid);
+                snprintf(window, sizeof(window), "%u", m.u.window_id);
+                execl(session_menu_tool, session_menu_tool, "set-minimized", "--pid", pid, "--window", window, "--state",
+                      m.minimized ? "1" : "0", (char *)NULL);
+                _exit(127);
+            }
         } else if (m.type == SWM_FOCUS)
             activate_owner(s);
         offset += used;
@@ -1422,6 +1431,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
+    int minimized;
     int surface_x, surface_y, has_surface, cover_count;
     uint32_t covers_hash;
     int cropping, covered; // cropping: the message the host last had, if it's taking this from the display.
@@ -1812,6 +1822,25 @@ static int tree_send_covers(struct Stream *s, struct TreeWindow *w, const struct
     return send_all(s->fd, message, SWM_HEADER_SIZE + size);
 }
 
+// Off the screen but still a window of an app that isn't hidden: in the guest's Dock. shortcut: or on another of the guest's Spaces, until
+// a session has any.
+static int tree_window_is_minimized(CGWindowID id, pid_t pid) {
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, id);
+    int exists = list && CFArrayGetCount(list) > 0;
+    if (list)
+        CFRelease(list);
+    ProcessSerialNumber psn = {0, 0};
+    return exists && GetProcessForPID(pid, &psn) == noErr && IsProcessVisible(&psn);
+}
+
+static int tree_send_minimized(struct Stream *s, CGWindowID id, int minimized) {
+    uint8_t message[SWM_HEADER_SIZE + 8];
+    swm_header(message, SWM_MINIMIZED, 8);
+    swm_w32(message + SWM_HEADER_SIZE, id);
+    swm_w32(message + SWM_HEADER_SIZE + 4, (uint32_t)minimized);
+    return send_all(s->fd, message, sizeof(message));
+}
+
 static int tree_surface_has_shadow(CGWindowID id) {
     for (uint32_t i = 0; i < tree_gpu_table->gpu_row_count && i < SWS_TREE; i++) {
         const struct SWSGPURow *row = &tree_gpu_table->gpu_rows[i];
@@ -1894,6 +1923,11 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                     w = &windows[k];
             if (!w)
                 continue;
+            if (w->minimized) {
+                w->minimized = 0;
+                if (tree_send_minimized(s, id, 0))
+                    goto done;
+            }
             int fresh = w->id != id;
             w->id = id;
             w->seen = 1;
@@ -2123,6 +2157,15 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             }
             order++;
         }
+        for (int i = 0; i < TREE_MAX_WINDOWS; i++)
+            if (windows[i].id && !windows[i].seen && tree_shared && tree_window_is_minimized(windows[i].id, windows[i].pid)) {
+                if (!windows[i].minimized) {
+                    windows[i].minimized = 1;
+                    if (tree_send_minimized(s, windows[i].id, 1))
+                        goto done;
+                }
+                windows[i].seen = 1;
+            }
         for (int i = 0; i < TREE_MAX_WINDOWS; i++)
             if (windows[i].id && !windows[i].seen) {
                 uint8_t gone[SWM_HEADER_SIZE + SWM_GONE_SIZE];

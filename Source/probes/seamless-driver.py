@@ -528,6 +528,39 @@ def desktop():
         print('during a resize', during, flush=True)
         print('after resize', next((row[-40:] for row in proxy_windows() if f'id={window} ' in row), ''), flush=True)
         subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-resized.png')])
+        # Minimized in the guest, it's in the host's Dock, and back from there it's back in both.
+        def on_screen():
+            return any(f'id={window} ' in row for row in rows())
+        def page_rate():
+            found = re.search(r'presented ([0-9.]+)', subprocess.run([meter, window, '3'], capture_output=True, text=True).stdout)
+            return float(found.group(1)) if found else 0
+        command.write_text('guest-minimize')
+        os.kill(safari, signal.SIGUSR2)
+        for _ in range(16):
+            time.sleep(0.5)
+            if not on_screen():
+                break
+        check('minimized in the guest, its window leaves the screen', not on_screen())
+        time.sleep(1)
+        command.write_text('host-restore')
+        os.kill(safari, signal.SIGUSR2)
+        for _ in range(16):
+            time.sleep(0.5)
+            if on_screen():
+                break
+        check('brought back on the host, its window returns', on_screen())
+        time.sleep(7)
+        rate = page_rate()
+        print('after coming back', rate, flush=True)
+        check('and the guest has it back too', rate >= 30)
+        command.write_text('host-minimize')
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(2)
+        check('minimized on the host, its window leaves the screen', not on_screen())
+        command.write_text('host-restore')
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(3)
+        check('and returns', on_screen())
         frame = capture(f'{tag}-desktop-frame.png')
         print('guest frame', frame, flush=True)
     pressed = time.time()

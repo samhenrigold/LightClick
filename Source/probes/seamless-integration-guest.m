@@ -222,6 +222,28 @@ static int listApps(void) {
     return 0;
 }
 
+// By the guest's window number, which is the only name that a window keeps, and through the app, so its Dock and Window menu follow.
+static int setMinimized(int pid, uint32_t number, int minimized) {
+    extern AXError _AXUIElementGetWindow(AXUIElementRef, uint32_t *);
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    CFArrayRef windows = NULL;
+    int result = 2;
+    if (AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, (CFTypeRef *)&windows) == kAXErrorSuccess && windows) {
+        for (CFIndex i = 0; i < CFArrayGetCount(windows); i++) {
+            AXUIElementRef window = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
+            uint32_t found = 0;
+            if (_AXUIElementGetWindow(window, &found) == kAXErrorSuccess && found == number) {
+                result = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute,
+                                                      minimized ? kCFBooleanTrue : kCFBooleanFalse) != kAXErrorSuccess;
+                break;
+            }
+        }
+        CFRelease(windows);
+    }
+    CFRelease(app);
+    return result;
+}
+
 static int printIcon(const char *path) {
     NSString *app = @(path);
     NSDictionary *info =
@@ -792,6 +814,9 @@ int main(int argc, char **argv) {
             [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.15]];
             return 0;
         }
+        if (!strcmp(command, "set-minimized"))
+            return setMinimized(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")),
+                                atoi(option(argc, argv, "--state", "1")));
         if (!strcmp(command, "icon"))
             return printIcon(option(argc, argv, "--path", ""));
         if (!strcmp(command, "menu"))
