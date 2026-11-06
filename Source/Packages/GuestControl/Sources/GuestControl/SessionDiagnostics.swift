@@ -117,7 +117,7 @@ public final class SessionDiagnostics: NSObject {
         }
         guard let slot = command["Slot"] == nil ? 0 : command["Slot"] as? NSNumber,
             slot.doubleValue == Double(slot.uintValue), slot.uintValue < slotCount
-        else { return "Choose an image drive from0 to\(slotCount - 1)." }
+        else { return "Choose an image drive from 0 to \(slotCount - 1)." }
         return nil
     }
 

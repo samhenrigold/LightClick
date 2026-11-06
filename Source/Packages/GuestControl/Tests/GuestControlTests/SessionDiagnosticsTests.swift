@@ -133,7 +133,7 @@ struct SessionDiagnosticsTests {
 
     @Test func imageRequestsNeedAWholeSlotInRange() {
         let issue = SessionDiagnostics.imageRequestIssue
-        let wrong = "Choose an image drive from0 to3."
+        let wrong = "Choose an image drive from 0 to 3."
         #expect(issue(["Path": "", "Slot": 3], 4) == nil)
         #expect(issue(["Path": "", "Slot": 4], 4) == wrong)
         #expect(issue(["Path": "", "Slot": -1], 4) == wrong)
