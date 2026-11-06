@@ -26,7 +26,9 @@ public enum RecoveryAutomation: Equatable, Sendable {
     case tigerControls
     /// The bootstrap, plus an exec wrapper around a re-signed automatic copy of Apple's installer.
     case scopedInstaller
-    /// The bootstrap and Apple's signed installer, whose rc.install already launches Language Chooser with `-f minstall`.
+    /// The bootstrap and Apple's signed installer. Genuine 14F27, 15G31, 16G29 and 17G66 rc.install launch Language Chooser
+    /// with TARGET_APP and `-f minstall`. Yosemite 660's OSIWindowController::start natively selects options.target and
+    /// enters the installing pane when isAutomated is true (confirmed by decompilation), so no adapter is needed.
     case nativeInstaller(systemVersion: Int)
     /// A serial agent started through rc.install's own hook, leaving Apple's startup script and UI as they are.
     case serialAgent

@@ -18,7 +18,7 @@ public enum RestoreDiscKind: Int {
 
 @objc(VIMGuestMediaPlan)
 public final class GuestMediaPlanBridge: NSObject {
-    private let guest: Guest
+    let guest: Guest
 
     private init(guest: Guest) {
         self.guest = guest

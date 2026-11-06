@@ -1,7 +1,6 @@
 #import "VIMInstallerAssembly.h"
 #import "VIMGuestFiles.h"
 #import "VIMGuestProfile.h"
-#include "../tools/opengl-installer-paths.h"
 #import <signal.h>
 #import <fcntl.h>
 #import <unistd.h>
@@ -148,6 +147,27 @@ static BOOL VerifyOpenGLSupport(NSURL *directory, NSString *guest, NSError **err
             return AssemblyError(error, @"A bundled guest support file is missing or invalid.");
     }
     return YES;
+}
+// WRITES a file on the generated working copy, never a source installer. Keeps
+// its inode and catalog owner, and adds write permission only while saving.
+static BOOL RewriteGeneratedFile(NSURL *file, NSData *bytes, NSError **error) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSNumber *mode = [fm attributesOfItemAtPath:file.path error:error][NSFilePosixPermissions];
+    if (!mode)
+        return NO;
+    BOOL saved = [fm setAttributes:@{
+                     NSFilePosixPermissions : @(mode.unsignedIntValue | 0200)
+                 }
+                      ofItemAtPath:file.path
+                             error:error] &&
+                 bytes && [bytes writeToURL:file options:0 error:error];
+    NSError *restore = nil;
+    if (![fm setAttributes:@{NSFilePosixPermissions : mode} ofItemAtPath:file.path error:&restore]) {
+        if (error)
+            *error = restore;
+        return NO;
+    }
+    return saved;
 }
 static BOOL InstallerPackageImage(NSURL *URL) {
     int fd = open(URL.fileSystemRepresentation, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
@@ -312,10 +332,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     if (!original)
         return NO;
     // com.apple.install.cd launches rc.install, not the retained rc.cdrom.
-    // Both genuine Mojave/Catalina rc.install versions call this native hook
-    // before Language Chooser. No modification of Apple's startup script/UI.
-    NSString *anchor = @"\t/etc/rc.cdrom.local\n";
-    if ([original componentsSeparatedByString:anchor].count != 2)
+    if (![VIMRecoveryText hasSerialHook:original])
         return AssemblyError(
             error, @"This installer’s startup files could not be prepared. Its original files have not been changed.");
     NSURL *destination = [mount URLByAppendingPathComponent:@"usr/libexec/guest-recovery-agent"];
@@ -324,41 +341,19 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                                                                error:error])
         return NO;
     NSURL *hook = [mount URLByAppendingPathComponent:@"private/etc/rc.cdrom.local"];
-    NSString *start = @"#!/bin/sh\nexec /usr/libexec/guest-recovery-agent --start-recovery-service >> "
-                      @"/var/log/virtualintelmac-recovery.log 2>&1\n";
     return ![fm fileExistsAtPath:hook.path] &&
-           [start writeToURL:hook atomically:NO encoding:NSUTF8StringEncoding error:error] &&
+           [VIMRecoveryText.serialHookScript writeToURL:hook atomically:NO encoding:NSUTF8StringEncoding error:error] &&
            [fm setAttributes:@{NSFilePosixPermissions : @0755} ofItemAtPath:hook.path error:error];
 }
 - (BOOL)prepareLeopardRecoveryMemoryAtMount:(NSURL *)mount error:(NSError **)error {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSURL *model = [mount URLByAppendingPathComponent:@"usr/libexec/cpu_check"];
     if ([fm fileExistsAtPath:model.path]) {
-        NSString *original = [NSString stringWithContentsOfURL:model encoding:NSUTF8StringEncoding error:NULL];
-        // Some restore discs run this script before the installer. Retail
-        // media may not contain it. Bypass only a recognizable script, never
-        // overwrite an unknown executable or insist on a particular model list.
-        if ([original hasPrefix:@"#!"]) {
-            NSString *line = [[original componentsSeparatedByString:@"\n"] firstObject];
-            if ([line containsString:@"perl"] || [line hasSuffix:@"/sh"] || [line hasSuffix:@"/bash"]) {
-                NSString *replacement =
-                    [line stringByAppendingString:[line containsString:@"perl"] ? @"\nexit 0;\n" : @"\nexit 0\n"];
-                NSNumber *mode = [fm attributesOfItemAtPath:model.path error:error][NSFilePosixPermissions];
-                if (!mode || ![fm setAttributes:@{NSFilePosixPermissions : @(mode.unsignedIntValue | 0200)}
-                                   ofItemAtPath:model.path
-                                          error:error])
-                    return NO;
-                BOOL saved = [replacement writeToURL:model atomically:NO encoding:NSUTF8StringEncoding error:error];
-                NSError *restore = nil;
-                if (![fm setAttributes:@{NSFilePosixPermissions : mode} ofItemAtPath:model.path error:&restore]) {
-                    if (error)
-                        *error = restore;
-                    return NO;
-                }
-                if (!saved)
-                    return NO;
-            }
-        }
+        NSString *bypass = [VIMRecoveryText bypassingModelCheck:[NSString stringWithContentsOfURL:model
+                                                                                         encoding:NSUTF8StringEncoding
+                                                                                            error:NULL]];
+        if (bypass && !RewriteGeneratedFile(model, [bypass dataUsingEncoding:NSUTF8StringEncoding], error))
+            return NO;
     }
     NSURL *script = [mount URLByAppendingPathComponent:@"etc/rc.cdrom"];
     if (![fm fileExistsAtPath:script.path])
@@ -366,42 +361,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     NSString *text = [NSString stringWithContentsOfURL:script encoding:NSUTF8StringEncoding error:error];
     if (!text)
         return NO;
-    // Measured 9J3050 recovery uses 512-byte sectors: 128 KB /var/run
-    // cannot hold the adapter plus a status tool, and 512 KB /var/tmp
-    // cannot stage the compiled setup controls. Change only this generated
-    // DVD copy's native RAMDisk budgets; never remount live socket paths.
-    NSDictionary *budgets = @{@"/var/tmp" : @262144, @"/var/run" : @16384};
-    for (NSString *path in budgets) {
-        NSRegularExpression *pattern = [NSRegularExpression
-            regularExpressionWithPattern:[NSString stringWithFormat:@"(?m)^(\\s*RAMDisk[ \\t]+%@[ \\t]+)([0-9]+)",
-                                                                    [NSRegularExpression escapedPatternForString:path]]
-                                 options:0
-                                   error:NULL];
-        for (NSTextCheckingResult *match in
-             [[pattern matchesInString:text options:0 range:NSMakeRange(0, text.length)] reverseObjectEnumerator]) {
-            NSRange number = [match rangeAtIndex:2];
-            if ([[text substringWithRange:number] longLongValue] < [budgets[path] longLongValue])
-                text = [text stringByReplacingCharactersInRange:number withString:[budgets[path] stringValue]];
-        }
-    }
-    NSNumber *mode = [NSFileManager.defaultManager attributesOfItemAtPath:script.path
-                                                                    error:error][NSFilePosixPermissions];
-    if (!mode)
-        return NO;
-    BOOL written =
-        [NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions : @(mode.unsignedIntValue | 0200)}
-                                       ofItemAtPath:script.path
-                                              error:error] &&
-        [text writeToURL:script atomically:NO encoding:NSUTF8StringEncoding error:error];
-    NSError *restore = nil;
-    if (![NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions : mode}
-                                        ofItemAtPath:script.path
-                                               error:&restore]) {
-        if (error)
-            *error = restore;
-        return NO;
-    }
-    return written;
+    return RewriteGeneratedFile(
+        script, [[VIMRecoveryText raisingRAMDiskBudgets:text] dataUsingEncoding:NSUTF8StringEncoding], error);
 }
 + (BOOL)validatePreparedMedia:(NSURL *)URL guest:(NSString *)guest error:(NSError **)error {
     struct stat image, record;
@@ -697,46 +658,19 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     // Let their native package installer try rather than require restore logic.
     if (!flat && ![fm fileExistsAtPath:distribution.path])
         return YES;
-    NSString *text = [NSString stringWithContentsOfURL:distribution encoding:NSUTF8StringEncoding error:error];
-    NSXMLDocument *plan =
-        text ? [[NSXMLDocument alloc] initWithXMLString:text
-                                                options:NSXMLNodePreserveAll | NSXMLNodeLoadExternalEntitiesNever
-                                                  error:error]
-             : nil;
-    if (![plan.rootElement.name isEqual:@"installer-gui-script"])
+    NSString *patched = [VIMRecoveryText
+        openingInstallationPlan:[NSString stringWithContentsOfURL:distribution
+                                                         encoding:NSUTF8StringEncoding
+                                                            error:error]
+               selectingRosetta:
+                   [fm fileExistsAtPath:[mount URLByAppendingPathComponent:@"System/Installation/Packages/Rosetta.pkg"]
+                                            .path]];
+    if (!patched)
         return AssemblyError(error,
                              @"This disc’s installation plan could not be read. Its original image was retained.");
-    for (NSXMLElement *check in [plan.rootElement elementsForName:@"installation-check"])
-        [check attributeForName:@"script"].stringValue = @"true";
-    if ([fm fileExistsAtPath:[mount URLByAppendingPathComponent:@"System/Installation/Packages/Rosetta.pkg"].path])
-        for (NSXMLElement *choice in [plan.rootElement elementsForName:@"choice"])
-            if ([[choice attributeForName:@"id"].stringValue isEqual:@"Rosetta"]) {
-                NSXMLNode *selected = [choice attributeForName:@"start_selected"];
-                if (selected)
-                    selected.stringValue = @"true";
-                else
-                    [choice addAttribute:[NSXMLNode attributeWithName:@"start_selected" stringValue:@"true"]];
-            }
-    NSString *patched = plan.XMLString;
-    if (!flat) {
-        NSNumber *mode = [fm attributesOfItemAtPath:distribution.path error:error][NSFilePosixPermissions];
-        if (!mode || ![fm setAttributes:@{NSFilePosixPermissions : @(mode.unsignedIntValue | 0200)}
-                           ofItemAtPath:distribution.path
-                                  error:error])
-            return NO;
-        BOOL saved = patched && [patched writeToURL:distribution
-                                         atomically:NO
-                                           encoding:NSUTF8StringEncoding
-                                              error:error];
-        NSError *restore = nil;
-        if (![fm setAttributes:@{NSFilePosixPermissions : mode} ofItemAtPath:distribution.path error:&restore]) {
-            if (error)
-                *error = restore;
-            return NO;
-        }
-        return saved;
-    }
-    if (!patched || ![patched writeToURL:distribution atomically:NO encoding:NSUTF8StringEncoding error:error])
+    if (!flat)
+        return RewriteGeneratedFile(distribution, [patched dataUsingEncoding:NSUTF8StringEncoding], error);
+    if (![patched writeToURL:distribution atomically:NO encoding:NSUTF8StringEncoding error:error])
         return NO;
     NSURL *output = [self.job URLByAppendingPathComponent:@"OSInstall-virtual.mpkg"];
     // xar's -C applies ONLY to extraction. During creation it silently logs
@@ -758,23 +692,47 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
             error,
             @"The Snow Leopard installation packages couldn’t be verified. The original DVD image was retained.");
     NSData *bytes = [NSData dataWithContentsOfURL:output options:0 error:error];
-    NSNumber *mode = [fm attributesOfItemAtPath:package.path error:error][NSFilePosixPermissions];
-    if (!bytes.length || bytes.length > 8 * 1024 * 1024 || !mode ||
-        ![fm setAttributes:@{NSFilePosixPermissions : @(mode.unsignedIntValue | 0200)}
-              ofItemAtPath:package.path
-                     error:error])
+    if (!bytes.length || bytes.length > 8 * 1024 * 1024)
         return NO;
-    BOOL saved = [bytes writeToURL:package options:0 error:error];
-    NSError *restore = nil;
-    if (![fm setAttributes:@{NSFilePosixPermissions : mode} ofItemAtPath:package.path error:&restore]) {
-        if (error)
-            *error = restore;
-        return NO;
+    return RewriteGeneratedFile(package, bytes, error);
+}
+// WRITES the attached working copy. Stops at the first refusal.
+- (BOOL)applyRecoveryEdit:(VIMRecoveryEdit *)edit
+                  atMount:(NSURL *)mount
+                  support:(NSURL *)support
+                    guest:(NSString *)guest
+                    error:(NSError **)error {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSURL *target = edit.path ? [mount URLByAppendingPathComponent:edit.path] : nil;
+    switch (edit.kind) {
+        case VIMRecoveryEditKindInstallSupport:
+            return [fm createDirectoryAtURL:target.URLByDeletingLastPathComponent
+                       withIntermediateDirectories:YES
+                                        attributes:nil
+                                             error:error] &&
+                   [self perform:[VIMToolInvocation copy:support.path to:target.path timeout:180] error:error];
+        case VIMRecoveryEditKindCreateScript:
+            return ![fm fileExistsAtPath:target.path] &&
+                   [edit.contents writeToURL:target atomically:NO encoding:NSUTF8StringEncoding error:error] &&
+                   [fm setAttributes:@{NSFilePosixPermissions : @0755} ofItemAtPath:target.path error:error];
+        case VIMRecoveryEditKindPatchStartup: {
+            NSString *patched = [edit patched:[NSString stringWithContentsOfURL:target
+                                                                       encoding:NSUTF8StringEncoding
+                                                                          error:error]];
+            if (!patched)
+                return AssemblyError(error, edit.unrecognizedMessage);
+            return RewriteGeneratedFile(target, [patched dataUsingEncoding:NSUTF8StringEncoding], error);
+        }
+        case VIMRecoveryEditKindSymlink:
+            return [fm createSymbolicLinkAtURL:target
+                            withDestinationURL:[NSURL fileURLWithPath:edit.destination]
+                                         error:error];
+        case VIMRecoveryEditKindPrepareAutomaticInstaller:
+            return [self prepareAutomaticInstallerAtMount:mount guest:guest error:error];
     }
-    return saved;
 }
 - (BOOL)prepareAutomaticInstallerAtMount:(NSURL *)mount guest:(NSString *)guest error:(NSError **)error {
-    NSString *executable = [NSString stringWithUTF8String:VIMOpenGLRecoveryInstallerForGuest(guest.UTF8String)];
+    NSString *executable = [VIMGuestMediaPlan planForGuest:guest].recoveryInstallerPath;
     NSURL *binary = [mount URLByAppendingPathComponent:[executable substringFromIndex:1]];
     NSURL *original =
         binary.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent;
@@ -788,9 +746,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         CFRelease(code);
     NSDictionary *details = CFBridgingRelease(information),
                  *entitlements = details[(__bridge NSString *)kSecCodeInfoEntitlementsDict];
-    if (status != errSecSuccess || !details ||
-        (entitlements && (![entitlements isKindOfClass:NSDictionary.class] || entitlements.count > 1 ||
-                          (entitlements.count && ![entitlements[@"com.apple.private.securityd.stash"] isEqual:@YES]))))
+    if (status != errSecSuccess || !details || ![VIMRecoveryText acceptsAutomaticInstallerEntitlements:entitlements])
         return AssemblyError(error, @"This OS X installer’s automatic launch policy is not recognized. Its original "
                                     @"installer was not changed.");
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -1209,15 +1165,9 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     [self nextWorkTo:.05 seconds:5];
     if (![self perform:[VIMToolInvocation checkSignatureOfPackage:files[@"assistant"].path] error:error])
         return nil;
-    // A valid third-party Developer ID is not an Apple OS installer signature.
-    // pkgutil is pinned to the system binary and its output locale above is fixed.
-    NSString *signature = [NSString stringWithContentsOfURL:self.lastLog encoding:NSUTF8StringEncoding error:error];
-    BOOL apple = NO;
-    for (NSString *line in [signature componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet])
-        if ([[line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]
-                isEqual:@"Status: signed Apple Software"])
-            apple = YES;
-    if (!apple) {
+    if (![VIMRecoveryText isSignedAppleSoftware:[NSString stringWithContentsOfURL:self.lastLog
+                                                                         encoding:NSUTF8StringEncoding
+                                                                            error:error]]) {
         AssemblyError(error, @"The package is not identified as signed Apple Software. It was not extracted.");
         return nil;
     }
@@ -1596,159 +1546,16 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                             error:error];
                         }
                 }
-                if (copied && bootstrap) {
-                    NSURL *extras = [packages URLByAppendingPathComponent:@"Extras"],
-                          *support = [extras URLByAppendingPathComponent:@"VirtualIntelMac"];
-                    copied = [fm createDirectoryAtURL:extras
-                                 withIntermediateDirectories:YES
-                                                  attributes:nil
-                                                       error:error] &&
-                             [self perform:[VIMToolInvocation copy:openGLSupport.path to:support.path timeout:180]
-                                     error:error];
-                    if (copied && NativeAutomatedRecovery(guest)) {
-                        NSURL *early = [mount URLByAppendingPathComponent:@"etc/rc.cdrom.local"];
-                        NSString *launcher = @"#!/bin/sh\nexec "
-                                             @"/System/Installation/Packages/Extras/VirtualIntelMac/"
-                                             @"opengl-install-bootstrap --start-recovery-agent\n";
-                        copied = ![fm fileExistsAtPath:early.path] &&
-                                 [launcher writeToURL:early atomically:NO encoding:NSUTF8StringEncoding error:error] &&
-                                 [fm setAttributes:@{NSFilePosixPermissions : @0755}
-                                      ofItemAtPath:early.path
-                                             error:error];
+                if (copied && bootstrap)
+                    for (VIMRecoveryEdit *edit in plan.recoveryEdits) {
+                        copied = [self applyRecoveryEdit:edit
+                                                 atMount:mount
+                                                 support:openGLSupport
+                                                   guest:guest
+                                                   error:error];
+                        if (!copied)
+                            break;
                     }
-                    if (copied && [guest isEqual:@"highsierra"]) {
-                        // Native17G66 reaches disk discovery but never opens
-                        // the -f minstall document. Its AppKit finishLaunching
-                        // explicitly handles -NSOpen. Our compiled wrapper
-                        // adds it only to LCA's child, retaining -f for LCA and
-                        // preserving the signed installer/PID supervision.
-                        NSURL *rc = [mount URLByAppendingPathComponent:@"etc/rc.install"];
-                        NSString *original = [NSString stringWithContentsOfURL:rc
-                                                                      encoding:NSUTF8StringEncoding
-                                                                         error:error];
-                        NSString *argument = @"\"${LAUNCH}\" \"${TARGET_APP}\"";
-                        NSString *package = @"INSTALL_PKG=/System/Installation/Packages/OSInstall.mpkg";
-                        if ([original componentsSeparatedByString:argument].count != 2 ||
-                            [original componentsSeparatedByString:package].count != 2) {
-                            AssemblyError(error, @"This High Sierra installer’s startup interface is not recognized. "
-                                                 @"Its original files were retained.");
-                            copied = NO;
-                        } else {
-                            NSString *patched = [original
-                                stringByReplacingOccurrencesOfString:argument
-                                                          withString:
-                                                              @"\"${LAUNCH}\" "
-                                                              @"/System/Installation/Packages/Extras/VirtualIntelMac/"
-                                                              @"opengl-installer-launch \"${TARGET_APP}\""];
-                            patched = [patched stringByReplacingOccurrencesOfString:package
-                                                                         withString:@"INSTALL_PKG=/InstallInfo.plist"];
-                            NSNumber *mode = [fm attributesOfItemAtPath:rc.path error:error][NSFilePosixPermissions];
-                            copied = mode &&
-                                     [fm setAttributes:@{NSFilePosixPermissions : @(mode.unsignedIntValue | 0200)}
-                                          ofItemAtPath:rc.path
-                                                 error:error] &&
-                                     [patched writeToURL:rc atomically:NO encoding:NSUTF8StringEncoding error:error];
-                            NSError *restore = nil;
-                            if (mode && ![fm setAttributes:@{NSFilePosixPermissions : mode}
-                                              ofItemAtPath:rc.path
-                                                     error:&restore]) {
-                                copied = NO;
-                                if (error)
-                                    *error = restore;
-                            }
-                        }
-                    }
-                    if (copied)
-                        copied =
-                            [fm createSymbolicLinkAtURL:[extras URLByAppendingPathComponent:@"rc.imaging"]
-                                     withDestinationURL:[NSURL
-                                                            fileURLWithPath:@"/System/Installation/Packages/Extras/"
-                                                                            @"VirtualIntelMac/opengl-install-bootstrap"]
-                                                  error:error] &&
-                            [fm createSymbolicLinkAtURL:[extras URLByAppendingPathComponent:@"minstallconfig.xml"]
-                                     withDestinationURL:
-                                         [NSURL fileURLWithPath:@"/var/tmp/VirtualIntelMac-minstallconfig.plist"]
-                                                  error:error];
-                    if (copied && restoreDVD) {
-                        // The measured restore DVD predates rc.imaging. Its
-                        // native pre-WindowServer hook runs once as guest root.
-                        copied =
-                            [fm createSymbolicLinkAtURL:[mount URLByAppendingPathComponent:@"etc/rc.cdrom.local"]
-                                     withDestinationURL:[NSURL
-                                                            fileURLWithPath:@"/System/Installation/Packages/Extras/"
-                                                                            @"VirtualIntelMac/opengl-install-bootstrap"]
-                                                  error:error] &&
-                            [fm createSymbolicLinkAtURL:[mount URLByAppendingPathComponent:@"etc/minstallconfig.xml"]
-                                     withDestinationURL:
-                                         [NSURL fileURLWithPath:@"/var/tmp/VirtualIntelMac-minstallconfig.plist"]
-                                                  error:error];
-                        if (copied)
-                            copied =
-                                // Both actual LanguageChooser-31 (Leopard) and
-                                // LanguageChooser-62 (Snow) initialize check this
-                                // path, selects its first (English) row and calls
-                                // finalizeLanguage:. The target only exists after
-                                // our root bootstrap authorizes automatic setup;
-                                // manual installs retain the normal language picker.
-                                [fm createSymbolicLinkAtURL:
-                                        [mount URLByAppendingPathComponent:@"System/Installation/CDIS/auto-pilot"]
-                                         withDestinationURL:
-                                             [NSURL fileURLWithPath:
-                                                        @"/var/tmp/VirtualIntelMac-InstallerAuthorization.plist"]
-                                                      error:error];
-                    }
-                    // Yosemite660's OSIWindowController::start natively
-                    // selects options.target and enters the installing pane
-                    // when isAutomated is true (confirmed by decompilation).
-                    // Its stock rc.install already launches LCA with -f.
-                    // Keep the signed installer and all original entitlements;
-                    // the earlier OSIPreInstallPanel adapter is unnecessary.
-                    if (copied && !NativeAutomatedRecovery(guest)) {
-                        NSURL *rc = [mount URLByAppendingPathComponent:@"etc/rc.install"];
-                        NSString *original = [NSString stringWithContentsOfURL:rc
-                                                                      encoding:NSUTF8StringEncoding
-                                                                         error:error];
-                        NSString *invocation = @"    \"${OSINSTALLER}\"                                ";
-                        NSArray *pieces = [original componentsSeparatedByString:invocation];
-                        if (pieces.count != 2) {
-                            AssemblyError(error, @"This installer’s automatic launch interface is not recognized. Its "
-                                                 @"original files were retained.");
-                            copied = NO;
-                        } else {
-                            // Apple's minstall branch bypasses Language
-                            // Chooser, which owns the native gray background.
-                            // Restore that original launcher around our exec
-                            // wrapper. The app-owned EFI supplies prev-lang:kbd;
-                            // LCA's observed hidden mode therefore chooses that
-                            // language without a picker and supervises its child.
-                            // The wrapper, not LCA, sets the scoped DYLD variable.
-                            NSString *launch = @"    \"${LAUNCH}\" "
-                                               @"/System/Installation/Packages/Extras/VirtualIntelMac/"
-                                               @"opengl-installer-launch \"${OSINSTALLER}\" ";
-                            NSString *patched = [original stringByReplacingOccurrencesOfString:invocation
-                                                                                    withString:launch];
-                            NSNumber *mode = [fm attributesOfItemAtPath:rc.path error:error][NSFilePosixPermissions];
-                            // This is the generated, ownership-disabled recovery
-                            // copy, not the source installer/host. Keep its inode
-                            // and catalog owner; only temporarily add write.
-                            copied = mode &&
-                                     [fm setAttributes:@{NSFilePosixPermissions : @(mode.unsignedIntValue | 0200)}
-                                          ofItemAtPath:rc.path
-                                                 error:error] &&
-                                     [patched writeToURL:rc atomically:NO encoding:NSUTF8StringEncoding error:error];
-                            NSError *restore = nil;
-                            if (mode && ![fm setAttributes:@{NSFilePosixPermissions : mode}
-                                              ofItemAtPath:rc.path
-                                                     error:&restore]) {
-                                copied = NO;
-                                if (error)
-                                    *error = restore;
-                            }
-                        }
-                    }
-                    if (copied && !NativeAutomatedRecovery(guest))
-                        copied = [self prepareAutomaticInstallerAtMount:mount guest:guest error:error];
-                }
                 if (sourceMount) {
                     NSError *issue = nil;
                     BOOL clean = [self perform:[VIMToolInvocation detachMountPoint:sourceMount.path] error:&issue];
@@ -1844,17 +1651,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
         NSDictionary *actual = [NSDictionary
             dictionaryWithContentsOfURL:
                 [readback URLByAppendingPathComponent:@"System/Library/CoreServices/SystemVersion.plist"]];
-        readbackValid =
-            [actual isEqual:version] &&
-            RegularFile([readback URLByAppendingPathComponent:@"System/Library/CoreServices/boot.efi"]) &&
-            (!classic ||
-             ([guest isEqual:@"highsierra"]
-                  ? (RegularFile([readback URLByAppendingPathComponent:@"InstallInfo.plist"]) &&
-                     RegularFile([readback URLByAppendingPathComponent:@"InstallESD.dmg"]))
-                  : (RegularFile([readback URLByAppendingPathComponent:
-                                               @"System/Installation/Packages/OSInstall.mpkg/Contents/Info.plist"]) ||
-                     RegularFile(
-                         [readback URLByAppendingPathComponent:@"System/Installation/Packages/OSInstall.mpkg"]))));
+        readbackValid = [actual isEqual:version] && [plan requirementsSatisfiedAtMount:readback];
         if (readbackValid && tiger) {
             NSData *distribution = [NSData
                 dataWithContentsOfURL:[readback
@@ -1862,39 +1659,8 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                                               @"System/Installation/Packages/OSInstall.mpkg/Contents/OSInstall.dist"]];
             readbackValid =
                 [VIMTigerDistributionSHA256(distribution) isEqual:tigerPolicy[@"PreparedDistributionSHA256"]] &&
-                RegularFile([readback
-                    URLByAppendingPathComponent:@"Applications/Utilities/Installer.app/Contents/MacOS/Installer"]) &&
                 VIMTigerVerifyInstallerControls(readback, openGLSupport, tigerControls, error);
         }
-        if (readbackValid && bootstrap)
-            readbackValid =
-                RegularFile([readback
-                    URLByAppendingPathComponent:[[NSString stringWithUTF8String:VIMOpenGLRecoveryInstallerForGuest(
-                                                                                    guest.UTF8String)]
-                                                    substringFromIndex:1]]) &&
-                (NativeAutomatedRecovery(guest) ||
-                 RegularFile([readback
-                     URLByAppendingPathComponent:[[NSString
-                                                     stringWithUTF8String:VIMOpenGLAutomaticInstaller(
-                                                                              restoreDVD || [guest isEqual:@"lion"])]
-                                                     substringFromIndex:1]]));
-        if (readbackValid && NativeAutomatedRecovery(guest))
-            readbackValid = RegularFile([readback URLByAppendingPathComponent:@"BaseSystem.dmg"]) &&
-                            RegularFile([readback URLByAppendingPathComponent:@"BaseSystem.chunklist"]);
-        if (readbackValid && SerialRecovery(guest))
-            readbackValid =
-                NonemptyFile([readback URLByAppendingPathComponent:@"usr/libexec/guest-recovery-agent"]) &&
-                [[NSString stringWithContentsOfURL:[readback URLByAppendingPathComponent:@"private/etc/rc.cdrom.local"]
-                                          encoding:NSUTF8StringEncoding
-                                             error:error]
-                    containsString:@"/usr/libexec/guest-recovery-agent --start-recovery-service"];
-        if (readbackValid && [guest isEqual:@"highsierra"])
-            readbackValid = [[NSString stringWithContentsOfURL:[readback URLByAppendingPathComponent:@"etc/rc.install"]
-                                                      encoding:NSUTF8StringEncoding
-                                                         error:error]
-                containsString:
-                    @"\"${LAUNCH}\" /System/Installation/Packages/Extras/VirtualIntelMac/opengl-installer-launch "
-                    @"\"${TARGET_APP}\""];
         NSError *issue = nil;
         BOOL clean = [self perform:[VIMToolInvocation detachMountPoint:readback.path] error:&issue];
         if (!clean) {
@@ -1994,13 +1760,9 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     [self report:@"Checking Apple’s signed installation package…"];
     if (![self perform:[VIMToolInvocation checkSignatureOfPackage:support.path] error:error])
         return nil;
-    NSString *signature = [NSString stringWithContentsOfURL:self.lastLog encoding:NSUTF8StringEncoding error:error];
-    BOOL apple = NO;
-    for (NSString *line in [signature componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet])
-        if ([[line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]
-                isEqual:@"Status: signed Apple Software"])
-            apple = YES;
-    if (!apple) {
+    if (![VIMRecoveryText isSignedAppleSoftware:[NSString stringWithContentsOfURL:self.lastLog
+                                                                         encoding:NSUTF8StringEncoding
+                                                                            error:error]]) {
         AssemblyError(error, @"The Big Sur installation package is not identified as signed Apple Software. Choose a "
                              @"complete installer or download it again.");
         return nil;
@@ -2021,10 +1783,9 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     BOOL extractedOK = NO;
     NSDictionary *asset = nil;
     if (attached) {
-        NSURL *assetDirectory = [mount URLByAppendingPathComponent:@"com_apple_MobileAsset_MacSoftwareUpdate"];
+        NSURL *assetDirectory = [mount URLByAppendingPathComponent:VIMHybridMedia.assetDirectory];
         NSDictionary *metadata = [NSDictionary
-            dictionaryWithContentsOfURL:
-                [assetDirectory URLByAppendingPathComponent:@"com_apple_MobileAsset_MacSoftwareUpdate.xml"]];
+            dictionaryWithContentsOfURL:[assetDirectory URLByAppendingPathComponent:VIMHybridMedia.assetMetadata]];
         NSArray *assets = metadata[@"Assets"];
         if ([assets isKindOfClass:NSArray.class] && assets.count == 1 &&
             [assets.firstObject isKindOfClass:NSDictionary.class])
@@ -2038,19 +1799,9 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                 [archives addObject:URL];
         if (archives.count == 1 && InstallerVersionMatches(asset[@"OSVersion"], @"bigsur") &&
             [asset[@"Build"] isKindOfClass:NSString.class]) {
-            // Exact entries used by Big Sur CIMUtilities, observed in its shipped
-            // createinstallmedia.dylib. No OS-wide restore or package scripts.
-            NSArray *members = @[
-                @"AssetData/Restore/BaseSystem.dmg", @"AssetData/Restore/BaseSystem.chunklist",
-                @"AssetData/boot/Firmware/Manifests/InstallerBoot/*",
-                @"AssetData/boot/Firmware/System/Library/CoreServices/bootbase.efi",
-                @"AssetData/boot/System/Library/KernelCollections/BootKernelExtensions.kc",
-                @"AssetData/boot/BridgeVersion.plist", @"AssetData/boot/BridgeVersion.bin",
-                @"AssetData/boot/PlatformSupport.plist", @"AssetData/boot/SystemVersion.plist"
-            ];
             [self nextWorkTo:.60 seconds:50];
             extractedOK = [self perform:[VIMToolInvocation unzip:[archives.firstObject path]
-                                                         members:members
+                                                         members:VIMHybridMedia.archiveMembers
                                                             into:extracted.path]
                                   error:error];
         } else
@@ -2067,17 +1818,7 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
             *error = detachError;
         return nil;
     }
-    NSDictionary *mapping = @{
-        @"AssetData/Restore/BaseSystem.dmg" : @"BaseSystem/BaseSystem.dmg",
-        @"AssetData/Restore/BaseSystem.chunklist" : @"BaseSystem/BaseSystem.chunklist",
-        @"AssetData/boot/Firmware/System/Library/CoreServices/bootbase.efi" : @"System/Library/CoreServices/boot.efi",
-        @"AssetData/boot/System/Library/KernelCollections/BootKernelExtensions.kc" :
-            @"System/Library/KernelCollections/BootKernelExtensions.kc",
-        @"AssetData/boot/BridgeVersion.plist" : @"System/Library/CoreServices/BridgeVersion.plist",
-        @"AssetData/boot/BridgeVersion.bin" : @"System/Library/CoreServices/BridgeVersion.bin",
-        @"AssetData/boot/PlatformSupport.plist" : @"System/Library/CoreServices/PlatformSupport.plist",
-        @"AssetData/boot/SystemVersion.plist" : @"System/Library/CoreServices/SystemVersion.plist"
-    };
+    NSDictionary<NSString *, NSString *> *mapping = VIMHybridMedia.stagedFiles;
     for (NSString *sourcePath in mapping) {
         if (self.cancelled) {
             AssemblyError(error, @"Media preparation was cancelled. Downloads were retained.");
@@ -2096,21 +1837,21 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
             ![fm moveItemAtURL:source toURL:target error:error])
             return nil;
     }
-    NSURL *manifests = [extracted URLByAppendingPathComponent:@"AssetData/boot/Firmware/Manifests/InstallerBoot"];
+    NSURL *manifests = [extracted URLByAppendingPathComponent:VIMHybridMedia.extractedManifests];
     if (![self perform:[VIMToolInvocation copy:manifests.path to:stage.path timeout:120] error:error])
         return nil;
-    NSURL *preferences = [stage URLByAppendingPathComponent:@"Library/Preferences/SystemConfiguration"];
-    if (![fm createDirectoryAtURL:preferences withIntermediateDirectories:YES attributes:nil error:error])
+    NSURL *bootPlist = [stage URLByAppendingPathComponent:VIMHybridMedia.bootPlistPath];
+    if (![fm createDirectoryAtURL:bootPlist.URLByDeletingLastPathComponent
+            withIntermediateDirectories:YES
+                             attributes:nil
+                                  error:error])
         return nil;
-    NSDictionary *boot = @{@"Kernel Flags" : @"root-dmg=file:///BaseSystem/BaseSystem.dmg"};
-    NSDictionary *cookie = @{
-        @"AppName" : installer.lastPathComponent,
-        @"ProductVersion" : asset[@"OSVersion"],
-        @"ProductBuildVersion" : asset[@"Build"]
-    };
+    NSDictionary *cookie = [VIMHybridMedia installerCookieForApplication:installer.lastPathComponent
+                                                          productVersion:asset[@"OSVersion"]
+                                                            productBuild:asset[@"Build"]];
     for (NSArray *entry in @[
-             @[ boot, [preferences URLByAppendingPathComponent:@"com.apple.Boot.plist"] ],
-             @[ cookie, [stage URLByAppendingPathComponent:@".IAPhysicalMedia"] ]
+             @[ VIMHybridMedia.bootPlist, bootPlist ],
+             @[ cookie, [stage URLByAppendingPathComponent:VIMHybridMedia.installerCookiePath] ]
          ]) {
         NSData *plist = [NSPropertyListSerialization dataWithPropertyList:entry[0]
                                                                    format:NSPropertyListXMLFormat_v1_0
@@ -2133,13 +1874,13 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     [self completedWork:.9];
     NSURL *image = [directory URLByAppendingPathComponent:@"Installer.iso"];
     [self nextWorkTo:.99 seconds:120];
-    if (![self
-            perform:[VIMToolInvocation
-                        makeHybridImageFromStage:stage.path
-                                blessedDirectory:[stage URLByAppendingPathComponent:@"System/Library/CoreServices"].path
-                                      volumeName:@"Install macOS Big Sur"
-                                          output:image.path]
-              error:error])
+    if (![self perform:[VIMToolInvocation
+                           makeHybridImageFromStage:stage.path
+                                   blessedDirectory:[stage URLByAppendingPathComponent:VIMHybridMedia.blessedDirectory]
+                                                        .path
+                                         volumeName:VIMHybridMedia.volumeName
+                                             output:image.path]
+                 error:error])
         return nil;
     NSNumber *imageSize = FlushGeneratedImage(image, error);
     if (!imageSize)
