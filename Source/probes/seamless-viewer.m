@@ -1,9 +1,12 @@
 // Host side of the seamless-window demo: one borderless NSWindow per guest window, fed by seamless-guest, with pointer
 // and keys sent back. Listens on loopback only; a guest reaches that as 10.0.2.2 over QEMU's user network.
 //
-//     seamless-viewer [--port 7654] [--self-test]
+//     seamless-viewer [--port 7654] [--self-test] [--exit-after SECONDS] [--png PATH] [--test-input X,Y]
 //
 // --self-test clicks and types into the first window, confirms on-screen pixels changed each time, and exits 0 or 1.
+// --exit-after stops that long after the first window appears, or when the guest disconnects, prints what arrived,
+// writes the window's last pixels to --png, and exits 0 if any frame came. --test-input clicks at X,Y (window points)
+// and types one key, a few seconds into the run, over the same path as real input.
 //
 // shortcut: any local process can connect, and nothing authenticates it; a real design uses a private virtio port.
 // shortcut: one process, so one Dock tile; generated per-app proxies are phase 2, see seamless-apps-design.md.
@@ -20,6 +23,9 @@
 
 static int connectionFD = -1; // Main thread.
 static BOOL selfTest;
+static double exitAfter;
+static NSString *pngPath;
+static NSPoint testClick = {-1, -1};
 
 // Input is latest-wins and the reader mustn't wedge against us, so never block the main thread on a full socket.
 static void sendToGuest(const uint8_t *bytes, size_t size) {
@@ -185,6 +191,7 @@ static void sendToGuest(const uint8_t *bytes, size_t size) {
 @property int port;
 @property NSUInteger framesShown, bytesShown;
 @property CFTimeInterval firstFrame;
+@property NSMutableArray<NSString *> *seenTitles;
 @end
 
 // Reads back this process's own window through SCK, which needs no Screen Recording grant.
@@ -227,6 +234,48 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
 - (void)fail:(const char *)why {
     fprintf(stderr, "self-test FAILED: %s\n", why);
     exit(1);
+}
+// Prints what the guest sent, keeps its last pixels, and exits.
+- (void)finishRun {
+    double seconds = self.framesShown ? CACurrentMediaTime() - self.firstFrame : 0;
+    printf("viewer_frames %lu count\n", (unsigned long)self.framesShown);
+    printf("viewer_rate %.1f /s\n", seconds > 0 ? self.framesShown / seconds : 0);
+    printf("viewer_received %.2f MB/s\n", seconds > 0 ? self.bytesShown / seconds / 1e6 : 0);
+    printf("viewer_windows %lu count\n", (unsigned long)self.seenTitles.count);
+    for (NSString *line in self.seenTitles)
+        printf("# %s\n", line.UTF8String);
+    GuestView *view = (GuestView *)self.windows.allValues.firstObject.contentView;
+    if (pngPath && view.layer.contents) {
+        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:(__bridge CGImageRef)view.layer.contents];
+        BOOL saved = [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:pngPath
+                                                                                             atomically:YES];
+        printf("# last frame %ux%u %s %s\n", view.pixelWidth, view.pixelHeight, saved ? "saved to" : "NOT saved to",
+               pngPath.UTF8String);
+    }
+    fflush(stdout);
+    exit(self.framesShown ? 0 : 1);
+}
+- (void)sendTestInput:(GuestWindow *)window {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+      uint8_t out[64];
+      int32_t x = (int32_t)(testClick.x * 16), y = (int32_t)(testClick.y * 16);
+      struct SWMPointer move = {window.guestID, SWM_MOVE, 0, 0, x, y, 0};
+      sendToGuest(out, swm_put_pointer(out, sizeof(out), &move));
+      struct SWMPointer down = {window.guestID, SWM_DOWN, 0, 1, x, y, 0};
+      sendToGuest(out, swm_put_pointer(out, sizeof(out), &down));
+      struct SWMPointer up = {window.guestID, SWM_UP, 0, 1, x, y, 0};
+      sendToGuest(out, swm_put_pointer(out, sizeof(out), &up));
+      puts("# sent the test click");
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        uint8_t bytes[32];
+        struct SWMKey press = {0, 1, 0}; // The A key.
+        sendToGuest(bytes, swm_put_key(bytes, sizeof(bytes), &press));
+        struct SWMKey release = {0, 0, 0};
+        sendToGuest(bytes, swm_put_key(bytes, sizeof(bytes), &release));
+        puts("# sent the test key");
+        fflush(stdout);
+      });
+    });
 }
 - (void)selfTestWindow:(GuestWindow *)window {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
@@ -293,6 +342,14 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
                                                    length:w->title_length
                                                  encoding:NSUTF8StringEncoding];
         window.title = title ?: @"";
+        NSString *owner = [[NSString alloc] initWithBytes:w->owner
+                                                   length:w->owner_length
+                                                 encoding:NSUTF8StringEncoding];
+        NSString *seen =
+            [NSString stringWithFormat:@"window %u of %@, \"%@\", %dx%d points, %ux%u pixels", w->window, owner,
+                                       window.title, w->width, w->height, w->pixel_width, w->pixel_height];
+        if (![self.seenTitles containsObject:seen])
+            [self.seenTitles addObject:seen];
         GuestView *view = (GuestView *)window.contentView;
         view.points = size;
         if (!NSEqualSizes(window.frame.size, size)) {
@@ -312,6 +369,13 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
             [window makeFirstResponder:view];
             if (selfTest)
                 [self selfTestWindow:window];
+            if (testClick.x >= 0)
+                [self sendTestInput:window];
+            if (exitAfter > 0)
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(exitAfter * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                                 [self finishRun];
+                               });
         }
     } else if (m->type == SWM_FRAME) {
         const struct SWMFrame *f = &m->u.frame;
@@ -386,6 +450,8 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
     free(buffer);
     close(client);
     dispatch_async(dispatch_get_main_queue(), ^{
+      if (exitAfter > 0)
+          [self finishRun];
       connectionFD = -1;
       for (GuestWindow *window in self.windows.allValues)
           [window close];
@@ -396,6 +462,7 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     self.windows = [NSMutableDictionary dictionary];
+    self.seenTitles = [NSMutableArray array];
     int listener = socket(AF_INET, SOCK_STREAM, 0), on = 1;
     setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
     struct sockaddr_in address;
@@ -435,7 +502,15 @@ int main(int argc, const char **argv) {
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--self-test"))
                 selfTest = YES;
-            else if (!strcmp(argv[i], "--port") && i + 1 < argc)
+            else if (!strcmp(argv[i], "--exit-after") && i + 1 < argc)
+                exitAfter = atof(argv[++i]);
+            else if (!strcmp(argv[i], "--png") && i + 1 < argc)
+                pngPath = @(argv[++i]);
+            else if (!strcmp(argv[i], "--test-input") && i + 1 < argc) {
+                NSArray<NSString *> *parts = [@(argv[++i]) componentsSeparatedByString:@","];
+                if (parts.count == 2)
+                    testClick = NSMakePoint(parts[0].doubleValue, parts[1].doubleValue);
+            } else if (!strcmp(argv[i], "--port") && i + 1 < argc)
                 controller.port = atoi(argv[++i]);
         }
         NSApplication *app = NSApplication.sharedApplication;

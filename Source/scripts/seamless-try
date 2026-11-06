@@ -1,0 +1,19 @@
+#!/bin/zsh
+# Runs a seamless-apps probe in a throwaway clone, with nobody at the guest. Results print here and go to
+# Build/seamless/. The clone's window is titled "Clone of <machine>".
+#
+#     scripts/seamless-try stream <app> <machine> [SECONDS]    Phase 1: TextEdit as its own host window.
+#     scripts/seamless-try display <app> <machine> [WxH ...]   Phase 2: how large a guest display works, and slot placement.
+#
+# `display` needs an app built from this branch, for its display-request diagnostic. `stream` works with any recent one.
+set -euo pipefail
+source_root=${0:A:h:h}
+mode=${1:?usage: seamless-try stream|display <app> <machine> [arguments]}
+app=${2:?usage: seamless-try stream|display <app> <machine> [arguments]}
+machine=${3:?usage: seamless-try stream|display <app> <machine> [arguments]}
+shift 3
+"$source_root/scripts/build-seamless-probes" "$source_root/Build/seamless" 2>/dev/null
+driver_arguments=(--driver-arg "$mode")
+for argument in "$@"; do driver_arguments+=(--driver-arg "$argument"); done
+exec "$source_root/scripts/guest-bench" "$app" "$machine" "seamless-$mode" \
+    --driver "$source_root/probes/seamless-driver.py" "${driver_arguments[@]}"

@@ -32,6 +32,8 @@ parser.add_argument('--repeat', type=int, default=1, help='benchmark runs in the
 parser.add_argument('--events', action='store_true', help='record guest event counts in Build/bench/<tag>.events')
 parser.add_argument('--workload', help='run this in the guest with /bin/sh instead of lc-bench')
 parser.add_argument('--program', help='stage this local x86 program and run it once, saving its output as Build/bench/<tag>.txt')
+parser.add_argument('--driver', type=Path, help='run this Python file in place of a benchmark, with request() and stage() from here')
+parser.add_argument('--driver-arg', action='append', default=[], help='passed to --driver as `arguments`')
 parser.add_argument('--sample', type=int, help='sample QEMU for this many seconds during the workload, into Build/bench/<tag>.sample')
 args = parser.parse_args()
 bench = source/'Build/bench/lc-bench'
@@ -101,6 +103,18 @@ def request(command, timeout):
     raise SystemExit(f'Timed out waiting for {command}')
 
 
+def stage(program):
+    shutil.copyfile(program, channel/'Transfer.bin')
+    start = time.time()
+    staged = request({'Action': 'stage-probe'}, 900)
+    if 'Error' in staged:
+        raise SystemExit(f'Staging failed: {staged}')
+    print(f'staged in {time.time()-start:.0f}s', flush=True)
+    path = staged['Transfer']['Directory']+'/Transfer.bin'
+    request({'Executable': '/bin/chmod', 'Arguments': ['0755', path]}, 120)
+    return path
+
+
 try:
     time.sleep(args.boot_wait)
     deadline = time.time()+300
@@ -108,7 +122,11 @@ try:
         if time.time() > deadline:
             raise SystemExit('The diagnostics channel never appeared')
         time.sleep(1)
-    if args.workload:
+    if args.driver:
+        exec(compile(args.driver.read_text(), str(args.driver), 'exec'),
+             {'arguments': args.driver_arg, 'channel': channel, 'request': request, 'source': source, 'stage': stage,
+              'tag': args.tag})
+    elif args.workload:
         phases = source/'Build/bench'/f'{args.tag}.phases'
         lines = sum(1 for _ in events.open()) if events.exists() else 0
         sampler = None
@@ -125,14 +143,7 @@ try:
         print(f'workload exit {result.get("ExitCode")}, event seconds {lines} to {after}')
         print(str(result.get('Stderr'))[:300])
     else:
-        shutil.copyfile(args.program or bench, channel/'Transfer.bin')
-        start = time.time()
-        staged = request({'Action': 'stage-probe'}, 900)
-        if 'Error' in staged:
-            raise SystemExit(f'Staging failed: {staged}')
-        print(f'staged in {time.time()-start:.0f}s', flush=True)
-        program = staged['Transfer']['Directory']+'/Transfer.bin'
-        request({'Executable': '/bin/chmod', 'Arguments': ['0755', program]}, 120)
+        program = stage(args.program or bench)
         if args.program:
             result = request({'Executable': program, 'Arguments': []}, 900)
             (source/'Build/bench'/f'{args.tag}.txt').write_text(result.get('Stdout', ''))

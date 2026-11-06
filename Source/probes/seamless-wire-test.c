@@ -1,5 +1,6 @@
 // Tests the seamless wire format: round trips, every truncation, lying lengths and random bytes.
 #include "seamless-wire.h"
+#include "seamless-slots.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -157,7 +158,35 @@ static void fuzz(void) {
     }
 }
 
+static void slots(void) {
+    struct SWMSlotLayout l = {8192, 4608, 1600, 1200, 64};
+    int x, y;
+    assert(swm_slot_origin(&l, 0, &x, &y) && x == 64 && y == 64);
+    assert(swm_slot_origin(&l, 1, &x, &y) && x == 64 + 1664 && y == 64);
+    assert(swm_slot_origin(&l, 4, &x, &y) && x == 64 && y == 64 + 1264); // Four fit across, so this wraps.
+    assert(swm_slot_origin(&l, 11, &x, &y));
+    assert(!swm_slot_origin(&l, 12, &x, &y)); // Three rows fit.
+    assert(!swm_slot_origin(&l, -1, &x, &y));
+    // Every slot of every layout is on the display, clear of the margins, and apart from every other.
+    for (int w = 800; w <= 2000; w += 300) {
+        struct SWMSlotLayout m = {4000, 3000, w, 700, 64};
+        int count = 0, ox, oy, px[64], py[64];
+        while (count < 64 && swm_slot_origin(&m, count, &ox, &oy)) {
+            assert(ox + w <= 4000 - SWM_SLOT_MARGIN_SIDE && oy + 700 <= 3000 - SWM_SLOT_MARGIN_BOTTOM);
+            for (int i = 0; i < count; i++)
+                assert(ox >= px[i] + w + 64 || px[i] >= ox + w + 64 || oy >= py[i] + 700 + 64 ||
+                       py[i] >= oy + 700 + 64);
+            px[count] = ox;
+            py[count++] = oy;
+        }
+        assert(count > 0);
+    }
+    struct SWMSlotLayout small = {1000, 700, 1600, 1200, 64}; // A window too big for the display gets no slot.
+    assert(!swm_slot_origin(&small, 0, &x, &y));
+}
+
 int main(void) {
+    slots();
     round_trips();
     rejects_lies();
     fuzz();

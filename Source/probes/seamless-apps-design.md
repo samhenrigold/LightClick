@@ -298,7 +298,32 @@ Cmd-Tab, Mission Control and Stage Manager checked by eye. Document types with c
 **Phase 5: the rest of the generations and the long tail.** Tiger to Mountain Lion and Catalina to Big Sur, one at a time. Host
 IME, file clipboard, drag and drop. Compositor hook only where a version needs it.
 
-## Trying phase 1
+## Running with nobody at the guest
+
+`scripts/seamless-try` boots a throwaway clone through `scripts/guest-bench`, staging `seamless-guest` over the guest agent, which
+re-enters the console session as `probes/gpu-bench.m` does. Results print and go to `Build/seamless/`.
+
+    # Phase 1: opens TextEdit, streams it to a host window, sends a test click and key.
+    scripts/seamless-try stream "$PWD/Build/Products/Current/Light Click.app" \
+        "$HOME/Library/Application Support/Virtual Intel Mac/Machines/Mavericks.vintelmac"
+
+    # The deciding step for slots. Needs an app built from this branch, for its display-request diagnostic.
+    scripts/seamless-try display <app> <machine> [WxH ...]
+
+`stream` reports `capture_mean`, `capture_rate`, `frames_sent_rate`, `click_changed_bounds` and `key_changed_title` from the guest,
+and frames, title and a PNG from the viewer. If `10.0.2.2` can't be reached it still measures capture and says so. `display` walks
+sizes up to 8192x8192: the host offers each with `display-request`, the guest selects it, places TextEdit in the far corner by
+Accessibility, moves it 20 times to time that, and the host saves its whole frame. It stops at the first failure, or if
+WindowServer restarts.
+
+`seamless-guest place` is slot placement: `--x --y`, or `--slot N` from `probes/seamless-slots.h`. It runs as root in the session on
+a guest, assuming root needs no Accessibility grant there, which is unverified [memory]. On this host, with a grant, a real window
+moved in 6 ms and 8.4 ms per later move, and `CGWindowList` agreed [measured]. That says nothing about guest speed.
+
+**Not run on a guest yet.** `probes/seamless-driver.py` has only run against a fake guest agent, and the `display-request` action in
+`VIMSession.m` hasn't been compiled. The guest tool's new imports haven't been rechecked against the Mavericks image.
+
+## Trying phase 1 by hand
 
 What's there:
 
