@@ -429,6 +429,17 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                     front.value.window.deminiaturize(nil)
                     return
                 }
+                if command.hasPrefix("guest-full-screen") {
+                    // Control-Command-F, to the guest, as the key.
+                    if let key = NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: [.command, .control], timestamp: 0,
+                        windowNumber: front.value.window.windowNumber, context: nil, characters: "f",
+                        charactersIgnoringModifiers: "f", isARepeat: false, keyCode: 3)
+                    {
+                        SeamlessInputViewForwardKeyEquivalent(front.value.input, key)
+                    }
+                    return
+                }
                 if command.hasPrefix("guest-minimize") {
                     // Command-M, to the guest, as the key.
                     if let key = NSEvent.keyEvent(

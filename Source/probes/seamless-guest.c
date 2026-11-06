@@ -1433,6 +1433,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
+    int away; // Off the screen: see tree_window_is_away.
     uint32_t materials_hash;
     int minimized;
     int surface_x, surface_y, has_surface, cover_count;
@@ -1827,7 +1828,8 @@ static int tree_send_covers(struct Stream *s, struct TreeWindow *w, const struct
 }
 
 // Asks the app, as a minimized window isn't in WindowServer's list by its number, even when asked for by that number.
-static int tree_window_is_minimized(CGWindowID id, pid_t pid) {
+// 2 for minimized, 1 for there but elsewhere, such as behind another app's full screen Space, and 0 for gone.
+static int tree_window_is_away(CGWindowID id, pid_t pid) {
     if (!session_menu_tool)
         return 0;
     char pid_text[16], window[16];
@@ -1835,11 +1837,11 @@ static int tree_window_is_minimized(CGWindowID id, pid_t pid) {
     snprintf(window, sizeof(window), "%u", id);
     char *const ask[] = {(char *)session_menu_tool, "is-minimized", "--pid", pid_text, "--window", window, NULL};
     char *said = run_tool(ask);
-    int minimized = said && strstr(said, "minimized yes");
+    int away = !said ? 0 : strstr(said, "minimized yes") ? 2 : strstr(said, "minimized no") ? 1 : 0;
     printf("# %.1f window %u left the screen: %s\n", now(), id, said ? said : "(no answer)");
     fflush(stdout);
     free(said);
-    return minimized;
+    return away;
 }
 
 static int tree_send_minimized(struct Stream *s, CGWindowID id, int minimized) {
@@ -1966,6 +1968,7 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 if (tree_send_minimized(s, id, 0))
                     goto done;
             }
+            w->away = 0;
             int fresh = w->id != id;
             w->id = id;
             w->seen = 1;
@@ -2200,17 +2203,21 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             }
             order++;
         }
-        for (int i = 0; i < TREE_MAX_WINDOWS; i++)
-            if (windows[i].id && !windows[i].seen && tree_shared &&
-                (windows[i].minimized || tree_window_is_minimized(windows[i].id, windows[i].pid))) {
-                // Once it's known, only its coming back, or the app's going, changes that.
-                if (!windows[i].minimized) {
+        for (int i = 0; i < TREE_MAX_WINDOWS; i++) {
+            if (!windows[i].id || windows[i].seen || !tree_shared)
+                continue;
+            // Once it's away, only its coming back, or the app's going, changes that. Asked once, as asking starts a program.
+            if (!windows[i].away) {
+                windows[i].away = tree_window_is_away(windows[i].id, windows[i].pid);
+                if (windows[i].away == 2) {
                     windows[i].minimized = 1;
                     if (tree_send_minimized(s, windows[i].id, 1))
                         goto done;
                 }
-                windows[i].seen = 1;
             }
+            if (windows[i].away)
+                windows[i].seen = 1;
+        }
         for (int i = 0; i < TREE_MAX_WINDOWS; i++)
             if (windows[i].id && !windows[i].seen) {
                 uint8_t gone[SWM_HEADER_SIZE + SWM_GONE_SIZE];
