@@ -393,3 +393,35 @@ private let exitCases = [
         #expect(!SessionRunState.isDisplayAsleep("paused"))
     }
 }
+
+@Suite struct InstallationFollowUpTests {
+    private func followUp(
+        desktop: Bool = true, verifiedRepair: Bool = false, running: Bool = true, phase: String? = "awaiting-reboot",
+        rebootRequired: Bool = true, installerDisplay: Bool = false
+    ) -> InstallationFollowUp {
+        var session = GuestSessionState()
+        session.running = running
+        session.verifiedUpdateRepair = verifiedRepair
+        let report = GuestReport(values: ["DesktopRunning": .init(foundationObject: desktop)])
+        return GuestStatusPolicy(report: report, failed: false, session: session).followUpAfterInstallation(
+            outcomePhase: phase, rebootRequired: rebootRequired, requiresInstallerDisplay: installerDisplay)
+    }
+
+    @Test func aCompletedInstallationOffersARestart() {
+        #expect(followUp() == .offerRestart)
+        #expect(followUp(desktop: false) == .offerRestart)
+        #expect(followUp(verifiedRepair: true) == .offerRestart)
+    }
+
+    @Test func aHeadlessVerifiedRepairRestartsAlone() {
+        #expect(followUp(desktop: false, verifiedRepair: true) == .handOff)
+    }
+
+    @Test func anythingElseKeepsPolling() {
+        #expect(followUp(running: false) == .keepPolling)
+        #expect(followUp(phase: nil) == .keepPolling)
+        #expect(followUp(phase: "rolled-back") == .keepPolling)
+        #expect(followUp(rebootRequired: false) == .keepPolling)
+        #expect(followUp(installerDisplay: true) == .keepPolling)
+    }
+}

@@ -1,6 +1,16 @@
 import Foundation
 import InstallerKit
 
+/// What happens once a graphics installation has been dispatched.
+@objc(VIMInstallationFollowUp)
+public enum InstallationFollowUp: Int, Sendable {
+    /// Uncertain outcomes and rollback must never be mistaken for success, so nothing restarts.
+    case keepPolling
+    /// Nobody is at a desktop to ask, so a verified repair restarts by itself.
+    case handOff
+    case offerRestart
+}
+
 /// What one guest status report means for the session: the ordered questions `finishGuestStatus` asks, each answered
 /// from the report and the session's current flags. Doing the work stays with the caller.
 ///
@@ -150,6 +160,16 @@ public struct GuestStatusPolicy: Sendable {
     public var mayBeginPreparation: Bool { session.preparationRequested && !failed && admitsPreparation }
 
     public var needsDesktopServices: Bool { !failed && report.isDesktopRunning }
+
+    /// `outcomePhase` and `rebootRequired` come from the installation's answer, and a failed installation has neither.
+    public func followUpAfterInstallation(
+        outcomePhase: String?, rebootRequired: Bool, requiresInstallerDisplay: Bool
+    ) -> InstallationFollowUp {
+        guard session.running, outcomePhase == "awaiting-reboot", rebootRequired, !requiresInstallerDisplay else {
+            return .keepPolling
+        }
+        return session.verifiedUpdateRepair && !report.isDesktopRunning ? .handOff : .offerRestart
+    }
 
     /// Fifteen seconds while something is still expected to change: a failure, requested preparation, no desktop yet,
     /// or a connected link with no address. A minute otherwise.

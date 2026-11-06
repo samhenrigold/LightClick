@@ -210,6 +210,15 @@ public final class GuestStatusPolicyBridge: NSObject {
     public var needsDesktopServices: Bool { policy.needsDesktopServices }
     public var refreshInterval: TimeInterval { policy.refreshInterval }
 
+    @objc(followUpAfterInstallation:requiresInstallerDisplay:)
+    public func followUpAfterInstallation(outcome: Any?, requiresInstallerDisplay: Bool) -> InstallationFollowUp {
+        let values = outcome as? [String: Any]
+        return policy.followUpAfterInstallation(
+            outcomePhase: values?["Phase"] as? String,
+            rebootRequired: values?["RebootRequired"] as? Bool ?? false,
+            requiresInstallerDisplay: requiresInstallerDisplay)
+    }
+
     @objc(guestAddressesReplacing:macAddress:isUsable:)
     public func guestAddresses(
         replacing current: [String]?, macAddress: String, isUsable: (String) -> Bool

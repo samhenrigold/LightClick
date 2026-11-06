@@ -3853,16 +3853,17 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                               if (installError)
                                   VIMFailCreateGuest(result);
                               current.state.reconciledBoot = nil;
-                              if (!installError && current.task.running &&
-                                  [outcome[@"Phase"] isEqual:@"awaiting-reboot"] &&
-                                  [outcome[@"RebootRequired"] isEqual:@YES] &&
-                                  !current.machine.requiresInstallerDisplay) {
-                                  if (current.state.verifiedUpdateRepair && ![report[@"DesktopRunning"] isEqual:@YES]) {
+                              switch ([[current statusPolicyForReport:report error:nil]
+                                  followUpAfterInstallation:installError ? nil : outcome
+                                   requiresInstallerDisplay:current.machine.requiresInstallerDisplay]) {
+                                  case VIMInstallationFollowUpHandOff:
                                       [current handoffToGraphics];
                                       return;
-                                  }
-                                  [current offerGraphicsRestart];
-                                  return;
+                                  case VIMInstallationFollowUpOfferRestart:
+                                      [current offerGraphicsRestart];
+                                      return;
+                                  case VIMInstallationFollowUpKeepPolling:
+                                      break;
                               }
                               [current scheduleGuestStatusRefreshAfter:60];
                               // No unconditional reboot: uncertain outcomes and
@@ -4060,20 +4061,14 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     // Changing emulated display hardware needs a new QEMU process, not an
     // in-guest reboot. Never force termination if macOS cannot shut down.
     // A --create-guest run has nobody to finish a late shutdown by hand, and an emulated guest can be slow to stop.
-    self.handoffTimer =
-        [NSTimer scheduledTimerWithTimeInterval:VIMCreatingGuestFromArguments() ? 1800 : 180
-                                        repeats:NO
-                                          block:^(NSTimer *timer) {
-                                            VIMSession *session = weakSelf;
-                                            [session applyLifecycleEvent:VIMSessionEventHandoffCancelled];
-                                            if (session.task.running) {
-                                                session.guestStatus.stringValue =
-                                                    @"Shutdown is taking longer than expected. Shut down this Mac, "
-                                                    @"then open it again to finish setup.";
-                                                VIMFailCreateGuest(session.guestStatus.stringValue);
-                                                [session refreshGuestStatus];
-                                            }
-                                          }];
+    self.handoffTimer = [NSTimer
+        scheduledTimerWithTimeInterval:VIMCreatingGuestFromArguments() ? 1800 : 180
+                               repeats:NO
+                                 block:^(NSTimer *timer) {
+                                   [weakSelf
+                                       cancelHandoffSaying:@"Shutdown is taking longer than expected. Shut down this "
+                                                           @"Mac, then open it again to finish setup."];
+                                 }];
     [self.guestAgent runExecutable:@"/sbin/shutdown"
                          arguments:@[ @"-h", @"now" ]
                            timeout:20
@@ -4081,15 +4076,19 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                           // The transport normally disappears during shutdown. Only a
                           // definite command failure cancels the handoff immediately.
                           VIMSession *session = weakSelf;
-                          if (session.task.running && !error && result && ![result[@"exitcode"] isEqual:@0]) {
-                              [session applyLifecycleEvent:VIMSessionEventHandoffCancelled];
-                              [session.handoffTimer invalidate];
-                              session.guestStatus.stringValue =
-                                  @"Automatic shutdown failed. Shut down this Mac, then open it again to finish setup.";
-                              VIMFailCreateGuest(session.guestStatus.stringValue);
-                              [session refreshGuestStatus];
-                          }
+                          if (!error && result && ![result[@"exitcode"] isEqual:@0])
+                              [session cancelHandoffSaying:@"Automatic shutdown failed. Shut down this Mac, then open "
+                                                           @"it again to finish setup."];
                         }];
+}
+- (void)cancelHandoffSaying:(NSString *)message {
+    [self applyLifecycleEvent:VIMSessionEventHandoffCancelled];
+    [self.handoffTimer invalidate];
+    if (!self.task.running)
+        return;
+    self.guestStatus.stringValue = message;
+    VIMFailCreateGuest(message);
+    [self refreshGuestStatus];
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     if (item.action == @selector(startAgain:)) {
