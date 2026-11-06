@@ -1,3 +1,4 @@
+#import <AVFoundation/AVFoundation.h>
 #import "VIMSession.h"
 #import "VIMGuestFiles.h"
 #import "VIMGuestProfile.h"
@@ -1388,7 +1389,10 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     // Opening the microphone blocks QEMU until TCC answers, and a session has no window to ask from.
     // shortcut: a seamless session has no microphone, until QEMU can open it when the guest does.
     BOOL seamless = [NSProcessInfo.processInfo.arguments containsObject:@"--seamless-session"];
-    launch.audioInputSelection = seamless ? @"disabled" : VIMAudioSelection(config, YES);
+    // Without a grant, opening the microphone waits on a TCC answer before the guest can start. Settings asks for it.
+    BOOL microphoneAllowed = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] ==
+                             AVAuthorizationStatusAuthorized;
+    launch.audioInputSelection = seamless || !microphoneAllowed ? @"disabled" : VIMAudioSelection(config, YES);
     launch.audioOutputRate = (NSInteger)VIMHostOutputSampleRate(VIMAudioSelection(config, NO));
     launch.audioInputRate = (NSInteger)VIMHostInputSampleRate(launch.audioInputSelection);
     launch.audioOutputDeviceName = audioDeviceNames[@NO];
