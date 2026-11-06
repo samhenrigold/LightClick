@@ -52,12 +52,14 @@ public struct AutomaticSetupProfile: Equatable, Sendable {
         credentialIdentifier = propertyList["CredentialIdentifier"] as? String
     }
 
+    /// `Enabled` is a real Boolean and the three options are integers, as they've always been saved.
     public var propertyList: [String: Any] {
         var list: [String: Any] = [
-            "FormatVersion": 1, "Enabled": isEnabled, "FileSharing": fileSharing, "RemoteLogin": remoteLogin
+            "FormatVersion": 1, "Enabled": isEnabled, "FileSharing": fileSharing ? 1 : 0,
+            "RemoteLogin": remoteLogin ? 1 : 0
         ]
         list["Username"] = username
-        list["AutomaticLogin"] = automaticLogin
+        list["AutomaticLogin"] = automaticLogin.map { $0 ? 1 : 0 }
         list["CredentialIdentifier"] = credentialIdentifier
         return list
     }

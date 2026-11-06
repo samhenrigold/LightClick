@@ -135,7 +135,10 @@ import Testing
         #expect(list == expected)
         let setup = try #require(list["AutomaticSetup"] as? NSDictionary)
         #expect(setup["Enabled"] as? NSNumber === kCFBooleanTrue)
-        #expect(setup["RemoteLogin"] as? NSNumber === kCFBooleanFalse)
+        for key in ["FileSharing", "RemoteLogin", "AutomaticLogin"] {
+            #expect(CFGetTypeID(setup[key] as CFTypeRef) == CFNumberGetTypeID(), "\(key) is saved as an integer")
+        }
+        #expect((setup["RemoteLogin"] as? NSNumber)?.intValue == 0)
         #expect(CFNumberIsFloatType(list["CPU"] as! CFNumber) == false)
         #expect(PropertyListSerialization.propertyList(job.propertyList, isValidFor: .binary))
     }
