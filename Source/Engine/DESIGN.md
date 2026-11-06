@@ -297,7 +297,42 @@ Measured on a Mavericks exec loop at 4 vCPUs: 9.5M cold blocks in 89 s, of which
 
 Code cache resets are the larger cost on Mojave: 19 in 174 s of launching six applications, each dropping the kernel and system libraries, with 2.6 GB of code generated through a 118 MB cache. 81 to 88% of cold kernel and shared blocks had been translated before. Splitting the cache, so that a process's own blocks could reset alone, did not help: the shared half fills by itself, with 22 full resets and 9 partial in the same run, and cold blocks unchanged at about 9M. So it was removed. The working set is simply larger than the cache. `b` and `bl` reach 128 MB, which is what holds it at 118, so a larger cache needs a part beyond reach with its own copy of the stubs. Not built.
 
-Direct calls between keys, such as from a program into a shared library, can't link, so each takes a trip through the monitor: 300,000 to 480,000 a second on Mojave's first vCPU. Patching the call's stub to do the lookup inline would avoid the trip, and a lookup is always right, so it risks no staleness. Not built.
+Direct calls between keys, such as from a program into a shared library, can't link, so each took a trip through the monitor: 300,000 to 480,000 a second on Mojave's first vCPU. The first such trip now sends the call to a few words that do the lookup an indirect call does, which is always right, so it risks no staleness. On Mojave running six apps at 4 vCPUs, one boot each: those trips on the first vCPU from 55M to under 3M, and its time in the VM from 58.6 to 50.8 s.
+
+### What stops mmap_touch scaling
+
+`mmap_touch` at 8 vCPUs on Mavericks: 452 Kpages/s at N=1, 619 at N=2, 436 at N=4, 386 at N=8. A `dtrace` kernel profile in the guest, 4 s at 997 Hz per CPU, counts samples by function:
+
+| N | `hw_lock_to` | `ml_set_interrupts_enabled` | `pmap_enter_options` | `pmap_remove_range_options` | `lck_rw_*` | `pmap_flush_tlbs` | idle |
+|---|---|---|---|---|---|---|---|
+| 1 | 14 | 133 | 573 | 533 | 0 | 39 | 15,404 |
+| 2 | 521 | 377 | 755 | 649 | 94 | 26 | 15,036 |
+| 4 | 1,295 | 1,716 | 682 | 528 | 125 | 84 | 12,683 |
+| 8 | 3,687 | 3,037 | 731 | 363 | 356 | 75 | 9,736 |
+
+So it is the guest's own spinlock, taken in `vm_fault`, not TLB shootdowns. Stacks at N=4 put most of `hw_lock_to` under `vm_fault`, with samples on single instructions in `pmap_enter_options` and `pmap_remove_range_options`, which looks like the return from a trapped PTE store. `ml_set_interrupts_enabled` is probably skid: a profile tick held off until interrupts open again. The monitor's own lock is not it: at 4 vCPUs the first vCPU waited 1.3 s for it of 27 s in the VM. That a PTE store's trap stretches the guest's critical section is inferred from those stacks, not measured directly. Rosetta shows the same lock with shorter sections, at a ratio of 2.42 at N=4 against 1.1 here. Nothing cheap fixes it: the store has to trap while the table is shadowed.
+
+### How long an application takes to start
+
+`probes/app-launch.sh`: `open -a` to a first window, cold being the first launch in a boot, warm the best of two more. 4 vCPUs, one boot of each, with the engine's measurements on a build with the call lookups. On Mavericks no process we can start gets a window list, so there it is the time to the application reporting it has finished launching, which comes before its window, and the two guests' figures don't compare with each other. Safari was already running at login on Mavericks, so its cold figure means nothing.
+
+| Mojave, to a window | TCG cold | Engine cold | TCG warm | Engine warm |
+|---|---|---|---|---|
+| Calculator | 7.52 | 2.21 | 2.44 | 0.69 |
+| TextEdit | 7.27 | 1.75 | 2.74 | 0.95 |
+| Notes | 6.78 | 1.86 | 3.63 | 1.14 |
+| Maps | 5.98 | 2.10 | 2.75 | 1.03 |
+| Safari | 6.57 | 2.56 | 3.33 | 1.45 |
+| System Preferences | 5.77 | 1.85 | 2.59 | 0.99 |
+
+| Mavericks, to finished launching | TCG cold | Engine cold | TCG warm | Engine warm |
+|---|---|---|---|---|
+| Calculator | 2.71 | 0.79 | 0.81 | 0.37 |
+| TextEdit | 2.21 | 0.90 | 0.89 | 0.52 |
+| Notes | 3.18 | 1.01 | 0.68 | 0.23 |
+| Maps | 3.12 | 0.90 | 0.62 | 0.28 |
+| System Preferences | 0.71 | 0.33 | 0.65 | 0.34 |
+| Keynote (i386) | 4.32 | 1.25 | 1.80 | 0.92 |
 
 ### A fast hidden start: resuming a snapshot under the engine
 
