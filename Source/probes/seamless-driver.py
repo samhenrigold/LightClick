@@ -310,6 +310,10 @@ def motion():
     tree(32, guest, hook=True, command=['program-tree', '--gl'])
 
 
+def version_is_mojave():
+    return request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60).get('Stdout', '').startswith('18.')
+
+
 def tree_bench(seconds):
     # The windows the hook can't read, plus what it can, once each in one boot, to compare a machine's settings.
     install_hook()
@@ -318,6 +322,8 @@ def tree_bench(seconds):
     request({'Executable': '/bin/sh', 'Arguments': ['-c', copy, 'sh', guest]}, 120)
     for name, command in {'Safari': ['tree', '--app', 'Safari', '--open'], 'TextEdit': ['tree', '--app', 'TextEdit', '--open'],
                           'Demo': ['program-tree', '--gl']}.items():
+        if name == 'Demo' and version_is_mojave():
+            continue
         print(f'=== {name}', flush=True)
         tree(seconds, '/tmp/sg/g', hook=True, command=command)
 

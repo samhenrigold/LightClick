@@ -107,6 +107,12 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         case .noteRecentDocument(let path):
             NSDocumentController.shared.noteNewRecentDocumentURL(URL(fileURLWithPath: path))
         case .activate: NSApp.activate()
+        case .showError(let message):
+            // A test has nobody to answer it.
+            guard ProcessInfo.processInfo.environment["LC_SEAMLESS_TEST"] == nil else { break }
+            let alert = NSAlert()
+            alert.messageText = message
+            alert.runModal()
         case .terminate:
             quitting = true
             NSApp.terminate(nil)

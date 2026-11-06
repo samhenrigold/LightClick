@@ -6,6 +6,8 @@ import QuartzCore
 @MainActor
 public protocol SeamlessGuest: AnyObject {
     func run(_ path: String, _ arguments: [String]) async -> SeamlessGuestRun
+    /// Whether the machine got as far as running. A machine another app has open never does.
+    var isMachineRunning: Bool { get }
     /// Puts a host file in the guest, and says where.
     func stage(_ file: URL) async -> String?
 }
@@ -115,6 +117,18 @@ public final class SeamlessSession {
 
     private func runInGuest() async -> SeamlessGuestRun? {
         let started = CFAbsoluteTimeGetCurrent()
+        // Starting is asynchronous, so give it a moment before believing it didn't.
+        while !guest.isMachineRunning {
+            if CFAbsoluteTimeGetCurrent() - started > 30 {
+                proxy?.send(
+                    SessionCommand.showError(
+                        "This app’s Mac couldn’t start. If it’s open in Light Click, shut it down there, then try again."
+                    ))
+                fail("the machine isn't running")
+                return nil
+            }
+            try? await Task.sleep(for: .seconds(1))
+        }
         // The agent isn't there until well into the boot, and answers with an error until it is.
         while await guest.run("/usr/bin/uname", ["-r"]).exitCode != 0 {
             if CFAbsoluteTimeGetCurrent() - started > 900 {
@@ -413,7 +427,8 @@ public final class SeamlessSession {
         let path = Array(configuration.socketPath.utf8CString)
         guard path.count <= MemoryLayout.size(ofValue: address.sun_path) else { return false }
         withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: path.map { UInt8(bitPattern: $0) }) }
-        unlink(configuration.socketPath)
+        // Whatever's left at this path in our private folder is no use now. The proxy only starts us if nothing answers there.
+        try? FileManager.default.removeItem(atPath: configuration.socketPath)
         let listener = socket(AF_UNIX, SOCK_STREAM, 0)
         let bound = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -594,7 +609,9 @@ public final class SeamlessSession {
             }
         }
         func frontPlace() -> (id: Int, x: Double, y: Double) {
-            let front = surfaces.values.filter { $0.window.level == 0 }.min { $0.window.order < $1.window.order }
+            let front = surfaces.values.filter { $0.window.level == 0 && !$0.window.title.isEmpty }.min {
+                $0.window.order < $1.window.order
+            }
             let window = front?.window
             let margin = Double(window?.margin ?? 0)
             return (
@@ -620,9 +637,10 @@ public final class SeamlessSession {
             let place = frontPlace()
             handle(.dragDropped(windowID: place.id, x: place.x, y: place.y))
         }
+        // A file made for this, so a pasteboard left from anything before can't look like it.
         after(60) { [self] in
             let place = frontPlace()
-            handle(.dragEntered(paths: [test.dragPath], windowID: place.id, x: place.x, y: place.y))
+            handle(.dragEntered(paths: [test.markerPath], windowID: place.id, x: place.x, y: place.y))
         }
         after(72) { [self] in
             let place = frontPlace()
@@ -630,7 +648,7 @@ public final class SeamlessSession {
             handle(.pointerLeftWithButtonDown(windowID: place.id))
         }
         after(82) { [self] in
-            let name = (test.dragPath as NSString).lastPathComponent
+            let name = (test.markerPath as NSString).lastPathComponent
             handle(.promiseRequested(id: 1, destination: (test.dragOutFolder as NSString).appendingPathComponent(name)))
         }
         after(92) { [self] in
@@ -643,15 +661,33 @@ public final class SeamlessSession {
             }
             note("# test: at the prompt, windows are: \(titles.joined(separator: "; "))")
             compose(to: test.screenshot)
-            // Return: the default button, Save.
-            sendToGuest(SessionWire.key(code: 36, down: true))
-            sendToGuest(SessionWire.key(code: 36, down: false))
+            guard test.cancelFirst else {
+                answer(code: 36)  // Return: the default button, Save.
+                return
+            }
+            answer(code: 53)  // Escape: Cancel.
+            note("# test: cancelled the prompt")
+        }
+        if test.cancelFirst {
+            after(123) { [self] in
+                let proxyAlive = NSRunningApplication(processIdentifier: proxyPID) != nil
+                note(
+                    "# test: after Cancel, the proxy \(proxyAlive ? "is running" : "has gone"), \(surfaces.count) windows"
+                )
+                NSRunningApplication(processIdentifier: proxyPID)?.terminate()
+            }
+            after(139) { [self] in answer(code: 36) }
         }
         after(200) { [self] in
             note("# ERROR test: the guest app didn't exit after the answer")
             // Ends the guest's side normally, which brings its log back with it.
             shutdown(guestDescriptor, SHUT_RDWR)
         }
+    }
+
+    private func answer(code: UInt16) {
+        sendToGuest(SessionWire.key(code: code, down: true))
+        sendToGuest(SessionWire.key(code: code, down: false))
     }
 
     /// Every window's exact pixels at its position and order, over gray, so it works with the Mac's display asleep. It isn't
@@ -695,14 +731,17 @@ public final class SeamlessSession {
 
 /// What a test wants of a session, from the environment.
 public struct SeamlessSessionTest: Sendable {
-    public var dragPath, dragOutFolder, screenshot: String
+    public var dragPath, markerPath, dragOutFolder, screenshot: String
+    public var cancelFirst: Bool
 
-    /// `LC_SEAMLESS_TEST`: three paths, on lines of their own.
+    /// `LC_SEAMLESS_TEST`: four paths on lines of their own, then whether to cancel the first prompt.
     public init?(environment value: String?) {
         let parts = value?.components(separatedBy: "\n") ?? []
-        guard parts.count == 3 else { return nil }
+        guard parts.count == 5 else { return nil }
         dragPath = parts[0]
-        dragOutFolder = parts[1]
-        screenshot = parts[2]
+        markerPath = parts[1]
+        dragOutFolder = parts[2]
+        screenshot = parts[3]
+        cancelFirst = parts[4] == "cancel"
     }
 }

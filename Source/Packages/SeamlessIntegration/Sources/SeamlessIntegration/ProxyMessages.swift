@@ -38,6 +38,8 @@ public enum SessionCommand: Codable, Hashable, Sendable {
     case noteRecentDocument(path: String)
     case activate
     case terminate
+    /// The app can't run, and why. The proxy is what the user is looking at, as nothing else of the session shows.
+    case showError(String)
     /// A guest drag has reached the edge of a window: start the host's drag, with these names promised.
     case beginDragOut(names: [String], imagePNG: Data?)
     case promiseFulfilled(id: Int, error: String?)

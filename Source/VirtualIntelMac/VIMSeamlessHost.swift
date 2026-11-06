@@ -11,6 +11,8 @@ private final class AgentGuest: SeamlessGuest {
         self.machinePath = machinePath
     }
 
+    var isMachineRunning: Bool { VIMSession.running(forMachinePath: machinePath) != nil }
+
     /// Waits for the machine's session and for its agent to be free. Long waits are normal during a boot.
     private func agent() async -> (VIMSession, GuestAgentBridge)? {
         for _ in 0..<1800 {

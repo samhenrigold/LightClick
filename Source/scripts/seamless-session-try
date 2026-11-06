@@ -69,68 +69,108 @@ if not bundle:
     sys.exit(1)
 info = plistlib.loads((Path(bundle)/'Contents/Info.plist').read_bytes())
 socket_path = Path(info['LCSessionSocket'])
-Path(str(socket_path)+'.log').unlink(missing_ok=True)  # Or the last run's would look like this one's.
-bundle_id = plistlib.loads((Path(bundle)/'Contents/Info.plist').read_bytes())['CFBundleIdentifier']
-document = work/'A note from the host.txt'
-document.write_text('Written on the host.\n')
-before = document.read_bytes()
-results.mkdir(parents=True, exist_ok=True)
+import secrets
 
-check('no machine is running this clone before the proxy opens', not running(str(machine)))
+
+def session(name, cancel=False):
+    """One launch from the proxy with a document, to the machine having shut down."""
+    print(f'== {name}', flush=True)
+    log = Path(str(socket_path)+'.log')
+    log.unlink(missing_ok=True)
+    document = work/f'A note for {name}.txt'
+    document.write_text('Written on the host.\n')
+    before = document.read_bytes()
+    marker = work/f'Marker {secrets.token_hex(4)}.txt'
+    marker.write_text(f'Only this drag: {secrets.token_hex(16)}\n')
+    dragged_out = work/f'dragged-out-{name}'
+    dragged_out.mkdir()
+    screenshot = results/f'seamless-session-{name}.png'
+    arguments = '\n'.join([str(dragged), str(marker), str(dragged_out), str(screenshot), 'cancel' if cancel else 'save'])
+    check('no machine is running this clone before the proxy opens', not running(str(machine)))
+    subprocess.run(['/usr/bin/open', '--env', f'CFFIXED_USER_HOME={home}', '--env', f'LC_SEAMLESS_TEST={arguments}', '-a', bundle, str(document)], check=True)
+    print('# opened the proxy with a document', flush=True)
+    launch_checked = False
+    deadline = time.time()+1500
+    said = ''
+    while time.time() < deadline:
+        said = log.read_text(errors='replace') if log.exists() else ''
+        if not launch_checked and 'running TextEdit' in said:
+            launch_checked = True
+            def kind(pattern):
+                pid = running(pattern)[0].split()[0] if running(pattern) else '0'
+                listing = subprocess.run(['lsappinfo', 'list'], capture_output=True, text=True).stdout
+                return next((line.strip() for line in listing.splitlines() if f'pid = {pid} ' in line), '')
+            proxy_kind = kind(f'{bundle}/Contents/MacOS/SeamlessProxy')
+            check('the proxy is a foreground app', 'type="Foreground"' in proxy_kind, proxy_kind[:80])
+            vm_kind = kind(f'{app}/Contents/MacOS/Light Click')
+            check('the machine\'s app is running, and not in the Dock', 'type="UIElement"' in vm_kind, vm_kind[:80])
+            vm_pid = running(f'{app}/Contents/MacOS/Light Click')[0].split()[0]
+            windows = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
+            # With the display asleep WindowServer lists them as on screen even ordered out, so what counts is that they're clear.
+            shown = [w for w in windows.splitlines() if f'pid={vm_pid} ' in w and ' alpha=0 ' not in w]
+            check('none of its windows can be seen', not shown, '; '.join(shown)[:300])
+        if 'the guest\'s side ended' in said or 'ERROR the session stopped' in said:
+            break
+        time.sleep(5)
+    (results/f'seamless-session-{name}.log').write_text(said)
+    print('== Session log\n'+said[-3000:], flush=True)
+    time.sleep(5)
+    def line(text):
+        return next((l for l in said.splitlines() if text in l), '')
+    check('the guest app was seen', '# window ' in said)
+    check('the document reached the guest', 'sent ' in said and document.name in said)
+    check('the save prompt came up as its own window', '# test: at the prompt' in said, line('at the prompt')[:160])
+    if cancel:
+        check('Cancel left the app running with its windows', 'the proxy is running' in said and ', 0 windows' not in line('after Cancel'), line('after Cancel'))
+    check('the guest app exited after that', '# the guest app has exited' in said)
+    after = document.read_bytes()
+    check('the saved document came back to the host', after != before, repr(after[:80]))
+    check('a guest drop was taken', 'drag_ended' in said, line('drag_ended'))
+    came_out = dragged_out/marker.name
+    check('this drag, and no other, came out as a promised file', came_out.exists() and came_out.read_bytes() == marker.read_bytes())
+    check('the app\'s badge reached the proxy', 'badge "7"' in said)
+    check('its request for attention did too', 'attention true' in said)
+    check('a scroll came through the input view', ' 0 gesture' not in said and ' gesture' in said, line('input ')[:60])
+    check('the proxy has quit', not running(f'{bundle}/Contents/MacOS/SeamlessProxy'))
+    for _ in range(36):
+        if not running(str(machine)):
+            break
+        time.sleep(5)
+    left = running(str(machine))
+    check('the machine has shut down, and its app has gone', not left, '; '.join(left)[:300])
+    for row in left:
+        os.kill(int(row.split()[0]), signal.SIGKILL)
+
+
 dragged = work/'Dragged from the host.txt'
 dragged.write_text('Dragged in.\n')
-dragged_out = work/'dragged-out'
-dragged_out.mkdir()
-screenshot = results/'seamless-session-prompt.png'
-arguments = '\n'.join([str(dragged), str(dragged_out), str(screenshot)])
-subprocess.run(['/usr/bin/open', '--env', f'CFFIXED_USER_HOME={home}', '--env', f'LC_SEAMLESS_TEST={arguments}', '-a', bundle, str(document)], check=True)
-print('# opened the proxy with a document; the guest boots now, which takes some minutes, more on a first session', flush=True)
+results.mkdir(parents=True, exist_ok=True)
+# Something left at the socket's path by anything before: the session has to deal with it.
+Path(socket_path).mkdir(exist_ok=True)
+session('first')
+session('second', cancel=True)
 
+# With another Light Click holding the machine, the proxy has to say so and leave, rather than bounce for ever.
+holder = subprocess.Popen([str(app/'Contents/MacOS/Light Click'), '--open-vm', str(machine)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(20)
 log = Path(str(socket_path)+'.log')
-launch_checked = False
-deadline = time.time()+1500
-said = ''
-while time.time() < deadline:
-    said = log.read_text(errors='replace') if log.exists() else ''
-    if not launch_checked and 'running TextEdit' in said:
-        launch_checked = True
-        def kind(pattern):
-            pid = running(pattern)[0].split()[0] if running(pattern) else '0'
-            listing = subprocess.run(['lsappinfo', 'list'], capture_output=True, text=True).stdout
-            return next((line.strip() for line in listing.splitlines() if f'pid = {pid} ' in line), '')
-        proxy_kind = kind(f'{bundle}/Contents/MacOS/SeamlessProxy')
-        check('the proxy is a foreground app', 'type="Foreground"' in proxy_kind, proxy_kind[:200])
-        vm_kind = kind(f'{app}/Contents/MacOS/Light Click')
-        check('the machine\'s app is running, and not in the Dock', 'type="UIElement"' in vm_kind, vm_kind[:200])
-        vm_pid = running(f'{app}/Contents/MacOS/Light Click')[0].split()[0]
-        windows = subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout
-        # With the display asleep WindowServer lists them as on screen even ordered out, so what counts is that they're clear.
-        shown = [w for w in windows.splitlines() if f'pid={vm_pid} ' in w and ' alpha=0 ' not in w]
-        check('none of its windows can be seen', not shown, '; '.join(shown)[:300])
-    if 'the guest\'s side ended' in said or 'ERROR the session stopped' in said:
-        break
-    time.sleep(5)
-print('== Session log\n'+said[-6000:], flush=True)
-time.sleep(5)
-check('the guest app was seen', '# window ' in said)
-check('the document reached the guest', 'sent ' in said and str(document.name) in said)
-check('the save prompt came up as its own window', '# test: at the prompt' in said, next((line for line in said.splitlines() if 'at the prompt' in line), ''))
-check('the guest app exited after that', '# the guest app has exited' in said)
-after = document.read_bytes()
-check('the saved document came back to the host', after != before, repr(after[:80]))
-check('a guest drop was taken', 'drag_ended' in said, next((line for line in said.splitlines() if 'drag_' in line), ''))
-came_out = dragged_out/dragged.name
-check('a guest drag came out as a promised file', came_out.exists() and came_out.read_bytes() == dragged.read_bytes())
-check('the app\'s badge reached the proxy', 'badge "7"' in said, next((line for line in said.splitlines() if 'app state' in line), ''))
-check('its request for attention did too', 'attention true' in said)
-check('a scroll came through the input view', ' 0 gesture' not in said and ' gesture' in said, next((line for line in said.splitlines() if line.startswith('input ')), ''))
-check('the proxy has quit', not running(f'{bundle}/Contents/MacOS/SeamlessProxy'))
+log.unlink(missing_ok=True)
+marker = work/'x.txt'
+marker.write_text('x')
+subprocess.run(['/usr/bin/open', '--env', f'CFFIXED_USER_HOME={home}', '--env', 'LC_SEAMLESS_TEST=a\nb\nc\nd\ne', bundle], check=True)
+gone = False
 for _ in range(36):
-    if not running(str(machine)):
-        break
     time.sleep(5)
-left = running(str(machine))
-check('the machine has shut down, and its app has gone', not left, '; '.join(left)[:400])
+    if not running(f'{bundle}/Contents/MacOS/SeamlessProxy') and 'session stopped' in (log.read_text(errors='replace') if log.exists() else ''):
+        gone = True
+        break
+check('a proxy opened while another app holds the machine says so, and quits', gone, log.read_text(errors='replace')[-200:] if log.exists() else 'no log')
+check('the holding app is unharmed', holder.poll() is None)
+holder.terminate()
+time.sleep(5)
+for row in running(str(machine))+running(f'{bundle}/'):
+    os.kill(int(row.split()[0]), signal.SIGKILL)
+
 lsregister = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 removed = subprocess.run([lsregister, '-u', bundle], capture_output=True, text=True)
 shutil.rmtree(bundle)
