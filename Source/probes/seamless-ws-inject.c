@@ -1,7 +1,12 @@
 // Loads seamless-ws-hook.dylib into a WindowServer that's already running, so a guest needs no restart. In the guest,
 // as root:
 //
-//     seamless-ws-inject /var/tmp/seamless-ws-hook.dylib
+//     seamless-ws-inject /usr/lib/seamless-ws-hook.dylib
+//
+// Exits 0 with every patch in, and otherwise leaves WindowServer as it was as far as it can tell, for the session to
+// use crops instead. A failure inside WindowServer logs the user out, so it checks all it can in its own process first,
+// and tries at most once per boot: 3 for already tried, 4 for what's there isn't known, 5 for it went in and the hook
+// refused.
 //
 // Makes the hook's table, as WindowServer can't by now, then runs a thread there that asks for a real thread that
 // dlopens the hook. Libraries in the shared cache are at the same address in both processes, so these addresses are
@@ -16,7 +21,9 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 static pid_t find_windowserver(void) {
@@ -41,20 +48,49 @@ static uint8_t *load_constant(uint8_t *to, uint8_t reg_prefix, uint8_t reg_op, u
     return put_bytes(to, &value, 8);
 }
 
+#define SWS_TRIED "/var/tmp/seamless-ws-injected"
+
 int main(int argc, char **argv) {
     if (argc != 2)
         return 2;
+    struct timeval booted = {0};
+    size_t size = sizeof(booted);
+    int boottime[] = {CTL_KERN, KERN_BOOTTIME};
+    long this_boot = 0, tried = 0;
+    if (sysctl(boottime, 2, &booted, &size, NULL, 0))
+        return 4;
+    this_boot = (long)booted.tv_sec;
+    FILE *mark = fopen(SWS_TRIED, "r");
+    if (mark) {
+        if (fscanf(mark, "%ld", &tried) != 1)
+            tried = 0;
+        fclose(mark);
+    }
+    if (tried == this_boot) {
+        fprintf(stderr, "already tried in this boot\n");
+        return 3;
+    }
+    void *hook = dlopen(argv[1], RTLD_NOW);
+    int (*preflight)(void) = hook ? (int (*)(void))dlsym(hook, "seamless_preflight") : NULL;
+    if (!preflight || !preflight()) {
+        fprintf(stderr, "this system isn't known to the hook: %s\n", hook ? "preflight refused" : dlerror());
+        return 4;
+    }
     int log = open("/var/tmp/seamless-ws-probe.log", O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (log >= 0) {
         fchmod(log, 0666);
         close(log);
     }
     int table = open(SWS_PATH, O_RDWR | O_CREAT, 0666);
-    if (table < 0 || fchmod(table, 0666) || ftruncate(table, sizeof(struct SWSTable))) {
+    // Empty first, for what an earlier boot left.
+    if (table < 0 || fchmod(table, 0666) || ftruncate(table, 0) || ftruncate(table, sizeof(struct SWSTable))) {
         perror("table");
         return 1;
     }
+    struct SWSTable *shared = mmap(NULL, sizeof(struct SWSTable), PROT_READ, MAP_SHARED, table, 0);
     close(table);
+    if (shared == MAP_FAILED)
+        return 1;
     pid_t pid = find_windowserver();
     task_t task = MACH_PORT_NULL;
     kern_return_t kr = pid ? task_for_pid(mach_task_self(), pid, &task) : KERN_FAILURE;
@@ -98,6 +134,11 @@ int main(int argc, char **argv) {
     if (mach_vm_write(task, code, (vm_offset_t)image, page_size) ||
         mach_vm_protect(task, code, page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE))
         return 1;
+    mark = fopen(SWS_TRIED, "w");
+    if (!mark)
+        return 1;
+    fprintf(mark, "%ld\n", this_boot);
+    fclose(mark);
     x86_thread_state64_t state;
     memset(&state, 0, sizeof(state));
     state.__rip = code;
@@ -110,6 +151,12 @@ int main(int argc, char **argv) {
     }
     usleep(100000);
     thread_terminate(thread);
+    for (int i = 0; i < 50 && shared->installed_pid != pid; i++)
+        usleep(100000);
+    if (shared->installed_pid != pid) {
+        fprintf(stderr, "the hook in %d refused; see its log\n", pid);
+        return 5;
+    }
     printf("injected into %d\n", pid);
     return 0;
 }

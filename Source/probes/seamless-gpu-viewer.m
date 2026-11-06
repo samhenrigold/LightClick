@@ -5,11 +5,16 @@
 //
 //     xcrun clang -fobjc-arc -O2 -framework AppKit -framework QuartzCore -framework CoreImage -framework IOSurface \
 //         probes/seamless-gpu-viewer.m -o Build/seamless/seamless-gpu-viewer
-//     seamless-gpu-viewer SERVICE SECONDS PNG_PREFIX [--no-windows]
+//     seamless-gpu-viewer SERVICE SECONDS PNG_PREFIX [--no-windows] [--materials ROWS_FILE]
+//
+// With --materials, each window has the host's own material behind its surface, where ROWS_FILE (seamless-guest gpu
+// --rows, rewritten as it changes) says, and a plain window behind it all that changes color. Each color's result is
+// read from the screen by window ID, with what's below that window.
 #import <AppKit/AppKit.h>
 #import <IOSurface/IOSurface.h>
 #import <CoreImage/CoreImage.h>
 #import <QuartzCore/QuartzCore.h>
+#include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <servers/bootstrap.h>
@@ -25,6 +30,9 @@ struct SGFrameMessage {
 @interface Seen : NSObject
 @property NSWindow *window;
 @property CALayer *layer;
+@property NSWindow *behind;
+@property NSMutableArray<NSVisualEffectView *> *materials;
+@property NSString *materialKey;
 @property uint32_t width, height, lastSent;
 @property int x, y;
 @property uint64_t received, changed, applied, lastHash, gaps;
@@ -36,7 +44,8 @@ struct SGFrameMessage {
 
 static NSMutableDictionary<NSNumber *, Seen *> *seen;
 static BOOL noWindows;
-static NSString *prefix;
+static NSString *prefix, *materialsFile;
+static NSDictionary *contentRows; // Window ID to its surface's origin, in guest points.
 
 // PVG's surfaces say 1 byte an element, with a row as long as their width, for pixels of 4 bytes. Their size is right.
 static size_t true_row(IOSurfaceRef surface) {
@@ -90,9 +99,26 @@ static void show(uint32_t windowID, IOSurfaceRef surface, uint32_t width, uint32
             s.window.hasShadow = NO;
             s.window.collectionBehavior = NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorTransient;
             s.window.contentView.wantsLayer = YES;
-            s.layer = s.window.contentView.layer;
+            NSView *top = [[NSView alloc] initWithFrame:s.window.contentView.bounds];
+            top.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            top.wantsLayer = YES;
+            [s.window.contentView addSubview:top];
+            s.layer = top.layer;
             s.layer.contentsGravity = kCAGravityResize;
-            [s.window orderBack:nil];
+            s.layer.contentsScale = 2;
+            if (materialsFile) {
+                s.behind = [[NSWindow alloc] initWithContentRect:frame
+                                                       styleMask:NSWindowStyleMaskBorderless
+                                                         backing:NSBackingStoreBuffered
+                                                           defer:NO];
+                s.behind.level = kCGDesktopWindowLevel;
+                s.behind.ignoresMouseEvents = YES;
+                s.behind.backgroundColor = NSColor.redColor;
+                s.behind.collectionBehavior = s.window.collectionBehavior;
+                [s.behind orderBack:nil];
+                [s.window orderWindow:NSWindowAbove relativeTo:s.behind.windowNumber];
+            }
+            [s.window orderWindow:NSWindowAbove relativeTo:s.behind.windowNumber];
         }
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -108,6 +134,117 @@ static void show(uint32_t windowID, IOSurfaceRef surface, uint32_t width, uint32
     if (s.last)
         CFRelease(s.last);
     s.last = surface;
+}
+
+// shortcut: the guest's material numbers as read on 18G103 in light appearance. The dark ones aren't read yet.
+static NSVisualEffectMaterial host_material(int material) {
+    switch (material) {
+        case 3:
+            return NSVisualEffectMaterialMenu;
+        case 4:
+            return NSVisualEffectMaterialSheet;
+        case 5:
+            return NSVisualEffectMaterialSidebar;
+        case 19:
+            return NSVisualEffectMaterialSelection;
+        case 21:
+        case 25:
+            return NSVisualEffectMaterialTitlebar;
+        default:
+            return NSVisualEffectMaterialWindowBackground;
+    }
+}
+
+// One effect view for each of the window's backdrops, in the order they're drawn, masked to where it is.
+static void apply_materials(void) {
+    NSString *text = [NSString stringWithContentsOfFile:materialsFile encoding:NSUTF8StringEncoding error:NULL];
+    if (!text)
+        return;
+    NSMutableDictionary *origins = [NSMutableDictionary new];
+    NSMutableDictionary<NSNumber *, NSMutableArray<NSArray *> *> *byWindow = [NSMutableDictionary new];
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        unsigned id = 0, order = 0, material = 0, active = 0, blend = 0, frames = 0, n = 0;
+        float x, y, w, h, s;
+        if (sscanf(line.UTF8String, "row %u id %u frames %u content %f,%f", &n, &id, &frames, &x, &y) == 5)
+            origins[@(id)] = @[ @(x), @(y) ];
+        else if (sscanf(line.UTF8String,
+                        "backdrop id %u order %u material %u active %u blend %u rect %f,%f %fx%f saturation %f", &id,
+                        &order, &material, &active, &blend, &x, &y, &w, &h, &s) == 10 &&
+                 active) {
+            if (!byWindow[@(id)])
+                byWindow[@(id)] = [NSMutableArray new];
+            [byWindow[@(id)] addObject:@[ @(order), @(material), @(x), @(y), @(w), @(h) ]];
+        }
+    }
+    contentRows = origins;
+    for (NSNumber *key in seen) {
+        Seen *s = seen[key];
+        NSArray *rows = byWindow[key];
+        NSArray *origin = origins[key];
+        NSString *wanted = [NSString stringWithFormat:@"%@ %@ %ux%u", rows, origin, s.width, s.height];
+        if (!s.window || !origin || [wanted isEqual:s.materialKey])
+            continue;
+        s.materialKey = wanted;
+        for (NSVisualEffectView *view in s.materials)
+            [view removeFromSuperview];
+        s.materials = [NSMutableArray new];
+        CGFloat ox = [origin[0] floatValue], oy = [origin[1] floatValue];
+        NSRect bounds = s.window.contentView.bounds;
+        NSView *top = s.window.contentView.subviews.lastObject;
+        for (int order = 0; order < 16; order++) {
+            NSMutableArray *rects = [NSMutableArray new];
+            int material = -1;
+            for (NSArray *row in rows)
+                if ([row[0] intValue] == order) {
+                    material = [row[1] intValue];
+                    [rects addObject:row];
+                }
+            if (!rects.count)
+                continue;
+            NSImage *mask = [NSImage imageWithSize:bounds.size
+                                           flipped:YES
+                                    drawingHandler:^BOOL(NSRect dst) {
+                                      [NSColor.blackColor set];
+                                      for (NSArray *row in rects)
+                                          NSRectFill(NSMakeRect([row[2] floatValue] - ox, [row[3] floatValue] - oy,
+                                                                [row[4] floatValue], [row[5] floatValue]));
+                                      return YES;
+                                    }];
+            NSVisualEffectView *view = [[NSVisualEffectView alloc] initWithFrame:bounds];
+            view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            view.material = host_material(material);
+            view.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+            view.state = NSVisualEffectStateActive;
+            view.maskImage = mask;
+            // The first drawn is the furthest back, and the last is under the surface.
+            [s.window.contentView addSubview:view positioned:NSWindowBelow relativeTo:top];
+            [s.materials addObject:view];
+        }
+    }
+}
+
+// What's on the screen at this window and below it: that the host's material samples what's really there.
+static void read_with_below(Seen *s, uint32_t id, NSString *name) {
+    typedef CGImageRef (*Create)(CGRect, CGWindowListOption, CGWindowID, CGWindowImageOption);
+    Create create = (Create)dlsym(RTLD_DEFAULT, "CGWindowListCreateImage");
+    if (!create) {
+        printf("no CGWindowListCreateImage\n");
+        return;
+    }
+    NSRect f = s.window.frame;
+    CGFloat height = NSScreen.screens[0].frame.size.height;
+    CGRect rect = CGRectMake(f.origin.x, height - f.origin.y - f.size.height, f.size.width, f.size.height);
+    CGImageRef image = create(rect, kCGWindowListOptionIncludingWindow | kCGWindowListOptionOnScreenBelowWindow,
+                              (CGWindowID)s.window.windowNumber, kCGWindowImageBestResolution);
+    if (!image) {
+        printf("no image for window %u\n", id);
+        return;
+    }
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:image];
+    [[rep representationUsingType:NSBitmapImageFileTypePNG
+                       properties:@{}] writeToFile:[NSString stringWithFormat:@"%@-%u-below-%@.png", prefix, id, name]
+                                        atomically:YES];
+    CGImageRelease(image);
 }
 
 static void report(BOOL final) {
@@ -209,6 +346,8 @@ int main(int argc, char **argv) {
         int seconds = atoi(argv[2]);
         prefix = @(argv[3]);
         noWindows = argc > 4 && !strcmp(argv[4], "--no-windows");
+        if (argc > 5 && !strcmp(argv[4], "--materials"))
+            materialsFile = @(argv[5]);
         seen = [NSMutableDictionary new];
         mach_port_t port = MACH_PORT_NULL;
         mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
@@ -245,6 +384,35 @@ int main(int argc, char **argv) {
                                           block:^(NSTimer *timer) {
                                             report(NO);
                                           }];
+        if (materialsFile) {
+            [NSTimer scheduledTimerWithTimeInterval:0.5
+                                            repeats:YES
+                                              block:^(NSTimer *timer) {
+                                                apply_materials();
+                                              }];
+            // Stepped by a file's appearing, so a run can read each color when it's ready.
+            __block int step = 0;
+            NSArray *colors = @[ NSColor.redColor, NSColor.blueColor, NSColor.greenColor, NSColor.blackColor ];
+            NSArray *names = @[ @"red", @"blue", @"green", @"black" ];
+            [NSTimer
+                scheduledTimerWithTimeInterval:5
+                                       repeats:YES
+                                         block:^(NSTimer *timer) {
+                                           if (step >= (int)colors.count)
+                                               return;
+                                           if (![NSFileManager.defaultManager
+                                                   fileExistsAtPath:[materialsFile stringByAppendingString:@".go"]])
+                                               return;
+                                           for (NSNumber *key in seen)
+                                               read_with_below(seen[key], key.unsignedIntValue, names[step]);
+                                           step++;
+                                           if (step < (int)colors.count)
+                                               for (NSNumber *key in seen)
+                                                   seen[key].behind.backgroundColor = colors[step];
+                                           printf("step %d\n", step);
+                                           fflush(stdout);
+                                         }];
+        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)seconds * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
           report(YES);
           save();
