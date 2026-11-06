@@ -38,6 +38,7 @@ extension ConfigurationWindow {
         stepper.minValue = 1024
         stepper.maxValue = Double(limits.maximumMemoryMiB)
         stepper.increment = 1024
+        stepper.valueWraps = false
         stepper.doubleValue = memory.doubleValue
         stepper.target = self
         stepper.action = #selector(memoryStepped)
