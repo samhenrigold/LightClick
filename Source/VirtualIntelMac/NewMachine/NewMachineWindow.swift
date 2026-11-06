@@ -172,12 +172,9 @@ final class NewMachineWindow: NSWindowController, NSWindowDelegate {
         if let saved = store.load(.creation) {
             job = saved
             guest = saved.guest
-            let password = saved.automaticSetup?.credentialIdentifier.flatMap {
-                try? VIMAutomaticSetup.password(forIdentifier: $0)
-            }
-            configuration.restore(saved, password: password)
+            configuredGuest = saved.guest
+            restoreConfiguration(from: saved)
             configuration.show(guest)
-            configuration.syncSliders()
             updateCreateButton()
             progress = SetupProgress(fraction: saved.progress ?? 0)
         } else {
@@ -257,10 +254,23 @@ final class NewMachineWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func resetConfigurationUnlessResuming() {
-        if NewMachineDefaults.pageStartsOver(pageGuest: configuredGuest, jobGuest: job?.guest, guest: guest) {
+        switch NewMachineDefaults.pageFill(pageGuest: configuredGuest, jobGuest: job?.guest, guest: guest) {
+        case .keep: break
+        case .defaults: configuration.reset(to: defaults(for: guest))
+        case .job:
+            // The page holds another guest's values, and not everything in a job replaces them.
             configuration.reset(to: defaults(for: guest))
+            if let job { restoreConfiguration(from: job) }
         }
         configuredGuest = guest
+    }
+
+    private func restoreConfiguration(from job: CreationJob) {
+        let password = job.automaticSetup?.credentialIdentifier.flatMap {
+            try? VIMAutomaticSetup.password(forIdentifier: $0)
+        }
+        configuration.restore(job, password: password)
+        configuration.syncSliders()
     }
 
     @objc private func chooseInstaller() {
