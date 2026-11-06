@@ -33,6 +33,8 @@
 	<string>space</string>
 	<key>DisplayScalingFilter</key>
 	<string>nearest</string>
+	<key>ExecutionEngine</key>
+	<string>on</string>
 	<key>FileSharingEnabled</key>
 	<false/>
 	<key>FileSharingPort</key>

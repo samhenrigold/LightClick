@@ -75,6 +75,9 @@ extension MachineConfiguration {
         {
             return false
         }
+        if let value = self[.executionEngine], value.string.flatMap(ExecutionEngine.init(rawValue:)) == nil {
+            return false
+        }
         for key in [Key.audioOutputDevice, .audioInputDevice] {
             if let value = self[key], !fits(value, within: 1024) { return false }
         }

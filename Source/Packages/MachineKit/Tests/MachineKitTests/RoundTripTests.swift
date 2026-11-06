@@ -97,6 +97,7 @@ import Testing
         #expect(c.additionalMedia == [nil, AbsolutePath(rawValue: "/Volumes/Images/Second.dmg")])
         #expect(c.legacyDisplayAdapter == .vmware)
         #expect(c.legacyGDBPort == 1234)
+        #expect(c.executionEngine == .on)
         #expect(!c.passthroughOpenGLEnabled)
     }
 

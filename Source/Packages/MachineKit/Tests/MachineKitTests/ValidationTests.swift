@@ -65,6 +65,9 @@ import Testing
         #expect(!valid(.displayMode, "bogus"))
         for filter: PropertyListValue in ["linear", "nearest"] { #expect(valid(.displayScalingFilter, filter)) }
         #expect(!valid(.displayScalingFilter, "cubic"))
+        for engine: PropertyListValue in ["off", "on"] { #expect(valid(.executionEngine, engine)) }
+        #expect(!valid(.executionEngine, "On"))
+        #expect(!valid(.executionEngine, 1))
     }
 
     @Test func textIsBoundedInUTF16Units() {
@@ -432,6 +435,14 @@ import Testing
                 "AudioOutputDevice", "AudioInputDevice", "ClipboardEnabled", "NetworkMode", "BridgeInterface",
                 "DisplayScalingFilter", "AdditionalMedia"
             ])
+    }
+
+    @Test func theEngineCanOnlyBeSetInTheFileItself() throws {
+        let base = Fixture.configuration
+        #expect(pending(["ExecutionEngine": "on"]).editable(from: base).executionEngine == base.executionEngine)
+        #expect(throws: MachineConfigurationError.queuedUnsupportedSetting) {
+            try pending(["ExecutionEngine": "on"]).applied(to: base)
+        }
     }
 
     @Test func aSettingsWindowSeesOnlyEditableValidEdits() {
