@@ -141,6 +141,81 @@ static bool use_cross_page_goto_tb(void)
 #endif
 }
 
+/*
+ * The code bytes this thread's translation decoded, by offset into the TB, for
+ * translator_code_changed.  A TB spans at most two pages, and x86's stops within
+ * one insn of the second page's start; offsets past this are left unverified.
+ */
+static __thread struct {
+    uint8_t bytes[8192];
+    bool seen[8192];
+    size_t end;                 /* seen[] is clear from here on */
+    size_t page0_len;
+    const uint8_t *host[2];
+} code_seen;
+
+static void code_seen_reset(const DisasContextBase *db)
+{
+    memset(code_seen.seen, 0, code_seen.end);
+    code_seen.end = 0;
+    code_seen.page0_len = -(db->pc_first | TARGET_PAGE_MASK);
+}
+
+static void code_seen_save(const DisasContextBase *db, vaddr pc,
+                           const uint8_t *from, size_t len)
+{
+    size_t offset;
+
+    if (((db->pc_first ^ pc) & TARGET_PAGE_MASK) == 0) {
+        if (pc < db->pc_first) {
+            return;
+        }
+        offset = pc - db->pc_first;
+    } else {
+        offset = pc - db->pc_second_page + code_seen.page0_len;
+    }
+    if (offset + len > sizeof(code_seen.bytes)) {
+        return;
+    }
+
+    code_seen.host[0] = db->host_addr[0];
+    code_seen.host[1] = db->host_addr[1];
+    /* Keep the first read, since that may be the one decoded. */
+    for (size_t i = 0; i < len; i++) {
+        if (!code_seen.seen[offset + i]) {
+            code_seen.seen[offset + i] = true;
+            code_seen.bytes[offset + i] = from[i];
+        }
+    }
+    code_seen.end = MAX(code_seen.end, offset + len);
+}
+
+/*
+ * Whether guest memory no longer holds what this thread decoded for @tb.
+ * Call after tb_record, so that every vCPU's stores to the TB's pages take the
+ * slow path from here on and any store before here is visible.
+ */
+bool translator_code_changed(const TranslationBlock *tb)
+{
+    size_t len = MIN(code_seen.end, tb->size);
+
+    smp_mb();
+    for (size_t i = 0; i < len; i++) {
+        const uint8_t *host;
+
+        if (!code_seen.seen[i]) {
+            continue;
+        }
+        host = i < code_seen.page0_len
+            ? code_seen.host[0] + i
+            : code_seen.host[1] + (i - code_seen.page0_len);
+        if (qatomic_read(host) != code_seen.bytes[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool translator_use_goto_tb(DisasContextBase *db, vaddr dest)
 {
     /* Suppress goto_tb if requested. */
@@ -180,6 +255,7 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
     db->record_start = 0;
     db->record_len = 0;
     db->code_mmuidx = cpu_mmu_index(cpu, true);
+    code_seen_reset(db);
 
     ops->init_disas_context(db, cpu);
     tcg_debug_assert(db->is_jmp == DISAS_NEXT);  /* no early exit */
@@ -291,8 +367,8 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
     }
 }
 
-static bool translator_ld(CPUArchState *env, DisasContextBase *db,
-                          void *dest, vaddr pc, size_t len)
+static bool translator_ld_host(CPUArchState *env, DisasContextBase *db,
+                               void *dest, vaddr pc, size_t len)
 {
     TranslationBlock *tb = db->tb;
     vaddr last = pc + len - 1;
@@ -410,6 +486,16 @@ static bool translator_ld(CPUArchState *env, DisasContextBase *db,
     }
     /* Unaligned or partial read from the second page is not atomic. */
     memcpy(dest, host, len);
+    return true;
+}
+
+static bool translator_ld(CPUArchState *env, DisasContextBase *db,
+                          void *dest, vaddr pc, size_t len)
+{
+    if (!translator_ld_host(env, db, dest, pc, len)) {
+        return false;
+    }
+    code_seen_save(db, pc, dest, len);
     return true;
 }
 
