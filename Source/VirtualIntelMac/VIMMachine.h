@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 NS_ASSUME_NONNULL_BEGIN
+/// Made on a worker queue and used on the main thread, as it always has been.
+NS_SWIFT_SENDABLE
 @interface VIMMachine : NSObject
 @property(nonatomic, readonly) NSURL *URL;
 @property(nonatomic, readonly) NSDictionary *configuration;

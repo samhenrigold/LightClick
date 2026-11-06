@@ -1,6 +1,6 @@
 import Foundation
 
-/// A transfer directory's Download.plist. VIMInstallerAssembly and VIMNewMachineWindow read the same file: Complete is a
+/// A transfer directory's Download.plist. VIMInstallerAssembly and MachineKit's InstallerLength read the same file: Complete is a
 /// real Boolean and Length an integer, -1 when the server gave no size.
 struct DownloadJournal: Encodable, Hashable, Sendable {
     private static let currentFormat = 1

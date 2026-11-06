@@ -2,8 +2,7 @@
 #import "VIMLibraryLocation.h"
 #import "VIMMachine.h"
 #import "VIMSession.h"
-#import "VIMMachineSettings.h"
-#import "VIMNewMachineWindow.h"
+#import "Light_Click-Swift.h"
 #import "VIMPlayButton.h"
 #import "VIMAlerts.h"
 #import <QuartzCore/QuartzCore.h>

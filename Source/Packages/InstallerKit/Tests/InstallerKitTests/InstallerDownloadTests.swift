@@ -540,7 +540,7 @@ extension StubbedNetwork {
 
         // MARK: - On-disk format
 
-        /// VIMInstallerAssembly's retireCompletedDownloads and VIMNewMachineWindow read this file with these exact checks.
+        /// VIMInstallerAssembly's retireCompletedDownloads and MachineKit's InstallerLength read this file with these exact checks.
         @Test func theJournalIsWhatTheObjectiveCCallersExpect() async throws {
             serve(Fixture.payload(count: 16))
             #expect(try await makeDownload().run() == .finished(finishedURL))
