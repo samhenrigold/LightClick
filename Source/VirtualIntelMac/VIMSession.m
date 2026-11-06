@@ -111,32 +111,6 @@ static BOOL VIMPrepareOpenGLSurfaceEndpoint(VIMDisplayConnection *connection, pi
     }
     return YES;
 }
-static NSString *VIMMultiMachineDiagnosticDirectory(NSArray<NSString *> *arguments, VIMMachine *machine) {
-    NSUInteger option = [arguments indexOfObject:@"--guest-diagnostics-root"];
-    if (option == NSNotFound || option + 1 >= arguments.count || ![arguments[option + 1] isAbsolutePath])
-        return nil;
-    NSUUID *identifier = [[NSUUID alloc] initWithUUIDString:machine.configuration[@"Identifier"]];
-    if (!identifier)
-        return nil;
-    NSString *root = arguments[option + 1];
-    NSString *directory = [root stringByAppendingPathComponent:identifier.UUIDString];
-    // Explicit developer opt-in only. Each session retains its own serialized
-    // QMP/QGA owners and command files; no shared Result.json/second client.
-    for (NSString *path in @[ root, directory ]) {
-        NSError *error = nil;
-        struct stat info;
-        if (![NSFileManager.defaultManager createDirectoryAtPath:path
-                                     withIntermediateDirectories:YES
-                                                      attributes:@{
-                                                          NSFilePosixPermissions : @0700
-                                                      }
-                                                           error:&error] ||
-            lstat(path.fileSystemRepresentation, &info) || !S_ISDIR(info.st_mode) || info.st_uid != getuid() ||
-            (info.st_mode & 077))
-            return nil;
-    }
-    return directory;
-}
 @interface VIMStoppedMacView : NSView
 @property NSImageView *wallpaper;
 @property NSString *guest;
@@ -276,6 +250,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property(copy) void (^pendingHostConnectionCompletion)(NSError *);
 - (void)servicePendingHostConnection;
 @property NSString *diagnosticDirectory;
+@property VIMSessionDiagnostics *diagnostics;
 @property NSDictionary *observedDisplayMode;
 - (void)applyDisplayMode:(NSString *)mode completion:(void (^)(NSDictionary *, NSError *))completion;
 @property(weak) NSWindow *diagnosticAboutWindow;
@@ -301,7 +276,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property VIMClipboardBridge *powerBridge;
 @property NSString *powerConfiguredBoot;
 @property NSDate *powerRetryAfter;
-@property NSUInteger audioTraceEpoch;
 @property VIMSMBService *smbService;
 @property VIMNetworkClient *networkClient;
 @property BOOL networkStarting;
@@ -1836,19 +1810,21 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                                                     [weakSelf servicePendingHostConnection];
                                                                     [weakSelf serviceDiagnosticRequest];
                                                                   }];
-          NSArray *args = NSProcessInfo.processInfo.arguments;
-          NSUInteger debug = [args indexOfObject:@"--guest-diagnostics"];
-          NSUInteger target = NSNotFound;
-          for (NSString *operation in @[ @"--open-vm", @"--repair-vm", @"--install-vm", @"--prepare-vm" ])
-              if (target == NSNotFound)
-                  target = [args indexOfObject:operation];
-          BOOL selected = target != NSNotFound && target + 1 < args.count &&
-                          [[args[target + 1] stringByResolvingSymlinksInPath]
-                              isEqual:session.machine.URL.URLByResolvingSymlinksInPath.path];
-          if ([args containsObject:@"--guest-diagnostics-root"])
-              session.diagnosticDirectory = VIMMultiMachineDiagnosticDirectory(args, session.machine);
-          else if (selected && debug != NSNotFound && debug + 1 < args.count && [args[debug + 1] isAbsolutePath])
-              session.diagnosticDirectory = args[debug + 1];
+          session.diagnosticDirectory =
+              [VIMSessionDiagnostics directoryForArguments:NSProcessInfo.processInfo.arguments
+                                               machinePath:session.machine.URL.URLByResolvingSymlinksInPath.path
+                                                identifier:session.machine.configuration[@"Identifier"]];
+          if (session.diagnosticDirectory) {
+              session.diagnostics = [[VIMSessionDiagnostics alloc]
+                  initWithDirectory:session.diagnosticDirectory
+                            control:session.control
+                              agent:session.guestAgent
+                         statusTool:session.guestStatusTool
+                          memoryMiB:[session.machine.configuration[@"MemoryMiB"] unsignedLongLongValue]];
+              session.diagnostics.isRunning = ^BOOL {
+                return weakSelf.task.running;
+              };
+          }
       }
     }];
     return YES;
@@ -1881,38 +1857,16 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (void)serviceDiagnosticRequest {
     // Explicit development opt-in. Reuse the app-owned serial connection;
     // a second QGA client would steal replies and interrupt guest setup.
-    if (!self.diagnosticDirectory || self.state.diagnosticPending)
+    if (!self.diagnostics || self.state.diagnosticPending)
         return;
-    NSString *request = [self.diagnosticDirectory stringByAppendingPathComponent:@"Request.json"];
-    struct stat st;
-    if (lstat(request.fileSystemRepresentation, &st) || !S_ISREG(st.st_mode) || st.st_uid != getuid() ||
-        st.st_size > 65536)
-        return;
-    NSData *data = [NSData dataWithContentsOfFile:request];
-    NSDictionary *command = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    if (![command isKindOfClass:NSDictionary.class])
-        return;
-    // Framebuffer/emulator reports need no guest agent. Explicit process-only
-    // inspection can also coexist with a provisioning child on the existing
-    // multiplexed owner; it never stages files or changes that transaction.
-    BOOL independent = [@[
-        @"capture", @"inspect-hardware", @"guest-processes", @"guest-process-sample", @"installer-log", @"cursor-state",
-        @"network-details", @"configuration", @"display-state", @"display-fingerprint", @"display-buffer-count",
-        @"display-acquire-async", @"pointer-workload", @"key-workload", @"fullscreen",
-        @"passthrough-opengl-release-bql", @"opengl-pirq-f-pic"
-    ] containsObject:command[@"Action"] ?: @""];
-    if (!independent &&
-        (self.state.guestPending || self.preparing || self.state.bootPolicyPending || self.state.clipboardPending))
-        return;
-    NSString *consumed = [self.diagnosticDirectory stringByAppendingPathComponent:@"Running.json"];
-    if (rename(request.fileSystemRepresentation, consumed.fileSystemRepresentation))
+    NSDictionary *command =
+        [self.diagnostics takeRequestWhileAgentBusy:self.state.guestPending || self.preparing ||
+                                                    self.state.bootPolicyPending || self.state.clipboardPending];
+    if (!command)
         return;
     self.state.diagnosticPending = YES;
-    NSString *output = [self.diagnosticDirectory stringByAppendingPathComponent:@"Result.json"];
     void (^finish)(NSDictionary *) = ^(NSDictionary *result) {
-      [[NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted
-                                         error:nil] writeToFile:output atomically:YES];
-      unlink(consumed.fileSystemRepresentation);
+      [self.diagnostics writeResult:result];
       self.state.diagnosticPending = NO;
       // Resume provisioning deferred while this command owned the agent.
       // In particular, an explicit clipboard-on request must not wait for
@@ -2394,328 +2348,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         finish(@{@"Requested" : @YES});
         return;
     }
-    if ([command[@"Action"] isEqual:@"status-probe"]) {
-        // Time the exact read-only production status path without creating a
-        // second guest-agent connection or triggering installation/repair.
-        double started = NSProcessInfo.processInfo.systemUptime;
-        [self.guestAgent connectWithCompletion:^(NSError *error) {
-          if (error) {
-              finish(@{@"Error" : error.localizedDescription});
-              return;
-          }
-          [self.guestAgent collectStatusWithTool:self.guestStatusTool
-                                      completion:^(NSDictionary *report, NSError *failure) {
-                                        finish(failure ? @{@"Error" : failure.localizedDescription} : @{
-                                            @"Report" : report,
-                                            @"Seconds" : @(NSProcessInfo.processInfo.systemUptime - started)
-                                        });
-                                      }];
-        }];
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"installer-log"]) {
-        // Recovery may lack the privileged installed-system status probe.
-        // Read the current tail through the same serialized owner. Verbose
-        // PackageKit logs can exceed the agent's bounded JSON response when
-        // captured in full; an oversized diagnostic must not drop control.
-        [self.guestAgent connectWithCompletion:^(NSError *error) {
-          if (error) {
-              finish(@{@"Error" : error.localizedDescription});
-              return;
-          }
-          [self.guestAgent
-              runExecutable:@"/usr/bin/tail"
-                  arguments:@[ @"-c", @"49152", @"/var/log/install.log" ]
-                    timeout:30
-                 completion:^(NSDictionary *result, NSError *failure) {
-                   if (failure) {
-                       finish(@{@"Error" : failure.localizedDescription});
-                       return;
-                   }
-                   NSData *bytes = result[@"stdout"] ?: NSData.data;
-                   // The byte-bounded tail can begin within a UTF-8 character.
-                   const uint8_t *start = bytes.bytes;
-                   NSUInteger skip = 0;
-                   while (skip < bytes.length && skip < 3 && (start[skip] & 0xc0) == 0x80)
-                       ++skip;
-                   if (skip)
-                       bytes = [bytes subdataWithRange:NSMakeRange(skip, bytes.length - skip)];
-                   NSString *text = [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding]
-                                        ?: [[NSString alloc] initWithData:bytes encoding:NSISOLatin1StringEncoding];
-                   NSString *detail = [[NSString alloc] initWithData:result[@"stderr"] ?: NSData.data
-                                                            encoding:NSUTF8StringEncoding];
-                   finish(@{@"Log" : text ?: @"", @"Stderr" : detail ?: @"", @"ExitCode" : result[@"exitcode"] ?: @-1});
-                 }];
-        }];
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"open-guest-preferences"]) {
-        [self.guestAgent connectWithCompletion:^(NSError *error) {
-          if (error) {
-              finish(@{@"Error" : error.localizedDescription});
-              return;
-          }
-          [self.guestAgent
-              openPreferencesPane:command[@"Pane"]
-                       completion:^(NSError *failure) {
-                         finish(failure ? @{@"Error" : failure.localizedDescription} : @{@"Opened" : @YES});
-                       }];
-        }];
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"trace-usb"]) {
-        // Metadata-only, bounded, on the existing production QMP owner.
-        // This never turns on usbredir's payload/hex-dump logging.
-        BOOL enabled = [command[@"Enabled"] boolValue];
-        NSArray *events = @[ @"usb_xhci_xfer_*", @"usb_xhci_ep_*", @"usb_xhci_irq_*" ];
-        __block NSError *failure = nil;
-        for (NSString *event in events)
-            [self.control execute:@"trace-event-set-state"
-                        arguments:@{@"name" : event, @"enable" : @(enabled)}
-                       completion:^(id result, NSError *error) {
-                         if (error && !failure)
-                             failure = error;
-                         if ([event isEqual:events.lastObject]) {
-                             if (failure) {
-                                 finish(@{@"Error" : failure.localizedDescription});
-                                 return;
-                             }
-                             // QMP dynamic state alone does not enable the log backend's
-                             // LOG_TRACE mask. Fixed HMP command; no client-supplied text.
-                             NSString *log = enabled
-                                                 ? @"log trace:usb_xhci_xfer_*,trace:usb_xhci_ep_*,trace:usb_xhci_irq_*"
-                                                 : @"log none";
-                             [self.control execute:@"human-monitor-command"
-                                         arguments:@{@"command-line" : log}
-                                        completion:^(id output, NSError *error) {
-                                          finish(error ? @{@"Error" : error.localizedDescription}
-                                                       : @{@"Enabled" : @(enabled),
-                                                           @"AutomaticStopSeconds" : @15});
-                                        }];
-                         }
-                       }];
-        if (enabled)
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-              [self.control execute:@"human-monitor-command"
-                          arguments:@{@"command-line" : @"log none"}
-                         completion:^(id result, NSError *error){
-                         }];
-              for (NSString *event in events)
-                  [self.control execute:@"trace-event-set-state"
-                              arguments:@{
-                                  @"name" : event,
-                                  @"enable" : @NO
-                              }
-                             completion:^(id result, NSError *error){
-                             }];
-            });
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"trace-sound"] || [command[@"Action"] isEqual:@"trace-sound-mix"] ||
-        [command[@"Action"] isEqual:@"trace-audio-gaps"]) {
-        // Development diagnostics use the existing serialized control channel.
-        // Exclude per-buffer logging: tracing must not itself stall the audio.
-        BOOL enabled = [command[@"Enabled"] boolValue];
-        if ([command[@"Action"] isEqual:@"trace-audio-gaps"]) {
-            // Exceptional gaps plus one continuity summary per second. FIFO
-            // clock adjustment can run every backend callback: leave that
-            // trace off, especially with the session log on external storage.
-            NSArray *events =
-                @[ @"audio_sdl_underrun", @"audio_timer_delayed", @"hda_audio_overrun", @"audio_sdl_continuity" ];
-            NSUInteger epoch = ++self.audioTraceEpoch;
-            __block NSError *failure = nil;
-            for (NSString *event in events)
-                [self.control execute:@"trace-event-set-state"
-                            arguments:@{@"name" : event, @"enable" : @(enabled)}
-                           completion:^(id result, NSError *error) {
-                             if (error && !failure)
-                                 failure = error;
-                             if ([event isEqual:events.lastObject])
-                                 finish(failure ? @{@"Error" : failure.localizedDescription}
-                                                : @{@"Enabled" : @(enabled),
-                                                    @"AutomaticStopSeconds" : @15});
-                           }];
-            if (enabled)
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                  if (self.audioTraceEpoch != epoch || !self.task.running)
-                      return;
-                  for (NSString *event in events)
-                      [self.control execute:@"trace-event-set-state"
-                                  arguments:@{
-                                      @"name" : event,
-                                      @"enable" : @NO
-                                  }
-                                 completion:^(id result, NSError *error){
-                                 }];
-                });
-            return;
-        }
-        [self.control execute:@"trace-event-set-state"
-                    arguments:@{
-                        @"name" : [command[@"Action"] isEqual:@"trace-sound-mix"] ? @"audio_sw_write"
-                                                                                  : @"virtio_snd_handle_code",
-                        @"enable" : @(enabled)
-                    }
-                   completion:^(id result, NSError *error) {
-                     finish(error ? @{@"Error" : error.localizedDescription} : @{@"Enabled" : @(enabled)});
-                   }];
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"network-link"]) {
-        // Explicit diagnostics only. Isolate device link negotiation without
-        // rewriting the guest's DHCP, DNS or user network preferences.
-        BOOL enabled = [command[@"Enabled"] isEqual:@YES];
-        [VIMSession setNetworkConnected:enabled
-                                machine:self.machine
-                             completion:^(NSError *error) {
-                               finish(error ? @{@"Error" : error.localizedDescription} : @{@"Enabled" : @(enabled)});
-                             }];
-        return;
-    }
-    if ([@[ @"guest-processes", @"guest-process-sample" ] containsObject:command[@"Action"] ?: @""]) {
-        // Explicit read-only development diagnostics while native setup owns
-        // a long-running child. Reuse the SAME multiplexed agent owner; no
-        // staging, account mutation, input data or second socket is admitted.
-        BOOL sample = [command[@"Action"] isEqual:@"guest-process-sample"];
-        NSNumber *pid = command[@"PID"];
-        if (sample && (![pid isKindOfClass:NSNumber.class] || pid.longLongValue < 2 || pid.longLongValue > INT_MAX)) {
-            finish(@{@"Error" : @"Choose a guest process identifier greater than one."});
-            return;
-        }
-        NSArray *arguments = sample ? @[ pid.stringValue, @"1", @"-file", @"/dev/stdout" ]
-                                    : @[ @"-axo", @"pid,ppid,state,etime,time,comm" ];
-        [self.guestAgent connectWithCompletion:^(NSError *failure) {
-          if (failure) {
-              finish(@{@"Error" : failure.localizedDescription});
-              return;
-          }
-          [self.guestAgent runExecutable:sample ? @"/usr/bin/sample" : @"/bin/ps"
-                               arguments:arguments
-                                 timeout:0
-                              completion:^(NSDictionary *reply, NSError *error) {
-                                if (error) {
-                                    finish(@{@"Error" : error.localizedDescription});
-                                    return;
-                                }
-                                NSString *text = [[NSString alloc] initWithData:reply[@"stdout"] ?: NSData.data
-                                                                       encoding:NSUTF8StringEncoding];
-                                NSString *detail = [[NSString alloc] initWithData:reply[@"stderr"] ?: NSData.data
-                                                                         encoding:NSUTF8StringEncoding];
-                                finish(@{
-                                    @"ExitCode" : reply[@"exitcode"] ?: @(-1),
-                                    @"Stdout" : text ?: @"",
-                                    @"Stderr" : detail ?: @""
-                                });
-                              }];
-        }];
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"inspect-hardware"]) {
-        if ([@[ @"memory-map", @"devices" ] containsObject:command[@"Component"] ?: @""]) {
-            [self.control
-                   execute:@"human-monitor-command"
-                 arguments:@{
-                     @"command-line" : [command[@"Component"] isEqual:@"devices"] ? @"info qtree" : @"info mtree -f"
-                 }
-                completion:^(id result, NSError *error) {
-                  finish(error ? @{@"Error" : error.localizedDescription} : @{@"Report" : result ?: @""});
-                }];
-            return;
-        }
-        // Whitelisted read-only QMP reports through the production owner.
-        // Available before the guest agent/OS boots; never opens another socket.
-        if ([@[ @"physical-memory", @"kernel-memory" ] containsObject:command[@"Component"] ?: @""]) {
-            BOOL kernel = [command[@"Component"] isEqual:@"kernel-memory"];
-            NSNumber *address = command[@"Address"], *words = command[@"Words"];
-            uint64_t ram = [self.machine.configuration[@"MemoryMiB"] unsignedLongLongValue] << 20;
-            if (![address isKindOfClass:NSNumber.class] || ![words isKindOfClass:NSNumber.class] ||
-                words.longLongValue < 1 || words.unsignedLongLongValue > 64 ||
-                (kernel ? (address.unsignedLongLongValue < UINT64_C(0xffffff8000000000) ||
-                           address.unsignedLongLongValue > UINT64_MAX - words.unsignedLongLongValue * 8)
-                        : (address.longLongValue < 0 ||
-                           address.unsignedLongLongValue > ram - words.unsignedLongLongValue * 8))) {
-                finish(@{
-                    @"Error" : @"Choose 1–64 words within this virtual Mac’s RAM or its identified x86 kernel mapping."
-                });
-                return;
-            }
-            NSString *read = [NSString stringWithFormat:@"%@ /%llugx 0x%llx", kernel ? @"x" : @"xp",
-                                                        words.unsignedLongLongValue, address.unsignedLongLongValue];
-            [self.control execute:@"human-monitor-command"
-                        arguments:@{@"command-line" : read}
-                       completion:^(id result, NSError *error) {
-                         finish(error ? @{@"Error" : error.localizedDescription} : @{@"Report" : result ?: @""});
-                       }];
-            return;
-        }
-        if ([@[ @"phy", @"link-history" ] containsObject:command[@"Component"] ?: @""]) {
-            [self.control execute:@"qom-get"
-                        arguments:@{
-                            @"path" : @"/machine/peripheral/ethernet",
-                            @"property" : [command[@"Component"] isEqual:@"phy"] ? @"x-phy-state" : @"x-link-history"
-                        }
-                       completion:^(id result, NSError *error) {
-                         finish(error ? @{@"Error" : error.localizedDescription} : @{@"Report" : result ?: @""});
-                       }];
-            return;
-        }
-        if ([command[@"Component"] isEqual:@"registers"]) {
-            [self.control execute:@"human-monitor-command"
-                        arguments:@{@"command-line" : @"info registers -a"}
-                       completion:^(id result, NSError *error) {
-                         finish(error ? @{@"Error" : error.localizedDescription} : @{@"Report" : result ?: @""});
-                       }];
-            return;
-        }
-        if ([command[@"Component"] isEqual:@"serial"]) {
-            // Explicit metadata-only UART inspection. Do not read RBR/FIFOs,
-            // IIR, LSR or MSR: those reads consume data or clear status. These
-            // three configuration registers are non-destructive even if DLAB
-            // is set (IER then aliases the divisor's high configuration byte).
-            NSArray *ports = @[ @0x3f9, @0x3fb, @0x3fc, @0x2f9, @0x2fb, @0x2fc ];
-            NSMutableArray *values = [NSMutableArray array];
-            __block void (^next)(NSUInteger);
-            next = ^(NSUInteger index) {
-              if (index == ports.count) {
-                  finish(@{@"Registers" : values});
-                  next = nil;
-                  return;
-              }
-              NSNumber *port = ports[index];
-              NSString *read = [NSString stringWithFormat:@"i /b 0x%lx", port.unsignedLongValue];
-              [self.control execute:@"human-monitor-command"
-                          arguments:@{@"command-line" : read}
-                         completion:^(id result, NSError *error) {
-                           if (error) {
-                               finish(@{@"Error" : error.localizedDescription});
-                               next = nil;
-                               return;
-                           }
-                           [values addObject:@{@"Port" : port, @"Report" : result ?: @""}];
-                           next(index + 1);
-                         }];
-            };
-            next(0);
-            return;
-        }
-        NSString *report = @{
-            @"cpu" : @"query-cpus-fast",
-            @"pci" : @"query-pci",
-            @"media" : @"query-block",
-            @"network" : @"x-query-network",
-            @"interrupts" : @"x-query-interrupt-controllers"
-        }[command[@"Component"] ?: @""];
-        if (!report) {
-            finish(@{@"Error" : @"Choose cpu, pci, network, interrupts, registers, serial, phy, or link-history."});
-            return;
-        }
-        [self.control execute:report
-                    arguments:@{}
-                   completion:^(id result, NSError *error) {
-                     finish(error ? @{@"Error" : error.localizedDescription} : @{@"Report" : result ?: @""});
-                   }];
-        return;
-    }
     if ([command[@"Action"] isEqual:@"input"]) {
         NSArray *events = command[@"Events"];
         if (!self.task.running || !self.displayView.inputHandler || ![events isKindOfClass:NSArray.class] ||
@@ -2757,115 +2389,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         });
         return;
     }
-    if ([command[@"Action"] isEqual:@"stage-probe"]) {
-        NSURL *input =
-            [NSURL fileURLWithPath:[self.diagnosticDirectory stringByAppendingPathComponent:@"Transfer.bin"]];
-        double start = NSProcessInfo.processInfo.systemUptime;
-        [self.guestAgent connectWithCompletion:^(NSError *error) {
-          if (error) {
-              finish(@{@"Error" : error.localizedDescription});
-              return;
-          }
-          // Exercise the production private staging and acknowledged transfer.
-          // stageFiles confines output to a fresh root-owned staging dir.
-          [self.guestAgent
-              stageFiles:@{@"Transfer.bin" : input}
-                progress:nil
-              completion:^(NSDictionary *receipt, NSError *failure) {
-                if (failure) {
-                    finish(@{@"Error" : failure.localizedDescription});
-                    return;
-                }
-                finish(@{@"Transfer" : receipt, @"Seconds" : @(NSProcessInfo.processInfo.systemUptime - start)});
-              }];
-        }];
-        return;
-    }
-    NSString *path = command[@"Executable"];
-    NSArray *arguments = command[@"Arguments"];
-    if (![path isKindOfClass:NSString.class] || !path.isAbsolutePath || ![arguments isKindOfClass:NSArray.class]) {
-        finish(@{@"Error" : @"Invalid command"});
-        return;
-    }
-    for (id argument in arguments)
-        if (![argument isKindOfClass:NSString.class]) {
-            finish(@{@"Error" : @"Invalid argument"});
-            return;
-        }
-    NSData *standardInput = nil;
-    if (command[@"PrivateInput"]) {
-        // Development-only cold operation: secrets go through the existing
-        // agent's stdin, never argv/Request.json or diagnostic output. Consume
-        // a single private, bounded file inside the already-validated local
-        // diagnostics directory; never follow an arbitrary path or symlink.
-        if (![command[@"PrivateInput"] isEqual:@"Input.bin"]) {
-            finish(@{@"Error" : @"Invalid private input"});
-            return;
-        }
-        NSString *inputPath = [self.diagnosticDirectory stringByAppendingPathComponent:@"Input.bin"];
-        int fd = open(inputPath.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        struct stat inputInfo;
-        NSMutableData *input = [NSMutableData data];
-        BOOL valid = fd >= 0;
-        if (valid)
-            valid = !fstat(fd, &inputInfo) && S_ISREG(inputInfo.st_mode) && inputInfo.st_uid == getuid() &&
-                    inputInfo.st_nlink == 1 && !(inputInfo.st_mode & 0077) && inputInfo.st_size >= 0 &&
-                    inputInfo.st_size <= 16384;
-        if (valid) {
-            unsigned char chunk[2048];
-            ssize_t count;
-            while ((count = read(fd, chunk, sizeof(chunk))) != 0) {
-                if (count < 0) {
-                    if (errno == EINTR)
-                        continue;
-                    valid = NO;
-                    break;
-                }
-                if (input.length + (NSUInteger)count > 16384) {
-                    valid = NO;
-                    break;
-                }
-                [input appendBytes:chunk length:(NSUInteger)count];
-            }
-            if (valid)
-                valid = input.length == (NSUInteger)inputInfo.st_size;
-        }
-        if (fd >= 0)
-            close(fd);
-        if (!valid || unlink(inputPath.fileSystemRepresentation)) {
-            finish(@{@"Error" : @"Private input could not be consumed safely"});
-            return;
-        }
-        standardInput = input;
-    }
-    [self.guestAgent connectWithCompletion:^(NSError *error) {
-      if (error) {
-          finish(@{@"Error" : error.localizedDescription});
-          return;
-      }
-      // An observation deadline must not discard the process handle for a
-      // native installer/cache rebuild which is still legitimately running.
-      // The diagnostic CLI can stop observing without cancelling this task.
-      [self.guestAgent runExecutable:path
-                           arguments:arguments
-                       standardInput:standardInput
-                             timeout:0
-                          completion:^(NSDictionary *result, NSError *failure) {
-                            if (failure) {
-                                finish(@{@"Error" : failure.localizedDescription});
-                                return;
-                            }
-                            finish(@{
-                                @"ExitCode" : result[@"exitcode"] ?: @(-1),
-                                @"Stdout" : [[NSString alloc] initWithData:result[@"stdout"] ?: NSData.data
-                                                                  encoding:NSUTF8StringEncoding]
-                                    ?: @"",
-                                @"Stderr" : [[NSString alloc] initWithData:result[@"stderr"] ?: NSData.data
-                                                                  encoding:NSUTF8StringEncoding]
-                                    ?: @""
-                            });
-                          }];
-    }];
+    [self.diagnostics handleCommand:command finish:finish];
 }
 - (void)enforceGuestSleepPolicyForBoot:(NSString *)boot nativeIdleGuard:(BOOL)guarded {
     if (!boot.length || [boot isEqual:self.sleepDisabledBoot] || !self.task.running)
