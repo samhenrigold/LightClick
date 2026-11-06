@@ -165,7 +165,7 @@ def tree(seconds, guest=None, hook=False, command=None):
     viewer = subprocess.Popen([str(results/'seamless-viewer'), '--tree', '--port', str(port), '--exit-after', str(seconds + 5),
                                '--png', str(prefix), '--screenshots', str(results/f'{name}-screen'),
                                # The demo's Anchor button, on a 10.9 title bar: it adds "clicked" to the title.
-                               '--test-input', '365,156'],
+                               '--test-input', '365,156', '--test-motion'],
                               stdout=subprocess.PIPE, text=True)
     status, _ = run(guest, (command or ['program-tree']) + ['--port', str(port), '--seconds', str(seconds)] +
                     (['--hook'] if hook else []))
@@ -281,7 +281,15 @@ def safari(seconds):
     tree(seconds, guest, hook=True, command=['tree', '--app', 'Safari', '--open'])
 
 
-if arguments[0] == 'gl':
+def motion():
+    install_hook()
+    guest = stage(guest_tool)
+    tree(32, guest, hook=True, command=['program-tree', '--gl'])
+
+
+if arguments[0] == 'motion':
+    motion()
+elif arguments[0] == 'gl':
     gl()
 elif arguments[0] == 'safari':
     safari(int(arguments[1]) if len(arguments) > 1 else 22)

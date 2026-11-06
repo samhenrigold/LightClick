@@ -28,6 +28,7 @@
 
 static int connectionFD = -1; // Main thread.
 static BOOL selfTest;
+static BOOL testMotion;
 static NSString *screenshotPrefix;
 static BOOL treeMode;
 static NSPoint guestOffset; // Host top-left-origin screen point = guest point + this.
@@ -392,6 +393,74 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
     fflush(stdout);
     exit(self.framesShown ? 0 : 1);
 }
+// Scroll, drag by the title bar and resize by the corner, in the demo's quiet seconds, after its sheet has gone. Sent
+// as a host would: guest screen points, moving a step at a time, while the host window follows the guest's.
+- (void)sendTestMotion:(GuestWindow *)window {
+    GuestView *view = (GuestView *)window.contentView;
+    static const double start = 20;
+    void (^at)(double, void (^)(void)) = ^(double when, void (^what)(void)) {
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(when * NSEC_PER_SEC)), dispatch_get_main_queue(), what);
+    };
+    void (^pointer)(uint8_t, double, double) = ^(uint8_t kind, double x, double y) {
+      uint8_t out[64];
+      struct SWMPointer e = {
+          0, kind, 0, kind == SWM_MOVE || kind == SWM_DRAG ? 0 : 1, (int32_t)(x * 16), (int32_t)(y * 16), 0};
+      sendToGuest(out, swm_put_pointer(out, sizeof(out), &e));
+    };
+    void (^stroke)(double, double, double, double, double) = ^(double when, double x, double y, double dx, double dy) {
+      at(when, ^{
+        NSPoint o = view.guestOrigin;
+        pointer(SWM_MOVE, o.x + x, o.y + y);
+        pointer(SWM_DOWN, o.x + x, o.y + y);
+        printf("# stroke from %g,%g, window at %g,%g %gx%g\n", o.x + x, o.y + y, o.x, o.y, view.points.width,
+               view.points.height);
+        for (int i = 1; i <= 12; i++)
+            at(i * 0.08, ^{
+              pointer(SWM_DRAG, o.x + x + dx * i / 12, o.y + y + dy * i / 12);
+            });
+        at(13 * 0.08 + 0.2, ^{
+          pointer(SWM_UP, o.x + x + dx, o.y + y + dy);
+        });
+      });
+    };
+    at(start, ^{
+      NSPoint o = view.guestOrigin;
+      puts("# scrolling");
+      for (int i = 0; i < 40; i++)
+          at(i * 0.03, ^{
+            uint8_t out[64];
+            struct SWMGesture g = {0,
+                                   SWG_SCROLL,
+                                   i == 0    ? SWP_BEGAN
+                                   : i == 39 ? SWP_ENDED
+                                             : SWP_CHANGED,
+                                   0,
+                                   0,
+                                   (int32_t)((o.x + 150) * 16),
+                                   (int32_t)((o.y + 160) * 16),
+                                   0,
+                                   -12,
+                                   0,
+                                   SWG_PRECISE,
+                                   0};
+            sendToGuest(out, swm_put_gesture(out, sizeof(out), &g));
+          });
+    });
+    stroke(start + 3, 200, 10, 180, 120);
+    at(start + 6, ^{
+      printf("# after the drag: window at %g,%g %gx%g\n", view.guestOrigin.x, view.guestOrigin.y, view.points.width,
+             view.points.height);
+    });
+    // The bottom right corner, from the top-left origin it still has.
+    at(start + 6.1, ^{
+      stroke(0, view.points.width - 4, view.points.height - 4, 160, 110);
+    });
+    at(start + 10, ^{
+      printf("# after the resize: window at %g,%g %gx%g\n", view.guestOrigin.x, view.guestOrigin.y, view.points.width,
+             view.points.height);
+      fflush(stdout);
+    });
+}
 - (void)sendTestInput:(GuestWindow *)window {
     // In a tree the demo's schedule leaves only its first seconds for this, and the window can't be addressed: all
     // events are in guest screen points.
@@ -525,9 +594,11 @@ static void centerPixel(NSWindow *window, void (^done)(uint32_t bgra)) {
             }
             // Only once: a tree's later windows aren't what the click is aimed at.
             static BOOL tested;
-            if (testClick.x >= 0 && !tested) {
+            if (testClick.x >= 0 && !tested && (!treeMode || [title hasPrefix:@"Seamless demo"])) {
                 tested = YES;
                 [self sendTestInput:window];
+                if (testMotion)
+                    [self sendTestMotion:window];
             }
             if (exitAfter > 0)
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(exitAfter * NSEC_PER_SEC)),
@@ -663,6 +734,8 @@ int main(int argc, const char **argv) {
                 selfTest = YES;
             else if (!strcmp(argv[i], "--screenshots") && i + 1 < argc)
                 screenshotPrefix = @(argv[++i]);
+            else if (!strcmp(argv[i], "--test-motion"))
+                testMotion = YES;
             else if (!strcmp(argv[i], "--tree"))
                 treeMode = YES;
             else if (!strcmp(argv[i], "--exit-after") && i + 1 < argc)

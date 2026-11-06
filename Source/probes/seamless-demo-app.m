@@ -23,7 +23,7 @@
     glVertex2f(0.6, -0.6);
     glVertex2f((float)(phase * 2 - 1), 0.7);
     glEnd();
-    glFlush();
+    [self.openGLContext flushBuffer];
 }
 - (void)tick:(NSTimer *)timer {
     self.needsDisplay = YES;
@@ -76,6 +76,18 @@
     [window.contentView addSubview:counter];
     self.counter = counter;
     [NSTimer scheduledTimerWithTimeInterval:1.0 / 30 target:self selector:@selector(tick) userInfo:nil repeats:YES];
+    // Something to scroll, resizing with the window, as a real document would.
+    NSScrollView *scroller = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, 50, 280, 100)];
+    scroller.hasVerticalScroller = YES;
+    scroller.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    NSTextView *text = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 280, 100)];
+    text.autoresizingMask = NSViewWidthSizable;
+    NSMutableString *lines = [NSMutableString string];
+    for (int i = 1; i <= 200; i++)
+        [lines appendFormat:@"Line %d of a document to scroll\n", i];
+    text.string = lines;
+    scroller.documentView = text;
+    [window.contentView addSubview:scroller];
     NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(20, 160, 200, 24)];
     field.delegate = self;
     [window.contentView addSubview:field];

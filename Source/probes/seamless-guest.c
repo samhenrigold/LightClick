@@ -43,6 +43,7 @@
 #include <dlfcn.h>
 #include <limits.h>
 #include <sys/mman.h>
+#include "seamless-inject.h"
 #include "seamless-slots.h"
 #include "seamless-ws-table.h"
 #include "../tools/guest-display-modes.h"
@@ -152,7 +153,7 @@ struct Stream {
     uint8_t receive[1024];
     size_t received;
     int buttons_down;
-    unsigned pointer_events, key_events, captures, frames_changed;
+    unsigned pointer_events, key_events, gesture_events, captures, frames_changed;
     double capture_seconds, capture_worst;
     uint64_t bytes_sent;
     uint32_t order, group, alpha, margin;
@@ -346,6 +347,13 @@ static void post_key(struct Stream *s, const struct SWMKey *k) {
 }
 
 // Applies every whole message waiting on the socket. Returns -1 once the host has gone or sent something invalid.
+static int darwin_major_early(void) {
+    char release[32] = "";
+    size_t size = sizeof(release);
+    sysctlbyname("kern.osrelease", release, &size, NULL, 0);
+    return atoi(release);
+}
+
 static int drain_input(struct Stream *s) {
     ssize_t n = recv(s->fd, s->receive + s->received, sizeof(s->receive) - s->received, 0);
     if (n < 0 && errno == EINTR)
@@ -368,7 +376,16 @@ static int drain_input(struct Stream *s) {
             post_pointer(s, &m.u.pointer);
         else if (m.type == SWM_KEY)
             post_key(s, &m.u.key);
-        else if (m.type == SWM_FOCUS)
+        else if (m.type == SWM_GESTURE && !s->test_pattern) {
+            // Apple's own route per generation: see seamless-input.md.
+            static struct SWIContext context;
+            context.mechanism = darwin_major_early() < 18 ? SWI_RECORD : SWI_SESSION;
+            const struct SWMGesture *g = &m.u.gesture;
+            CGPoint point = g->window ? CGPointMake(s->bounds.origin.x + g->x / 16.0, s->bounds.origin.y + g->y / 16.0)
+                                      : CGPointMake(g->x / 16.0, g->y / 16.0);
+            swi_gesture(&context, g, point);
+            s->gesture_events++;
+        } else if (m.type == SWM_FOCUS)
             activate_owner(s);
         offset += used;
     }
@@ -1302,6 +1319,7 @@ done:;
     printf("frames_sent_rate %.1f /s\n", s->frames_changed / elapsed);
     printf("sent %.2f MB/s\n", s->bytes_sent / elapsed / 1e6);
     printf("capture_share %.0f %%\n", s->capture_seconds / elapsed * 100);
+    printf("input %u pointer, %u key, %u gesture\n", s->pointer_events, s->key_events, s->gesture_events);
     if (tree_table) {
         printf("hook_frames %llu count\n", hook_frames);
         printf("hook_frames_rate %.1f /s\n", hook_frames / elapsed);
