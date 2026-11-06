@@ -231,6 +231,14 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
                 in->disp = *(i32 *)p;
                 p += 4;
             }
+        } else if (!tr_compat && opc >= 0xA0 && opc <= 0xA3 && !in->seg && !in->addr32) { // moffs: JavaScript's baseline code stores to fixed addresses this way
+            w = (opc & 1) ? sz : 1;
+            in->op = OP_MOV;
+            in->memop = true;
+            in->no_base = in->no_index = true;
+            in->to_reg = opc < 0xA2;
+            in->disp = *(i64 *)p;
+            p += 8;
         } else if (tr_compat && (opc == 0x9A || opc == 0xEA)) {
             in->op = OP_FAR;
             in->sub = opc == 0x9A ? 1 : 2;
@@ -800,6 +808,13 @@ static void decode_inner(u64 rip, Insn *in, const u8 *b, int avail) {
                 in->sub = 4;
                 in->has_imm = true;
                 in->imm = *p++;
+            } else if (mand == 0x66 && opc == 0x3A && p[0] == 0x63) { // pcmpistri: a Mavericks strcmp, thousands to an application's start
+                opc = *p++;
+                SSE_FORM();
+                in->sub = 5;
+                in->has_imm = true;
+                in->imm = *p++;
+                in->writes = F_ARITH;
             } else
                 BADUD("SSE4 opcode map: TCG has it");
         } else if (opc >= 0x40 && opc <= 0x4F) {

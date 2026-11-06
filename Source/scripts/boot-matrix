@@ -19,6 +19,7 @@ A CASE is one quoted string, a name and then switches:
     desktop=N   fail unless the guest agent reports the desktop within N seconds (default 300 with program=)
     program=P   stage this local x86 program in the guest and run it; a nonzero exit fails the boot
     expect=T    fail unless the program's stdout contains T
+    limit=N     fail the program if it hasn't finished in N seconds (default 900)
     reboots=N   after the program, expect the guest to restart N times, each reaching the desktop again. The app starts
                 a new QEMU for a guest reboot, so the program must start one and exit 0, as in '(sleep 4; reboot) &'
     KEY=VALUE   an upper-case word is an environment variable for the app and QEMU; it overrides --env
@@ -130,6 +131,7 @@ class Case:
     seconds: int | None = None
     desktop: int | None = None
     reboots: int = 0
+    limit: int = 900
     program: Path | None = None
     expect: str | None = None
     env: dict = field(default_factory=dict)
@@ -144,7 +146,7 @@ def parse_case(text, shared_env=()):
         key, equals, value = word.partition('=')
         if not equals:
             raise ValueError(f'{case.name}: expected KEY=VALUE, got {word!r}')
-        if key in ('cpus', 'runs', 'seconds', 'desktop', 'reboots'):
+        if key in ('cpus', 'runs', 'seconds', 'desktop', 'reboots', 'limit'):
             if not value.isdigit():
                 raise ValueError(f'{case.name}: {key} needs a number')
             setattr(case, key, int(value))
@@ -398,9 +400,9 @@ class Boot:
             return
         program = staged['Transfer']['Directory']+'/Transfer.bin'
         self.request({'Executable': '/bin/chmod', 'Arguments': ['0755', program]}, 120)
-        result = self.request({'Executable': program, 'Arguments': []}, 900)
+        result = self.request({'Executable': program, 'Arguments': []}, self.case.limit)
         if result is None:
-            self.program_failure = 'the program didn\'t finish in 900s'
+            self.program_failure = f'the program didn\'t finish in {self.case.limit}s'
             return
         self.evidence.mkdir(parents=True, exist_ok=True)
         (self.evidence/'program.json').write_text(json.dumps(result, indent=1))

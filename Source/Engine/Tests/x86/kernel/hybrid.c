@@ -1365,6 +1365,30 @@ static u32 crc32c_soft(u32 crc, u64 value, int bytes) {
     return crc;
 }
 
+// moffs in 64-bit mode: an address of eight bytes, and nothing else to decode.
+static void test_moffs(void) {
+    static volatile u64 cell __attribute__((used));
+    u64 r = 0x1122334455667788ULL, got;
+    __asm__ volatile(".byte 0x48, 0xa3\n .quad %c1" : : "a"(r), "i"(&cell) : "memory"); // mov %rax, cell
+    CHECK(cell == r);
+    __asm__ volatile(".byte 0xa1\n .quad %c1" : "=a"(got) : "i"(&cell), "0"(~0ULL) : "memory"); // mov cell, %eax
+    CHECK(got == (u32)r);
+    __asm__ volatile(".byte 0xa2\n .quad %c1" : : "a"(0x99ULL), "i"(&cell) : "memory"); // mov %al, cell
+    CHECK(cell == 0x1122334455667799ULL);
+}
+
+// strcmp's use of pcmpistri, as Mavericks has it: equal each, negative, least significant index.
+static void test_pcmpistri(void) {
+    static const char a[16] __attribute__((aligned(16))) = "hello, wo", b[16] __attribute__((aligned(16))) = "hello, world";
+    u32 index, flags;
+    __asm__ volatile("movdqa %2, %%xmm1\n pcmpistri $0x1a, %3, %%xmm1\n pushfq\n pop %q1" : "=c"(index), "=r"(flags) : "m"(*a), "m"(*b) : "xmm1", "cc");
+    CHECK(index == 9); // where they first differ
+    CHECK(flags & 1); // CF: a difference
+    CHECK(flags & 0x40); // ZF: b ends here
+    CHECK(flags & 0x80); // SF: a ends here
+    CHECK(!(flags & 0x800) && !(flags & 4) && !(flags & 0x10)); // OF: not at the first, PF and AF clear
+}
+
 static void test_crc32(void) {
     volatile u64 from_memory = 0x123456789ABCDEF0ULL;
     u64 v = 0x0FEDCBA987654321ULL;
@@ -2079,6 +2103,8 @@ void kmain(void) {
     test_calls_link();
     test_icr();
     test_forget_all(root);
+    test_moffs();
+    test_pcmpistri();
     test_crc32();
     test_locked_pte(root);
     test_second_vcpu(root);

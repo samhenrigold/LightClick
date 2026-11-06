@@ -459,6 +459,9 @@ for op in ["pblendvb", "blendvps", "blendvpd"]:
     form(f"{op} into xmm0", f"{op} %xmm0,%xmm2,%xmm0", ALL, FP)
 # Rosetta leaves SF, OF, PF and AF as they were. The SDM and TCG clear them, as the engine does: hybrid.c checks that.
 PT = F_C | F_Z
+for imm in (0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x14, 0x18, 0x1A, 0x1C, 0x30, 0x34, 0x38, 0x3A, 0x3C, 0x40, 0x44, 0x48, 0x4C, 0x5A, 0x7C):
+    form(f"pcmpistri ${imm:#x}", f"pcmpistri ${imm:#x},%xmm2,%xmm1", ALL, FP)
+    form(f"pcmpistri ${imm:#x} m", f"pcmpistri ${imm:#x},32(%r15),%xmm1", ALL, FP)
 form("ptest x", "ptest %xmm2,%xmm1", PT, FP)
 form("ptest same", "ptest %xmm1,%xmm1", PT, FP)
 form("ptest m", "ptest 32(%r15),%xmm1", PT, FP)

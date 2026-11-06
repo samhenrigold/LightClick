@@ -314,6 +314,20 @@ static void ins_x(int v, int lane, int x) { E(0x4E081C00u | (u32)lane << 20 | (u
 // SSE4.1, AES and PCLMUL, the forms libraries and kexts reach for, each with an exact NEON or crypto counterpart.
 static void emit_sse41(const Insn *in, int live) {
     int opc = in->opc, d = in->reg, imm = (int)(in->imm & 0xff);
+    if (in->sub == 5) {
+        int s = src_op(in, 4, false);
+        umov_d(S0, d, 0);
+        umov_d(S1, d, 1);
+        umov_d(S2, s, 0);
+        umov_d(S3, s, 1);
+        movimm(S4, (u64)imm);
+        svc(SVC_H_PCMPISTRI);
+        mov_reg(0, 1, S0);
+        msr_nzcv(S2);
+        mov_reg(1, R_PF, S3);
+        mov_reg(1, R_AF, S4);
+        return;
+    }
     if (in->sub == 4) {
         switch (opc) {
             case 0x08:
