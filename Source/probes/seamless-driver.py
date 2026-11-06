@@ -325,11 +325,11 @@ def tree_bench(seconds):
 def mojave(seconds):
     # What a capture does on Mojave, with the hook only reporting what its windows hold.
     install_hook()
-    log = request({'Executable': '/bin/cat', 'Arguments': ['/var/tmp/seamless-ws-probe.log']}, 120).get('Stdout') or ''
-    (results/f'{tag}-hook.log').write_text(log)
     guest = stage(guest_tool)
     tree(seconds, guest, hook=True, command=['tree', '--app', 'TextEdit', '--open'])
     tree(seconds, guest, hook=True, command=['tree', '--app', 'Safari', '--open'])
+    log = request({'Executable': '/bin/cat', 'Arguments': ['/var/tmp/seamless-ws-probe.log']}, 120).get('Stdout') or ''
+    (results/f'{tag}-hook.log').write_text(log)
 
 
 def capture_bench():

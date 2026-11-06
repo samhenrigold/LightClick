@@ -101,6 +101,7 @@ static const struct Build {
      sizeof(wanted_mojave) / sizeof(*wanted_mojave), 0xf0, 0, 0, 0, 0, 0},
 };
 static const struct Build *build;
+static int samples_left = 12;
 
 static const struct mach_header_64 *loaded_image(void) {
     size_t suffix = strlen(build->suffix);
@@ -202,6 +203,7 @@ static int resolve_symbols(void) {
     note("build: Darwin %s, %s\n", name_of_system.release, build->full ? "known" : "reporting only");
     if (!build->full)
         return 1;
+    samples_left = 2;
     window_has_shadow = resolved[1];
     backing_is_accelerated = resolved[2];
     backing_row_bytes = resolved[3];
@@ -244,8 +246,15 @@ static void sample_unknown_build(void) {
                  *(const uint32_t *)(backing + 4), *(const uint32_t *)(backing + 8), *(const uint32_t *)(backing + 12),
                  *(const uint32_t *)(backing + 0x38), *(void *const *)(backing + 0x68));
         note("\n");
-        if (backing && dumped < 4 && total_samples == 2) {
+        // Only what's on the desktop by now: an app's window, not the ones from before login.
+        if (backing && dumped < 6 && total_samples > 2 && *(const uint32_t *)(backing + 4) > 400 &&
+            *(const uint32_t *)(backing + 12) > 200) {
             dumped++;
+            const uint8_t *data = *(const uint8_t *const *)(backing + 0x48);
+            uint32_t row = *(const uint32_t *)(backing + 8), height = *(const uint32_t *)(backing + 12);
+            if (data && row)
+                note(" data %p, size %x, middle %08x\n", data, *(const uint32_t *)(backing + 0x50),
+                     *(const uint32_t *)(data + (size_t)row * (height / 2) + row / 2));
             note(" window bytes\n");
             dump(window, 0x200);
             note(" backing bytes\n");
@@ -425,7 +434,7 @@ static void publish(void) {
 
 static pthread_t main_thread;
 static time_t next_sample;
-static int ready, samples_left = 2, in_sample, reached;
+static int ready, in_sample, reached;
 
 static void between_requests(void) {
     if (!pthread_equal(pthread_self(), main_thread) || in_sample)

@@ -851,7 +851,10 @@ static int drain_input(struct Stream *s) {
         else if (m.type == SWM_GESTURE && !s->test_pattern) {
             // Apple's own route per generation: see seamless-input.md.
             static struct SWIContext context;
-            context.mechanism = darwin_major_early() < 18 ? SWI_RECORD : SWI_SESSION;
+            // On a Mavericks clone only the pid path delivered everything: magnify, rotate and swipe never arrive by
+            // record, and swipe doesn't by session. Mojave hasn't been run, so it stays on its agent's route.
+            context.mechanism = darwin_major_early() < 18 ? SWI_PID : SWI_SESSION;
+            context.pid = session_app_pid ? session_app_pid : s->pid;
             const struct SWMGesture *g = &m.u.gesture;
             CGPoint point = g->window ? CGPointMake(s->bounds.origin.x + g->x / 16.0, s->bounds.origin.y + g->y / 16.0)
                                       : CGPointMake(g->x / 16.0, g->y / 16.0);
@@ -1293,6 +1296,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
+    double animating_until;
     uint32_t surface_flushes;
     CGWindowID id;
     uint32_t seed, order;
@@ -1654,7 +1658,13 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             int have_seed = tree_flush_seed && tree_connection && !tree_flush_seed(tree_connection(), id, &seed);
             seed_answers += have_seed;
             // A seed doesn't cover GL or video surfaces in a window, so look anyway once a second.
-            int stale = !have_seed || seed != w->seed || sized || fresh || !w->previous || tick - w->last_capture > 1;
+            // A seed misses what's composited in the server: on Mojave a page's CSS animation leaves it still for 22 s.
+            // So the once-a-second look that finds a change without one looks faster for a while.
+            double look_every = tick < w->animating_until ? 1.0 / 15 : 1;
+            int seed_moved = have_seed && seed != w->seed;
+            int stale =
+                !have_seed || seed_moved || sized || fresh || !w->previous || tick - w->last_capture > look_every;
+            unsigned changed_before = s->frames_changed;
             struct SWSEntry *entry = tree_table ? &tree_table->slots[w - windows] : NULL;
             if (entry) {
                 entry->id = id;
@@ -1759,6 +1769,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
                 }
                 w->previous = s->previous;
                 s->previous = NULL;
+                if (s->frames_changed != changed_before && !seed_moved && !sized)
+                    w->animating_until = tick + 2;
                 if (fresh) {
                     if (!roster)
                         first_window = tick;
