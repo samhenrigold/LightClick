@@ -30,6 +30,10 @@ public struct GuestSessionState: Sendable {
     public var repairRequested = false
     public var explicitRepair = false
     public var verifiedUpdateRepair = false
+    /// A repair check or archive failed and told the user no repair was started. An explicit repair still may.
+    public var updateRepairHeld = false
+    /// The modern setup failures already shown to the user since the guest last started.
+    public var presentedSetupFailures: Set<String> = []
 
     public var guestPending = false
     public var diagnosticPending = false
@@ -87,6 +91,11 @@ public struct GuestSessionState: Sendable {
         return !displayPolicyRestartRequired && consoleUID != nil && !preparing && !preparationRequested
             && !repairRequested && !guestPending && !clipboardPending && !bootPolicyPending && !displayModePending
             && !shutdownRequested
+    }
+
+    /// Whether a modern setup failure needs its alert. Setup retries on a timer, so only a failure not yet shown does.
+    public func presentsSetupFailure(_ message: String) -> Bool {
+        !presentedSetupFailures.contains(message)
     }
 
     /// `isEqual:`, not `==`: boots compare literally, and a missing boot matches nothing.

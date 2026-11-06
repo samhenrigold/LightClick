@@ -49,6 +49,14 @@ public final class GuestSessionStateBridge: NSObject {
         get { state.verifiedUpdateRepair }
         set { state.verifiedUpdateRepair = newValue }
     }
+    public var updateRepairHeld: Bool {
+        get { state.updateRepairHeld }
+        set { state.updateRepairHeld = newValue }
+    }
+    public var presentedSetupFailures: Set<String> {
+        get { state.presentedSetupFailures }
+        set { state.presentedSetupFailures = newValue }
+    }
     public var guestPending: Bool {
         get { state.guestPending }
         set { state.guestPending = newValue }
@@ -147,6 +155,11 @@ public final class GuestSessionStateBridge: NSObject {
     @objc(sleepPolicyArgumentsWithNativeIdleGuard:)
     public func sleepPolicyArguments(nativeIdleGuard: Bool) -> [String]? {
         state.sleepPolicyArguments(nativeIdleGuard: nativeIdleGuard)
+    }
+
+    @objc(presentsSetupFailure:)
+    public func presentsSetupFailure(_ message: String) -> Bool {
+        state.presentsSetupFailure(message)
     }
 
     @objc(allowsDisplaySelectionForBoot:)

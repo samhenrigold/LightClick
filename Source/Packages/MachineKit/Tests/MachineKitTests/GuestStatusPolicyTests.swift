@@ -345,6 +345,28 @@ import Testing
         #expect(!policy { $0.repairRequested = true }.mayClaimUpdateRepair)
     }
 
+    @Test func aHeldRepairIsNotClaimedAgainButCanStillBeRequested() {
+        // After a failed check or archive, a read failure in the journal would otherwise authorize a new claim.
+        #expect(policy().mayClaimUpdateRepair)
+        #expect(!policy { $0.updateRepairHeld = true }.mayClaimUpdateRepair)
+        #expect(
+            policy {
+                $0.updateRepairHeld = true
+                $0.repairRequested = true
+            }.mayBeginRepair)
+    }
+
+    @Test func aSetupFailureIsPresentedOnceUntilItChanges() {
+        var state = session
+        #expect(state.presentsSetupFailure("no room"))
+        state.presentedSetupFailures.insert("no room")
+        #expect(!state.presentsSetupFailure("no room"))
+        #expect(state.presentsSetupFailure("no helpers"))
+        state.presentedSetupFailures.insert("no helpers")
+        // Two failures taking turns don't become an alert per retry.
+        #expect(!state.presentsSetupFailure("no room"))
+    }
+
     @Test func anExplicitRepairIsRecheckedOnlyBeforeTheDesktop() {
         let explicit = { (state: inout GuestSessionState) in
             state.explicitRepair = true
@@ -522,6 +544,10 @@ import Testing
         bridge.reconciliationAttempts = 2
         #expect(bridge.state.reconciledBoot == "boot")
         #expect(bridge.state.reconciliationAttempts == 2)
+        bridge.updateRepairHeld = true
+        #expect(bridge.state.updateRepairHeld)
+        bridge.presentedSetupFailures = ["no room"]
+        #expect(!bridge.presentsSetupFailure("no room"))
         #expect(bridge.allowsDisplaySelection(boot: "boot"))
     }
 

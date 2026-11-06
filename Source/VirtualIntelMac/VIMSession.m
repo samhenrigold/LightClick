@@ -298,6 +298,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property BOOL verifiedUpdateRepair;
 @property BOOL explicitRepair;
 @property BOOL repairArchivePending;
+@property BOOL updateRepairHeld;
+@property NSSet<NSString *> *presentedSetupFailures;
 @property(nonatomic) BOOL preparing;
 @property VIMInstallationActivity *sleepActivity;
 @property NSString *lastGuestMessage;
@@ -1308,7 +1310,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         };
         self.modernSetup.showAccountProgress = ^(BOOL automaticLogin) {
           VIMSession *session = weakSelf;
-          if (!session.task.running || session.shutdownRequested)
+          // Retries after a failure stay quiet: the notice would otherwise flash on every one.
+          if (!session.task.running || session.shutdownRequested || session.presentedSetupFailures.count)
               return;
           [session showSetupNoticeAutomatic:YES automaticLogin:automaticLogin restarting:NO];
         };
@@ -2931,6 +2934,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     state.repairRequested = self.repairRequested;
     state.explicitRepair = self.explicitRepair;
     state.verifiedUpdateRepair = self.verifiedUpdateRepair;
+    state.updateRepairHeld = self.updateRepairHeld;
+    state.presentedSetupFailures = self.presentedSetupFailures ?: NSSet.set;
     state.guestPending = self.guestPending;
     state.diagnosticPending = self.diagnosticPending;
     state.clipboardPending = self.clipboardPending;
@@ -3044,6 +3049,18 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                        [weakSelf finishGuestStatus:report error:failure];
                                      }];
     }];
+}
+- (void)scheduleGuestStatusRetry {
+    // Nothing else restarts this loop after finishGuestStatus cancels its timer.
+    if (!self.task.running)
+        return;
+    __weak VIMSession *weakSelf = self;
+    [self.guestTimer invalidate];
+    self.guestTimer = [NSTimer scheduledTimerWithTimeInterval:15
+                                                      repeats:NO
+                                                        block:^(NSTimer *timer) {
+                                                          [weakSelf refreshGuestStatus];
+                                                        }];
 }
 - (void)dismissSetupNotice {
     if (self.previewSetupNotice)
@@ -3561,13 +3578,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         }
         if (nativeError) {
             self.guestStatus.stringValue = nativeError.localizedDescription;
-            // The save can succeed once the library has room again, and nothing else restarts this loop.
-            __weak VIMSession *weakSelf = self;
-            self.guestTimer = [NSTimer scheduledTimerWithTimeInterval:15
-                                                              repeats:NO
-                                                                block:^(NSTimer *timer) {
-                                                                  [weakSelf refreshGuestStatus];
-                                                                }];
+            // The save can succeed once the library has room again.
+            [self scheduleGuestStatusRetry];
             return;
         }
     }
@@ -3584,8 +3596,15 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                  session.guestPending = NO;
                  if (failure) {
                      [session dismissSetupNotice];
-                     session.guestStatus.stringValue = failure.localizedDescription;
-                     VIMPresentError(failure, session.window);
+                     NSString *message = failure.localizedDescription;
+                     session.guestStatus.stringValue = message;
+                     if ([session.guestSessionState presentsSetupFailure:message]) {
+                         session.presentedSetupFailures =
+                             [session.presentedSetupFailures ?: NSSet.set setByAddingObject:message];
+                         VIMPresentError(failure, session.window);
+                     }
+                     // Each step is journaled and rechecks its target, and a dispatched or failed install isn't redone.
+                     [session scheduleGuestStatusRetry];
                      return;
                  }
                  if ([outcome[@"Handled"] isEqual:@YES]) {
@@ -3747,8 +3766,11 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         void (^beginRepair)(NSError *) = ^(NSError *failure) {
           self.preparing = NO;
           if (failure) {
+              self.repairArchivePending = NO;
+              self.updateRepairHeld = YES;
               self.guestStatus.stringValue = failure.localizedDescription;
               VIMPresentError(failure, self.window);
+              [self scheduleGuestStatusRetry];
               return;
           }
           if (!self.task.running)
@@ -3888,7 +3910,9 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                message:
                                    @"The previous installation record could not be preserved. Nothing was installed."
                             completion:nil];
+                        session.updateRepairHeld = YES;
                         VIMPresentError(archiveError, session.window);
+                        [session scheduleGuestStatusRetry];
                         return;
                     }
                     [VIMGuestInstallation
@@ -5925,6 +5949,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     self.displaySelectedBoot = nil;
     self.displaySelectionRetryAfter = nil;
     self.displayPolicyRestartRequired = NO;
+    self.updateRepairHeld = NO;
+    self.presentedSetupFailures = nil;
     [self.handoffTimer invalidate];
     self.handoffTimer = nil;
     [self.guestTimer invalidate];

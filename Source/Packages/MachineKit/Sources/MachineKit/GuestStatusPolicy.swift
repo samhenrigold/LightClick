@@ -124,7 +124,7 @@ public struct GuestStatusPolicy: Sendable {
     }
 
     public var mayClaimUpdateRepair: Bool {
-        !failed && !session.repairRequested && !session.preparationRequested
+        !failed && !session.repairRequested && !session.preparationRequested && !session.updateRepairHeld
     }
 
     private var admitsPreparation: Bool {
