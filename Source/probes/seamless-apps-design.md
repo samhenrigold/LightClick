@@ -241,12 +241,33 @@ So the host pays no more, and WindowServer pays more: 1.8 ms a composite here, a
 | Generation | What's run | Whole window at windowed rate | Covered | Display off | In a running guest |
 | --- | --- | --- | --- | --- | --- |
 | Mojave 18G103 | PVG: a guest IOSurface is a host IOSurface | Yes, in a layer, read from the screen | Yes, at 60 | Yes | Yes, injected |
-| Mavericks 13F34 | GL replay into host IOSurfaces | Yes, composed from pixels | Not run; the clip should do it | No | No: its layer markers rest on an interposed `new[]`, which injection can't do. Patching `CoreGraphics`' lazy pointer for it should [inferred] |
+| Mavericks 13F34 | GL replay into host IOSurfaces | Yes, in a layer, read from the screen | At the rate windowed gets there, about 14 frames/s for a page behind TextEdit | Yes | Yes, injected |
 | Yosemite to High Sierra | Not run. GL compositor [memory] | Likely with Mavericks' method, per build | | | |
 | Catalina, Big Sur | Not run. Metal, PVG | Likely with Mojave's, per build; Big Sur's library symbols are in question | | | |
 | Tiger to Mountain Lion | Not inspected | See below | | | |
 
-**A window's own content, with no composite in the guest.** Not reached. Each window's layers are drawn by WindowServer, as CA's render server is in it on both systems [Mavericks read and measured from the GL stream, Mojave read]. So handing the host layer trees would mean running CA's renderer against them there. The composite left is what's cheap: on Mavericks the draws run once more on the host, on Mojave 1.8 ms a window in the guest.
+**A window's own content, with no composite in the guest.** Not reached, and possible on Mojave. CA's render server is in WindowServer on both systems, and a commit reaches `CA::Render::Context` there as decoded changes [read, not run]. CA's remote layers rest on Mach ports, so they can't cross the VM, and the stream's numbering is private to each build, so the host would be fed by a translator to a plain `CALayer` tree, with any window it doesn't understand staying on its composite. See "The layer tree census". On Mavericks a window's contents have no host identity, so it stays with replay in the stream.
+
+**The layer tree census.** Measured with `CARenderUpdatePrintTrees` from the hook, through `CASetMessageFunction`: Safari, TextEdit, Finder and the demo's windows on Mojave, 300 surface updates, 61 distinct trees. Windows' trees are small and plain:
+
+| In 6,035 layers across the distinct trees | Count |
+| --- | --- |
+| `proxy-layer`, which is a material: number, blend mode, level, selection tint | 140 |
+| `gradient-layer` | 111 |
+| `layer-host`, another process's content | 46 |
+| `backdrop-layer` | 10 |
+| Compositing filters | `plusD` 403, `normalBlendMode` 342, `copy` 101, `darkenBlendMode` 10 |
+| Other filters | `gaussianBlur` and `colorSaturate`, 10 each |
+| Animations | 46 |
+
+No masks, transforms, shadows, shapes, replicators, emitters or portals turned up. Contents are `backingStore`, of an image or a surface, and Safari's page is 1024x1024 surfaces in tiles. So a translator would be small for these windows: layers, geometry, contents, the four subclasses, those filters. What this doesn't say is how close `plusD` and friends look on the host, what a video or a WebGL page has, or what contents cost: on Mojave, about half of large texture binds in a composite have a host IOSurface, and `CA_ACCEL_BACKING=1` hardly moved that. Binds aren't layers.
+
+**What the whole path looks like, from a static read of both WindowServers.** Not run, except where this section says.
+
+- A client's backing goes to a `CA::Render::Context` in WindowServer. An update then asks CA what changed, makes layers for each window, composites them, and presents.
+- A window's shadow is its own layers. Its materials are `WSBackdrop`s, which sample what's already been composited, on Mojave. Mavericks has no such thing: its blur is a surface's background radius and a shader.
+- Hooks can sit at the composite, as here, at each surface, or at the commit. A whole other compositor is there (`CompositorNoop`), but capture, Spaces and transitions all reach for one, so replacing it globally would break them.
+- Window management could move host-side by steps: `CGXMoveWindowList` mirrors a host's move for AppKit, with no composite a guest position only feeds events, and `__XPostEventRecordTo` may take a window. Identity, delivery and focus stay in the guest. None of it is tried.
 
 **Tiger to Mountain Lion, scoped and unrun.** Software backings are shared memory with the app [read on 10.9], so a window with no surfaces is a matter of reading its rows, as the hook does on 10.9. Doing that without a copy means an IOSurface over guest RAM, and fragmented 4K guest pages can't back one on a 16K host: `apple-gfx-legacy-shadow.m`'s notes say Metal refuses those imports. So one copy per damaged rectangle on the host, by its own CPU or GPU, which is `DG_VRAM_PATCH_DRAWABLE`'s kind of work [inferred]. Where a guest has PassthroughOpenGL, Mavericks' method applies if the compositor has the same shape, which isn't read: symbols and offsets are per build.
 
@@ -260,15 +281,44 @@ So the host pays no more, and WindowServer pays more: 1.8 ms a composite here, a
 
 - **Display off:** `generate_layers_for_window` returns 0 with no layers during an update, and runs as it does otherwise inside the hook's own composite, which also calls it. The helper stops encoding the display when `<directory>/nodisplay` exists.
 - **Damage:** the update's region at +0x50, by intersecting each window's capture shape, and the connections in `add_connection_to_update_contributors`, with a window's own at +0x18. CA's animations come with no connection. A window is damaged when new or moved too.
-- **Which window:** the surface's size. The low 8 bits of its width and the low 4 of its height carry the ID, with 0xA0 in the rest of the height's low byte. Past the window it's transparent. Bounds come from the session's window list by the same ID.
-- **One frame per composite:** a composite is several command buffers, so the helper sends a surface 6 ms after the last on it. That's latency, and has no signal from the guest yet.
-- **A covered window** with TextEdit over Safari: 60 frames/s, every frame's sampled pixels changing. The update's region leaves out what's covered, so a covered window's composite is whole.
+- **Which window:** the surface's size. The low 8 bits of its width and the low 4 of its height carry the ID, with 0xA0 in the rest of the height's low byte. Past the window it's transparent. Bounds come from the session's window list by the same ID. A real CA surface can have such a size, and one did. Neither a texture's label nor `IOSurfaceSetValue` reaches the host [measured], so size stays, and the marker below keeps such a surface from being sent.
+- **One frame per composite:** a composite is several command buffers, so after it the hook clears one point of a small surface, tagged 0xB0, on the same queue, and the helper sends the window's surface when that finishes.
+- **What the host's GPU keeps:** WindowServer's passes say "don't care" for what they load, as the guest's GPU keeps what it doesn't draw. An Apple GPU doesn't. So the helper changes that to load for these surfaces, or a composite of part of a window loses the rest.
+- **A covered window** with TextEdit over Safari: 60 frames/s, every frame's sampled pixels changing, in an earlier version. The update's region leaves out what's covered, so what's in front of a window, by its real shape, is drawn each frame. Skipped windows count, as the Dock does.
+- **A window that's opening** is mid-effect when first drawn, so it's drawn whole again a second later. It needs an update to happen by then.
+
+**Materials on Mojave.** A real host material sits behind a window, and follows what's behind it on the Mac [read from the screen by window ID, with what's below it]. Font Book's sidebar over a host window that changes color reads 228,204,202 over red, 204,203,227 over blue, 204,228,202 over green and 204,203,202 over black, while its white content stays 255,255,255. See `Build/seamless-gpu/v4-guest-light/window-scene-*.png` from the commands below.
+
+No patch to the composite was needed: a `WSBackdrop` samples its destination, and one window alone in an empty one leaves its materials clear, with an alpha of 1. Only crops have the guest's wallpaper in them. The hook publishes each window's raw backdrops, at +0x3b0, as `gpu_backdrops[]`: material, active, and rectangles. An inactive window's aren't in the resolved list at +0x3c0. The numbers read on 18G103, in light appearance: 3 menu and popover, 4 sheet, 5 sidebar, 19 selection, 21 menu bar, 25 title bar and status items, and 26 what vibrant text and icons cut out, which needs nothing. In a composite without its shadow, any alpha at all is the window's real shape, with a popover's arrow and a sidebar's corners, except for 21 and 25, which come out with none. So a window with materials also sends that as a surface, tagged 0xC0, when drawn whole, and the host masks with it. `apply_materials` in `probes/seamless-gpu-viewer.m` is how, with one `NSVisualEffectView` per material and its state following `active`.
+
+Not done: dark appearance, as `defaults` reads back Dark and apps stay light in these runs; how close the host's materials look to Mojave's; a menu and a sheet on their own, as the images catch only some of the demo's timeline; and a gap in Font Book, a column at its list's scroller that's clear in some runs, not understood.
+
+**Guest shadow or host shadow.** Compare `v4-guest-light` with `v4-host-light`. The guest's looks right, on overlap and over a background. The host's, from the surface's alpha, was only a hairline, on windows that are never key, so it hasn't had a fair look. A guest shadow past the guest's display is cut off, as Safari at the display's full width shows.
+
+**Mavericks with the display off**, and the hook injected into the running WindowServer, in one boot:
+
+| Safari | Windowed, 22 s | Each window, display off, 27 s |
+| --- | --- | --- |
+| Frames/s | 60.5 presented | 60 into its surface and to a layer in another process, read from the screen |
+| QEMU, which includes WindowServer | 22.5% | 21.0% |
+| WindowServer | 6.2% | 7.4% |
+| Safari's own, the app | 5.3% | 5.0% |
+| Viewer | | 1.8% |
+| Behind TextEdit, frames/s | 13.9 | 13.5 |
+
+So there's no difference to speak of, one run each. A page behind another app's window slows down whether or not this is on. Turning it off brought Safari back on the display whole. With the mode on, the host doesn't run the display's draws, each window gets all of what changed, and every window behind is drawn too, as nothing stops at an opaque one. A window drawn in part has no shadow drawn, and one drawn whole starts clear, or the shadow builds up. On 10.9 the injector borrows zeroed memory as a thread with `_pthread_set_self`, as `pthread_create_from_mach_thread` isn't there, and new[]'s lazy pointer in `CoreGraphics` gives the layers' owners, with no interposing.
+
+Not done there: what uses the display as a source, which is the Dock's and a sheet's blur, sampling a display that's no longer drawn. Mavericks' effects are a surface's background radius at +0x114 and `dock_blur_fbo_texture`'s shader [read], so the host would draw those from the radius and shape. Not read further.
+
+**Injecting safely.** A failure in WindowServer logs the user out. So `seamless-ws-inject` loads the hook in its own process first and has it check the build, every symbol and every entry it would patch, tries at most once per boot, and exits 3 if already tried, 4 if the system isn't known and 5 if the hook refused inside, for the session to use crops. All patches go in together or none do, and no thread may be stopped inside one. Exits 0, 3 and 4 have been seen, 4 from a real mistake in the check. 5 hasn't.
 
 **A real layer.** Safari's window in a `CALayer` in another process was read from the screen with `screencapture -l`, of that one window, and is whole and correct. PVG's odd row bytes don't trouble Core Animation.
 
-**A running guest.** `probes/seamless-ws-inject.c` loads the hook into a running WindowServer, with no restart and the same PID afterward, and windows then arrive at 60 frames/s. It uses `task_for_pid` as root, a bare thread that asks for a real one, and `dlopen`. WindowServer's sandbox refuses a library in `/var/tmp`, so it goes in `/usr/lib`, which needs SIP off in the guest, as these guests have. The log and table it makes itself, ahead of the library. Live patching stops the other threads, and leaves pages executable throughout. Interposing doesn't work in a library loaded this way, so nothing on Mojave relies on it: the composites run from a patch of `update_display_callback`.
+**A running guest.** `probes/seamless-ws-inject.c` loads the hook into a running WindowServer, with no restart and the same PID afterward, and windows then arrive at 60 frames/s. It uses `task_for_pid` as root, a bare thread that asks for a real one, and `dlopen`. WindowServer's sandbox refuses a library in `/var/tmp`, so it goes in `/usr/lib`, which needs SIP off in the guest, as these guests have. The log and table it makes itself, ahead of the library. Live patching stops the other threads, and leaves pages executable throughout. Interposing doesn't work in a library loaded this way, so nothing relies on it: the composites run from a patch of `update_display_callback`.
 
-Not done: a window that isn't Safari or a demo, overlap while moving or resizing, input, the session itself, other builds of 10.14, and any hook but this one on later systems.
+**Mojave's CPU is over the bar with what's been added since the table above.** The same page in one boot, 21 s windowed against 26 s each window: QEMU 49% against 70%, the helper 8% against 25%, viewer 1.7%, so 57% against 97% of a core, at 60 frames/s, 19 of 1,672 composites whole, at 2.1 ms each. That has the shadow, the marker and the load action in it, and this Mac's load varied between runs. Which of them costs what isn't known.
+
+Not done: overlap while moving or resizing, input, a real resize of a surface, the session itself, other builds of 10.14, and any hook but this one on later systems.
 
 To run them, with a built app: `scripts/seamless-gpu prepare`, then `boot`, `desktop` and `run`, and for Mavericks with the hook in the copy's WindowServer plist and `/var/tmp/seamless-ws-gl-tree` present, `scripts/seamless-gpu-safari <app> <copy> <results> replay|windowed`. On Mojave, `VIM_SEAMLESS_PVG_DIR` writes the helper's render passes and `seamless-guest hw-loop --app Safari --hz 60` asks for the composites.
 

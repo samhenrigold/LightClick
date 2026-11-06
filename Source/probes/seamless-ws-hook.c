@@ -73,8 +73,9 @@ static const char *const wanted[] = {
     "_CGRegionCreateWithRect",
     "_CGRegionRelease",
     "_WSArenaAlloc",
+    "_CGRegionCreateCopy",
 };
-static void *resolved[22];
+static void *resolved[23];
 static void *(*session_data)(void);
 static void **(*server_gl)(void);
 static void *placement_targets[3];
@@ -401,9 +402,13 @@ static char *building_window, *marked_window;
 static pthread_t building_thread;
 static int layers_used;
 
+static char *whole_windows[64]; // Those being drawn whole in this update, which the host starts clear.
+static unsigned whole_count;
+
 static void forget_layers(void) {
     memset(layer_owner, 0, sizeof(layer_owner));
     layers_used = 0;
+    whole_count = 0;
 }
 static void *hook_new_array(unsigned long size) {
     // What libc++'s does.
@@ -451,7 +456,7 @@ __attribute__((used)) void seamless_composite_layer(const void *layer) {
             note("layer %p has no known window\n", layer);
     }
     marked_window = owner;
-    float tokens[10] = {11184809.0f};
+    float tokens[11] = {11184809.0f};
     const uint8_t *state = owner ? *(const uint8_t **)(owner + 0xe0) : NULL;
     if (state) {
         struct RectResult rect = window_screen_rect(owner);
@@ -472,9 +477,12 @@ __attribute__((used)) void seamless_composite_layer(const void *layer) {
         tokens[7] = (float)margin;
         tokens[8] = *(const float *)(owner + 0x100) * 16;
         tokens[9] = table && table->gpu_mode ? 1 : 0;
+        for (unsigned i = 0; i < whole_count; i++)
+            if (whole_windows[i] == owner)
+                tokens[10] = 1;
     }
     void (*pass_through)(void *, float) = (void (*)(void *, float))gl[1 + 190];
-    for (int i = 0; i < 10; i++)
+    for (int i = 0; i < 11; i++)
         pass_through(gl[0], tokens[i]);
     static unsigned told;
     if (told++ % 3000 == 0)
@@ -677,6 +685,7 @@ static int whole_window_due(uint32_t id, char *window) {
         int done;
         uint64_t stable_since;
         struct RectResult rect;
+        uint32_t shadow;
     } seen[256];
     unsigned i = 0;
     while (i < 256 && seen[i].id && seen[i].id != id)
@@ -685,6 +694,14 @@ static int whole_window_due(uint32_t id, char *window) {
         return 0;
     uint64_t now = mach_absolute_time();
     struct RectResult rect = window_screen_rect(window);
+    uint32_t key = 2166136261u;
+    for (int b = 0x134; b < 0x148; b++)
+        key = (key ^ (uint8_t)window[b]) * 16777619u;
+    if (seen[i].id == id && key != seen[i].shadow) {
+        seen[i].shadow = key;
+        return 1;
+    }
+    seen[i].shadow = key;
     if (seen[i].id != id || memcmp(&rect, &seen[i].rect, sizeof(rect))) {
         seen[i].id = id;
         seen[i].rect = rect;
@@ -720,12 +737,18 @@ static char redraw_placed(char *state, char *window) {
         last_mode = table->gpu_mode;
         int whole = whole_window_due(id, window) || now < refresh_until;
         if (off || whole) {
+            uint8_t saved_shadow = *(uint8_t *)(state + 0x6b);
             void *saved_clip = *(void **)(state + 0x18);
             struct RectResult everywhere = {0, 0, 16384, 16384};
             void *clip = whole ? region_with_rect(everywhere) : region_copy(saved_clip);
             *(void **)(state + 0x18) = clip;
+            if (!whole)
+                *(uint8_t *)(state + 0x6b) = 1;
+            else if (whole_count < 64)
+                whole_windows[whole_count++] = window;
             char drew = redraw_original(state, window);
             *(void **)(state + 0x18) = saved_clip;
+            *(uint8_t *)(state + 0x6b) = saved_shadow;
             region_release_fn(clip);
             if (whole)
                 table->gpu_composites++;
@@ -780,9 +803,7 @@ static int mavericks_prepare(void) {
     new_array_pointer = (void **)(stub + 6 + to_pointer);
     region_with_rect = (void *(*)(struct RectResult))placement_targets[1];
     region_release_fn = (void (*)(void *))placement_targets[2];
-    region_copy = dlsym(RTLD_DEFAULT, "CGRegionCreateCopy");
-    if (!region_copy)
-        return 0;
+    region_copy = resolved[22];
     const struct Patch patches[MAVERICKS_PATCHES] = {
         PUSHES_PATCH(resolved[18], seamless_layer_entry, seamless_layer_continue),
         PUSHES_PATCH(placement_targets[0], redraw_placed, redraw_original)};
