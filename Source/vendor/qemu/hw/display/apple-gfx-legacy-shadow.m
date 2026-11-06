@@ -9,6 +9,7 @@
 #import <IOSurface/IOSurface.h>
 #include <mach/mach.h>
 #include <servers/bootstrap.h>
+#include <unistd.h>
 #include <os/lock.h>
 #include <stdint.h>
 #include <string.h>
@@ -92,10 +93,10 @@ struct SeamlessFrameMessage {
     uint32_t window, frame, width, height;
     int32_t x, y;
 };
-static void seamless_send_surface(IOSurfaceRef surface)
+static void seamless_send_surface(IOSurfaceRef surface, uint32_t window)
 {
     static mach_port_t port;
-    static uint32_t sent;
+    static uint32_t sent[4096];
     if (!port) {
         const char *service = getenv("VIM_SEAMLESS_PVG_SERVICE");
         if (!service || bootstrap_look_up(bootstrap_port, service, &port)) {
@@ -114,8 +115,8 @@ static void seamless_send_surface(IOSurfaceRef surface)
     m.surface.name = capability;
     m.surface.disposition = MACH_MSG_TYPE_COPY_SEND;
     m.surface.type = MACH_MSG_PORT_DESCRIPTOR;
-    m.window = (uint32_t)IOSurfaceGetWidth(surface) * 4096 + (uint32_t)IOSurfaceGetHeight(surface);
-    m.frame = ++sent;
+    m.window = window ? window : (uint32_t)IOSurfaceGetWidth(surface) * 4096 + (uint32_t)IOSurfaceGetHeight(surface);
+    m.frame = ++sent[window & 4095];
     m.width = (uint32_t)IOSurfaceGetWidth(surface);
     m.height = (uint32_t)IOSurfaceGetHeight(surface);
     mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, 0, 0, 0);
@@ -123,6 +124,25 @@ static void seamless_send_surface(IOSurfaceRef surface)
 }
 static uint64_t seamless_frames;
 void apple_gfx_seamless_frame(void) { __atomic_fetch_add(&seamless_frames, 1, __ATOMIC_RELAXED); }
+/* A composite is several command buffers, on the same surface in a moment. One that nothing follows for 6 ms is the last,
+ * so the surface goes then, once. Consumes the reference on `surface`. */
+static void seamless_composite_done(IOSurfaceRef surface, uint32_t window)
+{
+    static volatile uint32_t latest[4096];
+    uint32_t mine = __atomic_add_fetch(&latest[window & 4095], 1, __ATOMIC_RELAXED);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 6 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+        if (__atomic_load_n(&latest[window & 4095], __ATOMIC_RELAXED) == mine) seamless_send_surface(surface, window);
+        CFRelease(surface);
+    });
+}
+/* With <VIM_SEAMLESS_PVG_DIR>/nodisplay present, nobody shows the display, so its frames aren't encoded. */
+bool apple_gfx_seamless_display_off(void)
+{
+    if (!seamless_pvg_dir) return false;
+    static char path[1024];
+    if (!path[0]) snprintf(path, sizeof(path), "%s/nodisplay", seamless_pvg_dir);
+    return access(path, F_OK) == 0;
+}
 static void seamless_note_pass(MTLRenderPassDescriptor *pass)
 {
     static NSMutableDictionary *counts;
@@ -160,26 +180,22 @@ static id preserving_render_encoder(id self, SEL cmd, MTLRenderPassDescriptor *p
         seamless_note_pass(pass);
         id<MTLTexture> target = pass.colorAttachments[0].texture;
         IOSurfaceRef surface = target.iosurface;
+        /* A surface from probes/seamless-ws-mojave.h says its window in its size. Others only with VIM_SEAMLESS_PVG_SKIP. */
         const char *skip = getenv("VIM_SEAMLESS_PVG_SKIP");
         int skip_width = 0, skip_height = 0;
         if (skip) sscanf(skip, "%dx%d", &skip_width, &skip_height);
-        if (surface && target.width > 256 && target.height > 256 &&
-            !((int)target.width == skip_width && (int)target.height == skip_height)) {
-            CFRetain(surface);
-            [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> done) {
-                (void)done;
-                seamless_send_surface(surface);
-                CFRelease(surface);
-            }];
-        }
-    }
-    if (guest_render_depth) {
-        for (NSUInteger i = 0; i < 8; i++) {
-            MTLRenderPassColorAttachmentDescriptor *a = pass.colorAttachments[i];
-            if (a.loadAction == MTLLoadActionDontCare && a.texture.iosurface &&
-                a.texture.storageMode != MTLStorageModeMemoryless) {
-                if (!adjusted) adjusted = [pass copy];
-                adjusted.colorAttachments[i].loadAction = MTLLoadActionLoad;
+        uint32_t width = (uint32_t)target.width, height = (uint32_t)target.height;
+        uint32_t window = (height & 0xf0) == 0xa0 ? (width & 0xff) | (height & 0x0f) << 8 : 0;
+        if (surface && width > 256 && height > 256 && (window || (skip && !((int)width == skip_width && (int)height == skip_height)))) {
+            /* One a command buffer: a composite has several passes in one, and is finished when it is. */
+            static char once;
+            if (!objc_getAssociatedObject(self, &once)) {
+                objc_setAssociatedObject(self, &once, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                CFRetain(surface);
+                [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> done) {
+                    (void)done;
+                    seamless_composite_done(surface, window);
+                }];
             }
         }
     }

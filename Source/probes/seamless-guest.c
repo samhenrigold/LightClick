@@ -2228,6 +2228,46 @@ int main(int argc, char **argv) {
                (now() - started) * 1000 / made);
         return 0;
     }
+    if (!strcmp(command, "gpu")) {
+        // Turns the hook's per-window composites on or off on Mojave, and reports them. See seamless-ws-mojave.h.
+        if (flag(argc, argv, "--skip-desktop") && geteuid() == 0 && !in_session)
+            return run_in_console_session(argc, argv, 1);
+        int fd = open(SWS_PATH, O_RDWR);
+        struct SWSTable *t =
+            fd >= 0 ? mmap(NULL, sizeof(struct SWSTable), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+        if (t == MAP_FAILED)
+            return 1;
+        if (option(argc, argv, "--scale", NULL))
+            t->gpu_scale = atof(option(argc, argv, "--scale", "1"));
+        if (flag(argc, argv, "--skip-desktop")) {
+            // Below every app's windows, and the Dock's: a session doesn't show these.
+            CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID);
+            uint32_t skipped = 0;
+            for (CFIndex i = 0; windows && i < CFArrayGetCount(windows) && skipped < 64; i++) {
+                CFDictionaryRef w = CFArrayGetValueAtIndex(windows, i);
+                int level = 0, number = 0;
+                CFNumberGetValue(CFDictionaryGetValue(w, kCGWindowLayer), kCFNumberIntType, &level);
+                CFNumberGetValue(CFDictionaryGetValue(w, kCGWindowNumber), kCFNumberIntType, &number);
+                if (level < 0 || level == kCGDockWindowLevel)
+                    t->gpu_skip[skipped++] = (uint32_t)number;
+            }
+            if (windows)
+                CFRelease(windows);
+            t->gpu_skip_count = skipped;
+            printf("skipping %u windows\n", skipped);
+        }
+        if (option(argc, argv, "--mode", NULL))
+            t->gpu_mode = (uint32_t)atoi(option(argc, argv, "--mode", "0"));
+        printf("gpu mode %u scale %g generate %llu composites %llu seconds %.3f\n", t->gpu_mode, t->gpu_scale,
+               t->gpu_generate_calls, t->gpu_composites,
+               (double)t->gpu_ticks * t->ticks_numer / t->ticks_denom / 1e9);
+        for (uint32_t i = 0; flag(argc, argv, "--rows") && i < t->gpu_row_count; i++) {
+            const struct SWSGPURow *r = &t->gpu_rows[i];
+            printf("row %u id %u frames %u content %g,%g %gx%g window %g,%g %gx%g\n", i, r->id, r->frames, r->x, r->y,
+                   r->width, r->height, r->window_x, r->window_y, r->window_width, r->window_height);
+        }
+        return 0;
+    }
     if (!strcmp(command, "place")) {
         // Asks the hook to draw every window of an app this far from where it is, in device pixels.
         if (geteuid() == 0 && !in_session)

@@ -20,6 +20,7 @@
 #include "apple-gfx-shadow-ram.h"
 void apple_gfx_legacy_shadow_install(void);
 void apple_gfx_seamless_frame(void);
+bool apple_gfx_seamless_display_off(void);
 typedef struct {
     AppleGFXOOPRAMWire wire;
     uint8_t *host;
@@ -469,6 +470,7 @@ static int helper_main(int argc, char **argv)
         }
         display_desc.newFrameEventHandler = ^{
             display_power(NO, NO);
+            if (apple_gfx_seamless_display_off()) { return; }
             if (frame_busy) { frame_dirty = YES; return; }
             if (!display) { return; }
             if (!texture) {
