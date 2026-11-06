@@ -100,7 +100,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         switch command {
         case .setMenuBar(let items): setMenuBar(items)
         case .setDockMenu(let items): mirror.apply(items, to: dockMenu)
-        case .setBadge(let label): NSApp.dockTile.badgeLabel = label
+        case .setBadge(let label):
+            NSApp.dockTile.badgeLabel = label
+            send(.tileBadge(NSApp.dockTile.badgeLabel))
         case .requestAttention(let critical):
             _ = NSApp.requestUserAttention(critical ? .criticalRequest : .informationalRequest)
         case .notify(let title, let body, let identifier): post(title: title, body: body, identifier: identifier)

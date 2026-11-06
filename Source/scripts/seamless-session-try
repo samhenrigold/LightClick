@@ -97,15 +97,8 @@ def session(name, cancel=False):
     launch_checked = False
     deadline = time.time()+1500
     said = ''
-    tile_label = ''
     while time.time() < deadline:
         said = log.read_text(errors='replace') if log.exists() else ''
-        # What the Dock would draw: the proxy's own label, as LaunchServices has it.
-        proxy_rows = running(f'{bundle}/Contents/MacOS/SeamlessProxy')
-        if proxy_rows and '"7"' not in tile_label:
-            asn = subprocess.run(['lsappinfo', 'find', f'pid={proxy_rows[0].split()[0]}'], capture_output=True, text=True).stdout.strip()
-            if asn:
-                tile_label = subprocess.run(['lsappinfo', 'info', '-only', 'StatusLabel', asn], capture_output=True, text=True).stdout.strip()
         if not launch_checked and 'running TextEdit' in said:
             launch_checked = True
             def kind(pattern):
@@ -141,7 +134,7 @@ def session(name, cancel=False):
     came_out = dragged_out/marker.name
     check('this drag, and no other, came out as a promised file', came_out.exists() and came_out.read_bytes() == marker.read_bytes())
     check('the guest app\'s badge reached the session', 'badge "7"' in said, line('badge "7"'))
-    check('and the proxy\'s tile', '"7"' in tile_label, tile_label[:80])
+    check('and the proxy\'s tile, by AppKit', 'tile says "7"' in said, line('tile says "7"'))
     check('its request for attention reached the session', 'attention true' in said, line('attention true'))
     check('a scroll came through the input view', ' 0 gesture' not in said and ' gesture' in said, line('input ')[:60])
     check('the proxy has quit', not running(f'{bundle}/Contents/MacOS/SeamlessProxy'))

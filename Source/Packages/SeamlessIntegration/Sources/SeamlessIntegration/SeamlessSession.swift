@@ -469,6 +469,7 @@ public final class SeamlessSession {
             proxyPID = pid
             note("# proxy said hello, pid \(pid)")
         case .input(let bytes): sendToGuest(bytes)
+        case .tileBadge(let label): note("# the proxy's tile says \"\(label ?? "")\"")
         case .activated:
             if let id = surfaces.values.min(by: { $0.window.order < $1.window.order })?.window.id {
                 sendToGuest(SessionWire.value(.focus, id))
@@ -676,7 +677,9 @@ public final class SeamlessSession {
                 )
                 NSRunningApplication(processIdentifier: proxyPID)?.terminate()
             }
-            after(139) { [self] in answer(code: 36) }
+            // The first launch has saved under the name this offers, and a clone keeps that, so this one types its own.
+            after(139) { [self] in answer(code: 6) }
+            after(141) { [self] in answer(code: 36) }
         }
         after(200) { [self] in
             note("# ERROR test: the guest app didn't exit after the answer")

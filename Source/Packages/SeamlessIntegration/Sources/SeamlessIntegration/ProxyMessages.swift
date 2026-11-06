@@ -7,6 +7,8 @@ public enum ProxyEvent: Codable, Hashable, Sendable {
     case reopen
     case quit
     case activated
+    /// What the Dock tile's label says after a `setBadge`, as AppKit has it.
+    case tileBadge(String?)
     case menuChosen(path: [String], viaKey: Bool)
     case menuWillOpen(path: [String])
     /// The host's drag, in window points with a top-left origin, for the guest's helper to mirror.
