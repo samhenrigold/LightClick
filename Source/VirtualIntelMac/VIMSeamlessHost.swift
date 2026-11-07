@@ -74,6 +74,7 @@ private final class AgentGuest: SeamlessGuest {
 private final class WindowSurfaces: SeamlessPixelSource {
     private var surfaces: [UInt32: IOSurfaceRef] = [:]
     private var origins: [UInt32: (x: Int32, y: Int32)] = [:]
+    private var holds: [UInt32: GuestSurfaceHold] = [:]
     let noDisplayFile: URL
     weak var desktop: SeamlessDesktop?
     private var receiver: GuestWindowSurfaceReceiver?
@@ -87,8 +88,9 @@ private final class WindowSurfaces: SeamlessPixelSource {
             let surface = UnsafeTransfer(frame.surface)
             let window = frame.window
             let origin = frame.origin
+            let hold = frame.hold
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.arrived(window, surface.value, origin) }
+                MainActor.assumeIsolated { self?.arrived(window, surface.value, origin, hold) }
             }
         }
         if receiver == nil { return nil }
@@ -96,16 +98,18 @@ private final class WindowSurfaces: SeamlessPixelSource {
 
     static func service(_ identifier: String) -> String { "gold.samhenri.LightClick.seamless.\(identifier)" }
 
-    private func arrived(_ window: UInt32, _ surface: IOSurfaceRef, _ origin: (x: Int32, y: Int32)) {
+    private func arrived(_ window: UInt32, _ surface: IOSurfaceRef, _ origin: (x: Int32, y: Int32), _ hold: GuestSurfaceHold?) {
         guard let desktop else { return }
         if surfaces.isEmpty { FileManager.default.createFile(atPath: noDisplayFile.path, contents: nil) }
         if surfaces[window] == nil {
-            desktop.note("# window \(window)'s own surface: \(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))")
+            desktop.note(
+                "# window \(window)'s own surface: \(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))")
         }
         surfaces[window] = surface
         // Mavericks' say where they start, and Mojave's leave that to the tool.
         origins[window] = origin == (0, 0) ? nil : origin
         desktop.windowPixelsChanged(window)
+        holds[window] = hold  // The last frame's goes, its layer having this one now.
     }
 
     var hasSurfaces: Bool { !surfaces.isEmpty }
@@ -118,6 +122,7 @@ private final class WindowSurfaces: SeamlessPixelSource {
     func stop() {
         surfaces = [:]
         origins = [:]
+        holds = [:]
         desktop = nil
         try? FileManager.default.removeItem(at: noDisplayFile)
     }
@@ -227,11 +232,12 @@ final class SeamlessHost: NSObject {
         else { return [:] }
         let directory = surfaceDirectory(identifier)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        guard windowSurfaces[session.machinePath] != nil
-            || WindowSurfaces(machineIdentifier: identifier, directory: directory).map({
-                windowSurfaces[session.machinePath] = $0
-                return true
-            }) ?? false
+        guard
+            windowSurfaces[session.machinePath] != nil
+                || WindowSurfaces(machineIdentifier: identifier, directory: directory).map({
+                    windowSurfaces[session.machinePath] = $0
+                    return true
+                }) ?? false
         else { return [:] }
         return GuestWindowSurfaceReceiver.environment(service: WindowSurfaces.service(identifier), directory: directory.path)
     }
@@ -319,7 +325,9 @@ final class SeamlessHost: NSObject {
             } else if count == 0, windowHidden.contains(path) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                     MainActor.assumeIsolated {
-                        if desktops[path] === desktop, desktop.windowCount == 0 { desktop.finish(why: "no windows left") }
+                        if desktops[path] === desktop, desktop.windowCount == 0 {
+                            desktop.finish(why: "no windows left")
+                        }
                     }
                 }
             }

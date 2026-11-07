@@ -8,7 +8,8 @@ import IOSurface
 ///
 /// They're premultiplied BGRA, top row first, and `surface` can be bigger than the window: on Mojave, a surface's size says
 /// its window's ID, and past the window it's transparent. Use it as a layer's `contents` and take the window's own size in
-/// pixels from `contentRect`. A surface in use isn't written: each window has two or three, and they come round again.
+/// pixels from `contentRect`. A surface isn't written while it's in use or its `hold` lives: each window has a few, and they
+/// come round again once let go.
 public struct GuestWindowSurface: @unchecked Sendable {
     public let window: UInt32
     /// Goes up with each frame sent for this window. A gap means frames the guest drew and this never got.
@@ -20,6 +21,21 @@ public struct GuestWindowSurface: @unchecked Sendable {
     public let isShape: Bool
     /// Where the surface's top-left pixel is on the guest's display, or zero where the tool's window says it instead.
     public let origin: (x: Int32, y: Int32)
+    /// Keep this while the frame is what's shown, and let it go once the next one has replaced it. A sender that
+    /// doesn't reuse its surfaces itself, as on Mojave for now, sends none.
+    public let hold: GuestSurfaceHold?
+}
+
+/// While this lives, QEMU leaves the frame's surface alone. Letting it go, or this process's dying, tells it.
+public final class GuestSurfaceHold: Sendable {
+    private let right: mach_port_t
+
+    init?(right: mach_port_t) {
+        guard right != mach_port_t(MACH_PORT_NULL) else { return nil }
+        self.right = right
+    }
+
+    deinit { mach_port_deallocate(mach_task_self_, right) }
 }
 
 /// What a machine's QEMU sends each `GuestWindowSurface` to, on a bootstrap service. Start this first, and start QEMU with
@@ -54,6 +70,15 @@ public final class GuestWindowSurfaceReceiver: @unchecked Sendable {
             mach_port_insert_right(mach_task_self_, port, port, mach_msg_type_name_t(MACH_MSG_TYPE_MAKE_SEND))
                 == KERN_SUCCESS
         else { throw Failure.noPort }
+        // Every window comes at once when the mode goes on, and a sender doesn't wait.
+        var limits = mach_port_limits_t(mpl_qlimit: mach_port_msgcount_t(MACH_PORT_QLIMIT_LARGE))
+        withUnsafeMutablePointer(to: &limits) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                _ = mach_port_set_attributes(
+                    mach_task_self_, port, MACH_PORT_LIMITS_INFO, $0,
+                    mach_msg_type_number_t(MemoryLayout<mach_port_limits_t>.size / MemoryLayout<integer_t>.size))
+            }
+        }
         var bootstrap = mach_port_t(MACH_PORT_NULL)
         task_get_special_port(mach_task_self_, TASK_BOOTSTRAP_PORT, &bootstrap)
         // Not in Darwin's module map, and deprecated, though it's how a process with no launchd plist offers a service.
@@ -106,7 +131,10 @@ public final class GuestWindowSurfaceReceiver: @unchecked Sendable {
             frame: message.load(fromByteOffset: 44, as: UInt32.self),
             surface: surface,
             isShape: window & 0x10000 != 0,
-            origin: (message.load(fromByteOffset: 56, as: Int32.self), message.load(fromByteOffset: 60, as: Int32.self))
+            origin: (
+                message.load(fromByteOffset: 56, as: Int32.self), message.load(fromByteOffset: 60, as: Int32.self)
+            ),
+            hold: GuestSurfaceHold(right: header.msgh_remote_port)
         )
     }
 }
