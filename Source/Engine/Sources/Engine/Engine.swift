@@ -145,6 +145,7 @@ public final class Engine {
         let environment = ProcessInfo.processInfo.environment
         config.no_bulk_rep = options.hybrid && environment["LC_HVDBT_NO_BULK"] == "1"
         config.no_reuse = environment["LC_HVDBT_NO_REUSE"] == "1"
+        config.profile_invalidations = environment["LC_HVDBT_PROFILE_INVALIDATION"] == "1"
         config.no_return_prediction = options.hybrid && environment["LC_HVDBT_NO_RETURN_PREDICTION"] == "1"
         config.all_flags_live = options.hybrid && environment["LC_HVDBT_ALL_FLAGS"] == "1"
         config.keep_kernel_tables = !options.hybrid || environment["LC_HVDBT_KEEP_KPTI"] == "1"

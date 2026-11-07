@@ -369,6 +369,21 @@ public final class Tally: @unchecked Sendable {
         }
         o += String(format: "translation time     %12.1f ms\n", seconds(t.translate_ns) * 1000)
         o += "blocks invalidated   " + perSecond(t.invalidated) + "\n"
+        if t.invalidation_profile_enabled != 0 {
+            o += "\n== sampled invalidation cost (global translator; do not sum vCPU files) ==\n"
+            o += "sample_period_kills 256; costs are unscaled sampled nanoseconds, including counting overhead\n"
+            o += "invalidation_profile_enabled \(t.invalidation_profile_enabled)\n"
+            o += "invalidation_profiled_kills \(t.invalidation_profiled_kills)\n"
+            o += "invalidation_sampled_kills \(t.invalidation_sampled_kills)\n"
+            o += "invalidation_sampled_registered \(t.invalidation_sampled_registered)\n"
+            o += "invalidation_sampled_shared \(t.invalidation_sampled_shared)\n"
+            o += "invalidation_hash_view_visits \(t.invalidation_hash_view_visits)\n"
+            o += "invalidation_hash_probes \(t.invalidation_hash_probes)\n"
+            o += "invalidation_hash_removals \(t.invalidation_hash_removals)\n"
+            o += "invalidation_map_unlink_ns \(t.invalidation_map_unlink_ns)\n"
+            o += "invalidation_hash_fanout_ns \(t.invalidation_hash_fanout_ns)\n"
+            o += "invalidation_icache_ns \(t.invalidation_icache_ns)\n\n"
+        }
         o +=
             "cold blocks a cache keyed by frame had: \(t.again_live) live in another view, \(t.again_dead) dead with the frame unchanged. Lower bounds\n\n"
         o +=

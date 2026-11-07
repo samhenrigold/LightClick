@@ -69,6 +69,11 @@ typedef struct {
 static MapEntry *block_map;
 
 static TrStats stats;
+static mach_timebase_info_data_t invalidation_timebase;
+
+static u64 invalidation_ns(u64 ticks) {
+    return (u64)((__uint128_t)ticks * invalidation_timebase.numer / invalidation_timebase.denom);
+}
 
 static const char *stop_reasons[4096];
 static u32 stop_reason_count;
@@ -1149,6 +1154,9 @@ static void emit_monitor_op(const Insn *in) {
 
 void tr_init(const TrConfig *config) {
     cfg = *config;
+    if (cfg.profile_invalidations && (mach_timebase_info(&invalidation_timebase) != KERN_SUCCESS || !invalidation_timebase.denom))
+        cfg.profile_invalidations = false;
+    stats.invalidation_profile_enabled = cfg.profile_invalidations;
     cc_base = (u32 *)(cfg.priv + OFF_CC);
     tr_cc = cc_base;
     cc_cursor[0] = cc_base;
@@ -1327,24 +1335,71 @@ static void hash_remove(int view, u64 rip) {
     }
 }
 
+// The disabled path continues to use hash_remove unchanged, with no per-probe profiling branch.
+static void hash_remove_profiled(int view, u64 rip) {
+    u64 *t = hash_table(view);
+    u32 h = crc32c64(rip) & (HASH_ENTRIES - 1);
+    u64 probes = 0, removed = 0;
+    for (u32 n = 0; n < HASH_ENTRIES; n++, h = (h + 1) & (HASH_ENTRIES - 1)) {
+        u64 key = t[h * 2];
+        probes++;
+        if (key == 0)
+            break;
+        if (key == rip) {
+            t[h * 2] = 1;
+            removed = 1;
+            break;
+        }
+    }
+    stats.invalidation_hash_view_visits++;
+    stats.invalidation_hash_probes += probes;
+    stats.invalidation_hash_removals += removed;
+}
+
 static void hash_remove(int view, u64 rip);
 
 static void kill_block(u32 idx) {
     HostBlock *hb = &hblocks[idx];
     if (hb->dead)
         return;
+    bool sample = cfg.profile_invalidations && (++stats.invalidation_profiled_kills & 255) == 0;
+    if (sample) {
+        stats.invalidation_sampled_kills++;
+        stats.invalidation_sampled_shared += (hb->view & KEY_DOMAIN) != 0;
+    }
     hb->dead = true;
     if (hb->registered) {
-        map_remove((int)hb->view, hb->rip);
-        if (hb->view & KEY_DOMAIN) {
-            for (int v = 0; v <= view_high; v++)
-                hash_remove(v, hb->rip);
-        } else
-            hash_remove((int)hb->view, hb->rip);
+        if (sample) {
+            stats.invalidation_sampled_registered++;
+            u64 began = mach_absolute_time();
+            map_remove((int)hb->view, hb->rip);
+            stats.invalidation_map_unlink_ns += invalidation_ns(mach_absolute_time() - began);
+            began = mach_absolute_time();
+            if (hb->view & KEY_DOMAIN) {
+                for (int v = 0; v <= view_high; v++)
+                    hash_remove_profiled(v, hb->rip);
+            } else
+                hash_remove_profiled((int)hb->view, hb->rip);
+            stats.invalidation_hash_fanout_ns += invalidation_ns(mach_absolute_time() - began);
+        } else {
+            map_remove((int)hb->view, hb->rip);
+            if (hb->view & KEY_DOMAIN) {
+                for (int v = 0; v <= view_high; v++)
+                    hash_remove(v, hb->rip);
+            } else
+                hash_remove((int)hb->view, hb->rip);
+        }
     }
+    // Keep eager hash removal and entry poisoning: SVC_DEAD starts with view_lookup, and dead-block reuse can revive an entry.
+    // Leaving stale hash entries is not a profiling shortcut. Reverse actual-view membership is a later experiment only.
     u32 *entry = cc_base + hb->entry_word;
     *entry = WORD_DEAD;
-    sys_icache_invalidate(entry, 4);
+    if (sample) {
+        u64 began = mach_absolute_time();
+        sys_icache_invalidate(entry, 4);
+        stats.invalidation_icache_ns += invalidation_ns(mach_absolute_time() - began);
+    } else
+        sys_icache_invalidate(entry, 4);
     stats.invalidated++;
     if (hb->read_bytes)
         dead_slots[dead_slot(hb->view, hb->rip)] = idx + 1;

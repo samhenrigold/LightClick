@@ -16,6 +16,7 @@ typedef struct {
     // Comparison switches, each giving up one optimisation to see whether a fault goes with it.
     bool keep_kernel_tables, no_bulk_rep, no_return_prediction, all_flags_live, no_reuse;
     uint64_t ram_below_4g; // 0: RAM is one piece. Otherwise GPA 4 GB and up is host RAM at this offset
+    bool profile_invalidations; // opt-in: time and count hash probes for one of every 256 non-dead block kills
 } TrConfig;
 
 typedef struct {
@@ -70,6 +71,11 @@ typedef struct {
     uint64_t op_insns[128], op_words[128], exit_words; // cold code by x86 operation, the OP_ numbers in tr_internal.h; exit_words is what follows the last instruction
     uint64_t i386_blocks, i386_again; // cold 32-bit user blocks, and those again_live or again_dead counted
     uint64_t shared_blocks, shared_found; // translated into a shared user domain; found there by a view that had not looked before
+    // Global translator totals, repeated in each vCPU tally: do not sum across vCPUs. All costs are unscaled sampled nanoseconds.
+    uint64_t invalidation_profile_enabled, invalidation_profiled_kills, invalidation_sampled_kills;
+    uint64_t invalidation_sampled_registered, invalidation_sampled_shared;
+    uint64_t invalidation_hash_view_visits, invalidation_hash_probes, invalidation_hash_removals;
+    uint64_t invalidation_map_unlink_ns, invalidation_hash_fanout_ns, invalidation_icache_ns;
 } TrStats;
 TrStats tr_stats(void);
 
