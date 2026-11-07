@@ -775,7 +775,10 @@ static TrResult do_translate(int key, int view, u64 cr3, int cpl, u64 rip, bool 
     }
     (void)tail;
 
-    // How many blocks a cache keyed by frame would have saved.
+    // How many blocks a cache keyed by frame would have saved, and of those, 32-bit user code's: i386 libraries aren't in SHARED_USER_BASE.
+    bool i386_user = tr_compat && cpl == 3;
+    if (i386_user)
+        stats.i386_blocks++;
     if (res.frames[0] != ~0ULL && res.frames[0] < cfg.ram_size) {
         u32 it = frame_head[res.frames[0] >> 12];
         for (int look = 0; it && look < 32; look++) {
@@ -785,6 +788,8 @@ static TrResult do_translate(int key, int view, u64 cr3, int cpl, u64 rip, bool 
                     stats.again_dead++;
                 else
                     stats.again_live++;
+                if (i386_user)
+                    stats.i386_again++;
                 break;
             }
             it = other->frame[0] == res.frames[0] ? other->next_on_frame[0] : other->next_on_frame[1];

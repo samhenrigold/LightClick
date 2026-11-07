@@ -85,6 +85,14 @@ public final class GuestPreparationRun {
             "InitialGuestReport": .dictionary(report.values),
             "Installed": false
         ]
+        // What this attempt installs, for the machine window to tell when a newer app carries newer support.
+        let packaging = try? Data(contentsOf: runtime.appendingPathComponent("Packaging.plist"))
+        if let digest = GuestPayloadUpdate.bundledDigest(packaging: packaging, guest: report["Guest"]?.string ?? "") {
+            state["PayloadSHA256"] = .string(digest)
+        }
+        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            state["AppVersion"] = .string(version)
+        }
     }
 
     private func save(phase: String) throws {

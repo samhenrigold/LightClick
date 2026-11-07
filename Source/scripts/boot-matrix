@@ -543,6 +543,9 @@ class Boot:
         else:
             try:
                 self.forget_preferences()
+                if self.options.keep_machine and self.case.program and not self.program_failure:  # its program ends by shutting the guest down
+                    self.options.keep_machine.mkdir(parents=True, exist_ok=True)
+                    shutil.move(self.machine, self.options.keep_machine/self.machine.name)
                 if self.work.exists() and not remove_tree(self.work):
                     failures.append(f'something is mounted inside {self.work}: left it in place')
             except Exception as error:
@@ -593,6 +596,8 @@ def main():
     parser.add_argument('--results', type=Path, help='default Build/boot-matrix/results-<time>')
     parser.add_argument('--work', type=Path, default=source/'Build/boot-matrix', help='parent of the work directories')
     parser.add_argument('--keep-passed', action='store_true', help='keep the evidence of passing boots as well')
+    parser.add_argument('--keep-machine', type=Path, metavar='DIR',
+                        help='move each boot\'s clone here afterwards, for a later --machine with what its program installed')
     parser.add_argument('--dry-run', action='store_true', help='print the plan and start nothing')
     options = parser.parse_args()
     if any('=' not in item for item in options.env):

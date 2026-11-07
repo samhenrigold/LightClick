@@ -345,7 +345,7 @@ Safari on Mavericks has run before the probe reaches it, so its cold is not cold
 - Disk is not the gap between cold and warm on Mojave: reading the shared cache, the frameworks and the applications beforehand left cold launches where they were (1.45 to 2.04 s, one boot). dtrace's `io` probes showed nothing in either guest, so there is no disk latency figure.
 - Most of the guest's CPUs sit idle. Samples outside `kernel_task` over a 4 s window around a 2 s Calculator launch come to about 1.9 CPU seconds, so a launch is close to one thread's work at a time.
 - Translating: about 300 ms and 150k blocks over a Keynote launch of 1.4 to 2 s, cold or warm, and 100 to 500 ms per 2 s row around Mojave's. About 2 us a block, one vCPU at a time, plus an exit and a link per block whose cost isn't separated. Not measured: how long translated code takes against native. That is probably the largest remainder.
-- Inferred, not tried: warm Keynote translates as much as cold because i386 blocks aren't shared (the i386 shared region isn't in `SHARED_USER_BASE`) and die with their process. Reuse across views would need a dead block's own links undone, since they were made under another view's mappings.
+- Inferred, not tried: warm Keynote translates as much as cold because i386 blocks aren't shared (the i386 shared region isn't in `SHARED_USER_BASE`) and die with their process. Reuse across views would need a dead block's own links undone, since they were made under another view's mappings. Counted since, on Mavericks, Keynote '09 opened three times in one boot, 2 vCPUs: 449,735 cold 32-bit user blocks, of which a cache keyed by frame had 19,700, 4%, against 56% for 64-bit code in a fork loop. That counter looks at only the first 32 blocks on a frame, so it's a lower bound, but the same bound for both. Launches took 1.59, 1.16 and 1.08 s, so warm ones are already faster. Sharing i386 libraries isn't worth building on this. Mojave ran no 32-bit user code at all in a boot.
 
 **How many views.** At 64, Mojave evicted 135 views a second and 2.8 of 3.2 million dead blocks died that way. Two boots of each build, alternating, launching seven applications (six on Mojave):
 
@@ -386,7 +386,11 @@ Tried in the helper and dropped: answering a failed lookup with nil moves the th
 
 A second way a killed client ends badly: a guest panic with no helper crash, always at `IOAcceleratorFamily2+0x3097e`, CR2 `0xc0`, from the orphaned memory collector through `AppleParavirtResource::synchronizeForUnwire`: the resource's array at `0x38` is NULL. It came on one vCPU too, with the Meltdown switch kept, and with live flags, no bulk `rep` and no block reuse, one boot of each. Chess under TCG, killed the same time after its window, 120 launches in 3 boots: no panic and no helper crash, though it launches 3 times slower. Under the engine: helper deaths or this panic in most boots, also on a build from before the dead root drop and the Meltdown skip. Quitting instead of killing, one boot and 40 launches each: clean on both. 
 
-In a full RAM dump of one such panic, walking the guest's own tables to the resource saved at `[rbp-8]`: `0x38` is 0 in RAM too, so the kernel didn't read through a stale mapping. The resource's first word, where its vtable belongs, is `0xc0ffeed5d72bf374`, which by its top bits looks like XNU's cookie on a freed zone element (recalled, not checked against this kernel's source). So the memory map still lists a resource that has been freed. Why it was freed early isn't known: a race in the driver that the engine's timing brings out, and a wrong retain count from a mistranslation, both fit. Quitting Safari and Maps, 15 launches each under the engine in one boot each, was clean.
+In a full RAM dump of one such panic, walking the guest's own tables to the resource saved at `[rbp-8]`: `0x38` is 0 in RAM too, so the kernel didn't read through a stale mapping. The resource's first word, where its vtable belongs, is `0xc0ffeed5d72bf374`, which by its top bits looks like XNU's cookie on a freed zone element (recalled, not checked against this kernel's source). So the memory map still lists a resource that has been freed.
+
+Reading the driver gives a path for it, with no retain count going wrong. `AppleParavirtResource::allocateBackingHandle` keeps an IOSurface backing's map at `0x1e0` and calls `add_resource`, which takes no retain. Its `free` only releases that map. It never calls `remove_resource`, which `IOAccelResource2::free` does only for the map at `0x40`. That is harmless if the release ends the map. But `IOAccelMemoryMap::release`, at the last reference, asks whether the map's GPU event has finished, and if it hasn't, moves the map to the orphan list instead. The collector later walks the map's list, freed resource and all. So it takes a client that dies with GPU work still outstanding, which a quit doesn't have, and a guest kernel that gets through its teardown before the GPU finishes. That would fit a faster guest, more load on the host, and no dependence on the number of vCPUs. Read, not shown: no test yet has moved the GPU's speed alone.
+
+`PVGIOSurfaceABI` now takes the resource out of that map in a route on `free`, on Mojave only, and only when both functions' bytes are exactly those of the shipped kexts. With it, Chess killed 40 times a boot under the engine: no panic, no helper crash and no throw in 5 boots, against 3 panics in 6 without it. With one expected byte changed, the plugin logged that it didn't recognise the layout, and the guest ran 40 kills normally. The shipped guest payload still has the old plugin, so until that is repacked and guests take it, Force Quit of a GPU application, or one crashing, can still panic a Mojave guest under the engine, which blocks turning it on by default. Other systems' kexts weren't read. Quitting Safari and Maps, 15 launches each under the engine in one boot each, was clean.
 
 **Memory.** RSS and `phys_footprint` of 17 to 18 GB with an 8 GB guest are mostly counting: a test VM touching 2 GB the host had touched raised both, in step, and left host free memory alone. vmmap's regions came to 8.6 to 9.4 GB from 300 s to 1300 s, of which guest RAM is 7.7 GB, in a boot where only about 170 MB was malloc. TCG, with no stage 2, shows 9.1 GB in both counts. No memory kill was in the host's log.
 
@@ -464,6 +468,21 @@ Tried and dropped: doing a table store's TLB invalidates after letting go of the
 Filling the shadow at the store, for the page the process last faulted on, so that a new page costs one trip rather than two, was tried and dropped. It fired 20,000 times a second on the first vCPU, and page faults, best of 40 s, alternating, 2 vCPUs: Mojave 2649, 2563, 3045 ns without it, 3016, 3101, 2876 ns with it; Mavericks 1460, 1695 without, 1377, 1593 with. A retried fault is evidently not what a page costs. Mavericks' page fault at 1377 to 1695 is near Rosetta's 1352, so most of Mojave's gap is something else: its kernel's own path, more mirrors, or both.
 
 Not tried: not taking the lock for a store to a slot no shadow holds, which needs fills to look again.
+
+### Where real work goes: copies, pmap, a decoder
+
+Mojave picks `_platform_memmove` by the commpage's CPU family, not by ERMS or AVX, so a Penryn guest runs the Base variant. Copied byte for byte into a flat image, MB/s best of five: Base 17,670 at 256 B and 27,291 at 4 KB under the engine against Rosetta's 37,370 and 66,692, but 54,000 to 58,000 from 64 KB to 400 KB against Rosetta's 14,000 to 15,000. Its Nehalem variant runs at a flat 29,500 under the engine: its aligned SSE moves each compute an address and check alignment, where `movups` folds the offset and checks nothing. `rep movsb` is the engine's best small copy, at 47,000 to 68,000.
+
+A guest profile then says how much it matters: dtrace at 997 Hz per CPU, 2 vCPUs, one Mojave boot, over 12 s of Preview opening the 135 MB `Mojave.heic` and 15 s of Safari loading apple.com, cold then warm, as shares of samples outside the idle loop and dtrace's own. Of the 60 hottest kernel and 60 hottest user functions, so lower bounds:
+
+| | pmap | fault paths | memmove | HEVC decoder |
+|---|---|---|---|---|
+| Preview cold | 5.8% | 2.5% | 0.9% | 40.6% |
+| Preview warm | 2.9% | 1.7% | 1.0% | 58.9% |
+| Safari cold | 9.0% | 3.7% | 0.6% | |
+| Safari warm | 6.1% | 2.8% | 0.4% | |
+
+So copies are about 1% and aren't worth translator work. `pmap_enter_options` and `pmap_remove_range_options` are 3 to 9%, but a fastcall would remove only the trap of each store, a small part of that, as estimated from the store and fault costs above. Preview's image open is mostly one function of the software HEVC decoder, most samples at one rip: that loop's translation is the lever there. No x87 showed among the named functions.
 
 ### mmap_touch again
 
@@ -636,6 +655,28 @@ Honest order of risk, none of it started except as noted.
 6. **Limits to lift.** Kernel domains are capped at 16, and the code cache is 118 MB with a whole-cache reset. `Tests/stress-limits.sh` runs everything with a tiny cache and shadow pool, so the reset and reclaim paths are exercised, though never on a real guest's working set.
 7. **Unknown rates.** Page-table write rate in a real macOS guest. At these costs even 1M writes/s would be 60-300 ms of 4000. Cold translation during boot: 2.4 us per function, and how much code a boot touches is unmeasured.
 8. **Platform durability.** `ACTLR_EL1.EnTSO` from HVF is undocumented as far as I know, and hardware TSO could go when Rosetta does.
+
+## Turning it on by default
+
+Where each thing that would make `LC_HVDBT` on by default wrong for a user stands, with its evidence.
+
+| | Evidence | Status |
+|---|---|---|
+| Guests | The settings offer it for Mavericks and Mojave only (`bootedGuests`), up to 8 vCPUs. Every boot in this document is one of those two. 32-bit user code runs on the engine, Keynote '09 included. | Others untested, and stay on TCG |
+| Correctness | Fuzz, QEMU's test-i386, a compiled corpus, the SMP stress tests and lc-bench arithmetic match. Long runs check arithmetic, hashing, files and memory throughout: 0 wrong results, on both guests, including a 20-minute Mojave run and a 10-minute Mavericks one after the latest monitor changes. | Done for what is checked |
+| Guest panic when a GPU client dies | Chess killed under load panicked Mojave in about half of boots: Apple's driver walks a freed IOSurface backing on an orphaned map. The `PVGIOSurfaceABI` 1.6.4 route fixes it: 0 panics in 5 boots of 40 kills. It reaches a guest only through Repair Graphics Support, or the update sheet now offered when a newer app starts a machine. Mavericks has no PVG and none of this. | Fixed in source; a Mojave guest needs the update |
+| GPU helper crash | Every exception in the donor framework crashed the helper, its unwind tables a page off. Repaired at packaging, and a throw from a command buffer is caught. Not seen since in 9 kill boots, and when the helper does die the guest stays up and the app offers a restart. | Fixed; the catch untested in a real boot |
+| Other resets | One 15.7 s reset in a short Mojave boot, cause unknown, not seen again. QEMU now logs who asks for a reset and scans RAM for panic text, so the next one has evidence. | Open, rare |
+| Mavericks agent silence | The guest agent went quiet for 6 s to minutes in 6 of 8 engine boots and none of 2 on TCG; with 4 vCPUs in 3 of 3, for about 50 s, and not in one 1-vCPU boot. The host's bytes reach the UART and the guest reads them; timers, interrupts and IPIs keep arriving on every vCPU throughout, and no engine path that drops a wakeup was found by reading. What the agent is blocked in isn't known yet. | Open; blocks Mavericks |
+| Performance against TCG | Application launches 3 to 4.5 times faster on Mojave and 2 to 4.6 times on Mavericks, cold and warm (the table under "How long an application takes to start"). Boots reach the desktop in about 26 to 50 s against 60 to 130 on TCG in the same tests. Mojave's page faults cost 2.6 to 3.0 µs against Rosetta's 1.35 and Mavericks' 1.4 to 1.7. | Much faster everywhere measured |
+| Exceptions and long sessions | A 20-minute Mojave and a 10-minute Mavericks long run with application churn, memory past the guest's RAM and a JIT: no reset, no stall over about 11 s, all under memory pressure. | Good, few runs |
+| Platform | `ACTLR_EL1.EnTSO` from HVF is undocumented and could go with Rosetta. macOS 28 is deferred. | A risk outside our control |
+| What users lose | Nothing known in what the two guests use: the engine falls back to TCG for what it doesn't do (`hlt`, some MSRs, CR0.WP clear), measured as under a second of TCG time a boot outside `hlt`. Machines over 8 vCPUs stay on TCG. | |
+
+Recommendation:
+- **Mojave**: on by default once the app that ships `PVGIOSurfaceABI` 1.6.4 is out, since an un-updated guest can still panic when a GPU application crashes or is force-quit. Until then, keep it opt-in.
+- **Mavericks**: not by default yet. The agent silence leaves the app unable to reach the guest for up to a minute at a time; it hasn't shown at 1 vCPU, in one boot, and 2 vCPUs haven't been reported separately. Once it is explained or 2-vCPU boots are clean, on by default for the counts shown clean.
+- **Every other guest**: off, as now, until each has its own boots.
 
 ## Go or no-go
 

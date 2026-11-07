@@ -30,3 +30,11 @@ the donor's own accessor and kIOReturnBadArgument, matching its validator. This
 prevents the donor's AppleParavirtDisplayPipe.cpp:428 assertion during older
 WindowServer teardown. Valid submissions, resource ownership, and fence
 completion are unchanged; rejection logging is limited to four messages.
+
+1.6.4 takes an IOSurface backing resource out of the memory map it joined when
+the resource is freed, on Mojave only. AppleParavirtResource::free released
+that map without removing itself, and a map orphaned with GPU work in flight
+was later walked into the freed resource: a guest panic when a GPU client dies
+mid-frame. It fails closed, with Apple's behaviour kept, unless both
+AppleParavirtResource::free and IOAccelMemoryMap::remove_resource match the
+shipped Mojave kexts byte for byte.

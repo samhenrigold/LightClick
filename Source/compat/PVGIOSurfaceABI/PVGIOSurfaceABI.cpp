@@ -156,6 +156,7 @@ KernelPatcher::KextInfo iosurfaceKext{
 const char *ioacceleratorPaths[] = {
     "/System/Library/Extensions/IOAcceleratorFamily2.kext/Contents/MacOS/IOAcceleratorFamily2"};
 
+void discoverRemoveResource(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 KernelPatcher::KextInfo ioacceleratorKext{
     "com.apple.iokit.IOAcceleratorFamily2", ioacceleratorPaths, arrsize(ioacceleratorPaths), {true}, {},
     KernelPatcher::KextInfo::Unloaded};
@@ -484,6 +485,7 @@ void processIOAccelerator(void *, KernelPatcher &patcher, size_t index, mach_vm_
     }
 
     discoverSurfaceDimensions(patcher, index, address, size);
+    discoverRemoveResource(patcher, index, address, size);
 
     getPlaneIOSurface = reinterpret_cast<GetPlaneIOSurface>(
         patcher.solveSymbol(index, "__ZNK30IOAccelDisplayPipeTransaction217getPlaneIOSurfaceEjj"));
@@ -524,12 +526,71 @@ void processIOAccelerator(void *, KernelPatcher &patcher, size_t index, mach_vm_
     }
 }
 
+// An IOSurface backing joins the map at 0x1e0 with add_resource, which takes no retain, and its free only releases that
+// map. A map whose GPU event is still running then goes on the orphan list, and the collector walks it into the freed
+// resource: a panic when a client dies with GPU work outstanding. So the resource leaves the map as it goes.
+using ResourceFree = void (*)(void *);
+using RemoveResource = void (*)(void *, void *);
+RemoveResource removeResourceFromMap;
+mach_vm_address_t originalResourceFree;
+constexpr size_t backingMapOffset = 0x1e0;
+
+void wrappedResourceFree(void *resource) {
+    auto map = *reinterpret_cast<void **>(reinterpret_cast<uintptr_t>(resource) + backingMapOffset);
+    if (map) {
+        removeResourceFromMap(map, resource);
+    }
+    FunctionCast(wrappedResourceFree, originalResourceFree)(resource);
+}
+
+// The exact bytes of Mojave's kexts, offsets included: anything else keeps Apple's behaviour.
+bool codeMatches(mach_vm_address_t code, mach_vm_address_t address, size_t size, const uint8_t *expected, size_t length) {
+    return code && code >= address && code - address <= size && size - (code - address) >= length &&
+        !memcmp(reinterpret_cast<const void *>(code), expected, length);
+}
+
+void discoverRemoveResource(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+    if (getKernelVersion() != KernelVersion::Mojave)
+        return;
+    static const uint8_t expected[]{0x55, 0x48, 0x89, 0xe5, 0x48, 0x8b, 0x87, 0xb0, 0x00, 0x00, 0x00, 0x48, 0x85, 0xc0, 0x74,
+                                    0x46, 0x48, 0x8b, 0x97, 0xa0, 0x00, 0x00, 0x00, 0x31, 0xc9, 0x48, 0x39, 0x34, 0xca};
+    const auto remove = patcher.solveSymbol(index, "__ZN16IOAccelMemoryMap15remove_resourceEP16IOAccelResource2");
+    if (!codeMatches(remove, address, size, expected, sizeof(expected))) {
+        SYSLOG("iosabi", "unknown memory map layout; retained native resource release");
+        patcher.clearError();
+        return;
+    }
+    removeResourceFromMap = reinterpret_cast<RemoveResource>(remove);
+}
+
+void installBackingResourceRemoval(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+    if (getKernelVersion() != KernelVersion::Mojave || !removeResourceFromMap)
+        return;
+    static const uint8_t expected[]{0x55, 0x48, 0x89, 0xe5, 0x53, 0x50, 0x48, 0x89, 0xfb, 0x48, 0x8b, 0xbf, 0xe0, 0x01, 0x00,
+                                    0x00, 0x48, 0x85, 0xff, 0x74, 0x06, 0x48, 0x8b, 0x07, 0xff, 0x50, 0x28, 0x48, 0xc7, 0x83,
+                                    0xe0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    const char *symbol = "__ZN21AppleParavirtResource4freeEv";
+    if (!codeMatches(patcher.solveSymbol(index, symbol), address, size, expected, sizeof(expected))) {
+        SYSLOG("iosabi", "unknown PVG resource layout; retained native resource release");
+        patcher.clearError();
+        return;
+    }
+    KernelPatcher::RouteRequest request{symbol, wrappedResourceFree, originalResourceFree};
+    if (!patcher.routeMultiple(index, &request, 1)) {
+        SYSLOG("iosabi", "could not route PVG resource release; retained native behaviour");
+        patcher.clearError();
+        return;
+    }
+    SYSLOG("iosabi", "installed backing resource removal from its memory map");
+}
+
 void processAppleParavirtGPU(void *, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
     if (index != appleParavirtGPUKext.loadIndex) {
         return;
     }
 
     installPopulatedSurfaceDimensions(patcher, index, address, size);
+    installBackingResourceRemoval(patcher, index, address, size);
 
     setStartupDisplayMode = reinterpret_cast<SetFramebufferMode>(
         patcher.solveSymbol(index, "__ZN24AppleParavirtFramebuffer21setStartupDisplayModeEii"));
