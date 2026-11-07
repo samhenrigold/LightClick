@@ -395,6 +395,13 @@ def windowed(seconds):
     print(f'windowed_distinct {(last.get("Distinct", 0) - first.get("Distinct", 0)) / spent:.1f} /s', flush=True)
 
 
+def monitor_dump(why):
+    # Where the agent's UART, COM2 at 0x2f8, and its interrupt are. IIR goes last, as reading it can clear what it says.
+    print('# from the monitor,', why, flush=True)
+    for command in ('info pic', 'info ioapic', 'info lapic', 'i/b 0x2f9', 'i/b 0x2fb', 'i/b 0x2fc', 'i/b 0x2fd', 'i/b 0x2fe', 'i/b 0x2fa', 'i/b 0x2fd'):
+        print(f'## {command}', request({'Action': 'monitor', 'Command': command}, 30), flush=True)
+
+
 def watch_guest():
     # What the guest's doing, sent by the guest over its own network: when its agent stops answering, there's no asking it.
     listener = socket.socket()
@@ -440,7 +447,10 @@ done
 ) >/tmp/seamless-watch.err 2>&1 </dev/null &
 echo started
 '''
-    print('the watcher:', request({'Executable': '/bin/sh', 'Arguments': ['-c', script, 'sh', str(port)]}, 30), flush=True)
+    said = request({'Executable': '/bin/sh', 'Arguments': ['-c', script, 'sh', str(port)]}, 30)
+    print('the watcher:', said, flush=True)
+    if said.get('Error'):
+        monitor_dump('the agent not answering the first request')
     print('watching the guest:', target, flush=True)
 
 
@@ -509,6 +519,7 @@ def desktop(activation_only=False):
     check('windows appear for each app', len(windows) >= 2)
     if not windows:
         print('guest frame', capture(f'{tag}-no-windows.png'), flush=True)
+        monitor_dump('no windows came')
         print('the agent after no windows:', request({'Executable': '/bin/sh', 'Arguments': ['-c', '/bin/cat /var/tmp/seamless-ws-press; /bin/ls -l /var/tmp /usr/lib/seamless-ws-hook.dylib; /usr/bin/pgrep -x WindowServer; /bin/ps -axo pid,etime,command | /usr/bin/grep -E "/tmp/sg|agent" | /usr/bin/head -20; /usr/bin/tail -30 /var/log/system.log']}, 120), flush=True)
     for _ in range(3):
         print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
