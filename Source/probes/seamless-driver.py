@@ -395,12 +395,61 @@ def windowed(seconds):
     print(f'windowed_distinct {(last.get("Distinct", 0) - first.get("Distinct", 0)) / spent:.1f} /s', flush=True)
 
 
+def watch_guest():
+    # What the guest's doing, sent by the guest over its own network: when its agent stops answering, there's no asking it.
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(('127.0.0.1', 0))
+    listener.listen(16)
+    port = listener.getsockname()[1]
+    target = results/f'{tag}-guest-watch.txt'
+    target.write_text('')
+
+    def receive():
+        while True:
+            client, _ = listener.accept()
+            with client, target.open('ab') as file:
+                while chunk := client.recv(65536):
+                    file.write(chunk)
+    threading.Thread(target=receive, daemon=True).start()
+    # In one shell, so $PPID is the agent. A sample of it now and then says where it's stuck, if it is.
+    script = r'''
+agent=$PPID
+comm=$(/bin/ps -o comm= -p $agent)
+report() { /usr/bin/nc -w 1 10.0.2.2 "$1"; }
+{ echo "agent pid $agent is $comm"; /bin/ls /Library/LaunchDaemons | /usr/bin/grep -iE "virtual|intel|agent|qemu"; /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"; } | report "$1"
+(
+n=0
+while :; do
+  n=$((n + 1))
+  {
+    /bin/date
+    /bin/ps -axo pid,ppid,stat,etime,pcpu,command | /usr/bin/grep -E "$comm|/tmp/sg|ws-inject|WindowServer|tccd" | /usr/bin/grep -v grep | /usr/bin/cut -c1-120
+    /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"
+    /bin/cat /var/tmp/seamless-ws-press 2>/dev/null
+    /usr/bin/tail -2 /var/log/system.log | /usr/bin/cut -c1-180
+    if [ $((n % 10)) = 0 ]; then
+      /usr/bin/sample "$comm" 1 -file /tmp/seamless-watch.sample >/dev/null 2>&1
+      /usr/bin/grep -A25 "Call graph" /tmp/seamless-watch.sample | /usr/bin/cut -c1-110
+    fi
+    echo
+  } | report "$1"
+  /bin/sleep 2
+done
+) >/tmp/seamless-watch.err 2>&1 </dev/null &
+echo started
+'''
+    print('the watcher:', request({'Executable': '/bin/sh', 'Arguments': ['-c', script, 'sh', str(port)]}, 30), flush=True)
+    print('watching the guest:', target, flush=True)
+
+
 def desktop(activation_only=False):
     # The Seamless button, on a running machine: press, the apps' windows appear and the machine's goes, a click reaches one, press,
     # and the machine's window is back.
     for old in results.glob(f'{tag}-*.png'):
         old.unlink()
     guest = stage(guest_tool)
+    watch_guest()
     for app in ('Finder', 'TextEdit', 'Safari') if version_is_mojave() else ('TextEdit', 'Safari'):
         run(guest, ['open-app', '--app', app])
     time.sleep(12)
@@ -669,6 +718,12 @@ def desktop(activation_only=False):
         os.kill(safari, signal.SIGUSR2)
         time.sleep(8)
         print('in full screen', [row[-50:] for row in proxy_windows()], flush=True)
+        full_report = results/f'{tag}-clicks.txt.command.report'
+        full_report.unlink(missing_ok=True)
+        command.write_text('report')
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(0.5)
+        print('in full screen its proxy says', full_report.read_text() if full_report.exists() else 'nothing', flush=True)
         print('in full screen moving', subprocess.run([meter, window, '3'], capture_output=True, text=True).stdout, flush=True)
         subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-full-screen.png')], capture_output=True)
         os.kill(safari, signal.SIGUSR2)
@@ -703,6 +758,8 @@ def desktop(activation_only=False):
     said = request({'Executable': '/bin/sh', 'Arguments': ['-c', 'cat /tmp/seamless-leap-restore.log; /bin/ps -axo pid,ppid,pgid,command | /usr/bin/grep -E "/tmp/sg/" | /usr/bin/cut -c1-100']}, 60)
     print('restore log:', said.get('Stdout'), said.get('Error'), flush=True)
     check('the guest\'s Dock and shadows are put back', 'dock: 0' in (said.get('Stdout') or ''))
+    said = request({'Executable': '/bin/sh', 'Arguments': ['-c', '/bin/ls -la /tmp/sg | /usr/bin/head -20; /usr/bin/grep -hE "placed window|raised window|is now|back from" /tmp/sg/leap-*.log /tmp/sg/*.log | /usr/bin/tail -40; true']}, 60)
+    print('the tools saw:', said.get('Stdout'), said.get('Error'), flush=True)
     # Generated apps shouldn't stay known to the Mac after a clone's gone.
     for bundle in (source/'Build/bench'/tag).glob('**/Seamless Apps/*/*/*.app'):
         subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', str(bundle)])

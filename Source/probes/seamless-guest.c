@@ -435,8 +435,8 @@ static CGWindowID front_window_of(pid_t pid) {
 
 static const char *session_menu_tool;
 
-// Runs the menu tool, which is what Accessibility's grant names, and waits: what comes next depends on it being done.
-static int run_menu_tool(const char *command, pid_t pid, CGWindowID id, const char *x, const char *y) {
+// Runs the menu tool, which is what Accessibility's grant names, and waits: the press after it depends on it being done.
+static int raise_with_menu_tool(pid_t pid, CGWindowID id) {
     if (!session_menu_tool)
         return 127;
     char pid_text[16], window_text[16];
@@ -444,12 +444,7 @@ static int run_menu_tool(const char *command, pid_t pid, CGWindowID id, const ch
     snprintf(window_text, sizeof(window_text), "%u", id);
     pid_t child = fork();
     if (!child) {
-        if (x)
-            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text, "--x", x,
-                  "--y", y, (char *)NULL);
-        else
-            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text,
-                  (char *)NULL);
+        execl(session_menu_tool, session_menu_tool, "raise-window", "--pid", pid_text, "--window", window_text, (char *)NULL);
         _exit(127);
     }
     int status = 127;
@@ -468,7 +463,7 @@ static void raise_for_press(struct Stream *s, CGWindowID id) {
     activate_owner(s);
     if (front_window_of(pid) == id)
         return;
-    int error = run_menu_tool("raise-window", pid, id, NULL, NULL);
+    int error = raise_with_menu_tool(pid, id);
     double started = now();
     while (!error && front_window_of(pid) != id && now() - started < 0.25)
         usleep(5000);
@@ -1060,12 +1055,17 @@ static int drain_input(struct Stream *s) {
                 _exit(127);
             }
         } else if (m.type == SWM_SET_PLACE) {
-            char x[16], y[16];
-            snprintf(x, sizeof(x), "%d", m.place_x);
-            snprintf(y, sizeof(y), "%d", m.place_y);
-            int error = run_menu_tool("place-window", session_app_pid ? session_app_pid : s->pid, m.u.window_id, x, y);
-            printf("# %.3f placed window %u at %s,%s: error %d\n", now(), m.u.window_id, x, y, error);
+            printf("# %.3f placing window %u at %d,%d\n", now(), m.u.window_id, m.place_x, m.place_y);
             fflush(stdout);
+            if (session_menu_tool && !fork()) {
+                char pid[16], window[16], x[16], y[16];
+                snprintf(pid, sizeof(pid), "%d", session_app_pid ? session_app_pid : s->pid);
+                snprintf(window, sizeof(window), "%u", m.u.window_id);
+                snprintf(x, sizeof(x), "%d", m.place_x);
+                snprintf(y, sizeof(y), "%d", m.place_y);
+                execl(session_menu_tool, session_menu_tool, "place-window", "--pid", pid, "--window", window, "--x", x, "--y", y, (char *)NULL);
+                _exit(127);
+            }
         } else if (m.type == SWM_SET_FULL_SCREEN) {
             if (session_menu_tool && session_app_pid && !fork()) {
                 char pid[16], window[16];

@@ -28,7 +28,7 @@ public enum QMPError: Error, Equatable {
         case .invalidResponse: "Invalid control response."
         case .responseTooLarge: "The control response exceeded its size limit."
         case .timedOut: "The control response timed out."
-        case .connectionEnded: "The control connection ended or timed out."
+        case .connectionEnded: "The control connection ended."
         case .sendFailed: "Could not send a virtual machine command."
         case .unexpectedResponse: "An unexpected control response was received."
         case .rejected(let detail): detail
