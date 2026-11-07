@@ -533,6 +533,27 @@ These are discovery samples under observer load, not exclusive attribution of ev
 code-generation benchmark. Evidence: `Build/bench/loop3-startup-hevc-r2.hevc-profile.json`. No replay fixture or
 translator optimization has yet been made from that function.
 
+### A measured narrow-shift helper cost
+
+Static inspection of the verified baseline x86_64 slice (not x86_64h) found `sarw $9,%dx` at `0xd9033`, followed
+by the sampled `lea` at `0xd9037`. Precise flag liveness makes the intervening memory accesses before the next TEST
+read all arithmetic flags, so this word shift used `SVC_H_SHIFT`. Monitor interrupt delivery advances to the next
+x86 boundary; charging helper time to that following LEA is therefore consistent with the source. The complete
+3140-byte function also has indirect callbacks and is not a closed replay fixture.
+
+`Tests/vcphevc-sar.py` instead verifies and embeds the exact 25 bytes `[0xd9033,0xd904c)` in a synthetic local
+context/stack wrapper. All 65,536 word inputs and the timed batch output are checked against independent integer
+oracles. Three rotating rounds of one million iterations, identical image bytes: old precise engine 50.26–50.95 ns
+per fragment including wrapper (median 50.44), diagnostic fast flags 7.19–7.79 (7.25), Rosetta 7.22–7.59 (7.28).
+Thus the earlier flat-workload observation that precise flags cost little did not cover this real-code neighborhood.
+
+The narrow fix inlines register `SAR r16,imm` with live flags, retaining the helper's exact flag model and upper
+48 register bits. Memory, CL, byte and rotate forms retain their old paths. Precise flags remain enabled. The same
+benchmark then measured 7.32–7.51 ns (median 7.42), alongside Rosetta 7.35–7.98 (7.39). This is a local improvement,
+not yet a whole-decoder or application speedup. Focused Engine and Rosetta tests each passed 202,752 assertions;
+the kernel and C API preserved SAR flags/full RDX at the following fault, and the existing compatibility transcript
+still matched its recorded TCG SHA1. Baseline/optimized artifacts are in `/tmp/lightclick-vcphevc-sar-{baseline,optimized}`.
+
 ### Mojave's page faults: its kernel's bzero
 
 In a page-fault loop, best ns per page, 2 vCPUs: Mojave 2,350 to 3,260 under the engine and 3,468 under TCG; Mavericks 1,282 to 1,298. A dtrace profile of the loop on Mojave put `__bzero` at 56% of kernel samples, 3,107 of 5,579, against 39 of 4,341 on Mavericks, whose pmap time is about the same. Mojave zeroes each new page with `rep stos` under CR0.TS, and in hybrid mode `rep stos` never took the bulk stub: its pattern was a NEON register set outside the stub, where a TS trap couldn't be backed out of, so every element went through the plain loop. The pattern now goes into x22 by integer shifts and the stub stores it with `stp`. After, one boot against one on the build before: 1,367 to 1,414 ns a page against 2,351 to 2,531, `__bzero` 4 samples against 1,975. Mojave's fault now costs what Mavericks' does. Preview's HEIC open and Safari's page load ran as before, no panic. A 12-minute Mojave long run on it, 4 vCPUs: 24 cycles, 2,762 arithmetic checks, 12 file checks, 0 wrong, every application got a window, no reset; Chess killed when it wouldn't quit, as before, and stalls of 2 to 5 s under memory pressure. Launches, two boots of each build, alternating, 4 vCPUs, summed over six applications: warm 9.41 s against 9.90, cold 23.14 against 22.84, or 21.82 without one slow first launch, so about 5% faster warm and within noise cold.

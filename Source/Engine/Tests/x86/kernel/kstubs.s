@@ -134,6 +134,7 @@ _return_from_user:
 // ---- Ring 3 code, copied to user pages. Position independent, with a syscall per action. Ends at user_blob_end. ----
     .globl _user_blob, _user_blob_end
     .globl _u_syscalls, _u_touch, _u_touch_write, _u_spin, _u_cli, _u_ud2, _u_div0, _u_int3, _u_noncanon, _u_kernel_read, _u_int80, _u_flags_at_fault
+    .globl _u_sar16_at_fault, _u_sar16_fault_load
     .globl _u_table_limits, _u_idt_base, _u_gdt_base
     .globl _u_rmw_fault, _u_store_loop, _u_return_value, _u_rep_copy, _u_store_cross, _u_load_cross
     .p2align 12
@@ -267,6 +268,17 @@ _u_flags_at_fault:
     movq $0x7fffffffffffffff, %rax
     addq $1, %rax // OF SF AF PF set, CF ZF clear
     movq (%rdi), %rbx
+    jmp 8b
+
+// rdi: unmapped address; rdx: complete input. TEST is deliberately after the faulting load.
+_u_sar16_at_fault:
+    pushq $0xad7 // all arithmetic flags set, so SAR must establish its own flags including clearing OF/AF
+    popfq
+    sarw $9, %dx
+    leaq (%rdx,%rdx,2), %r8
+_u_sar16_fault_load:
+    movq (%rdi), %rbx
+    testb %dl, %dl
     jmp 8b
 
 // A read-modify-write whose store faults: nothing may change. rdi: read-only page.

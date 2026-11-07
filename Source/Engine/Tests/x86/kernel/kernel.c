@@ -163,7 +163,7 @@ static struct {
 
 extern char isr0[], isr3[], isr6[], isr8[], isr13[], isr14[], isr32[], isr33[], isr128[], syscall_entry[];
 extern char user_blob[], user_blob_end[], u_syscalls[], u_touch[], u_touch_write[], u_spin[], u_cli[], u_ud2[], u_div0[], u_int3[], u_noncanon[],
-    u_kernel_read[], u_int80[], u_flags_at_fault[], u_rmw_fault[], u_store_loop[], u_return_value[], u_rep_copy[], u_store_cross[], u_load_cross[], u_table_limits[], u_idt_base[], u_gdt_base[];
+    u_kernel_read[], u_int80[], u_flags_at_fault[], u_sar16_at_fault[], u_sar16_fault_load[], u_rmw_fault[], u_store_loop[], u_return_value[], u_rep_copy[], u_store_cross[], u_load_cross[], u_table_limits[], u_idt_base[], u_gdt_base[];
 extern u64 enter_user(u64 rip, u64 rsp, u64 rflags);
 extern __attribute__((noreturn)) void return_from_user(void);
 
@@ -220,7 +220,7 @@ typedef struct {
 static volatile u64 ticks;
 static volatile int apic_eoi_needed;
 static volatile u64 df_seen, df_resume_rsp;
-static u64 last_vector, last_err, last_cr2, last_rip, last_flags, last_rdi, last_rsp;
+static u64 last_vector, last_err, last_cr2, last_rip, last_flags, last_rdi, last_rsp, last_rdx;
 static u32 fault_count;
 enum { M_EXIT_ON_FAULT, M_DEMAND, M_COW, M_RET_ADJ };
 static int fault_mode;
@@ -248,6 +248,7 @@ void trap_dispatch(Frame *f) {
     last_flags = f->rflags;
     last_rdi = f->rdi;
     last_rsp = f->rsp;
+    last_rdx = f->rdx;
     fault_count++;
     if (f->vector == 14) {
         last_cr2 = read_cr2();
@@ -413,6 +414,22 @@ static void test_precise(void) {
     u64 r = run_user(u_flags_at_fault, 0x20000000, 0);
     u64 f = last_flags & 0x8D5;
     CHECK(r == 0x10E && f == (0x800 | 0x80 | 0x10 | 0x04), "flags at fault %x status %x", f, r);
+    // SAR's flags must remain precise across LEA and a faulting load, before the following TEST overwrites them.
+    // Complete RDX also matters: SAR dx changes only its low word, unlike a 32-bit register write.
+    static const struct { u64 input, value, flags; } sar[] = {
+        {0x123456789abc8000ULL, 0x123456789abcffc0ULL, 0x84},
+        {0xfedcba9876547fffULL, 0xfedcba987654003fULL, 0x05},
+        {0x123456789abcffffULL, 0x123456789abcffffULL, 0x85},
+        {0xfedcba9876540001ULL, 0xfedcba9876540000ULL, 0x44}
+    };
+    for (unsigned i = 0; i < sizeof sar / sizeof sar[0]; i++) {
+        r = run_user3(u_sar16_at_fault, 0x20000000, 0, sar[i].input);
+        CHECK(r == 0x10E && last_vector == 14 && last_cr2 == 0x20000000 &&
+              last_rip == user_rip(u_sar16_fault_load) && last_rdx == sar[i].value &&
+              (last_flags & 0x8D5) == sar[i].flags,
+              "sar16 fault case %d status %x rip %x rdx %x flags %x", i, r, last_rip, last_rdx, last_flags);
+    }
+    kprintf("PASS sar16 flags and full RDX at fault before TEST\n");
     // Read-only page: the store of add must fault with CF still set from stc and the page unchanged.
     u64 ro = frame_alloc();
     *phys(ro) = 0x77;

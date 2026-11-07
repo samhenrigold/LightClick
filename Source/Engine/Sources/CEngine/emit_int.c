@@ -696,6 +696,25 @@ static void emit_shift(const Insn *in, int live) {
             gpr_write(in->rm, sz, in->high_rm, S0);
         return;
     }
+    if (!mem && sz == 2 && kind == SH_SAR && in->has_imm) {
+        // Keep the narrow helper's complete flag model live without an SVC. The signed 32-bit result has
+        // the same N/Z as its low word; BFI below preserves the destination's other 48 bits.
+        int n = (int)in->imm & 31; // zero was handled above; SAR saturates at the operand's sign bit
+        sbfx(0, S0, d, 0, 16);
+        asr_imm(0, S0, S0, n);
+        logic_reg(0, 3, 0, XZR, S0, S0); // N/Z, V=0 for every nonzero count, as h_shift
+        if (live & F_C) {
+            int bit = n < 16 ? n - 1 : 15;
+            rmif(d, (bit - 1) & 63, 2);
+        }
+        cfinv(); // canonical C is inverse x86 CF
+        if (live & F_P)
+            mov_reg(0, R_PF, S0);
+        if (live & F_A)
+            mov_reg(0, R_AF, S0); // h_shift reports undefined AF as zero: AF = R_AF ^ R_PF
+        gpr_write(in->rm, sz, in->high_rm, S0);
+        return;
+    }
     if (sz < 4 || thru || (in->by_cl && rot && live)) {
         // Helper: exact semantics for the rare forms. Flags come back as data so a store can still fault first.
         if (d != S0)
