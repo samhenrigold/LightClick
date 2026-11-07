@@ -128,14 +128,11 @@ public final class SeamlessDesktop {
         }
         var ownSurfaces = false
         if pixelSource != nil {
-            // shortcut: Mavericks only when asked, since a window that hasn't changed there has no surface yet, and a page's repaint
-            // can miss it. Make it the default once those are right.
-            let alsoBuild = environment["LC_SEAMLESS_MAVERICKS_SURFACES"] != nil ? "13F34" : "18G103"
-            var injected = await guest.run("/bin/sh", ["-c", Self.injectScript, "sh", alsoBuild])
+            var injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
             // Dropped before it began. The script itself never tries twice in a guest's start, so asking again is safe.
             for _ in 1...8 where injected.exitCode == nil && !stopped {
                 try? await Task.sleep(for: .seconds(5))
-                injected = await guest.run("/bin/sh", ["-c", Self.injectScript, "sh", alsoBuild])
+                injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
             }
             note("# hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)\(injected.failure ?? "")")
             ownSurfaces = injected.exitCode == 0
@@ -189,7 +186,7 @@ public final class SeamlessDesktop {
     /// dies and logs the user out, so it's only for the one build it's been run on, is tried once per guest start and is never
     /// retried, whatever happened. Exit 0 means the hook's in this WindowServer; anything else leaves the display's frames.
     private static let injectScript = """
-        case "$(/usr/bin/sw_vers -buildVersion)" in 18G103|$1) ;; *) exit 3;; esac
+        case "$(/usr/bin/sw_vers -buildVersion)" in 18G103|13F34) ;; *) exit 3;; esac
         [ -x /tmp/sg/ws-inject ] && [ -f /tmp/sg/hook.dylib ] || exit 3
         # Earlier builds loaded it through WindowServer's launchd job. That one's in this WindowServer, and patching twice isn't safe, so
         # the entry goes now and windows have their surfaces from the guest's next start.
