@@ -1,6 +1,7 @@
 """guest-bench: bounded fixed Keynote 5.3 resources + sdef extraction in a disposable guest.
 
-One argument: existing fresh host results directory. sdef may launch Keynote inside the guest; no host input or Seamless.
+Arguments: existing fresh host results directory and optionally an already-built fixed-Keynote OSA helper.
+sdef/OSA may launch Keynote inside the guest; no host input or Seamless. Native-helper mode does not repeat the resource walk.
 Only fixed application resources and this collector's private files can be read. No scripting API is assumed.
 """
 import base64
@@ -86,7 +87,18 @@ def resources():
                     errors.append('oversize/empty/long scripting resource skipped'); continue
                 found.append(path)
     return found,{'entries_seen':seen,'directories_seen':visited,'symlinks_skipped':symlinks,'walk_truncated':truncated,'errors':errors[:64]}
-def extract(directory):
+def validated_helper(path,expected):
+    if not re.match(r'\A/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin\Z',path):
+        raise ValueError('invalid staged helper path')
+    parent=path.rsplit('/',1)[0]
+    info=os.lstat(parent)
+    if os.path.realpath(parent)!=parent or not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_mode&0o077:
+        raise ValueError('staged helper directory is not canonical/private/root-owned')
+    data=read(path,4*1024*1024,parent)
+    if os.lstat(path).st_uid!=0 or hashlib.sha256(data).hexdigest()!=expected:
+        raise ValueError('staged helper ownership/hash mismatch')
+    return path
+def extract(directory,helper=None):
     def limits():
         resource.setrlimit(resource.RLIMIT_FSIZE,(2*1024*1024,2*1024*1024))
         resource.setrlimit(resource.RLIMIT_CPU,(10,10))
@@ -94,7 +106,8 @@ def extract(directory):
     files=[os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'wb') for path in paths]
     process=None
     try:
-        process=subprocess.Popen(['/usr/bin/sdef',APP],stdin=open(os.devnull,'rb'),stdout=files[0],stderr=files[1],
+        command=[helper,directory+'/sdef.native'] if helper else ['/usr/bin/sdef',APP]
+        process=subprocess.Popen(command,stdin=open(os.devnull,'rb'),stdout=files[0],stderr=files[1],
                                  close_fds=True,preexec_fn=limits)
         deadline=time.time()+15
         while process.poll() is None and time.time()<deadline: time.sleep(0.05)
@@ -103,12 +116,12 @@ def extract(directory):
             process.kill()
             deadline=time.time()+2
             while process.poll() is None and time.time()<deadline: time.sleep(0.05)
-        return {'command':['/usr/bin/sdef',APP],'exit_code':process.poll(),'timed_out':expired,
+        return {'command':command,'mode':'native-osa' if helper else 'sdef-tool','exit_code':process.poll(),'timed_out':expired,
                 'deadline_seconds':15,'output_file_cap':2*1024*1024,'cpu_limit_seconds':10}
     finally:
         if process is not None and process.poll() is None: process.kill()
         for output in files: output.close()
-def collect():
+def collect(helper=None,helper_hash=None):
     if os.path.realpath(APP)!=APP or not stat.S_ISDIR(os.lstat(APP).st_mode):
         raise ValueError('fixed Keynote app is absent/noncanonical')
     info=plistlib.readPlistFromString(read(APP+'/Contents/Info.plist',512*1024,APP))
@@ -116,11 +129,12 @@ def collect():
         raise ValueError('fixed app changed from inventoried Keynote5.3 build1170')
     scripting=dict((key,value) for key,value in info.items() if 'script' in key.lower() or key.startswith('OSA') or key in
         ('CFBundleIdentifier','CFBundleName','CFBundleExecutable','CFBundleVersion','CFBundleShortVersionString','NSPrincipalClass'))
+    if helper: helper=validated_helper(helper,helper_hash)
     os.umask(0o077)
     directory=tempfile.mkdtemp(prefix='LightClickKeynote.',dir='/private/var/tmp')
     private(directory)
     manifest={'app':APP,'info':scripting,'resources':[],'files':[]}
-    paths,walk=resources()
+    paths,walk=([],{'walk_not_repeated':True,'reason':'Native OSA extraction; prior resource-walk evidence retained separately.'}) if helper else resources()
     manifest['walk']=walk
     total=0
     for path in paths:
@@ -136,10 +150,10 @@ def collect():
         manifest['resources'].append(descriptor)
         manifest['files'].append(descriptor)
     try:
-        manifest['extractor']=extract(directory)
+        manifest['extractor']=extract(directory,helper)
     except Exception as error:
         manifest['extractor']={'error':str(error)[:512]}
-    for selector,name in (('sdef-stdout','sdef.stdout'),('sdef-stderr','sdef.stderr')):
+    for selector,name in (('sdef-stdout','sdef.stdout'),('sdef-stderr','sdef.stderr'),('sdef-native','sdef.native')):
         path=directory+'/'+name
         if os.path.lexists(path) and os.lstat(path).st_size:
             manifest['files'].append(describe(path,selector,2*1024*1024,directory))
@@ -153,6 +167,7 @@ def chunk(directory,selector,offset,length,expected):
     if re.match(r'\Aresource-[0-9]{3}\Z',selector): filename=selector+'.bin'
     elif selector=='sdef-stdout': filename='sdef.stdout'
     elif selector=='sdef-stderr': filename='sdef.stderr'
+    elif selector=='sdef-native': filename='sdef.native'
     else: raise ValueError('invalid fixed output selector')
     descriptor=next((item for item in manifest['files'] if item['selector']==selector),None)
     if descriptor is None or descriptor['identity']!=expected or not 0<length<=192*1024 or offset<0 or offset+length>descriptor['bytes']:
@@ -169,6 +184,7 @@ def chunk(directory,selector,offset,length,expected):
     finally: os.close(fd)
 operation=sys.argv[1]
 if operation=='collect' and len(sys.argv)==2: result=collect()
+elif operation=='collect-native' and len(sys.argv)==4: result=collect(sys.argv[2],sys.argv[3])
 elif operation=='chunk' and len(sys.argv)==7 and sys.argv[4].isdigit() and sys.argv[5].isdigit():
     result=chunk(sys.argv[2],sys.argv[3],int(sys.argv[4]),int(sys.argv[5]),json.loads(sys.argv[6]))
 else: raise ValueError('invalid fixed collector operation')
@@ -192,8 +208,8 @@ def dictionary_summary(data):
 
 
 def collect_dictionary():
-    if len(arguments)!=1:
-        raise RuntimeError('dictionary driver requires one fresh existing host results directory')
+    if len(arguments) not in (1,2):
+        raise RuntimeError('dictionary driver requires fresh results directory and optional compiled fixed-Keynote OSA helper')
     results=Path(arguments[0])
     artifact=results/'keynote-dictionary.json'
     if not results.is_dir() or artifact.exists(): raise RuntimeError('results directory is absent or already used')
@@ -212,24 +228,36 @@ def collect_dictionary():
         return json.loads(text)
     try:
         save()
-        receipt=call(['collect'],40)
+        operation=['collect']
+        if len(arguments)==2:
+            helper=Path(arguments[1])
+            if not helper.is_file() or not 0<helper.stat().st_size<=4*1024*1024:
+                raise ValueError('host OSA helper is absent or exceeds4MiB')
+            helper_hash=hashlib.sha256(helper.read_bytes()).hexdigest()
+            evidence['native_helper']={'path':str(helper),'sha256':helper_hash}
+            save()
+            guest_helper=stage(helper)
+            if not isinstance(guest_helper,str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin',guest_helper):
+                raise ValueError('unexpected OSA helper staging receipt')
+            operation=['collect-native',guest_helper,helper_hash]
+        receipt=call(operation,40)
         evidence['receipt']=receipt
         save()
         directory=receipt.get('directory')
         if not isinstance(directory,str) or not re.fullmatch(r'/private/var/tmp/LightClickKeynote\.[A-Za-z0-9_-]{6,16}',directory):
             raise ValueError('unexpected collection directory')
         descriptors=receipt['manifest']['files']
-        if not isinstance(descriptors,list) or len(descriptors)>66: raise ValueError('invalid file manifest')
+        if not isinstance(descriptors,list) or len(descriptors)>67: raise ValueError('invalid file manifest')
         total=0
         seen=set()
         for descriptor in descriptors:
             selector,count,identity,expected=(descriptor.get(key) for key in ('selector','bytes','identity','sha256'))
-            if (not isinstance(selector,str) or not re.fullmatch(r'resource-[0-9]{3}|sdef-stdout|sdef-stderr',selector)
+            if (not isinstance(selector,str) or not re.fullmatch(r'resource-[0-9]{3}|sdef-stdout|sdef-stderr|sdef-native',selector)
                     or selector in seen or type(count) is not int or not 0<count<=2*1024*1024 or
                     not isinstance(expected,str) or not re.fullmatch('[0-9a-f]{64}',expected) or not isinstance(identity,list)):
                 raise ValueError('invalid bounded output descriptor')
             seen.add(selector); total+=count
-            if total>20*1024*1024: raise ValueError('total collector output budget exceeded')
+            if total>22*1024*1024: raise ValueError('total collector output budget exceeded')
             target=results/(selector+'.bin')
             partial=results/(selector+'.partial')
             digest=hashlib.sha256()
@@ -250,7 +278,9 @@ def collect_dictionary():
                 raise ValueError('final output bytes/hash mismatch')
             os.link(partial,target); partial.unlink()
             record=dict(descriptor,artifact=str(target))
-            if selector=='sdef-stdout' or str(descriptor.get('relative_path','')).lower().endswith('.sdef'):
+            if (selector=='sdef-native' or selector=='sdef-stdout' and
+                    receipt['manifest'].get('extractor',{}).get('mode')!='native-osa' or
+                    str(descriptor.get('relative_path','')).lower().endswith('.sdef')):
                 try: record['dictionary']=dictionary_summary(data)
                 except (ValueError,ET.ParseError) as error: record['parse_error']=str(error)
             evidence['files'].append(record); save()

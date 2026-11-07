@@ -67,12 +67,12 @@ def helper_checks(root):
         except ValueError: assert option!='valid'
         else: assert option=='valid'
     ns['os']=saved_os
-    for mode in ('success','timeout','launch-error'):
+    for mode in ('success','timeout','launch-error','native'):
         directory=root/('tool-'+mode)
         directory.mkdir()
         clock,killed,limits=[0.0],[],[]
         def popen(command,**options):
-            assert command==['/usr/bin/sdef',str(app)]
+            assert command==(['/fixed/staged/helper',str(directory)+'/sdef.native'] if mode=='native' else ['/usr/bin/sdef',str(app)])
             assert options['close_fds'] is True
             options['preexec_fn']()
             if mode=='launch-error': raise OSError('mock unavailable sdef')
@@ -83,17 +83,53 @@ def helper_checks(root):
         ns.update(subprocess=types.SimpleNamespace(Popen=popen),
                   resource=types.SimpleNamespace(RLIMIT_FSIZE=1,RLIMIT_CPU=2,setrlimit=lambda key,value:limits.append((key,value))),
                   time=types.SimpleNamespace(time=lambda:clock[0],sleep=lambda value:clock.__setitem__(0,clock[0]+value)))
-        try: result=ns['extract'](str(directory))
+        try: result=ns['extract'](str(directory),'/fixed/staged/helper' if mode=='native' else None)
         except OSError: assert mode=='launch-error'
         else:
             assert result['timed_out']==(mode=='timeout') and clock[0]<=17.1
+            assert result['mode']==('native-osa' if mode=='native' else 'sdef-tool')
             assert (directory/'sdef.stdout').read_bytes()==b'<dictionary/>'
         assert limits==[(1,(2*1024*1024,2*1024*1024)),(2,(10,10))]
     print('PASS fixed resource/framework walk, no symlink escape, private-directory checks, exact sdef argv/resource/time caps')
 
 
+def native_helper_checks(root):
+    ns=guest_functions(load())
+    helper='/private/var/tmp/VirtualIntelMac.ABC123/Transfer.bin'
+    payload=b'fixed staged helper'
+    for option in ('valid','wrong-path','owner','mode','alias','bad-sha'):
+        info=types.SimpleNamespace(st_mode=stat.S_IFDIR|(0o755 if option=='mode' else 0o700),st_uid=501 if option=='owner' else 0)
+        paths=[]
+        ns['os']=types.SimpleNamespace(lstat=lambda path:info,
+            path=types.SimpleNamespace(realpath=lambda path:'/Users/no' if option=='alias' else path))
+        ns['read']=lambda path,cap,parent:paths.append((path,cap,parent)) or payload
+        try:
+            result=ns['validated_helper']('/Users/no' if option=='wrong-path' else helper,
+                                          '0'*64 if option=='bad-sha' else hashlib.sha256(payload).hexdigest())
+        except ValueError: assert option!='valid'
+        else: assert option=='valid' and result==helper
+    # Real collect orchestration skips resources entirely in native mode and retains sdef-tool as the default.
+    for native in (False,True):
+        ns=guest_functions(load())
+        calls=[]
+        app_info={'CFBundleShortVersionString':'5.3','CFBundleVersion':'1170','NSAppleScriptEnabled':True}
+        ns.update(read=lambda *args:b'fixed info',plistlib=types.SimpleNamespace(readPlistFromString=lambda data:app_info),
+            validated_helper=lambda path,sha:calls.append('validate-helper')or path,
+            private=lambda directory:None,
+            resources=lambda:calls.append('walk')or ([],{}),
+            tempfile=types.SimpleNamespace(mkdtemp=lambda **kwargs:'/private/var/tmp/LightClickKeynote.ABC123'),
+            os=types.SimpleNamespace(umask=lambda mode:None,lstat=lambda path:types.SimpleNamespace(st_mode=stat.S_IFDIR),
+                path=types.SimpleNamespace(realpath=lambda path:path,lexists=lambda path:False)),
+            extract=lambda directory,helper:calls.append(('extract',helper))or {'mode':'native-osa' if helper else 'sdef-tool'},
+            store=lambda path,data:calls.append(('store',path)))
+        ns['collect'](helper,hashlib.sha256(payload).hexdigest()) if native else ns['collect']()
+        assert ('walk' in calls)==(not native)
+        assert ('extract',helper if native else None)in calls
+    print('PASS staged helper identity/hash/private scope and native collection without another resource walk')
+
+
 def protocol_checks(root):
-    cases=('valid','extractor-error','wrong-directory','wrong-identity','wrong-offset','short','bad-hash',
+    cases=('valid','native','bad-stage','stage-timeout','extractor-error','wrong-directory','wrong-identity','wrong-offset','short','bad-hash',
            'bad-final-hash','oversize','duplicate','host-timeout','control-error','deadline','existing')
     payload=b'<dictionary><suite><command name="Synthetic Only" code="abcdEFGH"/></suite></dictionary>'
     large=bytes(range(256))*1536+b'tail'
@@ -104,6 +140,9 @@ def protocol_checks(root):
         calls,clock=[],[0.0]
         ns['time']=types.SimpleNamespace(monotonic=lambda:clock[0])
         files={'resource-000':large,'sdef-stdout':payload,'sdef-stderr':b'full extractor diagnostic'}
+        helper=root/'compiled-helper-fixture'
+        helper.write_bytes(b'compiled helper fixture only; not executed')
+        if name=='native':files={'sdef-stdout':b'PASS fixed native helper','sdef-native':payload,'sdef-stderr':b'diagnostic'}
         descriptors=[{'selector':selector,'bytes':len(data),'identity':[1,index,len(data),1.5,2.5],
                       'sha256':hashlib.sha256(data).hexdigest()}for index,(selector,data)in enumerate(files.items())]
         if name=='bad-final-hash': descriptors[0]['sha256']='0'*64
@@ -117,9 +156,11 @@ def protocol_checks(root):
             if name=='deadline': clock[0]+=240
             if name=='host-timeout': raise SystemExit('Timed out waiting for collector')
             if name=='control-error': return {'Error':'The control response timed out.'}
-            if arguments[2]=='collect':
+            if arguments[2]in('collect','collect-native'):
+                if name=='native':
+                    assert arguments[2:]==['collect-native','/private/var/tmp/VirtualIntelMac.ABC123/Transfer.bin',hashlib.sha256(helper.read_bytes()).hexdigest()]
                 result={'directory':'/private/var/tmp/LightClickKeynote.ABC123',
-                        'manifest':{'files':descriptors,'extractor':{'exit_code':1 if name=='extractor-error' else 0}}}
+                        'manifest':{'files':descriptors,'extractor':{'mode':'native-osa' if name=='native' else 'sdef-tool','exit_code':1 if name=='extractor-error' else 0}}}
                 if name=='wrong-directory': result['directory']='/Users/no'
             else:
                 assert arguments[2]=='chunk' and arguments[3]=='/private/var/tmp/LightClickKeynote.ABC123'
@@ -133,17 +174,27 @@ def protocol_checks(root):
                 elif name=='short': result['bytes']-=1
                 elif name=='bad-hash': result['sha256']='0'*64
             return {'ExitCode':0,'Stdout':json.dumps(result)}
-        ns.update(arguments=[str(destination)],request=request)
+        stages=[]
+        def stage(path):
+            stages.append(path);assert path==helper
+            if name=='stage-timeout':raise SystemExit('Timed out waiting for stage')
+            return '/Users/no' if name=='bad-stage' else '/private/var/tmp/VirtualIntelMac.ABC123/Transfer.bin'
+        ns.update(arguments=[str(destination)]+([str(helper)]if name in('native','bad-stage','stage-timeout')else[]),request=request,stage=stage)
         with contextlib.redirect_stdout(io.StringIO()):
             try: ns['collect_dictionary']()
-            except (Exception,SystemExit): assert name not in('valid','extractor-error')
-            else: assert name in('valid','extractor-error')
+            except (Exception,SystemExit): assert name not in('valid','native','extractor-error')
+            else: assert name in('valid','native','extractor-error')
         report=json.loads((destination/'keynote-dictionary.json').read_text())
-        assert report['result']==('PASS_COLLECTION' if name in('valid','extractor-error') else 'INCONCLUSIVE')
+        assert report['result']==('PASS_COLLECTION' if name in('valid','native','extractor-error') else 'INCONCLUSIVE')
         if name in('valid','extractor-error'):
             assert (destination/'resource-000.bin').read_bytes()==large
             assert report['files'][1]['dictionary']['commands'][0]['name']=='Synthetic Only'
             assert (destination/'sdef-stderr.bin').read_bytes()==files['sdef-stderr']
+        if name=='native':
+            assert (destination/'sdef-native.bin').read_bytes()==payload
+            assert report['files'][1]['dictionary']['commands'][0]['name']=='Synthetic Only'
+            assert 'parse_error'not in report['files'][0]
+        if name in('bad-stage','stage-timeout'):assert not calls and len(stages)==1
         if name=='existing': assert (destination/'resource-000.bin').read_bytes()==b'preserve'
         if name in('host-timeout','control-error','deadline'): assert len(calls)==1
     print(f'PASS chunk collection: {len(cases)} mocked identity/hash/cap/deadline/exclusive-output cases; extractor errors retained')
@@ -153,6 +204,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='lightclick-keynote-dictionary-test-')as temporary:
         root=Path(temporary).resolve()
         helper_checks(root)
+        native_helper_checks(root)
         protocol=root/'protocol';protocol.mkdir()
         protocol_checks(protocol)
 
