@@ -166,6 +166,72 @@ static bool helper_task_map(PGTask_t *task, uint64_t offset, bool read_only,
     pthread_mutex_unlock(&task->lock);
     return true;
 }
+/* Task space that isn't guest RAM right now, in one range. */
+static uint64_t helper_unmapped_pages(const void *address, uint64_t length)
+{
+    mach_vm_address_t start = (mach_vm_address_t)address & ~(mach_vm_address_t)4095;
+    uint64_t pages = (((mach_vm_address_t)address + length + 4095) & ~(mach_vm_address_t)4095) - start, missing = 0;
+    pages /= 4096;
+    pthread_mutex_lock(&helper_tasks_lock);
+    for (PGTask_t *task = helper_tasks; task; task = task->next) {
+        if (start < task->address || start - task->address >= task->length) { continue; }
+        uint64_t first = (start - task->address) / 4096;
+        pthread_mutex_lock(&task->lock);
+        for (uint64_t i = 0; i < pages && task->backing && first + i < task->length / 4096; i++) {
+            if (!task->backing[first + i]) { missing++; }
+        }
+        pthread_mutex_unlock(&task->lock);
+        break;
+    }
+    pthread_mutex_unlock(&helper_tasks_lock);
+    return missing;
+}
+typedef struct { uint64_t offset, length; } HelperCommandRange;
+static IMP helper_original_exec;
+static const void *helper_command_address(id task, HelperCommandRange range)
+{
+    @try {
+        return ((const void *(*)(id, SEL, uint64_t, uint64_t, BOOL))objc_msgSend)(task,
+            sel_registerName("mappedAddressForOffset:length:needWritable:"), range.offset, range.length, NO);
+    } @catch (NSException *e) {
+        return NULL;
+    }
+}
+/* A command buffer the framework can't decode is dropped and reported to the guest as done, so its stamp still moves and the rest of the guest's GPU work goes on. */
+static void helper_exec_guarded(id self, SEL cmd, uint32_t count, HelperCommandRange *commands, void *resources,
+                                id event, uint64_t *value, void (^completion)(uint32_t, NSError *))
+{
+    @try {
+        ((void (*)(id, SEL, uint32_t, void *, void *, id, uint64_t *, id))helper_original_exec)(
+            self, cmd, count, commands, resources, event, value, completion);
+    } @catch (NSException *e) {
+        static uint32_t reported;
+        if (reported++ < 16) {
+            fprintf(stderr, "PVG dropped a command buffer: %s: %s\n", e.name.UTF8String, e.reason.UTF8String);
+            for (uint32_t i = 0; i < count && i < 16; i++) {
+                const uint8_t *bytes = helper_command_address(self, commands[i]);
+                uint64_t unmapped = bytes ? helper_unmapped_pages(bytes, commands[i].length) : UINT64_MAX;
+                fprintf(stderr, "PVG  buffer %u of %u: offset %#llx length %#llx at %p, unmapped pages %llu\n",
+                        i, count, commands[i].offset, commands[i].length, bytes, unmapped);
+                if (bytes && !unmapped) {
+                    char line[3 * 64 + 1];
+                    for (uint32_t b = 0; b < 64 && b < commands[i].length; b++) { snprintf(line + b * 3, 4, "%02x ", bytes[b]); }
+                    fprintf(stderr, "PVG  starts: %s\n", line);
+                }
+            }
+            NSArray *frames = e.callStackSymbols;
+            for (NSUInteger i = 0; i < frames.count && i < 8; i++) { fprintf(stderr, "PVG  %s\n", [frames[i] UTF8String]); }
+        }
+        completion(0, nil);
+    }
+}
+static void helper_guard_exec(void)
+{
+    Class task = NSClassFromString(@"PGLocalTask");
+    SEL selector = sel_registerName("doExecIndirect:cmdBuffers:resourceList:fifoEvent:fifoEventValue:completionHandler:");
+    Method method = task ? class_getInstanceMethod(task, selector) : NULL;
+    if (method) { helper_original_exec = method_setImplementation(method, (IMP)helper_exec_guarded); }
+}
 /* Optional app presentation endpoint. The app creates a private directory and
  * listener before launching QEMU. Fail closed if explicitly requested. */
 static int helper_app_connect(int frame_fd)
@@ -245,6 +311,7 @@ static int helper_main(int argc, char **argv)
         if (!getenv("PVG_SHADOW_PRIVATE_PAGING")) setenv("PVG_SHADOW_PRIVATE_PAGING", "1", 1);
         /* Install after donor classes exist and before any PVG resources. */
         apple_gfx_legacy_shadow_install();
+        helper_guard_exec();
         id<PGDevice> (*create)(PGDeviceDescriptor *) =
             dlsym(image, "PGCreateDeviceWithDescriptor");
         /* Older frameworks (macOS 13) export only the public constructor. */

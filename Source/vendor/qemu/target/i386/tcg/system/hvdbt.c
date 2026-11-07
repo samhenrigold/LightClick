@@ -210,7 +210,8 @@ static void hvdbt_watch_power_ports(CPUState *cs, uint16_t port, unsigned size, 
         return;
     }
     engine_tally_port_write(HV(cs)->engine, port, size, value, hv.kernel_slide);
-    if ((off || reset) && getenv("LC_HVDBT_RAM") && !hv.shutdown_dumped) {
+    if ((off || reset) && getenv("LC_HVDBT_RAM") && !hv.shutdown_dumped && !fork()) { /* in a child, as whoever is watching may end this process as soon as the guest goes quiet */
+        setsid();
         /* Sparse: zero pages are holes. The offset is into pc.ram, which is the GPA below 4 GB and GPA - 4 GB + below_4g above it. */
         FILE *ram = fopen(getenv("LC_HVDBT_RAM"), "wb");
         uint8_t *host = memory_region_get_ram_ptr(current_machine->ram);
@@ -224,6 +225,7 @@ static void hvdbt_watch_power_ports(CPUState *cs, uint16_t port, unsigned size, 
             ftruncate(fileno(ram), hv.ram_bytes);
             fclose(ram);
         }
+        _exit(0);
     }
     if ((off || reset) && kernel && !hv.shutdown_dumped) { /* the kernel's data as it stands now: its message buffer, and any panic string */
         g_autofree char *path = g_strdup_printf("%s.shutdown", kernel);
