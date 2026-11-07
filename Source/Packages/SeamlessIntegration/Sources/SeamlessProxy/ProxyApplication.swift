@@ -478,10 +478,34 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         let source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
         source.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, let front = self.surfaces.max(by: { Self.area($0.value) < Self.area($1.value) }) else {
+                guard let self else { return }
+                let command = (try? String(contentsOfFile: self.testCommandPath, encoding: .utf8)) ?? ""
+                if command.hasPrefix("owner-capture-report") {
+                    guard let request = OwnerWindowCaptureRequest(command: command) else { return }
+                    let requested = self.surfaces[request.guestID]
+                    OwnerWindowCapture.capture(window: requested?.window, guestID: request.guestID, nonce: request.nonce) {
+                        [weak self] report in
+                        guard let self,
+                              let current = try? String(contentsOfFile: self.testCommandPath, encoding: .utf8),
+                              let currentRequest = OwnerWindowCaptureRequest(command: current),
+                              currentRequest.guestID == request.guestID, currentRequest.nonce == request.nonce else {
+                            return // A timeout, cancellation or newer command must not receive an older artifact.
+                        }
+                        var result = report
+                        if let requested, self.surfaces[request.guestID]?.route !== requested.route
+                            || requested.route.windowID != request.guestID {
+                            result.failureCategory = "guestWindowChanged"
+                            result.readCount = 0
+                            result.width = 0
+                            result.height = 0
+                        }
+                        if let data = try? JSONEncoder().encode(result) {
+                            try? data.write(to: URL(fileURLWithPath: self.testCommandPath + ".owner-capture.json"), options: .atomic)
+                        }
+                    }
                     return
                 }
-                let command = (try? String(contentsOfFile: self.testCommandPath, encoding: .utf8)) ?? ""
+                guard let front = self.surfaces.max(by: { Self.area($0.value) < Self.area($1.value) }) else { return }
                 // What each window's material views are, against what the guest sent, for a test with the display asleep.
                 if command.hasPrefix("materials-report") {
                     let lines = self.surfaces.keys.sorted().map { id -> String in
