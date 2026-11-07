@@ -263,6 +263,16 @@
 { 'event': 'WAKEUP' }
 
 ##
+# @PVG_HELPER_LOST:
+#
+# Emitted when the process doing the paravirtual GPU's work has gone.
+# The guest runs on, with no display updates.
+#
+# Since: 10.2
+##
+{ 'event': 'PVG_HELPER_LOST' }
+
+##
 # @WATCHDOG:
 #     Emitted when the watchdog device's timer is expired
 #

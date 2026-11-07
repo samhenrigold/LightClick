@@ -47,6 +47,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)restoreDisplaySelectionForBoot:(NSString *)boot;
 - (void)handoffToGraphics;
 - (void)offerGraphicsRestart;
+- (void)offerRestartAfterGraphicsLoss;
 @property(nullable) NSString *runtimeDirectory;
 /// Every session's machine, none of which may be on a device given to a guest.
 @property(class, readonly) NSArray<NSURL *> *machineURLs;

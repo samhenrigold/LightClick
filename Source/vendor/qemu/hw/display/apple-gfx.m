@@ -12,6 +12,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/qapi-events-run-state.h"
 #include "qemu/lockable.h"
 #include "qemu/cutils.h"
 #include "qemu/log.h"
@@ -69,6 +70,11 @@ typedef struct {
     AppleGFXOOPCommand message;
     QEMUCursor *cursor;
 } AppleGFXOOPCursorJob;
+
+static void apple_gfx_oop_report_lost_bh(void *opaque)
+{
+    qapi_event_send_pvg_helper_lost();
+}
 
 static void apple_gfx_oop_cursor_bh(void *opaque)
 {
@@ -152,6 +158,7 @@ static void *apple_gfx_oop_receive(void *opaque)
     } else {
         error_report("PVG helper transport disconnected; GPU unavailable");
     }
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), apple_gfx_oop_report_lost_bh, NULL);
     dispatch_semaphore_signal(c->reply_ready);
     return NULL;
 }
@@ -942,6 +949,8 @@ static void apple_gfx_do_read(void *opaque)
     job->value = job->state->oop ?
         apple_gfx_oop_rpc(job->state->oop, APPLE_GFX_OOP_READ, job->offset, 0) :
         [job->state->pgdev mmioReadAtOffset:job->offset];
+    /* With the helper gone, all ones would read as every interrupt pending, and the guest's driver panics on them. */
+    if (job->state->oop && qatomic_read(&job->state->oop->failed)) { job->value = 0; }
     qatomic_set(&job->completed, true);
     aio_wait_kick();
 }
