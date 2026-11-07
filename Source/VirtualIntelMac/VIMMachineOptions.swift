@@ -14,6 +14,18 @@ struct MachineOptions: Equatable, Sendable {
         }
     }
 
+    enum MeltdownProtection: String, Sendable {
+        case off
+        case on
+
+        var environmentValue: String {
+            switch self {
+            case .off: "0"
+            case .on: "1"
+            }
+        }
+    }
+
     /// What a value in the app's own environment does.
     private enum Inherited {
         case dropped, wins, winsUnlessEmpty
@@ -21,6 +33,8 @@ struct MachineOptions: Equatable, Sendable {
 
     /// LC_HVDBT (enum, default off): Run the guest's 64-bit code in the hypervisor engine, with TCG as its other half. Needs a QEMU configured with -Dhvdbt_engine. Apple silicon only.
     var engine: Engine?
+    /// LC_HVDBT_KEEP_KPTI (enum, default off): Keep XNU's Meltdown page table switch in code the engine translates. Off skips it, for faster system calls, and the guest loses Meltdown protection. Only the engine reads it.
+    var meltdownProtection: MeltdownProtection?
     /// VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY (path, default unset: no in-process renderer): The OpenGL host library QEMU loads into its own process.
     var passthroughOpenGLInprocessLibrary: String?
     /// VIM_PASSTHROUGH_OPENGL_INLINE (flag, default off): Have the in-process OpenGL host serve inline.
@@ -73,11 +87,13 @@ struct MachineOptions: Equatable, Sendable {
     /// The options a Machine.plist can set.
     init(configuration: [String: Any] = [:]) {
         engine = (configuration["ExecutionEngine"] as? String).flatMap(Engine.init(rawValue:))
+        meltdownProtection = (configuration["MeltdownProtection"] as? String).flatMap(MeltdownProtection.init(rawValue:))
     }
 
     func apply(to environment: inout [String: String]) {
         let entries: [(name: String, value: String?, inherited: Inherited)] = [
             ("LC_HVDBT", engine?.environmentValue, .wins),
+            ("LC_HVDBT_KEEP_KPTI", meltdownProtection?.environmentValue, .wins),
             ("VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY", passthroughOpenGLInprocessLibrary, .wins),
             ("VIM_PASSTHROUGH_OPENGL_INLINE", passthroughOpenGLInline == true ? "1" : nil, .wins),
             ("VIM_PASSTHROUGH_OPENGL_SURFACE_IMPORT", passthroughOpenGLSurfaceImport == true ? "1" : nil, .wins),

@@ -233,6 +233,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property BOOL openGLRestartAttempted;
 @property NSUInteger tabletTrim;
 @property NSData *guestStatusTool;
+@property(nullable) VIMSeamlessWindowButton *seamlessButton;
 @property NSView *setupNotice;
 @property(copy) NSString *setupNoticeHeading;
 @property(copy) NSString *closedSetupNoticeHeading;
@@ -452,13 +453,17 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     toolbar.allowsUserCustomization = NO;
     self.window.toolbar = toolbar;
     self.window.toolbarStyle = NSWindowToolbarStyleUnified;
+    self.seamlessButton = [VIMSeamlessWindowButton installOnWindow:self.window
+                                                            target:self
+                                                            action:@selector(toggleSeamless:)];
+    [self updateSeamlessButton];
 }
 - (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar {
     // SDL device selection is currently next-start only. Keep it in Sound
     // settings, not among controls that imply a live device change.
     return @[
-        NSToolbarFlexibleSpaceItemIdentifier, @"GuestSeamless", @"GuestApps", @"GuestCPU", @"GuestUSB", @"GuestOptical",
-        @"GuestNetwork", @"GuestSharing", @"GuestControls", @"GuestSettings"
+        NSToolbarFlexibleSpaceItemIdentifier, @"GuestApps", @"GuestCPU", @"GuestUSB", @"GuestOptical", @"GuestNetwork",
+        @"GuestSharing", @"GuestControls", @"GuestSettings"
     ];
 }
 - (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
@@ -469,7 +474,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     willBeInsertedIntoToolbar:(BOOL)insert {
     NSDictionary *devices = @{
         @"GuestApps" : @[ @"Download Apps…", @"appstore", @"downloadApps:" ],
-        @"GuestSeamless" : @[ @"Seamless", @"macwindow.on.rectangle", @"toggleSeamless:" ],
         @"GuestCPU" : @[ @"CPU & Memory", @"cpu", @"showCPUSettings:" ],
         @"GuestSharing" : @[ @"Shared Folders", @"folder", @"showSharingSettings:" ]
     };
@@ -2509,6 +2513,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         self.state.usernameBoot = nil;
         // Preserve an explicitly entered Remote Login account while no
         // console user is known; a fresh valid observation replaces it.
+        [self updateSeamlessButton];
     }
     self.guestIPAddresses = [policy() guestAddressesReplacing:previousAddresses
                                                    macAddress:VIMNetworkMACAddress(self.machine.configuration)
@@ -2847,6 +2852,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                  // state while disconnected so input can still request a wakeup.
                  session.runStateQueryFailed = NO;
                  session.lastRunState = state;
+                 [session updateSeamlessButton];
                  [session updateInstallationActivity];
                  [NSNotificationCenter.defaultCenter postNotificationName:@"VIMLibraryChanged" object:nil];
                  session.displayView.displaySleeping = [VIMSessionRunState isDisplayAsleep:state];
@@ -3521,10 +3527,24 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     }
 }
 - (void)noteSeamlessChanged {
-    for (NSToolbarItem *item in self.window.toolbar.items)
-        if ([item.itemIdentifier isEqual:@"GuestSeamless"])
-            item.label = item.toolTip = [VIMSeamlessHost isActiveFor:self] ? @"Leave Seamless" : @"Seamless";
+    [self updateSeamlessButton];
     [NSNotificationCenter.defaultCenter postNotificationName:NSMenuDidChangeItemNotification object:nil];
+}
+- (void)updateSeamlessButton {
+    BOOL active = [VIMSeamlessHost isActiveFor:self];
+    VIMGuestSessionState *state = self.guestSessionState;
+    NSString *reason = nil;
+    if (!active) {
+        if (!state.running)
+            reason = @"Start this Mac to use Seamless.";
+        else if (state.preparing || state.preparationRequested || state.installationRequested)
+            reason = @"Seamless can start once this Mac has finished setting up.";
+        else if ([state.runState isEqual:@"paused"] || [state.runState isEqual:@"suspended"])
+            reason = @"This Mac is paused.";
+        else if (!state.consoleUID)
+            reason = @"Seamless can start once this Mac is at its desktop. Log in if it\u2019s asking you to.";
+    }
+    [self.seamlessButton updateActive:active disabledReason:reason];
 }
 - (IBAction)makeDockApp:(id)sender {
     [VIMSeamlessHost makeProxyFor:self];

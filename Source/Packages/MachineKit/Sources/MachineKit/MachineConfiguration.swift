@@ -128,6 +128,7 @@ public struct MachineConfiguration: Sendable, Equatable {
         case legacyDirectGLBridge = "LegacyDirectGLBridge"
         case legacyGDBPort = "LegacyGDBPort"
         case executionEngine = "ExecutionEngine"
+        case meltdownProtection = "MeltdownProtection"
     }
 
     public subscript(key: Key) -> PropertyListValue? {
@@ -371,10 +372,16 @@ public struct MachineConfiguration: Sendable, Equatable {
         set { setNumber(.legacyGDBPort, newValue as NSNumber?) }
     }
 
-    /// A developer setting with no UI, deliberately not in `PendingChanges.editableKeys`. Nil is the same as off.
+    /// Nil is the same as off.
     public var executionEngine: ExecutionEngine? {
         get { typed(.executionEngine) }
         set { setTyped(.executionEngine, newValue) }
+    }
+
+    /// Nil is the same as off, which skips the switch.
+    public var meltdownProtection: MeltdownProtection? {
+        get { typed(.meltdownProtection) }
+        set { setTyped(.meltdownProtection, newValue) }
     }
 
     /// `LegacyDirectGLBridge` is the old name. It's read as a fallback and left in the file.

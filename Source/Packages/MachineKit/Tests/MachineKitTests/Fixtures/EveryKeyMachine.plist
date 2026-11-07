@@ -85,6 +85,8 @@
 	<integer>1234</integer>
 	<key>MACAddress</key>
 	<string>02:34:56:78:9a:bc</string>
+	<key>MeltdownProtection</key>
+	<string>on</string>
 	<key>MemoryMiB</key>
 	<integer>4096</integer>
 	<key>NVRAM</key>

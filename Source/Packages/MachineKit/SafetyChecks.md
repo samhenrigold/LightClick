@@ -20,8 +20,8 @@ Each check ported from `VIMMachine.m`, `VIMGuestTransactionEvidence.h`, `VIMOpen
   relative, regular files that stay inside the package after `..` and symlinks resolve.
 - `State` is a real folder, not a link.
 - Ports are whole numbers from 1024 to 65535, required when enabled, distinct when both are enabled.
-- Booleans are numbers equal to 0 or 1. `NetworkMode`, `DisplayMode`, `DisplayScalingFilter` and
-  `ExecutionEngine` are known values.
+- Booleans are numbers equal to 0 or 1. `NetworkMode`, `DisplayMode`, `DisplayScalingFilter`,
+  `ExecutionEngine` and `MeltdownProtection` are known values.
 - Lengths in UTF-16 units: `BridgeInterface` 64, `Description` 4096, audio devices 1024.
 - `OpticalMedia` and each `AdditionalMedia` are empty or absolute, with fewer than `imageSlotCount` additional images.
 - `MACAddress` has the exact shape, so nothing can be injected into emulator arguments, and is unicast and non-zero.
