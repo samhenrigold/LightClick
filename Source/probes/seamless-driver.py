@@ -469,6 +469,10 @@ def desktop():
             found = re.search(r'presented ([0-9.]+)', subprocess.run([meter, lower, '4'], capture_output=True, text=True).stdout)
             return float(found.group(1)) if found else -1
         command = results/f'{tag}-clicks.txt.command'
+        # The other one in front, so what's being tested isn't already so.
+        command.write_text('click-title seamless-second')
+        os.kill(textedit_pid, signal.SIGUSR2)
+        time.sleep(1)
         command.write_text('move-title seamless-note')
         os.kill(textedit_pid, signal.SIGUSR2)
         time.sleep(1)
@@ -565,7 +569,9 @@ def desktop():
         def on_screen():
             return any(f'id={window} ' in row for row in rows())
         def page_rate():
-            found = re.search(r'presented ([0-9.]+)', subprocess.run([meter, window, '3'], capture_output=True, text=True).stdout)
+            said = subprocess.run([meter, window, '3'], capture_output=True, text=True)
+            print('page rate read', said.stdout.strip(), said.stderr.strip()[:200], [row[-50:] for row in proxy_windows()], flush=True)
+            found = re.search(r'presented ([0-9.]+)', said.stdout)
             return float(found.group(1)) if found else 0
         command.write_text('guest-minimize')
         os.kill(safari, signal.SIGUSR2)
