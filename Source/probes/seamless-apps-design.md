@@ -46,6 +46,21 @@ injection/proxy prearming. These numbers must not be treated as production cold-
 timeline omitted the desktop event because the persisted flag was integer 1 rather than a plist boolean; the observer
 now handles that actual schema, and the earlier run was not backfilled.
 
+**[measured]** The external presentation meter returned no images with screen-capture preflight false; its zero
+reads are not zero rendering FPS. Reading inside the window's owning process works without requesting permission:
+`loop7-owner-capture` returned one VM-window image (2396x1700), and signed `engineering-loop-8` returned one fixture
+proxy image (1224x948) with preflight still false. The latter matched guest window 43 to host window 46035 and its
+exact owned proxy PID, passed the materials check, restored `gpu mode 0` and cleaned up. Evidence:
+`Build/bench/loop7-owner-capture.owner-capture.json` and
+`Build/seamless/loop8-proxy-owner-materials-owner-capture.json`. These prove one image object/dimensions only,
+not pixel content, animation rate or presentation performance. Bounded owner-process sampling is the next check.
+
+**[read, headless test]** Proxy fullscreen-exit, minimize and drag/drop callbacks retained predecessor IDs after
+`renameSurface`. They now share a route retargeted on rename and invalidated before removal or displacement closes
+the old window (`9d0c1ef9`). A headless lifecycle test covers delayed callbacks, return to an earlier ID and ID reuse;
+live gestures and actual host Space transitions remain unqualified. `seamless-state.HostWindowID` now identifies
+the actual VM window independently of privacy-redacted titles and other windows owned by the same app.
+
 ## Try it on your Mac
 
 Open any machine, wait for its desktop, then press **Seamless** in its toolbar, or **Actions > Seamless**. The window goes, and each guest app with a window becomes a host app of its own, with a Dock tile and a Cmd-Tab entry, in the same place on the screen, in the same running machine. Nothing's installed and nothing restarts. To come back: **Show in Light Click Window** in any of those apps' own menu or Dock menu, Quit from one's Dock menu, or a click on Light Click's Dock tile. Quitting an app from its menu or with Cmd-Q quits it in the guest; when the last window's gone, the machine's window returns. So does it if a proxy dies, or the guest's side ends, or the machine stops. The window stays until something's there to take its place, and if nothing is, it says so.
