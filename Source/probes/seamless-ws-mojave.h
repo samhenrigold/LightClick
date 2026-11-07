@@ -54,6 +54,8 @@ struct GPUWindow {
     int width, height; // Of the surface.
     void *surfaces[2];
     void *marker, *shape;
+    void *marker_texture; // The marker's surface as a texture on the compositor's queue, for marking with a pass that
+                          // only clears.
     void *retired[2]; // What a resize left, kept for a few frames, as what's in flight may use them.
     int retired_for;
     int next;
@@ -368,6 +370,63 @@ static void gpu_composite(char *window, char *surface, const struct RectResult *
     gpu_clear_only = NULL;
 }
 
+// A composite's end, for the helper: a render pass on the window's marker surface that only clears, on the compositor's
+// own queue, after the composite has committed its command buffers there. A composite of nothing there did the same, at
+// a third of what a whole composite takes.
+static int gpu_quick_mark(char *marker, void **texture) {
+    void *(*send)(void *, void *) = dlsym(RTLD_DEFAULT, "objc_msgSend");
+    void *(*uid)(const char *) = dlsym(RTLD_DEFAULT, "sel_getUid");
+    void *(*class_named)(const char *) = dlsym(RTLD_DEFAULT, "objc_getClass");
+    void *(*push)(void) = dlsym(RTLD_DEFAULT, "objc_autoreleasePoolPush");
+    void (*pop)(void *) = dlsym(RTLD_DEFAULT, "objc_autoreleasePoolPop");
+    size_t (*width_of)(void *) = dlsym(RTLD_DEFAULT, "IOSurfaceGetWidth");
+    size_t (*height_of)(void *) = dlsym(RTLD_DEFAULT, "IOSurfaceGetHeight");
+    void *display = main_display_device();
+    int accelerator = display && (*((uint8_t *)display + 0x64) & 0x10) ? display_accelerator(display) : 0;
+    char *compositor = metal_compositor(accelerator);
+    char *context = compositor ? *(char **)(compositor + 0x10) : NULL;
+    void *queue = context ? *(void **)(context + 0x88) : NULL;
+    void *iosurface = *(void **)(marker + 0x70);
+    if (!send || !uid || !class_named || !push || !pop || !width_of || !height_of || !queue || !iosurface)
+        return 0;
+    void *pool = push();
+    if (!*texture) {
+        typedef void *(*DescriptorMake)(void *, void *, unsigned long, unsigned long, unsigned long, char);
+        typedef void *(*TextureMake)(void *, void *, void *, void *, unsigned long);
+        void *descriptor = ((DescriptorMake)send)(class_named("MTLTextureDescriptor"),
+                                                  uid("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"), 80,
+                                                  width_of(iosurface), height_of(iosurface), 0);
+        ((void (*)(void *, void *, unsigned long))send)(descriptor, uid("setUsage:"),
+                                                        4 /* MTLTextureUsageRenderTarget */);
+        *texture = descriptor
+                       ? ((TextureMake)send)(send(queue, uid("device")),
+                                             uid("newTextureWithDescriptor:iosurface:plane:"), descriptor, iosurface, 0)
+                       : NULL;
+    }
+    int done = 0;
+    if (*texture) {
+        void *pass = send(class_named("MTLRenderPassDescriptor"), uid("renderPassDescriptor"));
+        void *attachments = send(pass, uid("colorAttachments"));
+        void *color =
+            ((void *(*)(void *, void *, unsigned long))send)(attachments, uid("objectAtIndexedSubscript:"), 0);
+        ((void (*)(void *, void *, void *))send)(color, uid("setTexture:"), *texture);
+        ((void (*)(void *, void *, unsigned long))send)(color, uid("setLoadAction:"), 2 /* MTLLoadActionClear */);
+        ((void (*)(void *, void *, unsigned long))send)(color, uid("setStoreAction:"), 1 /* MTLStoreActionStore */);
+        void *commands = send(queue, uid("commandBuffer"));
+        void *encoder =
+            commands
+                ? ((void *(*)(void *, void *, void *))send)(commands, uid("renderCommandEncoderWithDescriptor:"), pass)
+                : NULL;
+        if (encoder) {
+            send(encoder, uid("endEncoding"));
+            send(commands, uid("commit"));
+            done = 1;
+        }
+    }
+    pop(pool);
+    return done;
+}
+
 static void gpu_compose_one(uint32_t id) {
     char *window = window_by_id(id);
     void *shape = window ? capture_shape(window, 1) : NULL;
@@ -449,7 +508,7 @@ static void gpu_compose_one(uint32_t id) {
                                          512 + (int)(0xb0 | ((id >> 8) & 0xf)));
         struct RectResult point = {bounds.x, bounds.y, 1, 1};
         void *one = region_from_rect(point);
-        if (w->marker && one && !table->gpu_no_marker) {
+        if (w->marker && one && !table->gpu_no_marker && !gpu_quick_mark(w->marker, &w->marker_texture)) {
             gpu_marking = 1;
             gpu_composite(window, w->marker, &bounds, one, 1);
             gpu_marking = 0;
