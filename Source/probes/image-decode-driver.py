@@ -19,6 +19,13 @@ OS_IMAGE = '/Library/Desktop Pictures/Mojave.heic'
 CAP = 512 * 1024 * 1024
 OUTPUT_CAP = 256 * 1024 * 1024
 TRANSFER_SECONDS = 180
+PREFLIGHT_SECONDS = 180
+# Exact acknowledged errors from QMPError.timedOut and GuestAgentError startup states.
+PREFLIGHT_TRANSIENT_ERRORS = (
+    'The control response timed out.',
+    'The virtual Mac’s guest tools are not connected.',
+    'Wait for this virtual Mac’s current operation to finish, then try again.',
+)
 
 # Python 2.7 in Mojave. Header: random 16-byte nonce, big-endian uint64 byte count, raw SHA256 digest.
 SENDER = r'''import binascii, hashlib, os, re, signal, socket, stat, struct, sys
@@ -171,18 +178,52 @@ def compare_bytes(reference, candidate):
             offset += len(left)
 
 
+def await_fixture(results):
+    started = time.monotonic()
+    deadline = started + PREFLIGHT_SECONDS
+    attempts = []
+
+    def record(attempt):
+        attempt['elapsed_seconds'] = time.monotonic() - started
+        attempts.append(attempt)
+        (results/'preflight-attempts.json').write_text(json.dumps(attempts, indent=2)+'\n')
+        print(f'OS fixture preflight attempt {len(attempts)}: {attempt!r}', flush=True)
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f'OS fixture preflight readiness exhausted {PREFLIGHT_SECONDS}s; attempts {attempts!r}')
+        attempt = {'request_timeout_seconds': min(30, remaining)}
+        try:
+            response = request({'Executable': '/bin/test', 'Arguments': ['-f', OS_IMAGE]},
+                               attempt['request_timeout_seconds'])
+        except (Exception, SystemExit) as error:
+            attempt['exception'] = repr(error)
+            record(attempt)
+            # Host timeouts have no acknowledged reply/request ID: proceeding could consume a stale reply as staging.
+            # App exit and cancellation also abort. Only the acknowledged startup errors below may be retried.
+            raise
+        attempt['response'] = response
+        record(attempt)
+        if (isinstance(response, dict) and 'ExitCode' not in response
+                and response.get('Error') in PREFLIGHT_TRANSIENT_ERRORS):
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+            continue
+        if (not isinstance(response, dict) or 'Error' in response or type(response.get('ExitCode')) is not int
+                or response['ExitCode'] not in (0, 1)):
+            raise RuntimeError(f'OS fixture preflight did not execute successfully: response {response!r}')
+        if response['ExitCode'] == 1:
+            raise RuntimeError(f'required OS fixture is absent or not a regular file: {OS_IMAGE}; response {response!r}')
+        return
+
+
 def experiment():
     if len(arguments) != 3:
         raise RuntimeError('driver requires results directory and host/guest probe paths')
     results, host, guest_binary = map(Path, arguments)
     trials = {'guest': [], 'host': []}
     try:
-        exists = request({'Executable': '/bin/test', 'Arguments': ['-f', OS_IMAGE]}, 15)
-        if (not isinstance(exists, dict) or 'Error' in exists or type(exists.get('ExitCode')) is not int
-                or exists['ExitCode'] not in (0, 1)):
-            raise RuntimeError(f'OS fixture preflight did not execute successfully: response {exists!r}')
-        if exists['ExitCode'] == 1:
-            raise RuntimeError(f'required OS fixture is absent or not a regular file: {OS_IMAGE}; response {exists!r}')
+        await_fixture(results)
         guest = stage(guest_binary)
         directory = staged_directory(guest)
         raw = directory + '/first-image.rgba'

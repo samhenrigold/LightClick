@@ -26,9 +26,11 @@ import types
 def load_driver():
     path = Path(__file__).resolve().parents[1]/'probes/image-decode-driver.py'
     tree = ast.parse(path.read_text(), filename=str(path))
-    constants = {'CAP', 'OUTPUT_CAP', 'TRANSFER_SECONDS', 'SENDER', 'OS_IMAGE'}
+    constants = {'CAP', 'OUTPUT_CAP', 'TRANSFER_SECONDS', 'SENDER', 'OS_IMAGE',
+                 'PREFLIGHT_SECONDS', 'PREFLIGHT_TRANSIENT_ERRORS'}
     nodes = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
-             or isinstance(node, ast.FunctionDef) and node.name in ('export', 'parse_report', 'staged_directory', 'experiment')
+             or isinstance(node, ast.FunctionDef) and node.name in ('export', 'parse_report', 'staged_directory',
+                                                                   'await_fixture', 'experiment')
              or isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in constants
                                                     for target in node.targets)]
     namespace = {}
@@ -208,6 +210,7 @@ def path_checks(namespace):
 
 
 def preflight_checks(namespace, work):
+    timeout, disconnected, busy = ({'Error': message} for message in namespace['PREFLIGHT_TRANSIENT_ERRORS'])
     cases = [('present', {'ExitCode': 0}, 'after successful preflight', True),
              ('absent', {'ExitCode': 1, 'Stderr': ''}, 'absent or not a regular file', False),
              ('launch-error', {'Error': 'No such executable'}, 'did not execute successfully', False),
@@ -215,39 +218,75 @@ def preflight_checks(namespace, work):
              ('error-with-zero', {'ExitCode': 0, 'Error': 'launch failed'}, 'did not execute successfully', False),
              ('unexpected-exit', {'ExitCode': 127}, 'did not execute successfully', False),
              ('boolean-exit', {'ExitCode': False}, 'did not execute successfully', False),
-             ('invalid-response', None, 'did not execute successfully', False)]
+             ('invalid-response', None, 'did not execute successfully', False),
+             ('transient-then-present', [timeout, disconnected, busy, {'ExitCode': 0}], 'after successful preflight', True),
+             ('transient-then-absent', [busy, {'ExitCode': 1}], 'absent or not a regular file', False),
+             ('exhausted', [timeout] * 6, 'readiness exhausted 180s', False),
+             ('mixed-transient-exit', dict(timeout, ExitCode=0), 'did not execute successfully', False),
+             ('malformed-error', {'Error': ['The control response timed out.']}, 'did not execute successfully', False),
+             ('host-timeout', SystemExit('Timed out waiting for fixture test'), 'Timed out waiting', False),
+             ('app-exit', SystemExit('The app exited; see /unused/app.log'), 'The app exited', False),
+             ('cancelled', SystemExit(130), '130', False)]
     for name, response, wanted, should_stage in cases:
         result_directory = work/name
         result_directory.mkdir()
         staged, requests = [], []
+        clock = [0.0]
+        sequence = response if isinstance(response, list) else [response]
+
+        def sleep(seconds):
+            assert 0 <= seconds <= 2
+            clock[0] += seconds
 
         def fake_request(command, timeout):
-            requests.append(command)
+            assert not staged, 'staging began before acknowledged fixture readiness'
+            assert 0 < timeout <= 30
+            requests.append((command, timeout))
             if command != {'Executable': '/bin/test', 'Arguments': ['-f', namespace['OS_IMAGE']]}:
                 return {'Error': 'wrong preflight executable or arguments'}
-            return response
+            if len(requests) > len(sequence):
+                raise AssertionError('unbounded preflight retries')
+            clock[0] += timeout if name == 'exhausted' else 0.25
+            item = sequence[len(requests) - 1]
+            if isinstance(item, BaseException):
+                raise item
+            return item
 
         def fake_stage(binary):
             staged.append(binary)
             # Stop at the first instruction after successful preflight: no transport, probe, or decoder can run.
             raise RuntimeError('after successful preflight')
 
+        original_time = namespace['time']
         namespace.update(arguments=[str(result_directory), '/unused/host-probe', '/unused/guest-probe'],
-                         request=fake_request, stage=fake_stage)
+                         request=fake_request, stage=fake_stage,
+                         time=types.SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
         try:
-            namespace['experiment']()
-        except SystemExit:
-            pass
-        else:
-            raise AssertionError(f'{name}: experiment unexpectedly continued')
+            with contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    namespace['experiment']()
+                except SystemExit:
+                    pass
+                else:
+                    raise AssertionError(f'{name}: experiment unexpectedly continued')
+        finally:
+            namespace['time'] = original_time
         report = json.loads((result_directory/'result.json').read_text())
         if wanted not in report['error'] or bool(staged) != should_stage:
             raise AssertionError(f'{name}: wrong preflight classification/staging: {report}')
-        if len(requests) != 1 or report['trials'] != {'guest': [], 'host': []}:
+        if len(requests) != len(sequence) or report['trials'] != {'guest': [], 'host': []}:
             raise AssertionError(f'{name}: work started after unsuccessful preflight')
-        if not should_stage and repr(response) not in report['error']:
-            raise AssertionError(f'{name}: full diagnostic response was not preserved')
-    print(f'PASS actual experiment preflight: /bin/test, absent vs launch failure, {len(cases)} cases')
+        attempts = json.loads((result_directory/'preflight-attempts.json').read_text())
+        if len(attempts) != len(sequence):
+            raise AssertionError(f'{name}: missing attempt artifacts')
+        for attempt, item in zip(attempts, sequence):
+            if isinstance(item, BaseException):
+                assert attempt['exception'] == repr(item)
+            else:
+                assert attempt['response'] == item
+        if name == 'exhausted':
+            assert clock[0] == 180 and requests[-1][1] == 20
+    print(f'PASS actual experiment preflight: /bin/test, bounded fake-clock startup retries, aborts, {len(cases)} cases')
 
 
 def main():
