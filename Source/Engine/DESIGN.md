@@ -506,6 +506,14 @@ must not be dismissed as harmless rounding. The next split is a draw into the so
 ICC hashes, to distinguish the later color transform from differences already present in provider/decoder output.
 No native media bridge is implemented by this experiment.
 
+The follow-up `--output-color-space source --trials 1` (`Build/image-decode/loop2-source-p3`) also failed exact
+comparison. Each side drew into its own decoded source P3 space, preserving its source/output profile fingerprint.
+The profiles themselves differed (guest 548 bytes, host 536). RGB mean absolute errors were 0.380/0.320/0.487 and
+maxima 21/4/39, with exact alpha. Thus the later sRGB transform alone does not explain the mismatch; differences
+already exist in the decoded/provider/same-space draw path, with different source profile representations still a
+confound. This is not proof that HEVC reconstruction itself differs. The high-level ImageIO replacement remains
+unqualified; preserving guest color handling would require a narrower boundary or accelerating the existing hot loop.
+
 ### Mojave's page faults: its kernel's bzero
 
 In a page-fault loop, best ns per page, 2 vCPUs: Mojave 2,350 to 3,260 under the engine and 3,468 under TCG; Mavericks 1,282 to 1,298. A dtrace profile of the loop on Mojave put `__bzero` at 56% of kernel samples, 3,107 of 5,579, against 39 of 4,341 on Mavericks, whose pmap time is about the same. Mojave zeroes each new page with `rep stos` under CR0.TS, and in hybrid mode `rep stos` never took the bulk stub: its pattern was a NEON register set outside the stub, where a TS trap couldn't be backed out of, so every element went through the plain loop. The pattern now goes into x22 by integer shifts and the stub stores it with `stp`. After, one boot against one on the build before: 1,367 to 1,414 ns a page against 2,351 to 2,531, `__bzero` 4 samples against 1,975. Mojave's fault now costs what Mavericks' does. Preview's HEIC open and Safari's page load ran as before, no panic. A 12-minute Mojave long run on it, 4 vCPUs: 24 cycles, 2,762 arithmetic checks, 12 file checks, 0 wrong, every application got a window, no reset; Chess killed when it wouldn't quit, as before, and stalls of 2 to 5 s under memory pressure. Launches, two boots of each build, alternating, 4 vCPUs, summed over six applications: warm 9.41 s against 9.90, cold 23.14 against 22.84, or 21.82 without one slow first launch, so about 5% faster warm and within noise cold.
