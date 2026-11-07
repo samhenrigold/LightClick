@@ -406,6 +406,17 @@ def monitor_dump(why):
     if pids:
         said = subprocess.run(['lsof', '-n', '-U', '-a', '-p', ','.join(pids)], capture_output=True, text=True).stdout
         print('## lsof', '\n'.join(row for row in said.splitlines() if 'guest-agent' in row or '->' in row)[:3000], flush=True)
+        # A connection waiting in the listener's queue unaccepted points at QEMU's loop not reaching the hang-up.
+        said = subprocess.run(['netstat', '-anv', '-f', 'unix'], capture_output=True, text=True).stdout
+        print('## netstat', '\n'.join(row for row in said.splitlines() if 'guest-agent' in row)[:2000], flush=True)
+        qemu = [row.split()[0] for row in subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
+                if f'Build/bench/{tag}/' in row and 'qemu-system' in row]
+        if qemu:
+            sample = results/f'{tag}-qemu.sample.txt'
+            subprocess.run(['sample', qemu[0], '3', '-file', str(sample)], capture_output=True)
+            text = sample.read_text() if sample.exists() else ''
+            main = text.split('Thread_')[1] if 'Thread_' in text else ''
+            print('## qemu main thread', main[:3000], flush=True)
     for command in ('info chardev', 'info pic', 'info ioapic', 'info lapic', 'i/b 0x2f9', 'i/b 0x2fb', 'i/b 0x2fc', 'i/b 0x2fd', 'i/b 0x2fe', 'i/b 0x2fa', 'i/b 0x2fd'):
         print(f'## {command}', request({'Action': 'monitor', 'Command': command}, 30), flush=True)
 
