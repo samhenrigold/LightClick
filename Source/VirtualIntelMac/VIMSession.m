@@ -26,6 +26,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <QuartzCore/QuartzCore.h>
 #include <unistd.h>
+#include <dlfcn.h>
 #include <sys/sysctl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -1706,6 +1707,90 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
       // the next minute-long status refresh after releasing that ownership.
       [self updateClipboardForBoot:self.state.usernameBoot];
     };
+    if ([command[@"Action"] isEqual:@"owner-window-capture"]) {
+        // One exact window owned by this process. Never accept a caller's window ID or request screen permission.
+        NSWindow *ownedWindow = self.window;
+        NSInteger number = ownedWindow.windowNumber;
+        typedef CFArrayRef (*CaptureWindow)(int32_t, const uint32_t *, int32_t, uint32_t);
+        typedef int32_t (*MainConnection)(void);
+        typedef bool (*Preflight)(void);
+        static void *skyLight;
+        static dispatch_once_t symbolsOnce;
+        static BOOL captureInFlight; // Main-queue single flight, including a private call still running after reply timeout.
+        dispatch_once(&symbolsOnce, ^{
+          skyLight = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY | RTLD_LOCAL);
+        });
+        CaptureWindow capture = skyLight ? (CaptureWindow)dlsym(skyLight, "SLSHWCaptureWindowList") : NULL;
+        MainConnection mainConnection = skyLight ? (MainConnection)dlsym(skyLight, "SLSMainConnectionID") : NULL;
+        Preflight preflight = (Preflight)dlsym(RTLD_DEFAULT, "CGPreflightScreenCaptureAccess");
+        NSDictionary *base = @{
+            @"HostWindowID" : @(number), @"PID" : @(getpid()), @"RequestedReads" : @1,
+            @"WindowVisible" : @(ownedWindow.isVisible), @"ReplyDeadlineSeconds" : @2,
+            @"ReadCount" : @0, @"Width" : @0, @"Height" : @0,
+            @"PreflightAvailable" : @(preflight != NULL),
+            @"PreflightAllowed" : preflight ? @(preflight()) : (id)NSNull.null,
+            @"CaptureSymbolAvailable" : @(capture != NULL), @"ConnectionSymbolAvailable" : @(mainConnection != NULL),
+            @"CaptureScope" : @"actual session NSWindow only; no image bytes exported"
+        };
+        NSString *issue = number <= 0 || (uint64_t)number > UINT32_MAX ? @"invalidWindowID"
+                            : !capture || !mainConnection ? @"symbolUnavailable"
+                            : captureInFlight ? @"captureAlreadyRunning" : nil;
+        if (issue) {
+            NSMutableDictionary *result = [base mutableCopy];
+            result[@"FailureCategory"] = issue;
+            finish(result);
+            return;
+        }
+        // Window identity and connection are resolved on main. The private read and image inspection never block AppKit.
+        uint32_t hostWindowID = (uint32_t)number;
+        int32_t connection = mainConnection();
+        captureInFlight = YES;
+        __block BOOL replied = NO;
+        void (^replyOnce)(NSDictionary *) = ^(NSDictionary *result) {
+          if (replied)
+              return;
+          replied = YES;
+          finish(result);
+        };
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+          NSMutableDictionary *result = [base mutableCopy];
+          result[@"FailureCategory"] = @"captureTimedOut";
+          // This limits the reply wait. A blocked private C call cannot be cancelled; single flight prevents more reads.
+          replyOnce(result);
+        });
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+          @autoreleasepool {
+              uint32_t target = hostWindowID;
+              CFArrayRef images = capture(connection, &target, 1, 1 | (1 << 11));
+              NSMutableDictionary *result = [base mutableCopy];
+              NSString *failure = images && CFGetTypeID(images) != CFArrayGetTypeID() ? @"invalidCaptureResult" : @"noImages";
+              if (images && CFGetTypeID(images) == CFArrayGetTypeID() && CFArrayGetCount(images) > 0) {
+                  CGImageRef image = (CGImageRef)CFArrayGetValueAtIndex(images, 0);
+                  failure = @"invalidImage";
+                  if (image && CFGetTypeID(image) == CGImageGetTypeID() && CGImageGetWidth(image) && CGImageGetHeight(image)) {
+                      result[@"ReadCount"] = @1;
+                      result[@"Width"] = @(CGImageGetWidth(image));
+                      result[@"Height"] = @(CGImageGetHeight(image));
+                      failure = @"none";
+                  }
+              }
+              if (images)
+                  CFRelease(images);
+              result[@"FailureCategory"] = failure;
+              dispatch_async(dispatch_get_main_queue(), ^{
+                captureInFlight = NO;
+                if (self.window != ownedWindow || self.window.windowNumber != number) {
+                    result[@"FailureCategory"] = @"windowChanged";
+                    result[@"ReadCount"] = @0;
+                    result[@"Width"] = @0;
+                    result[@"Height"] = @0;
+                }
+                replyOnce(result);
+              });
+          }
+        });
+        return;
+    }
     if ([command[@"Action"] isEqual:@"capture"]) {
         [self.displayView capturePNG:^(NSData *png) {
           BOOL saved = [png writeToFile:[self.diagnosticDirectory stringByAppendingPathComponent:@"Frame.png"]
