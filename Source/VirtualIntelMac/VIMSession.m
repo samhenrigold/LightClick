@@ -1674,13 +1674,18 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     }
     if ([command[@"Action"] isEqual:@"seamless-state"]) {
-        [self.diagnostics writeResult:@{
+        NSMutableDictionary *state = [@{
             @"Active" : @([VIMSeamlessHost isActiveFor:self]),
             @"WindowVisible" : @(self.window.isVisible),
             @"SurfaceFrames" : @([VIMSeamlessHost surfaceFramesFor:self]),
             @"OwnSurfaces" : @([VIMSeamlessHost hasOwnSurfacesFor:self]),
             @"Prepared" : @([VIMSeamlessHost isPreparedFor:self])
-        }];
+        } mutableCopy];
+        // The actual VM display window, independent of other app windows and privacy-redacted CGWindow titles.
+        NSInteger hostWindowID = self.window.windowNumber;
+        if (hostWindowID > 0)
+            state[@"HostWindowID"] = @(hostWindowID);
+        [self.diagnostics writeResult:state];
         return;
     }
     if ([command[@"Action"] isEqual:@"seamless-toggle"]) {

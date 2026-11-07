@@ -608,15 +608,29 @@ def fps():
         reply = subprocess.run([str(guest_tool), 'list'], capture_output=True, text=True, timeout=5)
         if reply.returncode:
             raise RuntimeError('fps could not enumerate host windows')
-        selected = [window for window in fps_window_rows(reply.stdout) if window['pid'] in pids]
+        windows = fps_window_rows(reply.stdout)
+        reported = None
+        if seamless:
+            selected = [window for window in windows if window['pid'] in pids]
+        else:
+            reported = state().get('HostWindowID')
+            if type(reported) is not int or not 0 < reported <= 0xffffffff:
+                raise RuntimeError(f'fps needs a positive app-reported HostWindowID: {reported!r}')
+            # Require a unique CG record for that exact ID, then its exact owned app PID. Never guess by title or size.
+            selected = [window for window in windows if window['id'] == str(reported)]
+            if len(selected) != 1 or selected[0]['pid'] not in pids:
+                raise RuntimeError(f'fps HostWindowID is absent, ambiguous or no longer owned by this VM: {reported!r}')
         if len(selected) != 1:
             raise RuntimeError(f'fps needs exactly one owned {"Safari page" if seamless else "VM"} window: {selected!r}')
         window = selected[0]
-        if window['title'] and not (window['title'] == 'Seamless page' if seamless else window['title'].startswith('Clone of ')):
-            raise RuntimeError(f'fps owned window has an unexpected nonempty title: {window!r}')
+        if seamless and window['title'] and window['title'] != 'Seamless page':
+            raise RuntimeError(f'fps owned Safari window has an unexpected nonempty title: {window!r}')
         evidence.setdefault('window_selections', []).append(dict(
             kind='Safari proxy' if seamless else 'VM', window=window,
-            provenance='owned PID and unique main window; title withheld' if not window['title'] else 'owned PID and unique main window; title matched',
+            provenance=('owned Safari PID and unique main window; title withheld' if not window['title'] else
+                        'owned Safari PID and unique main window; title matched') if seamless else
+                       'app-reported HostWindowID and exact owned VM PID',
+            host_window_id=reported,
             safari_bundle_identifier='com.apple.Safari' if seamless else None))
         save()
         return window['id'], window['row']
