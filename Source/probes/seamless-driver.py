@@ -670,6 +670,25 @@ def desktop(activation_only=False, materials_only=False):
     # and the machine's window is back.
     for old in results.glob(f'{tag}-*.png'):
         old.unlink()
+    record = globals().get('record_phase')
+    def prepared_state(location):
+        if record:
+            record('prepared_request_started', location=location)
+        try:
+            state = request({'Action': 'seamless-state'}, 5)
+        except BaseException as error:
+            if record:
+                record('prepared_request_finished', location=location, error=repr(error))
+            raise
+        if record:
+            record('prepared_request_finished', location=location, response=state)
+            if state.get('Prepared'):
+                record('prepared_observed', location=location)
+        return state
+
+    if record:
+        record('desktop_driver_entered', materials_only=materials_only)
+        prepared_state('before_watcher')
     # Before anything else asks the agent for anything: it has been seen to stop right after staging.
     watch_guest()
     guest = stage(guest_tool)
@@ -688,9 +707,16 @@ def desktop(activation_only=False, materials_only=False):
     def rows():
         return subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True, timeout=5).stdout.splitlines()
 
+    hidden_observed = False
+
     def machine_window():
+        nonlocal hidden_observed
         # AppKit's word: with the Mac's display asleep, WindowServer's list still says a hidden window's on screen.
-        return request({'Action': 'seamless-state'}, 5 if materials_only else 60).get('WindowVisible')
+        visible = request({'Action': 'seamless-state'}, 5 if materials_only else 60).get('WindowVisible')
+        if record and visible is False and not hidden_observed:
+            hidden_observed = True
+            record('machine_window_hidden_observed')
+        return visible
 
     def proxy_windows():
         running = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True, timeout=5).stdout.splitlines()
@@ -710,7 +736,7 @@ def desktop(activation_only=False, materials_only=False):
 
     ready_deadline = time.monotonic() + 240
     while time.monotonic() < ready_deadline:
-        state = request({'Action': 'seamless-state'}, 5)
+        state = prepared_state('prepared_wait')
         if state.get('Prepared') or 'Prepared' not in state:
             break
         time.sleep(1)
@@ -726,7 +752,11 @@ def desktop(activation_only=False, materials_only=False):
     print('the agent before the press:', request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60), flush=True)
     print(next(iter(rows()), ''), flush=True)
     pressed = time.time()
+    if record:
+        record('press_requested')
     request({'Action': 'seamless-toggle'}, 60)
+    if record:
+        record('press_acknowledged')
     windows = []
     first = None
     dumped = 0
@@ -736,6 +766,8 @@ def desktop(activation_only=False, materials_only=False):
         windows = proxy_windows()
         if windows and first is None:
             first = time.time() - pressed
+            if record:
+                record('first_proxy_observed', windows=windows)
         # While the agent's silent, not after: it has been seen to come back.
         # Bytes each way on the agent's socket, often, to tell an unanswered request from an answer that never arrives.
         if first is None and time.time() - pressed > 2 and time.time() - socket_at > 4:
@@ -746,6 +778,8 @@ def desktop(activation_only=False, materials_only=False):
             dumped += 1
             monitor_dump(f'{time.time() - pressed:.0f} s after a press with no windows yet')
         time.sleep(0.1)
+    if record:
+        record('press_observation_finished', window_count=len(windows))
     print(f'first window after {first} s, machine window gone after {time.time() - pressed:.1f} s', flush=True)
     for row in windows:
         print(row[:150], flush=True)

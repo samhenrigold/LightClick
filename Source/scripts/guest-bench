@@ -28,6 +28,8 @@ import subprocess
 import time
 import uuid
 
+from startup_timeline import StartupTimeline, preserve_startup_logs
+
 from clone_lease import CloneLease, LeaseRefused, process_identity
 
 source = Path(__file__).resolve().parents[1]
@@ -48,6 +50,7 @@ parser.add_argument('--driver', type=Path, help='run this Python file in place o
 parser.add_argument('--driver-arg', action='append', default=[], help='passed to --driver as `arguments`')
 parser.add_argument('--sample', type=int, help='sample QEMU for this many seconds during the workload, into Build/bench/<tag>.sample')
 parser.add_argument('--fresh-identifier', action='store_true', help='give the clone its own machine identifier')
+parser.add_argument('--startup-timeline', action='store_true', help='retain passive startup phase observations as <tag>.startup.jsonl')
 args = parser.parse_args()
 clone_lease = CloneLease()
 try:
@@ -178,6 +181,15 @@ def stop_test_processes(process, work):
         return str(error)
 
 
+timeline = None
+if args.startup_timeline:
+    (machine/'State/GuestStatus.plist').unlink(missing_ok=True)
+    timeline = StartupTimeline(source/'Build/bench'/f'{args.tag}.startup.jsonl')
+    atexit.register(timeline.close)
+    timeline.record('app_launch_requested',
+                    preparation_delay_policy_seconds=90 if 'LC_SEAMLESS_CLICK_LOG' in env else 20,
+                    preparation_enabled='LC_SEAMLESS_CLICK_LOG' in env,
+                    preparation_policy='test' if 'LC_SEAMLESS_CLICK_LOG' in env else 'product; diagnostics suppresses prearm')
 process = subprocess.Popen([str(app/'Contents/MacOS/Light Click'), '--open-vm', str(machine), '--guest-diagnostics-root',
                             str(diagnostics)], env=env, stdout=(work/'app.log').open('w'), stderr=subprocess.STDOUT,
                            stdin=subprocess.DEVNULL)
@@ -185,6 +197,9 @@ try:
     def interrupted(number, frame):
         raise SystemExit(128+number)
     signal.signal(signal.SIGTERM, interrupted)
+    if timeline:
+        timeline.record('app_launched', pid=process.pid)
+        timeline.start(machine, channel, process.pid, real)
     time.sleep(args.boot_wait)
     deadline = time.time()+300
     while not channel.is_dir():
@@ -194,7 +209,7 @@ try:
     if args.driver:
         exec(compile(args.driver.read_text(), str(args.driver), 'exec'),
              {'arguments': args.driver_arg, 'channel': channel, 'request': request, 'source': source, 'stage': stage,
-              'tag': args.tag})
+              'tag': args.tag, **({'record_phase': timeline.record} if timeline else {})})
     elif args.workload:
         phases = source/'Build/bench'/f'{args.tag}.phases'
         lines = sum(1 for _ in events.open()) if events.exists() else 0
@@ -242,7 +257,18 @@ try:
 finally:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    cleanup_failure = stop_test_processes(process, work)
+    try:
+        if timeline:
+            timeline.record('cleanup_started')
+    finally:
+        # Optional evidence must never prevent cleanup of a successfully spawned clone.
+        cleanup_failure = stop_test_processes(process, work)
+    if timeline:
+        timeline.record('process_cleanup_finished', error=cleanup_failure)
+        copied = preserve_startup_logs(work, source/'Build/bench', args.tag,
+                                       Path(env.get('TMPDIR', '/tmp')), identifier, args.fresh_identifier)
+        timeline.record('startup_logs_retained', paths=copied, fresh_identifier=args.fresh_identifier)
+        timeline.close()
     if (machine/'State/session.log').exists():
         shutil.copyfile(machine/'State/session.log', source/'Build/bench'/f'{args.tag}.session.log')
     if cleanup_failure:
