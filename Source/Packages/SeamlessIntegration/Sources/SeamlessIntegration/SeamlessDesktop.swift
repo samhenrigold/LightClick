@@ -264,7 +264,7 @@ public final class SeamlessDesktop {
         [ -x /tmp/sg/ws-inject ] && [ -f /tmp/sg/hook.dylib ] || exit 3
         # Earlier builds loaded it through WindowServer's launchd job. That one's in this WindowServer, and patching twice isn't safe, so
         # the entry goes now and windows have their surfaces from the guest's next start.
-        boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed 's/.*sec = \\([0-9]*\\).*/\\1/')
+        boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed 's/.*{ sec = \\([0-9]*\\).*/\\1/')
         plist=/System/Library/LaunchDaemons/com.apple.WindowServer.plist
         if /usr/bin/grep -q seamless-ws-hook $plist; then
             /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables:DYLD_INSERT_LIBRARIES" $plist

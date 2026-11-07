@@ -428,9 +428,10 @@ while :; do
     /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"
     /bin/cat /var/tmp/seamless-ws-press 2>/dev/null
     /usr/bin/tail -2 /var/log/system.log | /usr/bin/cut -c1-180
-    if [ $((n % 10)) = 0 ]; then
+    if [ $((n % 5)) = 0 ]; then
       /usr/bin/sample "$comm" 1 -file /tmp/seamless-watch.sample >/dev/null 2>&1
       /usr/bin/grep -A25 "Call graph" /tmp/seamless-watch.sample | /usr/bin/cut -c1-110
+      /usr/sbin/lsof -p $agent 2>/dev/null | /usr/bin/grep -E "serial|cu\\." | /usr/bin/cut -c1-110
     fi
     echo
   } | report "$1"
@@ -448,8 +449,9 @@ def desktop(activation_only=False):
     # and the machine's window is back.
     for old in results.glob(f'{tag}-*.png'):
         old.unlink()
-    guest = stage(guest_tool)
+    # Before anything else asks the agent for anything: it has been seen to stop right after staging.
     watch_guest()
+    guest = stage(guest_tool)
     for app in ('Finder', 'TextEdit', 'Safari') if version_is_mojave() else ('TextEdit', 'Safari'):
         run(guest, ['open-app', '--app', app])
     time.sleep(12)
