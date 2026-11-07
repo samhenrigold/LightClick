@@ -1,8 +1,8 @@
 // Builds real host layers from a guest's render tree, as the hook's census printed it, for judging how close the host's
-// Core Animation comes to the guest's. Offline: nothing here talks to a guest, and nothing's shown. The host's CARenderer
-// draws the layers into a texture over the color asked for, so the images are composed from pixels by host CA, with no
-// window, and it works with the display off. What samples what's behind a window can't be seen this way: a backdrop layer
-// comes out as what's in the destination. Says what it didn't know.
+// Core Animation comes to the guest's. Offline: nothing here talks to a guest, and nothing's shown. The host's
+// CARenderer draws the layers into a texture over the color asked for, so the images are composed from pixels by host
+// CA, with no window, and it works with the display off. What samples what's behind a window can't be seen this way: a
+// backdrop layer comes out as what's in the destination. Says what it didn't know.
 //
 //     xcrun clang -fobjc-arc -O2 -framework AppKit -framework QuartzCore -framework Metal \
 //         probes/seamless-layer-viewer.m -o Build/seamless/seamless-layer-viewer
@@ -99,7 +99,8 @@ static CGImageRef blob_image(unsigned index) {
         // shortcut: blobs from before the hook used IOSurfaceGetBytesPerRow have a padded row, at this alignment.
         unsigned align = getenv("STRIDE_ALIGN") ? (unsigned)atoi(getenv("STRIDE_ALIGN")) : 0;
         unsigned stride = align ? ((w * 4 + align - 1) & ~(align - 1)) : row;
-        CGImageRef image = CGImageCreate(w, h, 8, 32, stride, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
+        CGImageRef image =
+            CGImageCreate(w, h, 8, 32, stride, space, kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
                           provider, NULL, NO, kCGRenderingIntentDefault);
         CGColorSpaceRelease(space);
         CGDataProviderRelease(provider);
@@ -120,8 +121,10 @@ static CALayer *make_layer(Node *n, CFTimeInterval renderNow) {
     Node *position = n.items.count > 1 ? n.items[1] : nil, *bounds = n.items.count > 2 ? n.items[2] : nil,
          *anchor = n.items.count > 3 ? n.items[3] : nil;
     Node *subclass = [n named:@"subclass"];
-    NSString *kind = subclass.items.count > 1 ? [subclass.items[1] wordAt:0] : nil;
-    Node *inner = subclass.items.count > 1 ? subclass.items[1] : nil;
+    Node *inner = subclass.items.lastObject;
+    if (subclass.items.count < 2)
+        inner = nil;
+    NSString *kind = [inner wordAt:0];
     CALayer *layer;
     if ([kind isEqual:@"gradient-layer"]) {
         CAGradientLayer *gradient = [CAGradientLayer layer];
@@ -130,6 +133,17 @@ static CALayer *make_layer(Node *n, CFTimeInterval renderNow) {
             gradient.startPoint = CGPointMake(number(start, 0), number(start, 1));
         if (end.items.count == 2)
             gradient.endPoint = CGPointMake(number(end, 0), number(end, 1));
+        Node *stops = [subclass named:@"gradient-colors"];
+        NSMutableArray *colors = [NSMutableArray new], *locations = [NSMutableArray new];
+        for (NSUInteger i = 1; i + 4 < stops.items.count; i += 5) {
+            [locations addObject:@(number(stops, i))];
+            CGColorRef color = CGColorCreateSRGB(number(stops, i + 1), number(stops, i + 2), number(stops, i + 3),
+                                                 number(stops, i + 4));
+            [colors addObject:(__bridge id)color];
+            CGColorRelease(color);
+        }
+        gradient.colors = colors;
+        gradient.locations = locations;
         layer = gradient;
     } else if ([kind isEqual:@"backdrop-layer"]) {
         Class backdrop = NSClassFromString(@"CABackdropLayer");
@@ -257,8 +271,13 @@ static CALayer *make_layer(Node *n, CFTimeInterval renderNow) {
     if ([kind isEqual:@"layer-host"]) {
         // Another process's tree, printed in place.
         for (NSUInteger i = 2; i < inner.items.count; i++)
-            if ([[inner.items[i] wordAt:0] isEqual:@"layer"])
-                [layer addSublayer:make_layer(inner.items[i], renderNow)];
+            if ([[inner.items[i] wordAt:0] isEqual:@"layer"]) {
+                // shortcut: a hosted context's root doesn't flip again, or Safari's page lands upside down. Read from
+                // one tree's result, and CA's rule for this isn't read.
+                CALayer *hosted = make_layer(inner.items[i], renderNow);
+                hosted.geometryFlipped = NO;
+                [layer addSublayer:hosted];
+            }
     } else if (kind && ![kind isEqual:@"gradient-layer"] && ![kind isEqual:@"backdrop-layer"])
         unknown[kind] = @(unknown[kind].intValue + 1);
     Node *sublayers = [n named:@"sublayers"];
@@ -342,7 +361,8 @@ int main(int argc, char **argv) {
         [renderer beginFrameAtTime:began + animateSeconds timeStamp:NULL];
         [renderer addUpdateRect:top.bounds];
         CGRect update = renderer.updateBounds;
-        fprintf(stderr, "update %g,%g %gx%g\n", update.origin.x, update.origin.y, update.size.width, update.size.height);
+        fprintf(stderr, "update %g,%g %gx%g\n", update.origin.x, update.origin.y, update.size.width,
+                update.size.height);
         [renderer render];
         [renderer endFrame];
         usleep(500000); // Its command buffer is its own, and nothing says when that's done.
