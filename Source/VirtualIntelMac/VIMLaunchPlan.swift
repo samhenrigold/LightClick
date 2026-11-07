@@ -465,7 +465,10 @@ public final class LaunchPlan: NSObject {
 
     private static func environment(_ input: LaunchInput, _ guest: Guest) -> [String: String] {
         var options = MachineOptions(configuration: input.configuration)
-        if !input.appleSilicon { options.engine = nil }
+        // hvdbt_want_engine stops QEMU past 8 vCPUs, which Settings says means Software.
+        let cpuCount = (input.configuration["CPUCount"] as? NSNumber)?.intValue ?? 0
+        if !input.appleSilicon || cpuCount > 8 { options.engine = nil }
+        if !input.appleSilicon { options.meltdownProtection = nil }
         if let library = input.inprocessOpenGLLibrary {
             options.passthroughOpenGLInprocessLibrary = library
             options.passthroughOpenGLInline = true

@@ -3,6 +3,9 @@
     {"name": "LC_HVDBT", "swift": "engine", "type": "enum", "reader": "engine", "inherited": "wins",
      "plistKey": "ExecutionEngine", "enumName": "ExecutionEngine", "values": {"off": "0", "on": "1"},
      "default": "off", "meaning": "Run the guest's 64-bit code in the hypervisor engine, with TCG as its other half. Needs a QEMU configured with -Dhvdbt_engine. Apple silicon only."},
+    {"name": "LC_HVDBT_KEEP_KPTI", "swift": "meltdownProtection", "type": "enum", "reader": "engine", "inherited": "wins",
+     "plistKey": "MeltdownProtection", "enumName": "MeltdownProtection", "values": {"off": "0", "on": "1"},
+     "default": "off", "meaning": "Keep XNU's Meltdown page table switch in code the engine translates. Off skips it, for faster system calls, and the guest loses Meltdown protection. Only the engine reads it."},
 
     {"name": "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY", "swift": "passthroughOpenGLInprocessLibrary", "type": "path", "reader": "qemu", "inherited": "wins",
      "default": "unset: no in-process renderer", "meaning": "The OpenGL host library QEMU loads into its own process."},

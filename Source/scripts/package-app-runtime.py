@@ -429,7 +429,8 @@ def main():
         build.pop('BuildDirectory', None)
         build.pop('DependencyPrefixes', None)
         build['ConfigureArguments'] = {
-            arch: [re.sub(r'--python=.*', '--python=${BUILD_PYTHON}', arg) for arg in arguments]
+            arch: [re.sub(r'-Dhvdbt_engine=.*', '-Dhvdbt_engine=${ENGINE}',
+                          re.sub(r'--python=.*', '--python=${BUILD_PYTHON}', arg)) for arg in arguments]
             for arch, arguments in build.get('ConfigureArguments', {}).items()}
     receipt['USBHelper'] = runpy.run_path(str(source/'scripts/build-usb-helper.py'))['build'](
         source, args.output, args.signing_identity, dependencies=args.dependencies)

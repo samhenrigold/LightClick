@@ -105,7 +105,7 @@ def machine_kit(table):
     for option in table['options']:
         if 'plistKey' not in option:
             continue
-        lines += [f'/// `{option["plistKey"]}`, a developer setting with no UI: {option["meaning"]}',
+        lines += [f'/// `{option["plistKey"]}`: {option["meaning"]}',
                   f'public enum {option["enumName"]}: String, Codable, Sendable {{']
         lines += [f'    case {case}' for case in option['values']]
         lines += ['}', '']
