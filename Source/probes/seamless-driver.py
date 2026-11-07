@@ -431,6 +431,10 @@ def desktop():
         match = re.search(r'pid=(\d+)', found)
         return int(match.group(1)) if match else 0
 
+    for _ in range(240):
+        if request({'Action': 'seamless-state'}, 60).get('Prepared'):
+            break
+        time.sleep(1)
     print('before the press', request({'Action': 'seamless-state'}, 60), flush=True)
     print(next(iter(rows()), ''), flush=True)
     pressed = time.time()

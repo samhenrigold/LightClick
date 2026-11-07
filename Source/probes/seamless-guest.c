@@ -1996,9 +1996,10 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             }
             // Room for the guest's shadow if its surface has one, or else there's the window's own shape for the
             // host's.
-            int margin = own_surface && tree_surface_has_shadow(id) ? item->margin
-                         : crop || tree_shared                      ? 0
-                                                                    : item->margin;
+            // Mavericks' say where they start on the frame, not in the hook's rows, and always carry their shadow.
+            int margin = own_surface && (darwin_major() == 13 || tree_surface_has_shadow(id)) ? item->margin
+                         : crop || tree_shared                                                  ? 0
+                                                                                                : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
                 sized = !CGSizeEqualToSize(bounds.size, w->bounds.size) || margin != w->margin;
             uint32_t seed = 0;
@@ -2411,6 +2412,8 @@ static int flag(int argc, char **argv, const char *name) {
 // for. It and they end when the host's connection does. Lines, each a tab-separated list:
 //   to the host:  apps NAME BUNDLE NAME BUNDLE ...  and  described BUNDLE JSON ICON-BASE64
 //   from the host: describe BUNDLE  and  run NAME PORT
+static pthread_mutex_t leap_send_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static int leap_send(int fd, const char *text) {
     for (size_t sent = 0, length = strlen(text); sent < length;) {
         ssize_t wrote = send(fd, text + sent, length - sent, 0);
@@ -2433,20 +2436,33 @@ static char *leap_line(char *text, char start) {
     return "";
 }
 
-static int leap_describe(int fd, const char *menu_tool, char *path) {
-    char *const read_it[] = {(char *)menu_tool, "describe", "--path", path, NULL};
-    char *const icon_of[] = {(char *)menu_tool, "icon", "--path", path, NULL};
+struct LeapDescribe {
+    int fd;
+    const char *menu_tool;
+    char path[PATH_MAX];
+};
+
+// On its own thread: reading an app starts two programs, a second or more each in a guest that's emulated.
+static void *leap_describe(void *argument) {
+    struct LeapDescribe *job = argument;
+    char *const read_it[] = {(char *)job->menu_tool, "describe", "--path", job->path, NULL};
+    char *const icon_of[] = {(char *)job->menu_tool, "icon", "--path", job->path, NULL};
     char *description = run_tool(read_it), *icon = run_tool(icon_of);
     const char *json = description ? leap_line(description, '{') : "";
     if (icon && (icon[0] == '#' || strchr(icon, ' ')))
         icon[0] = 0;
     if (icon)
         icon[strcspn(icon, "\r\n")] = 0;
-    int failed = leap_send(fd, "described\t") || leap_send(fd, path) || leap_send(fd, "\t") || leap_send(fd, json) ||
-                 leap_send(fd, "\t") || leap_send(fd, icon ? icon : "") || leap_send(fd, "\n");
+    // The whole line at once, with the list of apps also going down this connection. A failure ends the main loop's read.
+    pthread_mutex_lock(&leap_send_lock);
+    (void)(leap_send(job->fd, "described\t") || leap_send(job->fd, job->path) || leap_send(job->fd, "\t") ||
+           leap_send(job->fd, json) || leap_send(job->fd, "\t") || leap_send(job->fd, icon ? icon : "") ||
+           leap_send(job->fd, "\n"));
+    pthread_mutex_unlock(&leap_send_lock);
     free(description);
     free(icon);
-    return failed;
+    free(job);
+    return NULL;
 }
 
 #define LEAP_CHILDREN 64
@@ -2677,8 +2693,15 @@ static int leap(const char *host, int port, const char *menu_tool, int own_surfa
                     *first = 0;
                 if (second)
                     *second = 0;
-                if (first && !strcmp(line, "describe") && leap_describe(fd, menu_tool, first + 1))
-                    goto done;
+                if (first && !strcmp(line, "describe")) {
+                    struct LeapDescribe *job = calloc(1, sizeof(*job));
+                    pthread_t thread;
+                    job->fd = fd;
+                    job->menu_tool = menu_tool;
+                    snprintf(job->path, sizeof(job->path), "%s", first + 1);
+                    if (!pthread_create(&thread, NULL, leap_describe, job))
+                        pthread_detach(thread);
+                }
                 if (second && !strcmp(line, "run"))
                     leap_run(self, menu_tool, first + 1, second + 1);
                 if (!strcmp(line, "gpu-off")) {
@@ -2697,7 +2720,10 @@ static int leap(const char *host, int port, const char *menu_tool, int own_surfa
         if (strcmp(listed, last) || now() - said > 3) {
             said = now();
             strcpy(last, listed);
-            if (leap_send(fd, listed))
+            pthread_mutex_lock(&leap_send_lock);
+            int failed = leap_send(fd, listed);
+            pthread_mutex_unlock(&leap_send_lock);
+            if (failed)
                 break;
         }
     }

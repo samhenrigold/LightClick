@@ -55,6 +55,9 @@ public final class SeamlessDesktop {
     private let environment = ProcessInfo.processInfo.environment
     private static var staged: Set<String> = []
     private static var described: [String: GuestApp] = [:]
+    private lazy var savedDescriptions: [String: GuestApp] =
+        (try? JSONDecoder().decode([String: GuestApp].self, from: Data(contentsOf: descriptionsFile))) ?? [:]
+    private var descriptionsFile: URL { configuration.bundles.appending(path: "apps.json") }
     private static var preparing: [String: Task<Bool, Never>] = [:]
 
     public static let leaveTitle = "Show in Light Click Window"
@@ -126,41 +129,36 @@ public final class SeamlessDesktop {
             finish("This Mac isn’t ready yet. Wait for it to finish starting, then try again.")
             return
         }
-        var ownSurfaces = false
-        if pixelSource != nil {
-            var injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
-            // Dropped before it began. The script itself never tries twice in a guest's start, so asking again is safe.
-            for _ in 1...8 where injected.exitCode == nil && !stopped {
-                try? await Task.sleep(for: .seconds(5))
-                injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
-            }
-            note("# hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)\(injected.failure ?? "")")
-            ownSurfaces = injected.exitCode == 0
-            if stopped { return }
-        }
         var ran = SeamlessGuestRun(exitCode: nil, output: "", failure: nil)
-        // On Mavericks the agent's connection can drop just after setup, under whatever runs next. Nothing's reached the user yet.
+        // In one request, as each costs about a second on Mavericks. Dropping just after setup, on Mavericks, means asking again:
+        // the script never tries the hook twice in a guest's start, and nothing's reached the user yet.
         for attempt in 1...8 {
-            ran = await guest.run(
-                "/usr/bin/env",
-                ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--port", String(port), "--menu-tool", "/tmp/sg/ig"]
-                    + (ownSurfaces ? ["--own-surfaces"] : []))
-            if stopped || ran.exitCode != nil || control >= 0 || attempt == 8 { break }
-            note("# trying again: \(ran.failure ?? "")")
-            try? await Task.sleep(for: .seconds(3))
+            ran = await guest.run("/bin/sh", ["-c", Self.pressScript, "sh", String(port)])
+            if stopped || control >= 0 || attempt == 8 { break }
+            if ran.exitCode == Self.noTools {
+                // The guest has restarted since they went in.
+                Self.staged.remove(configuration.machine.path)
+                guard await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path) else { break }
+            } else if ran.exitCode != nil {
+                break
+            } else {
+                note("# trying again: \(ran.failure ?? "")")
+                try? await Task.sleep(for: .seconds(3))
+            }
         }
         note("# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")")
         finish(ran.exitCode == 3 ? "This Mac couldn’t reach Light Click. Seamless needs its networking on." : nil, why: "the guest's side ended")
     }
+
+    public static func isPrepared(machine: String) -> Bool { staged.contains(machine) }
 
     /// Puts the programs in the guest, once for each of its starts, and sooner than a press if the app wants that to be quick.
     public static func prepare(guest: any SeamlessGuest, tools: URL, machine: String) async -> Bool {
         if let running = preparing[machine] { return await running.value }
         let task = Task<Bool, Never> { @MainActor in
             defer { preparing[machine] = nil }
-            // The folder goes with the guest's next start, and the tools with this app's next build.
-            let present = await guest.run("/bin/sh", ["-c", "test -x /tmp/sg/g && test -x /tmp/sg/ig"]).exitCode == 0
-            if present, staged.contains(machine) { return true }
+            // A guest that's restarted since says so when they're run.
+            if staged.contains(machine) { return true }
             guard let tool = await guest.stage(tools.appending(path: "seamless-guest")),
                 let menuTool = await guest.stage(tools.appending(path: "seamless-integration-guest"))
             else { return false }
@@ -181,6 +179,8 @@ public final class SeamlessDesktop {
         preparing[machine] = task
         return await task.value
     }
+
+    private static let noTools = 126
 
     /// Loads the hook into the running WindowServer, so each window comes on a surface of its own. If this goes wrong WindowServer
     /// dies and logs the user out, so it's only for the one build it's been run on, is tried once per guest start and is never
@@ -211,6 +211,16 @@ public final class SeamlessDesktop {
         echo "$boot $pid ok" > $marker
         """
 
+    private static let pressScript = """
+        [ -x /tmp/sg/g ] && [ -x /tmp/sg/ig ] || exit \(noTools)
+        ( \(injectScript)
+        )
+        hooked=$?
+        echo "# hook into WindowServer: exit $hooked"
+        own=; [ $hooked = 0 ] && own=--own-surfaces
+        exec /usr/bin/env SEAMLESS_RUN_IN_PLACE=1 /tmp/sg/g leap --port "$1" --menu-tool /tmp/sg/ig $own
+        """
+
     private func listen() -> Bool {
         let listener = socket(AF_INET, SOCK_STREAM, 0)
         var address = sockaddr_in()
@@ -233,6 +243,7 @@ public final class SeamlessDesktop {
             DispatchQueue.main.sync {
                 MainActor.assumeIsolated {
                     self?.control = client
+                    self?.note("# the guest's program connected")
                     if self?.stopped ?? true { shutdown(client, SHUT_RDWR) }
                 }
             }
@@ -274,7 +285,7 @@ public final class SeamlessDesktop {
                 describing.insert(app.path)
                 names[app.path] = app.name
                 // Reading an app starts programs in the guest, which is slow. It's the same app next time.
-                if let known = Self.described[app.path] {
+                if let known = Self.described[app.path] ?? savedDescriptions[app.path] {
                     Task { await open(known, icon: nil) }
                 } else {
                     tell("describe\t\(app.path)")
@@ -306,6 +317,8 @@ public final class SeamlessDesktop {
             }
             note("# described \(path)")
             Self.described[path] = app
+            savedDescriptions[path] = app
+            try? JSONEncoder().encode(savedDescriptions).write(to: descriptionsFile)
             Task { await open(app, icon: icon) }
         default:
             break
@@ -337,8 +350,10 @@ public final class SeamlessDesktop {
             let built = (try? configuration.proxyExecutable.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate?.timeIntervalSince1970 ?? 0
             let folder = configuration.bundles.appending(path: String(Int(built)))
-            if !FileManager.default.fileExists(atPath: folder.path) {
-                try? FileManager.default.removeItem(at: configuration.bundles)
+            if !FileManager.default.fileExists(atPath: folder.path),
+                let old = try? FileManager.default.contentsOfDirectory(at: configuration.bundles, includingPropertiesForKeys: nil)
+            {
+                for item in old where item != descriptionsFile { try? FileManager.default.removeItem(at: item) }
             }
             let existing = folder.appending(path: proxy.bundleName)
             if FileManager.default.fileExists(atPath: existing.appending(path: "Contents/Info.plist").path) {

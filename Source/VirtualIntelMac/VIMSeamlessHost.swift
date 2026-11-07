@@ -237,13 +237,15 @@ final class SeamlessHost: NSObject {
     }
 
     @objc static func isActive(for session: VIMSession) -> Bool { desktops[session.machinePath] != nil }
+    @objc static func isPrepared(for session: VIMSession) -> Bool { SeamlessDesktop.isPrepared(machine: session.machinePath) }
     @objc static func hasOwnSurfaces(for session: VIMSession) -> Bool { windowSurfaces[session.machinePath]?.hasSurfaces ?? false }
 
     /// So the button's quick from the first press. Once the guest's agent answers, and not while something's measuring it or
     /// the app's only there to run one guest app.
     @objc static func prepare(for session: VIMSession) {
         let arguments = ProcessInfo.processInfo.arguments
-        guard !arguments.contains("--guest-diagnostics-root"), !arguments.contains("--seamless-session"),
+        guard !arguments.contains("--guest-diagnostics-root") || ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil,
+            !arguments.contains("--seamless-session"),
             !arguments.contains("--seamless-make-proxy")
         else { return }
         let path = session.machinePath

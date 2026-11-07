@@ -1658,7 +1658,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         [self.diagnostics writeResult:@{
             @"Active" : @([VIMSeamlessHost isActiveFor:self]),
             @"WindowVisible" : @(self.window.isVisible),
-            @"OwnSurfaces" : @([VIMSeamlessHost hasOwnSurfacesFor:self])
+            @"OwnSurfaces" : @([VIMSeamlessHost hasOwnSurfacesFor:self]),
+            @"Prepared" : @([VIMSeamlessHost isPreparedFor:self])
         }];
         return;
     }
