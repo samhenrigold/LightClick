@@ -2721,6 +2721,8 @@ int main(int argc, char **argv) {
         }
         if (option(argc, argv, "--census", NULL))
             t->gpu_census = atoi(option(argc, argv, "--census", "0"));
+        if (option(argc, argv, "--no-marker", NULL))
+            t->gpu_no_marker = (uint32_t)atoi(option(argc, argv, "--no-marker", "0"));
         if (option(argc, argv, "--no-shadow", NULL))
             t->gpu_no_shadow = (uint32_t)atoi(option(argc, argv, "--no-shadow", "0"));
         if (option(argc, argv, "--mode", NULL)) {

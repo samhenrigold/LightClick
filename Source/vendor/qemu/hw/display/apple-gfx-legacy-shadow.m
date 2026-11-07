@@ -189,9 +189,8 @@ static void seamless_note_sampled(id<MTLTexture> t)
     }
     os_unfair_lock_unlock(&lock);
 }
-/* For host layers: which host IOSurface a guest's surface is. The hook binds it in a pass on a small surface tagged 0xd0 with
+/* For host layers: which host IOSurface a guest's surface is. The hook copies a pixel of it to a small surface tagged 0xd0 with
  * a slot, as nothing else says. Each goes to <dir>/identities.txt, with a sum of its pixels, for telling whether they got here. */
-static __thread int seamless_identify_slot = -1;
 static void seamless_identified(int slot, id<MTLTexture> texture)
 {
     static FILE *file;
@@ -217,7 +216,6 @@ static void seamless_identified(int slot, id<MTLTexture> texture)
 }
 static void seamless_set_fragment_texture(id self, SEL cmd, id<MTLTexture> texture, NSUInteger index)
 {
-    if (seamless_identify_slot >= 0 && texture) seamless_identified(seamless_identify_slot, texture);
     if (getenv("VIM_SEAMLESS_PVG_SAMPLED")) seamless_note_sampled(texture);
     ((void (*)(id, SEL, id, NSUInteger))original_set_fragment_texture)(self, cmd, texture, index);
 }
@@ -226,11 +224,28 @@ static void seamless_set_fragment_textures(id self, SEL cmd, const id<MTLTexture
     for (NSUInteger i = 0; i < range.length; i++) seamless_note_sampled(textures[i]);
     ((void (*)(id, SEL, const id *, NSRange))original_set_fragment_textures)(self, cmd, (const id *)textures, range);
 }
+static IMP original_copy_texture;
+static void seamless_copy_texture(id self, SEL cmd, id<MTLTexture> source, NSUInteger slice, NSUInteger level, MTLOrigin origin,
+                                  MTLSize size, id<MTLTexture> destination, NSUInteger to_slice, NSUInteger to_level, MTLOrigin to)
+{
+    ((void (*)(id, SEL, id, NSUInteger, NSUInteger, MTLOrigin, MTLSize, id, NSUInteger, NSUInteger, MTLOrigin))original_copy_texture)(
+        self, cmd, source, slice, level, origin, size, destination, to_slice, to_level, to);
+    uint32_t height = (uint32_t)destination.height;
+    if (guest_render_depth && destination.iosurface && destination.width > 256 && height > 256 && (height & 0xf0) == 0xd0)
+        seamless_identified((int)((destination.width & 0xff) | (height & 0x0f) << 8), source);
+}
 static void seamless_watch_sampling(id encoder)
 {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Class c = [encoder class];
+        id<MTLCommandQueue> queue = [[encoder device] newCommandQueue];
+        id<MTLBlitCommandEncoder> blit = [[queue commandBuffer] blitCommandEncoder];
+        original_copy_texture = class_replaceMethod([blit class],
+            @selector(copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:),
+            (IMP)seamless_copy_texture, "v@:@QQ{_MTLOrigin=QQQ}{_MTLSize=QQQ}@QQ{_MTLOrigin=QQQ}");
+        [blit endEncoding];
+        [queue release];
         original_set_fragment_texture = class_replaceMethod(c, @selector(setFragmentTexture:atIndex:), (IMP)seamless_set_fragment_texture, "v@:@Q");
         original_set_fragment_textures = class_replaceMethod(c, @selector(setFragmentTextures:withRange:), (IMP)seamless_set_fragment_textures, "v@:^@{_NSRange=QQ}");
     });
@@ -290,7 +305,6 @@ static id preserving_render_encoder(id self, SEL cmd, MTLRenderPassDescriptor *p
                 adjusted = [pass copy];
                 adjusted.colorAttachments[0].loadAction = MTLLoadActionLoad;
             }
-            seamless_identify_slot = tag == 0xd0 ? (int)window : -1;
             if (tag == 0xa0) {
                 /* What the guest gave it, for telling whether a value set there can name a window. */
                 static uint32_t told[64];
