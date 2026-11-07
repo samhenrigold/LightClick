@@ -442,27 +442,11 @@ def cpu_percent(seconds=16):
     print(f'cpu_percent {percent:.0f}, load {load}', flush=True)
 
 
-def watch_guest():
-    # What the guest's doing, sent by the guest over its own network: when its agent stops answering, there's no asking it.
-    listener = socket.socket()
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(('127.0.0.1', 0))
-    listener.listen(16)
-    port = listener.getsockname()[1]
-    target = results/f'{tag}-guest-watch.txt'
-    target.write_text('')
-
-    def receive():
-        while True:
-            client, _ = listener.accept()
-            with client, target.open('ab') as file:
-                while chunk := client.recv(65536):
-                    file.write(chunk)
-    threading.Thread(target=receive, daemon=True).start()
-    # In one shell, so $PPID is the agent. A sample of it now and then says where it's stuck, if it is.
-    script = r'''
-agent=$PPID
-comm=$(/bin/ps -o comm= -p $agent)
+WATCH_PORT = 57391
+# In one shell. A sample of the agent now and then says where it's stuck, if it is.
+WATCHER = r'''
+agent=$(/usr/bin/pgrep -f opengl-guest-agent | /usr/bin/head -1)
+comm=opengl-guest-agent
 report() { /usr/bin/nc -w 1 10.0.2.2 "$1"; }
 { echo "agent pid $agent is $comm"; /bin/ls /Library/LaunchDaemons | /usr/bin/grep -iE "virtual|intel|agent|qemu"; /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"; } | report "$1"
 # Late timers or wakeups show as a 0.1 s sleep taking over a second, logged with the guest's own clock.
@@ -471,6 +455,7 @@ report() { /usr/bin/nc -w 1 10.0.2.2 "$1"; }
 n=0
 while :; do
   n=$((n + 1))
+  agent=$(/usr/bin/pgrep -f opengl-guest-agent | /usr/bin/head -1)
   {
     /bin/date
     /bin/ps -axo pid,ppid,stat,etime,pcpu,command | /usr/bin/grep -E "$comm|/tmp/sg|ws-inject|WindowServer|tccd|perl" | /usr/bin/grep -v grep | /usr/bin/cut -c1-120
@@ -495,6 +480,63 @@ done
 ) >/tmp/seamless-watch.err 2>&1 </dev/null &
 echo started
 '''
+
+
+def install_watcher():
+    # Once, into a private copy of the test machine: the watcher as a launchd job, so it reports from boot, before the
+    # agent may go quiet. Then a clean shutdown, and the clone kept as that copy, with its own identifier.
+    copy = Path(arguments[arguments.index('install-watcher') + 1])
+    script = WATCHER.replace('"$1"', str(WATCH_PORT))
+    plist = ('<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+             '<key>Label</key><string>gold.samhenri.seamless-watch</string>'
+             '<key>ProgramArguments</key><array><string>/bin/sh</string><string>/usr/local/libexec/seamless-watch.sh</string></array>'
+             '<key>RunAtLoad</key><true/><key>AbandonProcessGroup</key><true/></dict></plist>')
+    install = ('/bin/mkdir -p /usr/local/libexec && printf %s "$1" > /usr/local/libexec/seamless-watch.sh && '
+               f"/bin/echo '{plist}' > /Library/LaunchDaemons/gold.samhenri.seamless-watch.plist && "
+               '/usr/sbin/chown root:wheel /Library/LaunchDaemons/gold.samhenri.seamless-watch.plist && '
+               '/bin/chmod 644 /Library/LaunchDaemons/gold.samhenri.seamless-watch.plist && echo installed')
+    said = request({'Executable': '/bin/sh', 'Arguments': ['-c', install, 'sh', script]}, 60)
+    print('install:', said, flush=True)
+    if 'installed' not in (said.get('Stdout') or ''):
+        return
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', '/sbin/shutdown -h +0 >/dev/null 2>&1 &']}, 30)
+    clone = next((source/'Build/bench'/tag/'home/Library/Application Support/Light Click/Machines').glob('Clone of *.vintelmac'))
+    for _ in range(120):
+        running = subprocess.run(['ps', '-axo', 'command='], capture_output=True, text=True).stdout
+        if not any(f'Build/bench/{tag}/' in row and 'qemu-system' in row for row in running.splitlines()):
+            break
+        time.sleep(1)
+    else:
+        print('the guest never shut down, so nothing was kept', flush=True)
+        return
+    shutil.rmtree(copy, ignore_errors=True)
+    subprocess.run(['cp', '-c', '-R', str(clone), str(copy)], check=True)
+    (copy/'State/PendingConfiguration.plist').unlink(missing_ok=True)
+    print('kept', copy, flush=True)
+
+
+def watch_guest():
+    # What the guest's doing, sent by the guest over its own network: when its agent stops answering, there's no asking it.
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        listener.bind(('127.0.0.1', WATCH_PORT))
+    except OSError:
+        listener.bind(('127.0.0.1', 0))
+    listener.listen(16)
+    port = listener.getsockname()[1]
+    target = results/f'{tag}-guest-watch.txt'
+    target.write_text('')
+
+    def receive():
+        while True:
+            client, _ = listener.accept()
+            with client, target.open('ab') as file:
+                while chunk := client.recv(65536):
+                    file.write(chunk)
+    threading.Thread(target=receive, daemon=True).start()
+    # In one shell, so $PPID is the agent. A sample of it now and then says where it's stuck, if it is.
+    script = WATCHER
     said = request({'Executable': '/bin/sh', 'Arguments': ['-c', script, 'sh', str(port)]}, 30)
     print('the watcher:', said, flush=True)
     if said.get('Error'):
@@ -971,6 +1013,8 @@ if arguments[0] == 'capture-bench':
     capture_bench()
 elif arguments[0] == 'placement':
     placement()
+elif 'install-watcher' in arguments:
+    install_watcher()
 elif arguments[0] == 'desktop' and 'activation' in arguments:
     desktop(activation_only=True)
 elif arguments[0] == 'desktop' and 'old-hook' in arguments:
