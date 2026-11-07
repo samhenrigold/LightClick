@@ -9,9 +9,11 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import threading
 import time
+import uuid
 
 results = source/'Build/seamless'
 guest_tool = results/'seamless-guest'
@@ -368,7 +370,98 @@ u=$(/usr/bin/stat -f%Su /dev/console); uid=$(/usr/bin/id -u "$u")
     return None
 
 
-def qualify_material_fixture(guest, window, proxy_windows, check):
+def owner_capture_identity(pid):
+    """Exact clone fixture proxy process, including birth time; never identify a window by title or dimensions."""
+    reply = subprocess.run(['ps', '-p', str(pid), '-ww', '-o', 'pid=,lstart=,command='],
+                           capture_output=True, text=True, timeout=2)
+    fields = reply.stdout.strip().split(None, 6)
+    if reply.returncode or len(fields) != 7 or fields[0] != str(pid):
+        raise RuntimeError('fixture proxy process identity unavailable')
+    home = source/'Build/bench'/tag/'home'
+    match = re.match(re.escape(str(home)) + r'/(.*?/Seamless Apps/.*?\.app)/Contents/MacOS/SeamlessProxy(?: |$)', fields[6])
+    if not match:
+        raise RuntimeError('capture target is not this clone’s proxy process')
+    bundle = (home/match[1]).resolve()
+    if not bundle.is_relative_to(home.resolve()):
+        raise RuntimeError('proxy bundle escaped this clone')
+    with (bundle/'Contents/Info.plist').open('rb') as file:
+        info = plistlib.load(file)
+    if info.get('LCGuestBundleIdentifier') != 'org.virtualintelmac.SeamlessMaterialsFixture':
+        raise RuntimeError('capture target is not the explicit materials fixture proxy')
+    return {'pid': pid, 'birth': ' '.join(fields[1:6]), 'command': fields[6], 'bundle': str(bundle)}
+
+
+def qualify_owner_capture(window, pid):
+    """One opt-in proxy-owned image/dimensions proof. No guest-agent calls, permission request, or pixel export."""
+    command_file = results/f'{tag}-clicks.txt.command'
+    reply_file = Path(str(command_file) + '.owner-capture.json')
+    artifact = results/f'{tag}-materials-owner-capture.json'
+    nonce = str(uuid.uuid4())
+    evidence = {'result': 'FAIL', 'guestID': window, 'proxyPID': pid, 'nonce': nonce,
+                'captureReplyDeadlineSeconds': 2, 'fileWaitDeadlineSeconds': 5,
+                'qualification': 'One owned image/dimensions only; no pixel-content, frame-rate or presentation qualification.'}
+    try:
+        if type(window) is not int or not 0 < window <= 0xffffffff or type(pid) is not int or pid <= 0:
+            raise RuntimeError('owner capture requires exact positive guest window and proxy PID')
+        identity = owner_capture_identity(pid)
+        evidence['owned_process'] = identity
+        reply_file.unlink(missing_ok=True)
+        command_file.write_text(f'owner-capture-report {window} {nonce}')
+        if owner_capture_identity(pid) != identity:
+            raise RuntimeError('fixture proxy process changed before signal; no signal sent')
+        os.kill(pid, signal.SIGUSR2)
+        deadline = time.monotonic() + 5
+        while not reply_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        fd = os.open(reply_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as reply:
+            details = os.fstat(reply.fileno())
+            if not stat.S_ISREG(details.st_mode) or not 0 < details.st_size <= 16384:
+                raise RuntimeError('owner-capture reply is absent, not regular, or oversized')
+            payload = reply.read(16385)
+            if len(payload) != details.st_size:
+                raise RuntimeError('owner-capture reply changed size')
+        report = json.loads(payload)
+        allowed = {'guestID', 'nonce', 'proxyPID', 'hostWindowID', 'preflightAvailable', 'preflightAllowed',
+                   'readCount', 'width', 'height', 'failureCategory'}
+        if not isinstance(report, dict) or set(report)-allowed:
+            raise RuntimeError('owner-capture reply violates the metadata-only schema')
+        evidence['capture'] = report
+        if (report.get('nonce') != nonce or type(report.get('guestID')) is not int or report['guestID'] != window
+                or type(report.get('proxyPID')) is not int or report['proxyPID'] != pid):
+            raise RuntimeError('owner-capture reply nonce/PID/guest window mismatch; no retry')
+        host = report.get('hostWindowID')
+        if type(host) is not int or not 0 < host <= 0xffffffff:
+            raise RuntimeError('proxy did not report a valid exact host window ID')
+        if owner_capture_identity(pid) != identity:
+            raise RuntimeError('fixture proxy process changed during capture')
+        listing = subprocess.run([str(guest_tool), 'list'], capture_output=True, text=True, timeout=2)
+        if listing.returncode:
+            raise RuntimeError('host CG window metadata is unavailable')
+        records = [tuple(map(int, match.groups())) for row in listing.stdout.splitlines()
+                   if (match := re.match(r'^id=(\d+) pid=(\d+)(?: |$)', row))]
+        matches = [item for item in records if item[0] == host]
+        if matches != [(host, pid)]:
+            raise RuntimeError('reported host window ID is absent, ambiguous, or not owned by the fixture proxy')
+        evidence['owned_cg_record'] = {'hostWindowID': host, 'proxyPID': pid}
+        if (type(report.get('preflightAvailable')) is not bool or
+                ('preflightAllowed' in report and type(report['preflightAllowed']) is not bool) or
+                type(report.get('readCount')) is not int or report['readCount'] != 1 or
+                any(type(report.get(key)) is not int or report[key] <= 0 for key in ('width', 'height')) or
+                report.get('failureCategory') != 'none'):
+            raise RuntimeError('proxy did not complete exactly one successful image/dimensions read')
+        evidence['result'] = 'PASS_ONE_IMAGE'
+        return True
+    except Exception as error:
+        evidence['error'] = repr(error)
+        print(f'# fixture owner capture failed: {error}', flush=True)
+        return False
+    finally:
+        command_file.write_text('')
+        artifact.write_text(json.dumps(evidence, indent=2)+'\n')
+
+
+def qualify_material_fixture(guest, window, proxy_windows, check, owner_capture=False):
     """Capture host material state, stop Seamless, then read its retained guest backdrop snapshot."""
     check('the explicit materials fixture reached its guest window', window is not None)
     if window is None:
@@ -378,6 +471,7 @@ def qualify_material_fixture(guest, window, proxy_windows, check):
     deadline = time.monotonic() + 45
     report = None
     saw_proxy = False
+    owner_pid = None
     try:
         while time.monotonic() < deadline:
             # Host WindowServer may withhold titles. The unique fixture app owner identifies the proxy; the report's
@@ -399,8 +493,12 @@ def qualify_material_fixture(guest, window, proxy_windows, check):
                 (results/f'{tag}-materials-proxy.txt').write_text(text)
                 report = material_report(text).get(window)
                 if report and report[0] > 0 and report[1] > 0 and report[2]:
+                    owner_pid = int(pid[1])
                     break
             time.sleep(0.25)
+        if owner_capture:
+            check('the explicit fixture proxy captures its own exact host window once',
+                  qualify_owner_capture(window, owner_pid))
     finally:
         command_file.write_text('')
     # The long-lived leap command owns the guest agent while Seamless is active. Finish it before issuing a diagnostic
@@ -900,7 +998,7 @@ def watch_guest():
     print('watching the guest:', target, flush=True)
 
 
-def desktop(activation_only=False, materials_only=False):
+def desktop(activation_only=False, materials_only=False, owner_capture=False):
     # The Seamless button, on a running machine: press, the apps' windows appear and the machine's goes, a click reaches one, press,
     # and the machine's window is back.
     for old in results.glob(f'{tag}-*.png'):
@@ -1030,7 +1128,7 @@ def desktop(activation_only=False, materials_only=False):
     check('the machine window hides', not machine_window())
     check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
     if materials_only:
-        qualify_material_fixture(guest, fixture_window, proxy_windows, check)
+        qualify_material_fixture(guest, fixture_window, proxy_windows, check, owner_capture=owner_capture)
         print('PASS materials fixture' if all(checks) else 'FAIL materials fixture', flush=True)
         if not all(checks):
             raise SystemExit(1)
@@ -1477,6 +1575,8 @@ elif 'install-watcher' in arguments:
     install_watcher()
 elif arguments[0] == 'desktop' and 'activation' in arguments:
     desktop(activation_only=True)
+elif arguments[0] == 'desktop' and 'materials-owner-capture' in arguments:
+    desktop(materials_only=True, owner_capture=True)
 elif arguments[0] == 'desktop' and 'materials' in arguments:
     desktop(materials_only=True)
 elif arguments[0] == 'desktop' and 'old-hook' in arguments:
