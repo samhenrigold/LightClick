@@ -376,7 +376,13 @@ Boots with the `sti` shadow fixed, except where noted:
 
 Three of six long Mojave boots ended early. The user stopped some of the long runs themselves, because of the load on their laptop, so these can't be read as engine failures: the QEMU exit and the lost connection probably, the reset possibly. Before the `sti` fix, 5 of 8 Mojave boots wedged within minutes, which is an engine failure, seen in the event ring.
 
-A guest reset did happen in a normal short boot, 15.7 s after hand-off, with one vCPU parked in `cpu_signal_handler`. QEMU's log of it gave a reset on vCPU 2, but its register dump is the last fallback's, not the moment's, and NVRAM has no panic text. QEMU now looks for panic text in RAM at a reset. Cause unknown.
+A guest reset did happen in a normal short boot, 15.7 s after hand-off, with one vCPU parked in `cpu_signal_handler`. QEMU's log of it gave a reset on vCPU 2, but its register dump is the last fallback's, not the moment's, and NVRAM has no panic text. QEMU now looks for panic text in RAM at a reset. That boot's cause is unknown.
+
+**The GPU helper's death.** A loop of killing a GPU client and opening it again on Mojave kills `apple-gfx-helper` about once a boot under the engine, and didn't in 18 launches in one TCG boot, whose launches are three times slower. The framework throws on something a command or a display update refers to: a render pipeline, a texture, a page, or a bad command header. The throw itself then crashes under Rosetta: the unwinder calls a personality that isn't one, as the donor framework was taken from another system's dyld cache. Why a command refers to something missing isn't known. A guest stream gone wrong and a dying client's half-written work both fit.
+
+The helper's death then panicked the guest about one boot in six: QEMU's reads returned all ones, which the driver read as every display pending. Those reads now return 0, and QEMU sends `PVG_HELPER_LOST`, on which the app offers a restart. In the loop before: 1 panic in about 6 boots, of which 3 with 0. After: 0 in 5, the event in the 3 boots that could send it, and the guest alive but with a frozen display, so `open` and window lists hang. This protects the guest. It doesn't save the GPU.
+
+Tried in the helper and dropped: answering a failed lookup with nil moves the throw to the decoder a little later. Repairing the personalities in `__unwind_info` didn't reach the crash, and one boot on that build never got to its desktop.
 
 **Memory.** RSS and `phys_footprint` of 17 to 18 GB with an 8 GB guest are mostly counting: a test VM touching 2 GB the host had touched raised both, in step, and left host free memory alone. vmmap's regions came to 8.6 to 9.4 GB from 300 s to 1300 s, of which guest RAM is 7.7 GB, in a boot where only about 170 MB was malloc. TCG, with no stage 2, shows 9.1 GB in both counts. No memory kill was in the host's log.
 
