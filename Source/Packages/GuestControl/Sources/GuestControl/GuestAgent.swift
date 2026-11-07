@@ -178,6 +178,7 @@ public actor GuestAgent {
     static let longestUARTRequest = 900
 
     /// The command, its arguments and its input, as a script and a file beside it in a private directory, run by name.
+    /// Under staging's own prefix, the only places the guest's agent will write a file.
     private func runFromFile(
         _ path: String,
         arguments: [String],
@@ -187,7 +188,7 @@ public actor GuestAgent {
         patience: TimeInterval
     ) async throws(GuestAgentError) -> GuestProcessResult {
         let directory = try await Self.makePrivateDirectory(
-            template: "/private/tmp/vim-exec.", failure: .cannotStart, using: self)
+            template: "/private/var/tmp/VirtualIntelMac.", failure: .cannotStart, using: self)
         func quoted(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         var script = "exec " + ([path] + arguments).map(quoted).joined(separator: " ")
         if let standardInput {

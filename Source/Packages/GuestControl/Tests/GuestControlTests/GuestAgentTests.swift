@@ -138,7 +138,7 @@ struct GuestAgentTests {
     @Test func aLongCommandToASerialGuestGoesAsAFile() async throws {
         let fake = FakeGuestAgent { process in
             process.path == "/usr/bin/mktemp"
-                ? .finished(exitCode: 0, output: "/private/tmp/vim-exec.Ab12Cd\n")
+                ? .finished(exitCode: 0, output: "/private/var/tmp/VirtualIntelMac.Ab12Cd\n")
                 : .finished(exitCode: 0, output: "ran")
         }
         defer { fake.stop() }
@@ -149,9 +149,9 @@ struct GuestAgentTests {
         #expect(result.output == "ran")
         let (processes, files) = fake.state.withLock { ($0.processes, $0.files) }
         #expect(processes.map(\.path).prefix(2) == ["/usr/bin/mktemp", "/bin/sh"])
-        #expect(processes.dropFirst().first?.arguments == ["/private/tmp/vim-exec.Ab12Cd/run.sh"])
+        #expect(processes.dropFirst().first?.arguments == ["/private/var/tmp/VirtualIntelMac.Ab12Cd/run.sh"])
         #expect(processes.allSatisfy { $0.arguments.joined().count < GuestAgent.longestUARTRequest })
-        let script = String(decoding: files["/private/tmp/vim-exec.Ab12Cd/run.sh"] ?? Data(), as: UTF8.self)
+        let script = String(decoding: files["/private/var/tmp/VirtualIntelMac.Ab12Cd/run.sh"] ?? Data(), as: UTF8.self)
         #expect(script == "exec '/bin/sh' '-c' '" + long.replacingOccurrences(of: "'", with: "'\\''") + "'\n")
     }
 
@@ -160,7 +160,7 @@ struct GuestAgentTests {
     @Test func aCommandSentAsAFileKeepsItsArgumentsExactly() async throws {
         let fake = FakeGuestAgent { process in
             process.path == "/usr/bin/mktemp"
-                ? .finished(exitCode: 0, output: "/private/tmp/vim-exec.Ab12Cd\n")
+                ? .finished(exitCode: 0, output: "/private/var/tmp/VirtualIntelMac.Ab12Cd\n")
                 : .finished(exitCode: 0)
         }
         defer { fake.stop() }
@@ -170,7 +170,7 @@ struct GuestAgentTests {
             "%s|", "Sam's file.txt", "", "two\nlines", "'", "$HOME `date` \\", String(repeating: "x", count: 1000)
         ]
         _ = try await agent.runExecutable("/usr/bin/printf", arguments: arguments, timeout: 0)
-        let script = fake.state.withLock { $0.files["/private/tmp/vim-exec.Ab12Cd/run.sh"] } ?? Data()
+        let script = fake.state.withLock { $0.files["/private/var/tmp/VirtualIntelMac.Ab12Cd/run.sh"] } ?? Data()
         let shell = Process()
         shell.executableURL = URL(fileURLWithPath: "/bin/sh")
         shell.arguments = ["-c", String(decoding: script, as: UTF8.self)]
