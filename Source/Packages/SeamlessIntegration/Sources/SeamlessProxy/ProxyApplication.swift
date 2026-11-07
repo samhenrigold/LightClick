@@ -634,6 +634,18 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         SeamlessInputViewSetRaisesWindow(input, UInt32(clamping: id))
         window.observer = drop
         window.collectionBehavior = [.fullScreenPrimary, .fullScreenAuxiliary]
+        // So the guest keeps drawing what it covers in a window the host can see.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
+        ) { [weak self, weak window] _ in
+            MainActor.assumeIsolated {
+                guard let self, let window, let id = self.surfaces.first(where: { $0.value.window === window })?.key
+                else {
+                    return
+                }
+                self.send(.surfaceShown(windowID: id, shown: window.occlusionState.contains(.visible)))
+            }
+        }
         NotificationCenter.default.addObserver(
             forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main
         ) {

@@ -54,6 +54,7 @@ public final class SeamlessDesktop {
     private var saidFirstWindow = false
     private var saidReplaced = false
     private var prearming = false
+    private var toldShown: Set<UInt32> = []
     private var prearmStopped = false
     private static var prearmers: [String: (desktop: SeamlessDesktop, work: Task<Void, Never>)] = [:]
     private let environment = ProcessInfo.processInfo.environment
@@ -97,6 +98,14 @@ public final class SeamlessDesktop {
         }
     }
 
+    /// Every app's shown windows, as one list, whenever that changes.
+    private func tellShownWindows() {
+        let shown = sessions.values.reduce(into: Set<UInt32>()) { $0.formUnion($1.shownWindows) }
+        guard shown != toldShown else { return }
+        toldShown = shown
+        tell("gpu-visible\t" + shown.sorted().map(String.init).joined(separator: ","))
+    }
+
     public var windowCount: Int { sessions.values.reduce(0) { $0 + $1.windowCount } }
     private var appsInFirstList: Set<String>?
 
@@ -104,7 +113,9 @@ public final class SeamlessDesktop {
     /// with nothing lost. Asked each time something arrives.
     public var hasReplacedDisplay: Bool {
         guard let appsInFirstList, !appsInFirstList.isEmpty else { return false }
-        return appsInFirstList.allSatisfy { sessions[$0].map { $0.windowCount > 0 && $0.allWindowsHavePixels } ?? false }
+        return appsInFirstList.allSatisfy {
+            sessions[$0].map { $0.windowCount > 0 && $0.allWindowsHavePixels } ?? false
+        }
     }
 
     public func start() {
@@ -165,7 +176,8 @@ public final class SeamlessDesktop {
                 // The guest has restarted since they went in.
                 Self.staged.remove(configuration.machine.path)
                 Self.hooked.remove(configuration.machine.path)
-                guard await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path) else { break }
+                guard await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path)
+                else { break }
             } else if ran.exitCode != nil {
                 break
             } else {
@@ -173,12 +185,18 @@ public final class SeamlessDesktop {
                 try? await Task.sleep(for: .seconds(3))
             }
         }
-        note("# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")")
+        note(
+            "# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")"
+        )
         if ran.exitCode == nil, control < 0, !stopped {
-            finish("This Mac isn’t answering. It may just be busy, so try again in a moment.", why: "no answer from the guest")
+            finish(
+                "This Mac isn’t answering. It may just be busy, so try again in a moment.",
+                why: "no answer from the guest")
             return
         }
-        finish(ran.exitCode == 3 ? "This Mac couldn’t reach Light Click. Seamless needs its networking on." : nil, why: "the guest's side ended")
+        finish(
+            ran.exitCode == 3 ? "This Mac couldn’t reach Light Click. Seamless needs its networking on." : nil,
+            why: "the guest's side ended")
     }
 
     public static func isPrepared(machine: String) -> Bool { staged.contains(machine) }
@@ -203,10 +221,14 @@ public final class SeamlessDesktop {
     }
 
     private func prearmWork() async {
-        guard await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path) else { return }
+        guard await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path) else {
+            return
+        }
         if !Self.hooked.contains(configuration.machine.path) {
             let injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
-            note("# pre-armed: hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)")
+            note(
+                "# pre-armed: hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)"
+            )
             // Exits but for a dropped connection are answers, and it never tries twice in a guest's start.
             if injected.exitCode != nil { Self.hooked.insert(configuration.machine.path) }
         }
@@ -219,7 +241,10 @@ public final class SeamlessDesktop {
         }
         _ = await guest.run(
             "/usr/bin/env",
-            ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--list-only", "--port", String(port), "--menu-tool", "/tmp/sg/ig"])
+            [
+                "SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--list-only", "--port", String(port), "--menu-tool",
+                "/tmp/sg/ig"
+            ])
     }
 
     private func endPrearming() {
@@ -446,11 +471,13 @@ public final class SeamlessDesktop {
         } else {
             socketPath = Self.socketPath(for: app, machine: configuration.machine.identifier)
             // A proxy from another build mightn't speak this one's protocol.
-            let built = (try? configuration.proxyExecutable.resourceValues(forKeys: [.contentModificationDateKey]))?
+            let built =
+                (try? configuration.proxyExecutable.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate?.timeIntervalSince1970 ?? 0
             let folder = configuration.bundles.appending(path: String(Int(built)))
             if !FileManager.default.fileExists(atPath: folder.path),
-                let old = try? FileManager.default.contentsOfDirectory(at: configuration.bundles, includingPropertiesForKeys: nil)
+                let old = try? FileManager.default.contentsOfDirectory(
+                    at: configuration.bundles, includingPropertiesForKeys: nil)
             {
                 for item in old where item != descriptionsFile { try? FileManager.default.removeItem(at: item) }
             }
@@ -462,11 +489,13 @@ public final class SeamlessDesktop {
                 bundle = await Task.detached {
                     var iconFile: URL?
                     if let icon {
-                        let file = FileManager.default.temporaryDirectory.appending(path: "lc-icon-\(UUID().uuidString).icns")
+                        let file = FileManager.default.temporaryDirectory.appending(
+                            path: "lc-icon-\(UUID().uuidString).icns")
                         if (try? icon.write(to: file)) != nil { iconFile = file }
                     }
                     defer { iconFile.map { try? FileManager.default.removeItem(at: $0) } }
-                    return try? proxy.write(to: folder, proxyExecutable: executable, sessionSocket: socketPath, guestIcon: iconFile)
+                    return try? proxy.write(
+                        to: folder, proxyExecutable: executable, sessionSocket: socketPath, guestIcon: iconFile)
                 }.value
             }
         }
@@ -491,6 +520,7 @@ public final class SeamlessDesktop {
         session.guestOffset = configuration.guestOffset
         session.leaveTitle = Self.leaveTitle
         session.pixelSource = pixelSource
+        session.onShownWindowsChanged = { [weak self] in self?.tellShownWindows() }
         session.onWindowsChanged = { [weak self] in
             guard let self else { return }
             if !self.saidFirstWindow, self.windowCount > 0 {
