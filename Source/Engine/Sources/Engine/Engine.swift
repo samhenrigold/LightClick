@@ -147,6 +147,7 @@ public final class Engine {
         config.no_reuse = environment["LC_HVDBT_NO_REUSE"] == "1"
         config.no_return_prediction = options.hybrid && environment["LC_HVDBT_NO_RETURN_PREDICTION"] == "1"
         config.all_flags_live = options.hybrid && environment["LC_HVDBT_ALL_FLAGS"] == "1"
+        config.keep_kernel_tables = !options.hybrid || environment["LC_HVDBT_KEEP_KPTI"] == "1"
         config.precise_flags = options.preciseFlags
         config.has_tzcnt_lzcnt = options.tzcntLzcnt
         config.code_cache_bytes = options.codeCacheBytes

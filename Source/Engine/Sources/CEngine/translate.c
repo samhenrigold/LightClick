@@ -713,6 +713,29 @@ static TrResult do_translate(int key, int view, u64 cr3, int cpl, u64 rip, bool 
             case OP_CLI:
             case OP_STI:
             case OP_MOV_CR:
+                if (i && in->reg == 3 && !in->to_reg && in->rm == 0 && !cfg.keep_kernel_tables && tr_cpl == 0) {
+                    // XNU's Meltdown fix, from 10.13.2: a process runs on tables holding little of the kernel, and every way in and out changes between them and the full ones,
+                    // through two fields of its per-CPU data. Those are the same to a process, which can't read the kernel's pages either way, so it stays on the full tables.
+                    // Going out, that is nothing to do. Coming in, the tables may be the other ones if TCG took it out, so look.
+                    const Insn *p = &list[i - 1];
+                    if (p->op == OP_MOV && p->seg == 2 && p->to_reg && p->reg == 0 && !p->rm_reg) {
+                        if (p->disp == 0x138)
+                            break;
+                        if (p->disp == 0x140) {
+                            Addr a = {.base = CTX, .imm = __builtin_offsetof(EngineCtx, cr3)};
+                            ldst(1, 8, S0, a);
+                            logic_sh(1, 2, 0, S0, S0, 0, 0, 0); // eor with rax
+                            ubfx(1, S0, S0, 12, 40); // the tables, whatever the PCID
+                            u32 *same = tr_cc;
+                            cbz(0, 1, S0, 0);
+                            emit_monitor_op(in);
+                            *same |= ((u32)(tr_cc - same) & 0x7ffff) << 5;
+                            break;
+                        }
+                    }
+                }
+                emit_monitor_op(in);
+                break;
             case OP_MOV_DR:
             case OP_INVLPG:
             case OP_INVPCID:
