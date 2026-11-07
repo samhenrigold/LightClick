@@ -4,12 +4,38 @@ Goal: a guest app is indistinguishable from a host app. Its own Dock icon and Cm
 real shadow and alpha, popovers past the window's edge, sheets, menus, gestures, force click, drag and drop, and no visible VM. "It has
 to be perfect" is the requirement, and it rules out designs that are only nearly right.
 
-**Mavericks clones have now run the window tree, the hook and a whole session from a proxy; nothing else has run on a guest.** Host claims come from probes on macOS
-27.2 (M4 Max, ProMotion, SIP on). Other guest claims come from reading stock Mavericks (13F34) and Mojave (18G103) binaries, read-only,
-without Hopper (`nm`, `otool`). No other OS version was inspected. All guest numbers are under TCG on this busy Mac.
+This document accumulates results from several implementations. Early Mavericks results below used TCG; later sections
+also cover Mojave and the engine. Read each measurement with its stated guest and path. Host probes used macOS 27.2
+(M4 Max, ProMotion, SIP on); the initial binary inspection covered stock Mavericks (13F34) and Mojave (18G103), without
+Hopper (`nm`, `otool`). No other guest version was inspected in that investigation.
 
 Labels: **[measured]** by a probe here. **[read]** seen in code or a binary. **[source]** public documentation or code, linked.
 **[inferred]** reasoned, untested. **[memory]** recalled, unchecked; verify before relying on it.
+
+## Engineering qualification, 2026-11-07
+
+**[measured]** `seamless-driver.py desktop materials`, in one disposable Mojave clone with the engine enabled, now
+passes a persistent `NSVisualEffectView` fixture. Guest window 43 published two usable backdrop rows; the matching
+proxy reported two material kinds and masked views inside the proxy. Material 26 is excluded by the existing proxy
+policy. First proxy: 2.49 s after the press; VM window hidden: 3.6 s. Evidence is in `Build/seamless/loop1-materials-r3-*`
+and `/tmp/lightclick-loop1-materials-r3.log`, using the signed `Build/Products/engineering-loop-2/Light Click.app`.
+This checks metadata delivery and view construction, not visual blur fidelity, physical input, frame rate or other guests.
+
+**[read, then measured]** The guest sends initial materials before announcing the window, and hashes unchanged rows
+to suppress retransmission. `SeamlessSession` used to discard those rows before its surface existed; an absent proxy
+could lose the immediate forward too. The failing r2 fixture had nonempty guest rows and zero proxy rows. Retaining
+bounded pending metadata until surface creation fixed that r3 check (`245485ed`). The same initial-ordering defect
+affects Mojave surface origins: its PVG messages leave origin selection to the tool. Origin retention (`6034b11a`)
+has twelve targeted metadata tests and source review; those tests alone do not qualify pixel alignment on a display.
+The combined signed `engineering-loop-3` candidate repeated the live materials check successfully (`r4`: first
+proxy 3.25 s, VM hidden 4.4 s), with successful owned-process cleanup. That is a materials regression check, not a
+pixel-alignment measurement of the origin fix. These press times follow the harness's preparation wait and do not
+measure desktop-to-Seamless readiness.
+
+The diagnostic stops Seamless and waits for guest `gpu mode 0` before reading its retained backdrop snapshot.
+Trying to execute that query while the long-lived leap command owns the guest agent caused a diagnostic timeout.
+Host titles can be withheld, so qualification identifies the fixture proxy by owner/PID and correlates its original
+guest window ID, rather than depending on its title. `scripts/test-seamless-materials.py` covers those failure cases.
 
 ## Try it on your Mac
 
@@ -732,7 +758,8 @@ If it goes wrong:
 - **Window appears but clicks do nothing:** `CGEventPost` may be refused for a normal user. Rerun with `sudo`. If still nothing, enable
   assistive access in System Preferences > Security & Privacy for Terminal.
 - **`No window list`:** it isn't running in the Aqua session. Use Terminal in the guest, not ssh.
-- **Another VM is running:** `boot-clone` refuses. Set `BOOT_CLONE_ALLOW_RUNNING=1` only if forwarded ports won't clash.
+- **Another VM is running:** `boot-clone` refuses. Close it before starting a clone test. `boot-clone`, `boot-matrix`
+  and `guest-bench` share one exclusive lease; these harnesses run one clone at a time.
 
 Stop with Ctrl-C in each terminal, kill the PIDs `boot-clone` printed, and delete `Build/clone`.
 

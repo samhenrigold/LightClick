@@ -484,6 +484,28 @@ A guest profile then says how much it matters: dtrace at 997 Hz per CPU, 2 vCPUs
 
 So copies are about 1% and aren't worth translator work. `pmap_enter_options` and `pmap_remove_range_options` are 3 to 9%, but a fastcall would remove only the trap of each store, a small part of that, as estimated from the store and fault costs above. Preview's image open is mostly one function of the software HEVC decoder, most samples at one rip: that loop's translation is the lever there. No x87 showed among the named functions.
 
+### Native ImageIO boundary experiment, 2026-11-07
+
+`scripts/image-decode-try` runs a bounded experiment in one disposable Mojave clone. It exports only the fixed OS
+`/Library/Desktop Pictures/Mojave.heic` and its own staged probe's output, with length and SHA256 verification.
+The encoded input was 134,758,820 bytes, SHA256 `a84ed4faa376b8b2cb0328b306d09d25ad9047a0f7d106ad46098d0d91381256`.
+Item 0 of 16 is 5120x2880, Display P3. The probe forces decoding and conversion by drawing into an explicit
+top-first, premultiplied RGBA8 sRGB bitmap; it never opens Preview or puts an image on a display.
+
+Three fresh-process pairs, 4-vCPU engine guest versus native ARM host: forced draw was 1425–2005 ms in the guest
+(median 1457), 183–211 ms on the host (median 185). Transfers, hashing and raw writes are separate from that phase.
+Filesystem caches and host load were uncontrolled, and the ImageIO implementations differ in both OS version and
+architecture. This is evidence of a useful boundary to investigate, not an eightfold application speedup or a qualified
+replacement. Artifacts: `Build/image-decode/loop1-heic-r3`, signed app `Build/Products/engineering-loop-3/Light Click.app`.
+
+The replacement check **failed**: guest orientation metadata was absent while the host reported 1, and pixel hashes
+differed, although each side was stable across its three trials. Of 14,745,600 pixels, 10,196,584 differed; RGB mean
+absolute errors were 0.488/0.363/0.608 and maxima 26/6/46, with exact alpha. One additional host-Rosetta process also
+produced a different hash from both sides; it uses the current host frameworks, not Mojave's decoder. These differences
+must not be dismissed as harmless rounding. The next split is a draw into the source P3 space, with source/destination
+ICC hashes, to distinguish the later color transform from differences already present in provider/decoder output.
+No native media bridge is implemented by this experiment.
+
 ### Mojave's page faults: its kernel's bzero
 
 In a page-fault loop, best ns per page, 2 vCPUs: Mojave 2,350 to 3,260 under the engine and 3,468 under TCG; Mavericks 1,282 to 1,298. A dtrace profile of the loop on Mojave put `__bzero` at 56% of kernel samples, 3,107 of 5,579, against 39 of 4,341 on Mavericks, whose pmap time is about the same. Mojave zeroes each new page with `rep stos` under CR0.TS, and in hybrid mode `rep stos` never took the bulk stub: its pattern was a NEON register set outside the stub, where a TS trap couldn't be backed out of, so every element went through the plain loop. The pattern now goes into x22 by integer shifts and the stub stores it with `stp`. After, one boot against one on the build before: 1,367 to 1,414 ns a page against 2,351 to 2,531, `__bzero` 4 samples against 1,975. Mojave's fault now costs what Mavericks' does. Preview's HEIC open and Safari's page load ran as before, no panic. A 12-minute Mojave long run on it, 4 vCPUs: 24 cycles, 2,762 arithmetic checks, 12 file checks, 0 wrong, every application got a window, no reset; Chess killed when it wouldn't quit, as before, and stalls of 2 to 5 s under memory pressure. Launches, two boots of each build, alternating, 4 vCPUs, summed over six applications: warm 9.41 s against 9.90, cold 23.14 against 22.84, or 21.82 without one slow first launch, so about 5% faster warm and within noise cold.
