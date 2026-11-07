@@ -3,6 +3,25 @@ import Darwin
 import IOSurface
 import QuartzCore
 
+/// Material messages precede the first window record on the guest stream. Keep only a bounded amount until its
+/// surface can be created; after that, Surface owns the rows for proxy reconnects. New unknown IDs cannot grow this
+/// map beyond the guest hook's window census, and one ID cannot exceed the wire's material-row limit.
+struct PendingWindowMaterials {
+    static let maximumWindows = 256
+    static let maximumRows = 32
+    private var rows: [UInt32: [GuestMaterial]] = [:]
+
+    mutating func receive(_ materials: [GuestMaterial], for window: UInt32) {
+        guard rows[window] != nil || rows.count < Self.maximumWindows else { return }
+        // An empty update is meaningful when a successor reuses an older window's surface.
+        rows[window] = Array(materials.prefix(Self.maximumRows))
+    }
+
+    mutating func take(_ window: UInt32) -> [GuestMaterial]? { rows.removeValue(forKey: window) }
+    mutating func remove(_ window: UInt32) { rows[window] = nil }
+    mutating func reset() { rows.removeAll() }
+}
+
 /// What a session needs of the machine it runs on: the guest agent the app already holds.
 @MainActor
 public protocol SeamlessGuest: AnyObject {
@@ -89,6 +108,7 @@ public final class SeamlessSession {
     private let guest: any SeamlessGuest
     private let finished: () -> Void
     private var surfaces: [UInt32: Surface] = [:]
+    private var pendingMaterials = PendingWindowMaterials()
     private var proxy: LineSocket?
     private var proxyPID: Int32 = 0
     private var guestDescriptor: Int32 = -1
@@ -177,6 +197,7 @@ public final class SeamlessSession {
         proxy?.send(SessionCommand.terminate)
         if guestDescriptor >= 0 { shutdown(guestDescriptor, SHUT_RDWR) }
         surfaces = [:]
+        pendingMaterials.reset()
     }
 
     public func activateProxy() {
@@ -330,6 +351,7 @@ public final class SeamlessSession {
         guestDescriptor = -1
         for id in surfaces.keys { proxy?.send(SessionCommand.removeSurface(id: Int(id))) }
         surfaces = [:]
+        pendingMaterials.reset()
         if !stopped {
             onWindowsChanged?()
             onGuestGone?()
@@ -432,10 +454,12 @@ public final class SeamlessSession {
             if let surface = surfaces[id] { showCrops(of: [surface]) }
         case .successor(let id, let next):
             note("# window \(id) is now \(next)")
+            pendingMaterials.remove(id)
             guard let surface = surfaces.removeValue(forKey: id) else { return }
             // Told after a new window's first tick, whose proxy goes in favour of this one.
             if let arrived = surfaces[next] {
                 surface.window = arrived.window
+                surface.materials = arrived.materials
                 proxy?.send(SessionCommand.removeSurface(id: Int(next)))
             }
             surfaces[next] = surface
@@ -444,14 +468,21 @@ public final class SeamlessSession {
                 onShownWindowsChanged?()
             }
             proxy?.send(SessionCommand.renameSurface(id: Int(id), to: Int(next)))
-            if surface.window.id == next { tellProxy(surface) }
+            if surface.window.id == next {
+                tellProxy(surface)
+                proxy?.send(SessionCommand.setMaterials(id: Int(next), surface.materials))
+            }
         case .fullScreen(let id, let on):
             note("# window \(id) \(on ? "in" : "out of") full screen")
             setFullScreen(on, window: surfaces[id]?.window)
             proxy?.send(SessionCommand.fullScreenSurface(id: Int(id), fullScreen: on))
         case .materials(let id, let rows):
-            surfaces[id]?.materials = rows
-            proxy?.send(SessionCommand.setMaterials(id: Int(id), rows))
+            if let surface = surfaces[id] {
+                surface.materials = rows
+                proxy?.send(SessionCommand.setMaterials(id: Int(id), rows))
+            } else {
+                pendingMaterials.receive(rows, for: id)
+            }
         case .minimized(let id, let minimized):
             note("# window \(id) \(minimized ? "minimized" : "back")")
             proxy?.send(SessionCommand.minimizeSurface(id: Int(id), minimized: minimized))
@@ -460,6 +491,7 @@ public final class SeamlessSession {
             if let surface = surfaces[id] { showCrops(of: [surface]) }
         case .gone(let id):
             note("# window \(id) gone")
+            pendingMaterials.remove(id)
             surfaces[id] = nil
             if shownWindows.remove(id) != nil { onShownWindowsChanged?() }
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
@@ -516,8 +548,14 @@ public final class SeamlessSession {
                 surface.hostOffset = NSPoint(x: placing.host.x - Double(window.x), y: placing.host.y - Double(window.y))
             }
         }
+        let changedID = surface.window.id != window.id
+        let initialMaterials = pendingMaterials.take(window.id)
+        if let initialMaterials { surface.materials = initialMaterials }
         surface.window = window
         tellProxy(surface)
+        if initialMaterials != nil || changedID {
+            proxy?.send(SessionCommand.setMaterials(id: Int(window.id), surface.materials))
+        }
         onWindowsChanged?()
         if let stopAfter, measuring == nil {
             measuring = (CFAbsoluteTimeGetCurrent(), arrived, distinctFrames?() ?? 0)
@@ -862,9 +900,7 @@ public final class SeamlessSession {
         proxy = socket
         for surface in surfaces.values {
             tellProxy(surface)
-            if !surface.materials.isEmpty {
-                socket.send(SessionCommand.setMaterials(id: Int(surface.window.id), surface.materials))
-            }
+            socket.send(SessionCommand.setMaterials(id: Int(surface.window.id), surface.materials))
         }
         if let lastMenu { socket.send(SessionCommand.setMenuBar(lastMenu)) }
         if let leaveTitle { socket.send(SessionCommand.setDockMenu([GuestMenuItem(title: leaveTitle)])) }
