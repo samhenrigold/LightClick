@@ -438,7 +438,7 @@ def desktop():
     # A second TextEdit window, in front of the first, for a press that only the host can tell apart.
     request({'Executable': '/bin/sh', 'Arguments': ['-c', 'echo second > /tmp/seamless-second.txt; chmod 644 /tmp/seamless-second.txt; '
                                                     '/tmp/sg/ig open-file --session --path /tmp/seamless-second.txt --with TextEdit']}, 120)
-    time.sleep(8)
+    time.sleep(70)
     print('before the press', request({'Action': 'seamless-state'}, 60), flush=True)
     print(next(iter(rows()), ''), flush=True)
     pressed = time.time()

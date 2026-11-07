@@ -97,6 +97,13 @@ public final class SeamlessSession {
     public var drivesGuest = true
     public var guestPort: UInt16 { port }
     public var windowCount: Int { surfaces.count }
+    /// Whether each window has what it'll show: its own surface when those are coming, or else a display frame.
+    public var allWindowsHavePixels: Bool {
+        surfaces.values.allSatisfy { surface in
+            if pixelSource?.hasSurfaces ?? false { return pixelSource?.surface(forWindow: surface.window.id) != nil }
+            return frame != nil && surface.cropped
+        }
+    }
     /// A menu item and Dock menu item with this title calls `onLeave`, rather than going to the guest, and so does asking the proxy to quit.
     public var leaveTitle: String?
     public var onLeave: (() -> Void)?

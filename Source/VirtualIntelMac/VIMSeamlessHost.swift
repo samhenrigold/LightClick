@@ -240,6 +240,25 @@ final class SeamlessHost: NSObject {
     @objc static func isPrepared(for session: VIMSession) -> Bool { SeamlessDesktop.isPrepared(machine: session.machinePath) }
     @objc static func hasOwnSurfaces(for session: VIMSession) -> Bool { windowSurfaces[session.machinePath]?.hasSurfaces ?? false }
 
+    private static func makeDesktop(session: VIMSession, guest: AgentGuest) -> SeamlessDesktop? {
+        let path = session.machinePath
+        guard let machine = try? VIMMachine.load(URL(fileURLWithPath: path)),
+            let identifier = machine.configuration["Identifier"] as? String
+        else { return nil }
+        let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let origin = session.seamlessGuestOffset
+        return SeamlessDesktop(
+            configuration: .init(
+                tools: tools, proxyExecutable: tools.appending(path: "SeamlessProxy"),
+                bundles: home.appending(path: "Library/Caches/Light Click/Seamless Apps/\(identifier)"),
+                savedBundles: home.appending(path: "Applications/Light Click"),
+                machine: .init(identifier: identifier, name: name, path: path),
+                log: FileManager.default.temporaryDirectory.appending(path: "lc-seamless-\(identifier.prefix(8)).log"),
+                guestOffset: NSPoint(x: origin.x.rounded(), y: origin.y.rounded())),
+            guest: guest)
+    }
+
     /// So the button's quick from the first press. Once the guest's agent answers, and not while something's measuring it or
     /// the app's only there to run one guest app.
     @objc static func prepare(for session: VIMSession) {
@@ -254,11 +273,13 @@ final class SeamlessHost: NSObject {
             try? await Task.sleep(for: .seconds(20))
             for _ in 0..<60 {
                 guard VIMSession.running(forMachinePath: path) != nil else { return }
-                if await guest.run("/usr/bin/uname", ["-r"]).exitCode == 0 {
-                    _ = await SeamlessDesktop.prepare(guest: guest, tools: tools, machine: path)
-                    return
-                }
+                if await guest.run("/usr/bin/uname", ["-r"]).exitCode == 0 { break }
                 try? await Task.sleep(for: .seconds(15))
+            }
+            // Again now and then for apps opened since, while nothing's using the agent for long.
+            while VIMSession.running(forMachinePath: path) != nil {
+                if desktops[path] == nil, let desktop = makeDesktop(session: session, guest: guest) { await desktop.prearm() }
+                try? await Task.sleep(for: .seconds(45))
             }
         }
     }
@@ -270,21 +291,7 @@ final class SeamlessHost: NSObject {
             desktop.finish(why: "the button")
             return
         }
-        guard let machine = try? VIMMachine.load(URL(fileURLWithPath: path)),
-            let identifier = machine.configuration["Identifier"] as? String
-        else { return }
-        let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let origin = session.seamlessGuestOffset
-        let desktop = SeamlessDesktop(
-            configuration: .init(
-                tools: tools, proxyExecutable: tools.appending(path: "SeamlessProxy"),
-                bundles: home.appending(path: "Library/Caches/Light Click/Seamless Apps/\(identifier)"),
-                savedBundles: home.appending(path: "Applications/Light Click"),
-                machine: .init(identifier: identifier, name: name, path: path),
-                log: FileManager.default.temporaryDirectory.appending(path: "lc-seamless-\(identifier.prefix(8)).log"),
-                guestOffset: NSPoint(x: origin.x.rounded(), y: origin.y.rounded())),
-            guest: AgentGuest(machinePath: path))
+        guard let desktop = makeDesktop(session: session, guest: AgentGuest(machinePath: path)) else { return }
         desktops[path] = desktop
         session.noteSeamlessChanged()
         let surfaces = windowSurfaces[path]
@@ -292,13 +299,20 @@ final class SeamlessHost: NSObject {
         desktop.pixelSource = surfaces
         desktop.hasOwnSurfaces = { surfaces?.hasSurfaces ?? false }
         // The window only goes once something's there in its place, and comes back if nothing is.
+        // Goes as soon as what replaces it is up, with a limit for a window that never gets its first frame.
+        let hide = {
+            guard !windowHidden.contains(path), desktops[path] === desktop else { return }
+            windowHidden.insert(path)
+            session.setSeamlessWindowHidden(true)
+        }
+        var sawWindow = false
         desktop.windowsChanged = { count in
             if count > 0, !windowHidden.contains(path) {
-                windowHidden.insert(path)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    MainActor.assumeIsolated {
-                        if windowHidden.contains(path) { session.setSeamlessWindowHidden(true) }
-                    }
+                if desktop.hasReplacedDisplay {
+                    hide()
+                } else if !sawWindow {
+                    sawWindow = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { MainActor.assumeIsolated { hide() } }
                 }
             } else if count == 0, windowHidden.contains(path) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) {

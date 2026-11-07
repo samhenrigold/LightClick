@@ -3028,6 +3028,14 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(command, "leap-restore"))
         return leap_restore(option(argc, argv, "--menu-tool", ""));
+    if (!strcmp(command, "leap-list")) {
+        if (geteuid() == 0 && !in_session)
+            return run_in_console_session(argc, argv, 1);
+        static char listed[1 << 14];
+        leap_list(listed, sizeof(listed));
+        fputs(listed, stdout);
+        return 0;
+    }
     if (!strcmp(command, "leap")) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);

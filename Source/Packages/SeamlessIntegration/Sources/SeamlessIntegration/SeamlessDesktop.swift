@@ -52,8 +52,10 @@ public final class SeamlessDesktop {
     private let logHandle: FileHandle?
     private let began = CFAbsoluteTimeGetCurrent()
     private var saidFirstWindow = false
+    private var saidReplaced = false
     private let environment = ProcessInfo.processInfo.environment
     private static var staged: Set<String> = []
+    private static var hooked: Set<String> = []
     private static var described: [String: GuestApp] = [:]
     private lazy var savedDescriptions: [String: GuestApp] =
         (try? JSONDecoder().decode([String: GuestApp].self, from: Data(contentsOf: descriptionsFile))) ?? [:]
@@ -85,9 +87,22 @@ public final class SeamlessDesktop {
 
     public func windowPixelsChanged(_ id: UInt32) {
         for session in sessions.values { session.windowPixelsChanged(id) }
+        if !saidReplaced, hasReplacedDisplay {
+            saidReplaced = true
+            note("# every window has its pixels")
+            windowsChanged?(windowCount)
+        }
     }
 
     public var windowCount: Int { sessions.values.reduce(0) { $0 + $1.windowCount } }
+    private var appsInFirstList: Set<String>?
+
+    /// Whether every app with windows when this started has them on the host with their own pixels, so the machine's window can go
+    /// with nothing lost. Asked each time something arrives.
+    public var hasReplacedDisplay: Bool {
+        guard let appsInFirstList, !appsInFirstList.isEmpty else { return false }
+        return appsInFirstList.allSatisfy { sessions[$0].map { $0.windowCount > 0 && $0.allWindowsHavePixels } ?? false }
+    }
 
     public func start() {
         signal(SIGPIPE, SIG_IGN)
@@ -117,6 +132,11 @@ public final class SeamlessDesktop {
         for session in sessions.values {
             session.frameArrived(surface: current, bytes: nil, width: width, height: height, stride: stride)
         }
+        if !saidReplaced, hasReplacedDisplay {
+            saidReplaced = true
+            note("# every window has its pixels")
+            windowsChanged?(windowCount)
+        }
     }
 
     // MARK: The guest's side
@@ -138,6 +158,7 @@ public final class SeamlessDesktop {
             if ran.exitCode == Self.noTools {
                 // The guest has restarted since they went in.
                 Self.staged.remove(configuration.machine.path)
+                Self.hooked.remove(configuration.machine.path)
                 guard await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path) else { break }
             } else if ran.exitCode != nil {
                 break
@@ -151,6 +172,32 @@ public final class SeamlessDesktop {
     }
 
     public static func isPrepared(machine: String) -> Bool { staged.contains(machine) }
+
+    /// Everything a press would otherwise wait for, while the machine's just running: the programs and the hook in the guest, and a
+    /// proxy for each app with windows. Nothing shows, and nothing's changed until a press turns it on.
+    public func prearm() async {
+        guard await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path) else { return }
+        if !Self.hooked.contains(configuration.machine.path) {
+            let injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
+            note("# pre-armed: hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)")
+            // Exits but for a dropped connection are answers, and it never tries twice in a guest's start.
+            if injected.exitCode != nil { Self.hooked.insert(configuration.machine.path) }
+        }
+        let listing = await guest.run("/usr/bin/env", ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap-list"]).output
+        guard let line = listing.split(separator: "\n").first(where: { $0.hasPrefix("apps") }) else { return }
+        let fields = line.components(separatedBy: "\t")
+        for path in stride(from: 2, to: fields.count, by: 2).map({ fields[$0] }) where savedDescriptions[path] == nil {
+            let said = await guest.run("/tmp/sg/ig", ["describe", "--icon", "--path", path]).output
+            let lines = said.split(separator: "\n").map(String.init)
+            guard let at = lines.firstIndex(where: { $0.hasPrefix("{") }),
+                let app = try? JSONDecoder().decode(GuestApp.self, from: Data(lines[at].utf8)), app.guestPath == path
+            else { continue }
+            savedDescriptions[path] = app
+            try? JSONEncoder().encode(savedDescriptions).write(to: descriptionsFile)
+            _ = await proxyFor(app, icon: at + 1 < lines.count ? Data(base64Encoded: lines[at + 1]) : nil)
+            note("# pre-armed \(path)")
+        }
+    }
 
     /// Puts the programs in the guest, once for each of its starts, and sooner than a press if the app wants that to be quick.
     public static func prepare(guest: any SeamlessGuest, tools: URL, machine: String) async -> Bool {
@@ -280,6 +327,7 @@ public final class SeamlessDesktop {
         case "apps":
             // Each after that is a name and its bundle, front first.
             let apps = stride(from: 1, to: fields.count - 1, by: 2).map { (name: fields[$0], path: fields[$0 + 1]) }
+            if appsInFirstList == nil { appsInFirstList = Set(apps.map(\.path)) }
             for app in apps where sessions[app.path] == nil && !describing.contains(app.path) {
                 note("# apps says \(app.name)")
                 describing.insert(app.path)
@@ -332,7 +380,8 @@ public final class SeamlessDesktop {
 
     // MARK: One guest app
 
-    private func open(_ app: GuestApp, icon: Data?) async {
+    /// The proxy for an app, made if need be, and the socket it looks for its session on.
+    private func proxyFor(_ app: GuestApp, icon: Data?) async -> (bundle: URL?, socket: String) {
         let proxy = ProxyBundle(
             app: app,
             machine: .init(identifier: configuration.machine.identifier, name: configuration.machine.name, path: ""))
@@ -371,6 +420,11 @@ public final class SeamlessDesktop {
                 }.value
             }
         }
+        return (bundle, socketPath)
+    }
+
+    private func open(_ app: GuestApp, icon: Data?) async {
+        let (bundle, socketPath) = await proxyFor(app, icon: icon)
         describing.remove(app.guestPath)
         guard !stopped, let bundle, sessions[app.guestPath] == nil else {
             if bundle == nil { note("# couldn't make a proxy for \(app.name)") }
