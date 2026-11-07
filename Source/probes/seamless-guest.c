@@ -2766,7 +2766,7 @@ static void leap_arrange_restore(const char *menu_tool) {
     fcntl(ends[1], F_SETFD, FD_CLOEXEC);
 }
 
-static int leap(const char *host, int port, const char *menu_tool, int own_surfaces) {
+static int leap(const char *host, int port, const char *menu_tool, int own_surfaces, int list_only) {
     char self[PATH_MAX];
     uint32_t length = sizeof(self);
     if (_NSGetExecutablePath(self, &length))
@@ -2776,8 +2776,8 @@ static int leap(const char *host, int port, const char *menu_tool, int own_surfa
         printf("# ERROR can't reach the host: %s\n", strerror(errno));
         return 3;
     }
-    leap_arrange_restore(menu_tool);
-    if (own_surfaces && leap_set_own_surfaces(self, 1)) {
+    if (list_only) {
+    } else if (leap_arrange_restore(menu_tool), own_surfaces && leap_set_own_surfaces(self, 1)) {
         if (leap_send(fd, "gpu\n"))
             return 0;
     } else {
@@ -3028,19 +3028,11 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(command, "leap-restore"))
         return leap_restore(option(argc, argv, "--menu-tool", ""));
-    if (!strcmp(command, "leap-list")) {
-        if (geteuid() == 0 && !in_session)
-            return run_in_console_session(argc, argv, 1);
-        static char listed[1 << 14];
-        leap_list(listed, sizeof(listed));
-        fputs(listed, stdout);
-        return 0;
-    }
     if (!strcmp(command, "leap")) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
         return leap(option(argc, argv, "--host", "10.0.2.2"), atoi(option(argc, argv, "--port", "7654")),
-                    option(argc, argv, "--menu-tool", ""), flag(argc, argv, "--own-surfaces"));
+                    option(argc, argv, "--menu-tool", ""), flag(argc, argv, "--own-surfaces"), flag(argc, argv, "--list-only"));
     }
     if (!strcmp(command, "tree") || !strcmp(command, "program-tree")) {
         // Only ever reads windows, so it's safe on the host; the program form opens an app, so it isn't.

@@ -53,6 +53,7 @@ public final class SeamlessDesktop {
     private let began = CFAbsoluteTimeGetCurrent()
     private var saidFirstWindow = false
     private var saidReplaced = false
+    private var prearming = false
     private let environment = ProcessInfo.processInfo.environment
     private static var staged: Set<String> = []
     private static var hooked: Set<String> = []
@@ -183,20 +184,20 @@ public final class SeamlessDesktop {
             // Exits but for a dropped connection are answers, and it never tries twice in a guest's start.
             if injected.exitCode != nil { Self.hooked.insert(configuration.machine.path) }
         }
-        let listing = await guest.run("/usr/bin/env", ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap-list"]).output
-        guard let line = listing.split(separator: "\n").first(where: { $0.hasPrefix("apps") }) else { return }
-        let fields = line.components(separatedBy: "\t")
-        for path in stride(from: 2, to: fields.count, by: 2).map({ fields[$0] }) where savedDescriptions[path] == nil {
-            let said = await guest.run("/tmp/sg/ig", ["describe", "--icon", "--path", path]).output
-            let lines = said.split(separator: "\n").map(String.init)
-            guard let at = lines.firstIndex(where: { $0.hasPrefix("{") }),
-                let app = try? JSONDecoder().decode(GuestApp.self, from: Data(lines[at].utf8)), app.guestPath == path
-            else { continue }
-            savedDescriptions[path] = app
-            try? JSONEncoder().encode(savedDescriptions).write(to: descriptionsFile)
-            _ = await proxyFor(app, icon: at + 1 < lines.count ? Data(base64Encoded: lines[at + 1]) : nil)
-            note("# pre-armed \(path)")
+        // Over the same connection as a press, as an icon's megabytes through the agent stop it answering for minutes.
+        guard listen() else { return }
+        prearming = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(60))
+            self?.endPrearming()
         }
+        _ = await guest.run(
+            "/usr/bin/env",
+            ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--list-only", "--port", String(port), "--menu-tool", "/tmp/sg/ig"])
+    }
+
+    private func endPrearming() {
+        if control >= 0 { shutdown(control, SHUT_RDWR) }
     }
 
     /// Puts the programs in the guest, once for each of its starts, and sooner than a press if the app wants that to be quick.
@@ -327,6 +328,15 @@ public final class SeamlessDesktop {
         case "apps":
             // Each after that is a name and its bundle, front first.
             let apps = stride(from: 1, to: fields.count - 1, by: 2).map { (name: fields[$0], path: fields[$0 + 1]) }
+            if prearming {
+                let unknown = apps.filter { savedDescriptions[$0.path] == nil }
+                if unknown.isEmpty, describing.isEmpty { endPrearming() }
+                for app in unknown where !describing.contains(app.path) {
+                    describing.insert(app.path)
+                    tell("describe\t\(app.path)")
+                }
+                return
+            }
             if appsInFirstList == nil { appsInFirstList = Set(apps.map(\.path)) }
             for app in apps where sessions[app.path] == nil && !describing.contains(app.path) {
                 note("# apps says \(app.name)")
@@ -367,6 +377,14 @@ public final class SeamlessDesktop {
             Self.described[path] = app
             savedDescriptions[path] = app
             try? JSONEncoder().encode(savedDescriptions).write(to: descriptionsFile)
+            if prearming {
+                Task {
+                    _ = await proxyFor(app, icon: icon)
+                    describing.remove(path)
+                    note("# pre-armed \(path)")
+                }
+                return
+            }
             Task { await open(app, icon: icon) }
         default:
             break
