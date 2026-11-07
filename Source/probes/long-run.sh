@@ -136,7 +136,14 @@ def has_window(app):
     return False
 def launch(app):
     t = time.time()
-    subprocess.call(["/usr/bin/open", "-a", path_of(app)])
+    for attempt in (1, 2):
+        p = subprocess.Popen(["/usr/bin/open", "-a", path_of(app)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = p.communicate()[0]
+        # -600: the application just killed is still going away. Only open's own failure gets a second try, never a missing window.
+        if not p.returncode or "-600" not in out or attempt == 2:
+            break
+        say("RETRY %s after open failed with -600" % app)
+        time.sleep(3)
     while time.time() - t < 60:
         if has_window(app):
             return time.time() - t
