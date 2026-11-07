@@ -561,8 +561,12 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                     return
                 }
                 let screen = front.value.window.screen?.visibleFrame ?? .zero
-                front.value.window.setFrameOrigin(
-                    NSPoint(x: screen.maxX - front.value.window.frame.width, y: screen.minY))
+                // The other corner if it's there already, as a window nearly the screen's size can be, so it always moves.
+                var corner = NSPoint(x: screen.maxX - front.value.window.frame.width, y: screen.minY)
+                if front.value.window.frame.origin == corner {
+                    corner = NSPoint(x: screen.minX, y: screen.maxY - front.value.window.frame.height)
+                }
+                front.value.window.setFrameOrigin(corner)
                 self.surfaceMoved(front.key)
             }
         }
