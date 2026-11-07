@@ -20,6 +20,7 @@
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 #include <mach/mach.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -74,8 +75,9 @@ static const char *const wanted[] = {
     "_CGRegionRelease",
     "_WSArenaAlloc",
     "_CGRegionCreateCopy",
+    "_CGRegionGetBoundingBox",
 };
-static void *resolved[23];
+static void *resolved[24];
 static void *(*session_data)(void);
 static void **(*server_gl)(void);
 static void *placement_targets[3];
@@ -426,8 +428,20 @@ static void *hook_new_array(unsigned long size) {
     }
     return memory;
 }
+static int update_origin_x, update_origin_y;
+static struct RectResult update_bounds, display_bounds; // This update's, and the largest seen, which is the display's.
 __attribute__((used)) void seamless_redraw_window(void *state, char *window) {
-    (void)state;
+    if (layers_used || marked_window == NULL) {
+        // First in this update: what's being updated, which is what a drawable of just that part is the size of. See
+        // seamless-gpu-replay-host.c.
+        struct RectResult (*bounds_of)(void *) = (struct RectResult (*)(void *))resolved[23];
+        struct RectResult bounds = bounds_of(*(void **)((char *)state + 0x18));
+        update_origin_x = (int)bounds.x;
+        update_origin_y = (int)bounds.y;
+        update_bounds = bounds;
+        if (bounds.width * bounds.height > display_bounds.width * display_bounds.height)
+            display_bounds = bounds;
+    }
     if (layers_used)
         forget_layers();
     marked_window = (char *)-1; // Nothing marked yet, so the first layer is told, even with no owner.
@@ -456,7 +470,7 @@ __attribute__((used)) void seamless_composite_layer(const void *layer) {
             note("layer %p has no known window\n", layer);
     }
     marked_window = owner;
-    float tokens[11] = {11184809.0f};
+    float tokens[13] = {11184809.0f};
     const uint8_t *state = owner ? *(const uint8_t **)(owner + 0xe0) : NULL;
     if (state) {
         struct RectResult rect = window_screen_rect(owner);
@@ -480,9 +494,11 @@ __attribute__((used)) void seamless_composite_layer(const void *layer) {
         for (unsigned i = 0; i < whole_count; i++)
             if (whole_windows[i] == owner)
                 tokens[10] = 1;
+        tokens[11] = (float)(16384 + update_origin_x);
+        tokens[12] = (float)(16384 + update_origin_y);
     }
     void (*pass_through)(void *, float) = (void (*)(void *, float))gl[1 + 190];
-    for (int i = 0; i < 11; i++)
+    for (int i = 0; i < 13; i++)
         pass_through(gl[0], tokens[i]);
     static unsigned told;
     if (told++ % 3000 == 0)
@@ -695,6 +711,15 @@ static int whole_window_due(uint32_t id, char *window) {
         return 0;
     uint64_t now = mach_absolute_time();
     struct RectResult rect = window_screen_rect(window);
+    // This update draws on a drawable of only what it updates, and all of a window with its shadow has to fit, or the
+    // host would start it clear with part of it missing. What's past the display can't be drawn anyway. It stays due.
+    enum { shadow = 96 };
+    double left = fmax(rect.x - shadow, display_bounds.x), top = fmax(rect.y - shadow, display_bounds.y);
+    double right = fmin(rect.x + rect.width + shadow, display_bounds.x + display_bounds.width);
+    double bottom = fmin(rect.y + rect.height + shadow, display_bounds.y + display_bounds.height);
+    if (left < update_bounds.x || top < update_bounds.y || right > update_bounds.x + update_bounds.width ||
+        bottom > update_bounds.y + update_bounds.height)
+        return 0;
     // All of each window once the mode's on, covered or not, as nothing else would ever draw what doesn't change.
     if (seen[i].generation != whole_generation) {
         seen[i].generation = whole_generation;

@@ -33,7 +33,7 @@ public protocol SeamlessPixelSource: AnyObject {
     /// `window` is the guest's window number. The surface holds it with real alpha, from `surfaceOrigin` on the guest's display,
     /// and can be bigger than it.
     func surface(forWindow window: UInt32) -> IOSurfaceRef?
-    /// Where it starts on the guest's display, if the surface itself says. Otherwise the guest's tool does.
+    /// Where it starts on the guest's display, in its pixels, if the surface itself says. Otherwise the guest's tool does, in points.
     func surfaceOrigin(forWindow window: UInt32) -> (x: Int32, y: Int32)?
     /// Whether windows are coming this way now, which leaves the display's frames with nothing current in them.
     var hasSurfaces: Bool { get }
@@ -74,6 +74,7 @@ public final class SeamlessSession {
         var surfaceOrigin: (x: Int32, y: Int32)?
         var ownSurfaceLayer: CALayer?
         var guestCovers: [CGRect]?
+        var materials: [GuestMaterial] = []
         init(window: SessionWire.Window, context: NSObject, layer: CALayer) {
             self.window = window
             self.context = context
@@ -256,7 +257,8 @@ public final class SeamlessSession {
         return
             "mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp \"$1\" /tmp/sg/g; cp \"$2\" /tmp/sg/ig; chmod 755 /tmp/sg/g /tmp/sg/ig; "
             + "/usr/bin/sqlite3 \"/Library/Application Support/com.apple.TCC/TCC.db\" \"\(rows.joined())\(agentRow)\" 2>&1; "
-            + "/bin/ps -o comm= -p $PPID; /usr/bin/killall tccd; sleep 2"
+            // After this script has answered, since the agent has been seen to stop answering for minutes if tccd goes under it.
+            + "/bin/ps -o comm= -p $PPID; (sleep 1; /usr/bin/killall tccd) </dev/null >/dev/null 2>&1 &"
     }
 
     private func listenForGuest() -> Bool {
@@ -411,6 +413,9 @@ public final class SeamlessSession {
         case .covers(let id, let rects):
             surfaces[id]?.guestCovers = rects
             if let surface = surfaces[id] { showCrops(of: [surface]) }
+        case .materials(let id, let rows):
+            surfaces[id]?.materials = rows
+            proxy?.send(SessionCommand.setMaterials(id: Int(id), rows))
         case .minimized(let id, let minimized):
             note("# window \(id) \(minimized ? "minimized" : "back")")
             proxy?.send(SessionCommand.minimizeSurface(id: Int(id), minimized: minimized))
@@ -609,7 +614,12 @@ public final class SeamlessSession {
         let layer = surface.layer
         if let own = pixelSource?.surface(forWindow: window.id) {
             // Until the guest says, at its window's place, which is right but for any shadow: with the display off, this is all there is.
-            let origin = pixelSource?.surfaceOrigin(forWindow: window.id) ?? surface.surfaceOrigin ?? (window.x, window.y)
+            var originX = Double(surface.surfaceOrigin?.x ?? window.x)
+            var originY = Double(surface.surfaceOrigin?.y ?? window.y)
+            if let pixels = pixelSource?.surfaceOrigin(forWindow: window.id) {
+                originX = Double(pixels.x) / scale
+                originY = Double(pixels.y) / scale
+            }
             setPieces(of: surface, to: [], from: own, place: place, height: whole.height)
             layer.mask = nil
             layer.contents = nil
@@ -624,9 +634,9 @@ public final class SeamlessSession {
                 surface.ownSurfaceLayer = sublayer
             }
             let size = CGSize(width: Double(IOSurfaceGetWidth(own)) / scale, height: Double(IOSurfaceGetHeight(own)) / scale)
-            let top = Double(origin.y) - (Double(window.y) - side)
+            let top = originY - (Double(window.y) - side)
             sublayer.frame = CGRect(
-                x: Double(origin.x) - (Double(window.x) - side), y: whole.height - top - size.height,
+                x: originX - (Double(window.x) - side), y: whole.height - top - size.height,
                 width: size.width, height: size.height)
             sublayer.contents = own
             sublayer.perform(NSSelectorFromString("setContentsChanged"))
@@ -758,7 +768,12 @@ public final class SeamlessSession {
         }
         socket.start()
         proxy = socket
-        for surface in surfaces.values { tellProxy(surface) }
+        for surface in surfaces.values {
+            tellProxy(surface)
+            if !surface.materials.isEmpty {
+                socket.send(SessionCommand.setMaterials(id: Int(surface.window.id), surface.materials))
+            }
+        }
         if let lastMenu { socket.send(SessionCommand.setMenuBar(lastMenu)) }
         if let leaveTitle { socket.send(SessionCommand.setDockMenu([GuestMenuItem(title: leaveTitle)])) }
         if activateWhenConnected {

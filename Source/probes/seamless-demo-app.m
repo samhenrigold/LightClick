@@ -198,6 +198,26 @@ int seamless_gl_demo_main(void) {
     return 0;
 }
 
+// An update of the display, in a session that may have nothing else drawing, by a window nobody will see for a moment.
+// It covers the display, as an update only goes through the windows where it changes.
+void seamless_poke_update(void) {
+    @autoreleasepool {
+        [NSApplication sharedApplication];
+        NSApp.activationPolicy = NSApplicationActivationPolicyProhibited;
+        NSWindow *window = [[NSWindow alloc] initWithContentRect:NSScreen.mainScreen.frame
+                                                       styleMask:NSBorderlessWindowMask
+                                                         backing:NSBackingStoreBuffered
+                                                           defer:NO];
+        window.alphaValue = 0.01;
+        [window orderFrontRegardless];
+        [window displayIfNeeded];
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
+        [window close];
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
+        [window release];
+    }
+}
+
 int seamless_demo_app_main(void) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];

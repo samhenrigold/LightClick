@@ -15,7 +15,7 @@ public enum SessionWire {
         case hello = 1, window = 2, frame = 3, gone = 4
         case pointer = 16, key = 17, focus = 18
         case menu = 48, menuPress = 49, document = 50, quitApp = 51, appGone = 52
-        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58, overlay = 59, surfaceOrigin = 60, covers = 61, minimized = 62, setMinimized = 63
+        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58, overlay = 59, surfaceOrigin = 60, covers = 61, minimized = 62, setMinimized = 63, materials = 64
     }
 
     public struct Window: Equatable, Sendable {
@@ -55,6 +55,7 @@ public enum SessionWire {
         case surfaceOrigin(UInt32, x: Int32, y: Int32)
         case covers(UInt32, [CGRect])
         case minimized(UInt32, Bool)
+        case materials(UInt32, [GuestMaterial])
     }
 
     public enum Parsed: Equatable, Sendable {
@@ -90,6 +91,8 @@ public enum SessionWire {
             guard length == 12 else { return .bad }
         case .minimized:
             guard length == 8 else { return .bad }
+        case .materials:
+            guard length >= 8, length <= 8 + 32 * 24, (length - 8) % 24 == 0 else { return .bad }
         case .setMinimized:
             return .bad
         case .covers:
@@ -108,6 +111,15 @@ public enum SessionWire {
         case .gone: return .message(.gone(u32(bytes, body)), used: used)
         case .crop: return .message(.crop(u32(bytes, body)), used: used)
         case .overlay: return .message(.overlay(u32(bytes, body)), used: used)
+        case .materials:
+            let rows = (0..<(length - 8) / 24).map { index -> GuestMaterial in
+                func value(_ field: Int) -> Int32 { Int32(bitPattern: u32(bytes, body + 8 + index * 24 + field * 4)) }
+                return GuestMaterial(
+                    material: Int(value(0)), active: value(1) != 0, x: Double(value(2)), y: Double(value(3)),
+                    width: Double(value(4)), height: Double(value(5)))
+            }
+            guard Int(u32(bytes, body + 4)) == rows.count else { return .bad }
+            return .message(.materials(u32(bytes, body), rows), used: used)
         case .minimized:
             return .message(.minimized(u32(bytes, body), u32(bytes, body + 4) != 0), used: used)
         case .setMinimized:

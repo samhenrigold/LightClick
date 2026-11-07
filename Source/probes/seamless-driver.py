@@ -398,8 +398,10 @@ def windowed(seconds):
 def desktop():
     # The Seamless button, on a running machine: press, the apps' windows appear and the machine's goes, a click reaches one, press,
     # and the machine's window is back.
+    for old in results.glob(f'{tag}-*.png'):
+        old.unlink()
     guest = stage(guest_tool)
-    for app in ('TextEdit', 'Safari'):
+    for app in ('Finder', 'TextEdit', 'Safari') if version_is_mojave() else ('TextEdit', 'Safari'):
         run(guest, ['open-app', '--app', app])
     time.sleep(12)
     listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
@@ -429,7 +431,6 @@ def desktop():
         match = re.search(r'pid=(\d+)', found)
         return int(match.group(1)) if match else 0
 
-    version_is_mojave_before = version_is_mojave()
     print('before the press', request({'Action': 'seamless-state'}, 60), flush=True)
     print(next(iter(rows()), ''), flush=True)
     pressed = time.time()
@@ -449,11 +450,10 @@ def desktop():
         print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
         time.sleep(1)
     check('the machine window hides', not machine_window())
-    if version_is_mojave_before or os.environ.get('LC_SEAMLESS_MAVERICKS_SURFACES'):
-        check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
+    check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
-        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-{window}.png')])
+        subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-desktop-{window}.png')], capture_output=True)
     clicks = results/f'{tag}-clicks.txt'
     safari = proxy_pid('Safari')
     window = next((re.search(r'id=(\d+)', row).group(1) for row in windows if 'Safari' in row), None)
@@ -493,7 +493,7 @@ def desktop():
         after = place(window)
         print('moved from', before, 'to', after, flush=True)
         check('a window moves on the host', before is not None and after is not None and before != after)
-        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-moved.png')])
+        subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-desktop-moved.png')], capture_output=True)
         clicks.write_text('')
         timing = subprocess.Popen([meter, window, '5', '--clicks', str(clicks)], stdout=subprocess.PIPE, text=True)
         for _ in range(4):
@@ -518,16 +518,16 @@ def desktop():
         time.sleep(1.5)
         for name, wanted in (('safari', window), ('textedit', other)):
             if wanted:
-                subprocess.run(['screencapture', '-x', '-o', '-l', wanted, str(results/f'{tag}-apart-{name}.png')])
+                subprocess.run([str(results/'seamless-present-meter'), wanted, '0.2', '--save', str(results/f'{tag}-apart-{name}.png')], capture_output=True)
         command.write_text('resize')
         os.kill(safari, signal.SIGUSR2)
         time.sleep(1)
         during = subprocess.run([meter, window, '1'], capture_output=True, text=True).stdout
-        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-resizing.png')])
+        subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-resizing.png')], capture_output=True)
         time.sleep(4)
         print('during a resize', during, flush=True)
         print('after resize', next((row[-40:] for row in proxy_windows() if f'id={window} ' in row), ''), flush=True)
-        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-resized.png')])
+        subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-resized.png')], capture_output=True)
         # Minimized in the guest, it's in the host's Dock, and back from there it's back in both.
         def on_screen():
             return any(f'id={window} ' in row for row in rows())
@@ -561,6 +561,20 @@ def desktop():
         os.kill(safari, signal.SIGUSR2)
         time.sleep(3)
         check('and returns', on_screen())
+        for row in proxy_windows():
+            if 'Finder' in row:
+                subprocess.run([str(results/'seamless-present-meter'), re.search(r'id=(\d+)', row).group(1), '0.2', '--save', str(results/f'{tag}-materials.png')], capture_output=True)
+        # Not a pass or a fail yet: what a real guest full screen does to this window, and to the others.
+        command.write_text('guest-full-screen')
+        print('before full screen', [row[-50:] for row in proxy_windows()], flush=True)
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(8)
+        print('in full screen', [row[-50:] for row in proxy_windows()], flush=True)
+        print('in full screen moving', subprocess.run([meter, window, '3'], capture_output=True, text=True).stdout, flush=True)
+        subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-full-screen.png')], capture_output=True)
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(8)
+        print('after full screen', [row[-50:] for row in proxy_windows()], flush=True)
         frame = capture(f'{tag}-desktop-frame.png')
         print('guest frame', frame, flush=True)
     pressed = time.time()
