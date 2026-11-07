@@ -265,9 +265,11 @@ public final class Tally: @unchecked Sendable {
     // Any thread, so approximate, which is all it is for.
     func exclusiveStop() { exclusiveStops.pointee += 1 }
 
+    var apicRegisters: [UInt64: Int] = [:]
     func mmio(_ gpa: UInt64) {
         lock.lock()
         mmioPages[gpa & ~0xFFF, default: 0] += 1
+        if gpa & ~0xFFF == 0xFEE0_0000 { apicRegisters[gpa & 0xFF0, default: 0] += 1 } // which local APIC register: a timer arm or an EOI
         lock.unlock()
     }
 
@@ -378,6 +380,7 @@ public final class Tally: @unchecked Sendable {
         o += "stopped for another vCPU's exclusive section: \(exclusiveStops.pointee)\n"
         o += String(format: "dead blocks reused: %llu. Direct calls between keys given a lookup: %llu\n", t.reused, t.call_tails)
         o += String(format: "this vCPU waited for the translator lock %llu times, %.2f s\n\n", engine.translatorWaits, seconds(engine.translatorWaitTicks))
+        o += String(format: "page invalidations: %llu, %.2f s waiting for the translator lock, %.2f s in all\n\n", engine.invalidations, seconds(engine.invalidationWaitTicks), seconds(engine.invalidationTicks))
         o += "== why blocks died: blocks, of those with the page still on the same frame, calls ==\n"
         let killed = withUnsafeBytes(of: t.killed) { Array($0.bindMemory(to: UInt64.self)) }
         let unmoved = withUnsafeBytes(of: t.killed_unmoved) { Array($0.bindMemory(to: UInt64.self)) }
@@ -471,6 +474,10 @@ public final class Tally: @unchecked Sendable {
         o += "\n== mmio by page ==\n"
         for (page, count) in mmioPages.sorted(by: { $0.value > $1.value }).prefix(40) {
             o += String(format: "%12d  ", count) + hex(page) + "\n"
+        }
+        o += "\n== local APIC accesses by register ==\n"
+        for (register, count) in apicRegisters.sorted(by: { $0.value > $1.value }) {
+            o += String(format: "%12d  ", count) + hex(register) + "\n"
         }
         o +=
             "\n== mmio by site: 1 in 256 sampled, so counts are approximate. rip, read or write, size, device's megabyte, bytes at rip ==\n"

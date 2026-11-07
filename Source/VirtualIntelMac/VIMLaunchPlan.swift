@@ -162,7 +162,9 @@ public final class LaunchPlan: NSObject {
         // xnu's rtc_timer_init takes the TSC-deadline timer whenever CPUID offers it, from Lion's
         // source through Big Sur's. Each LAPIC timer arm costs three MMIO accesses; this costs one
         // WRMSR. Enabled only for the guest it has been qualified on: extend once others boot.
-        if appleSilicon && guest == .mavericks { cpu += ",+tsc-deadline" }
+        if appleSilicon && (guest == .mavericks || ProcessInfo.processInfo.environment["LC_GUEST_TSC_DEADLINE"] == "1") {
+            cpu += ",+tsc-deadline" // the variable: qualification boots of another guest only
+        }
         // Development only. Per xnu's lapic_init, this alone switches Big Sur to x2APIC under a
         // hypervisor; Mountain Lion through Catalina also need the -x2apic boot argument.
         if appleSilicon && options.contains("--expose-x2apic") { cpu += ",+x2apic" }

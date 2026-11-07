@@ -382,6 +382,7 @@ public final class Engine {
     // For the tally: how much of a translation is waiting for another vCPU's.
     var translatorWaits: UInt64 = 0
     var translatorWaitTicks: UInt64 = 0
+    var invalidations: UInt64 = 0, invalidationWaitTicks: UInt64 = 0, invalidationTicks: UInt64 = 0 // HC_VIEW_INVALIDATE_VA, for the tally
     private func lockTranslator() {
         if os_unfair_lock_trylock(translatorLock) { return }
         let start = mach_absolute_time()
@@ -508,7 +509,9 @@ public final class Engine {
                 lockTranslator()
             }
         } else if translating {
+            let start = code == Int(HC_VIEW_INVALIDATE_VA) ? mach_absolute_time() : 0
             lockTranslator()
+            if start != 0 { invalidationWaitTicks &+= mach_absolute_time() &- start }
         }
         defer { if translating { os_unfair_lock_unlock(translatorLock) } }
         switch code {
@@ -546,6 +549,8 @@ public final class Engine {
         case Int(HC_SMC):
             _ = tr_invalidate_frame(c.pointee.req_a.0, UInt32(c.pointee.req_a.1))
         case Int(HC_VIEW_INVALIDATE_VA):
+            let start = mach_absolute_time()
+            defer { invalidations &+= 1; invalidationTicks &+= mach_absolute_time() &- start }
             _ = tr_invalidate_view_va(Int32(c.pointee.req_a.0), c.pointee.req_a.1, UInt32(c.pointee.req_a.2), c.pointee.req_a.3 != 0, c.pointee.req_a.4 != 0)
         case Int(HC_YIELD):
             sched_yield()
