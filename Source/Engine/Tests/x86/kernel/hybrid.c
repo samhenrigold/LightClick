@@ -289,6 +289,83 @@ static void test_notes(u64 root) {
     CHECK(f() == 3);
 }
 
+// dtrace's fbt as XNU does it, with the patch written by TCG: kernel text changes with CR0.WP clear, which the engine
+// refuses, so the bytes arrive as a write behind its back. The entry probe turns push %rbp into int3, the return probe
+// pop %rbp; the handler emulates whichever it is and returns past it. A translation from before a patch, or one that
+// mixed old and new bytes, would come back with rbp, rsp or the return wrong.
+__asm__(".text\n"
+        ".globl _fbt_trap\n_fbt_trap:\n"
+        "  pushq %rax\n"
+        "  movq 8(%rsp), %rax\n"
+        "  cmpq _fbt_pop_return(%rip), %rax\n"
+        "  je 1f\n"
+        "  popq %rax\n" // push %rbp: move the frame down 8, put rbp where the push would
+        "  subq $16, %rsp\n"
+        "  movq %rax, (%rsp)\n"
+        "  movq 16(%rsp), %rax\n  movq %rax, 8(%rsp)\n"
+        "  movq 24(%rsp), %rax\n  movq %rax, 16(%rsp)\n"
+        "  movq 32(%rsp), %rax\n  movq %rax, 24(%rsp)\n"
+        "  movq 40(%rsp), %rax\n  movq %rax, 32(%rsp)\n"
+        "  movq 48(%rsp), %rax\n  movq %rax, 40(%rsp)\n"
+        "  movq 32(%rsp), %rax\n  subq $8, %rax\n  movq %rbp, (%rax)\n  movq %rax, 32(%rsp)\n"
+        "  popq %rax\n"
+        "  iretq\n"
+        "1: movq 32(%rsp), %rax\n" // pop %rbp: from the interrupted stack
+        "  movq (%rax), %rbp\n"
+        "  addq $8, %rax\n"
+        "  movq %rax, 32(%rsp)\n"
+        "  popq %rax\n"
+        "  iretq\n");
+extern char fbt_trap[];
+u64 fbt_pop_return;
+
+static u64 call_probed(u64 fn, u64 *rsp_before, u64 *rsp_after, u64 *rbp_after) {
+    u64 rax, before, after, rbp;
+    // rbp is the operand under test, so nothing in here may address through it.
+    __asm__ volatile("pushq %%rbp\n"
+                     "movabsq $0x1122334455667788, %%rbp\n"
+                     "movq %%rsp, %1\n"
+                     "call *%4\n"
+                     "movq %%rsp, %2\n"
+                     "movq %%rbp, %3\n"
+                     "popq %%rbp\n"
+                     : "=a"(rax), "=&r"(before), "=&r"(after), "=&r"(rbp)
+                     : "r"(fn)
+                     : "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory");
+    *rsp_before = before, *rsp_after = after, *rbp_after = rbp;
+    return rax;
+}
+
+static void test_fbt_patch(u64 root) {
+    static const u8 body[] = {0x55, 0x48, 0x89, 0xe5, 0x48, 0x89, 0xe8, 0x5d, 0xc3}; // push rbp; mov rsp,rbp; mov rbp,rax; pop rbp; ret
+    u64 code = frame();
+    volatile u8 *p = (volatile u8 *)PHYS(code);
+    for (unsigned i = 0; i < sizeof body; i++)
+        p[i] = body[i];
+    u64 fn = TEST_VA + 0x40000;
+    *pte_of(root, fn) = code | PRESENT_RW;
+    fbt_pop_return = fn + 8;
+    gate(3, fbt_trap);
+    // The words TCG writes: bytes 0 to 3 and 4 to 7, each as it is or with its probe byte.
+    const u32 entry[2] = {0xe5894855, 0xe58948cc}, ret[2] = {0x5de88948, 0xcce88948};
+    static const int steps[][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0, 0}, {1, 1}, {0, 0}};
+    for (unsigned s = 0; s < sizeof steps / sizeof steps[0]; s++) {
+        MAILBOX[1] = code;
+        MAILBOX[2] = entry[steps[s][0]];
+        command(2);
+        MAILBOX[1] = code + 4;
+        MAILBOX[2] = ret[steps[s][1]];
+        command(2);
+        for (int twice = 0; twice < 2; twice++) { // the second run is on whatever the first translated
+            u64 before, after, rbp;
+            u64 got = call_probed(fn, &before, &after, &rbp);
+            CHECK(got == before - 16);
+            CHECK(after == before);
+            CHECK(rbp == 0x1122334455667788ULL);
+        }
+    }
+}
+
 static void test_ts(void) {
     u64 cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -2072,6 +2149,7 @@ void kmain(void) {
     test_fallback_state();
     test_host_changes_cr3(root);
     test_notes(root);
+    test_fbt_patch(root);
     test_ts();
     test_level_interrupts();
     test_tsc();
