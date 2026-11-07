@@ -476,12 +476,14 @@ while :; do
     /bin/ps -axo pid,ppid,stat,etime,pcpu,command | /usr/bin/grep -E "$comm|/tmp/sg|ws-inject|WindowServer|tccd|perl" | /usr/bin/grep -v grep | /usr/bin/cut -c1-120
     /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"
     /bin/cat /var/tmp/seamless-ws-press 2>/dev/null
+    # Which way it's stuck: waiting on tty output is the transmit path, on input a lost receive.
+    /bin/ps -o pid,stat,wchan,etime,command -p $agent | /usr/bin/tail -1 | /usr/bin/cut -c1-120
+    /bin/stty -a -f /dev/cu.serial2 2>&1 | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-400; echo
     /usr/bin/tail -3 /tmp/seamless-oversleep.log
     /usr/bin/tail -2 /var/log/system.log | /usr/bin/cut -c1-180
     if [ $((n % 5)) = 0 ]; then
       /usr/sbin/ioreg -l -w0 -r -c Apple16X50UARTSync 2>/dev/null | /usr/bin/grep -vE "^ *$" | /usr/bin/cut -c1-140 | /usr/bin/head -40
       /usr/sbin/ioreg -l -w0 -r -n Apple16X50Serial 2>/dev/null | /usr/bin/grep -iE "count|state|error|overrun|bytes" | /usr/bin/cut -c1-140 | /usr/bin/head -20
-      /bin/ps -o pid,stat,wchan,etime,command -p $agent | /usr/bin/cut -c1-120
       /usr/bin/sample $agent 1 -file /tmp/seamless-watch.sample >/dev/null 2>&1
       /usr/bin/grep -A25 "Call graph" /tmp/seamless-watch.sample | /usr/bin/cut -c1-110
       /usr/sbin/lsof -p $agent 2>/dev/null | /usr/bin/grep -E "serial|cu\\." | /usr/bin/cut -c1-110
