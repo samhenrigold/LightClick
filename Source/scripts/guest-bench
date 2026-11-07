@@ -51,8 +51,9 @@ parser.add_argument('--driver-arg', action='append', default=[], help='passed to
 parser.add_argument('--sample', type=int, help='sample QEMU for this many seconds during the workload, into Build/bench/<tag>.sample')
 parser.add_argument('--fresh-identifier', action='store_true', help='give the clone its own machine identifier')
 parser.add_argument('--startup-timeline', action='store_true', help='retain passive startup phase observations as <tag>.startup.jsonl')
+parser.add_argument('--allow-running-vms', action='store_true', help='allow unrelated running VMs while retaining this harness\'s exclusive clone-test lease')
 args = parser.parse_args()
-clone_lease = CloneLease()
+clone_lease = CloneLease(check_running=not args.allow_running_vms)
 try:
     clone_lease.acquire()
 except (LeaseRefused, OSError, subprocess.TimeoutExpired) as error:
