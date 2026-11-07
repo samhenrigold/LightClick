@@ -29,6 +29,7 @@ def main():
     parser.add_argument('--deadline', type=int, default=1200)
     parser.add_argument('--boot-wait', type=int, default=90, help='warm-profile startup wait before driver, seconds0..600')
     parser.add_argument('--allow-running-vms', action='store_true', help="allow other chats' VMs; guest-bench still owns the exclusive clone lease")
+    parser.add_argument('--membership-invalidation', action='store_true', help='enable conservative membership prototype; controls explicitly set0')
     parser.add_argument('--profile-invalidations', action='store_true', help='enable sampled Engine invalidation timing; new runtime required')
     args = parser.parse_args()
     app, machine, probe, reference, output = (path.resolve() for path in (args.app, args.machine, args.probe, args.reference, args.results))
@@ -60,18 +61,19 @@ def main():
     prefix = output/'tallies/engine.txt'
     tag = 'hevc-tally-' + time.strftime('%Y%m%d-%H%M%S-') + str(os.getpid())
     command = [sys.executable, str(source/'scripts/guest-bench'), str(app), str(machine), tag,
-               '--fresh-identifier', '--boot-wait', str(args.boot_wait), '--env', 'LC_HVDBT=1', '--env', 'LC_HVDBT_TALLY='+str(prefix),
+               '--fresh-identifier', '--startup-timeline', '--boot-wait', str(args.boot_wait), '--env', 'LC_HVDBT=1', '--env', 'LC_HVDBT_TALLY='+str(prefix),
+               '--env', 'LC_HVDBT_INVALIDATION_MEMBERSHIP='+str(int(args.membership_invalidation)),
                '--driver', str(source/'probes/hevc-tally-driver.py')]
     if args.allow_running_vms:
         command += ['--allow-running-vms']
     if args.profile_invalidations:
         command += ['--env', 'LC_HVDBT_PROFILE_INVALIDATION=1']
-    for value in (output/'measurements', probe, prefix, cpus, args.seconds, args.idle_seconds, reference, int(args.profile_invalidations)):
+    for value in (output/'measurements', probe, prefix, cpus, args.seconds, args.idle_seconds, reference, int(args.profile_invalidations), int(args.membership_invalidation)):
         command += ['--driver-arg', str(value)]
     # Diagnostics normally suppresses prearm; don't accidentally inherit a prior Seamless experiment's opt-ins.
-    environment = {key: value for key, value in os.environ.items() if not key.startswith(('LC_SEAMLESS_', 'VIM_SEAMLESS_')) and key != 'LC_HVDBT_PROFILE_INVALIDATION'}
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(('LC_SEAMLESS_', 'VIM_SEAMLESS_')) and key not in ('LC_HVDBT_PROFILE_INVALIDATION', 'LC_HVDBT_INVALIDATION_MEMBERSHIP')}
     (output/'invocation.json').write_text(json.dumps(dict(command=command, probe_sha256=hashlib.sha256(probe.read_bytes()).hexdigest(),
-        app=str(app), machine=str(machine), reference=str(reference), profile_invalidations=args.profile_invalidations,
+        app=str(app), machine=str(machine), reference=str(reference), startup_timeline=str(source/'Build/bench'/f'{tag}.startup.jsonl'), profile_invalidations=args.profile_invalidations,membership_invalidation=args.membership_invalidation,
         note='Guest-bench owns clone cleanup and the single-clone lease. No build or application benchmark.'), indent=2)+'\n')
     interrupted = [0]
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):

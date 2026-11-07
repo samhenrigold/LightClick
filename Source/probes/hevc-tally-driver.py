@@ -1,5 +1,5 @@
 """Performance-only guest-bench driver. No Seamless, application UI, exports, dtrace, or new guest helper.
-Arguments: NEW_RESULTS EXISTING_X86_PROBE TALLY_PREFIX CPU_COUNT DRAW_SECONDS IDLE_SECONDS PRIOR_GUEST_REPORT PROFILE_INVALIDATIONS_0_OR_1
+Arguments: NEW_RESULTS EXISTING_X86_PROBE TALLY_PREFIX CPU_COUNT DRAW_SECONDS IDLE_SECONDS PRIOR_GUEST_REPORT PROFILE_INVALIDATIONS_0_OR_1 MEMBERSHIP_0_OR_1
 The opt-in resident probe hashes input once before the repeat loop and final pixels afterward. Periodic tallies remain coarse.
 """
 import hashlib
@@ -11,7 +11,7 @@ import sys
 import time
 
 sys.path.insert(0, str(source/'scripts'))
-from hevc_tally import TallyCollector
+from hevc_tally import TallyCollector, membership_qualification
 
 OS_IMAGE = '/Library/Desktop Pictures/Mojave.heic'
 INPUT_SHA256 = 'a84ed4faa376b8b2cb0328b306d09d25ad9047a0f7d106ad46098d0d91381256'
@@ -66,14 +66,17 @@ def validate_repeat(report, requested):
 
 
 def experiment():
-    if len(arguments) != 8:
-        raise ValueError('requires results, existing probe, tally prefix, cpu count, trials, idle seconds, prior guest report, expected invalidation profiling0/1')
+    if len(arguments) != 9:
+        raise ValueError('requires results, existing probe, tally prefix, cpu count, trials, idle seconds, prior guest report, expected invalidation profiling0/1, expected membership0/1')
     output, probe, prefix = map(Path, arguments[:3])
     cpus, draw_seconds, idle = map(int, arguments[3:6])
     reference_path = Path(arguments[6])
     if arguments[7] not in ('0', '1'):
         raise ValueError('expected invalidation profiling must be0/1')
     profile_expected = int(arguments[7])
+    if arguments[8] not in ('0','1'):
+        raise ValueError('expected membership must be0/1')
+    membership_expected=int(arguments[8])
     if not output.is_absolute() or output.exists() or not prefix.is_absolute() or not 1 <= cpus <= 8 or not 10 <= draw_seconds <= 30 or not 8 <= idle <= 30:
         raise ValueError('new absolute results, absolute tally prefix, cpus1..8, draw_seconds10..30, idle8..30 required')
     if not probe.is_file() or probe.is_symlink() or not reference_path.is_file():
@@ -136,7 +139,10 @@ def experiment():
         complete = all(row['all_expected_vcpus_present'] for row in evidence['phases'].values())
         profile_matches = all((row.get('invalidation_profile_enabled') or 0) == profile_expected for row in evidence['phases'].values())
         evidence['invalidation_profile_expected'] = profile_expected
-        evidence['result'] = 'COLLECTED' if complete and profile_matches else 'INCONCLUSIVE'
+        evidence['membership_expected']=membership_expected
+        evidence['membership_qualification']={name:membership_qualification(row,membership_expected) for name,row in evidence['phases'].items()}
+        membership_matches=all(row['qualified'] for row in evidence['membership_qualification'].values())
+        evidence['result'] = 'COLLECTED' if complete and profile_matches and membership_matches else 'INCONCLUSIVE'
     except BaseException as error:
         evidence.update(result='FAIL', error=repr(error))
         raise

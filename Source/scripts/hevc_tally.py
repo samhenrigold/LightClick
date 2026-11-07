@@ -21,7 +21,7 @@ def parse_tally(text):
     if not elapsed or not math.isfinite(float(elapsed[1])):
         raise ValueError('missing tally elapsed time')
     result = dict(elapsed_since_handoff_seconds=float(elapsed[1]), per_cpu={}, per_cpu_gauges={}, global_translator={}, global_monitor={},
-                  fallbacks={}, fallback_sites=[], svc={}, host_calls={}, invalidation_profile={})
+                  fallbacks={}, fallback_sites=[], svc={}, host_calls={}, invalidation_profile={},membership_state={},membership_counters={})
     section = ''
     for line in text.splitlines():
         if line.startswith('==') or line.startswith('monitor calls by SVC_'):
@@ -43,6 +43,14 @@ def parse_tally(text):
             row = re.fullmatch(r'\s*(\d+),\s+[0-9.]+/s\s+(\d+)', line)
             if row:
                 result['svc'][row[2]] = int(row[1])
+        elif section.startswith('== invalidation membership prototype'):
+            row = re.fullmatch(r'invalidation_membership_([a-z_]+) (\d+)',line)
+            if row:
+                key,value=row[1],int(row[2])
+                if key in ('enabled','reliable','bytes'):
+                    result['membership_state'][key]=value
+                elif key in ('inserts','view_visits','stale_visits','removals','tracking_failures','full_scans'):
+                    result['membership_counters'][key]=value
         elif section.startswith('== sampled invalidation cost'):
             row = re.fullmatch(r'(invalidation_[a-z_]+) (\d+)', line)
             if row:
@@ -106,6 +114,9 @@ def interval(before, after):
                 raise ValueError('invalidation profiling mode changed')
             result['invalidation_profile_enabled'] = enabled
         result[key] = differences(a, b)
+    result['global_membership_state']={'start':before['parsed']['membership_state'],'end':after['parsed']['membership_state']}
+    result['global_membership_counters']=differences(before['parsed']['membership_counters'],after['parsed']['membership_counters'])
+    result['global_membership_cumulative_end']=after['parsed']['membership_counters']
     a, b = before['parsed']['svc'], after['parsed']['svc']
     result['svc_count_deltas_common_top20'] = {key: b[key]-a[key] for key in set(a)&set(b) if b[key] >= a[key]}
     result['svc_newly_printed_end_counts'] = {key: b[key] for key in set(b)-set(a)}
@@ -189,7 +200,7 @@ class TallyCollector:
                     if len(selected) < 2:
                         raise ValueError('fewer than two interior publications')
                     delta = interval(selected[0], selected[-1])
-                    global_fields = {key: delta.pop(key) for key in ('global_translator', 'global_monitor', 'invalidation_profile', 'invalidation_profile_enabled')}
+                    global_fields = {key: delta.pop(key) for key in ('global_translator', 'global_monitor', 'invalidation_profile', 'invalidation_profile_enabled','global_membership_state','global_membership_counters','global_membership_cumulative_end')}
                     if cpu == 0:
                         result.update(global_fields)
                     result['per_cpu'][str(cpu)] = delta
@@ -197,6 +208,25 @@ class TallyCollector:
                     result['errors'].append(dict(cpu=cpu, error=str(error)))
         result['global_translator_source_cpu'] = 0
         result['global_monitor_source_cpu'] = 0
+        result['global_membership_source_cpu'] = 0
         result['timing_interpretation'] = ('Fallback wall-away time is not TCG CPU. Host-call elapsed time overlaps page-invalidation time and sampled invalidation substeps; never add them into total CPU. Each vCPU has its own asynchronous publication interval.')
         result['all_expected_vcpus_present'] = len(result['per_cpu']) == len(self.paths)
         return result
+
+
+def membership_qualification(phase, expected):
+    """State is not a delta. Require observed candidate mode and conservative coverage, preserving fallback evidence."""
+    state=phase.get('global_membership_state',{})
+    start,end=state.get('start',{}),state.get('end',{})
+    counters=phase.get('global_membership_cumulative_end',{})
+    issue=None
+    if any(type(row.get('enabled')) is not int or row['enabled'] != expected for row in (start,end)):
+        issue='membershipModeMissingOrMismatch'
+    elif expected and any(row.get('reliable') != 1 or type(row.get('bytes')) is not int or row['bytes'] <= 0 for row in (start,end)):
+        issue='membershipTrackingNotReliable'
+    elif expected and any(counters.get(key) != 0 for key in ('tracking_failures','full_scans')):
+        issue='membershipFallbackObserved'
+    elif not expected and any(row.get('bytes') != 0 or row.get('reliable') != 0 for row in (start,end)):
+        issue='disabledMembershipHasState'
+    return dict(qualified=issue is None,expected_enabled=expected,issue=issue,
+                note='CPU0 global state; flags/bytes are not deltas. Tracking failure/full scan keeps evidence but disqualifies the optimized-path measurement.')

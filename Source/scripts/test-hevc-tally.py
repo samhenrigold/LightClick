@@ -16,7 +16,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from hevc_tally import TallyCollector, differences, interval, parse_tally
+from hevc_tally import TallyCollector, differences, interval, parse_tally, membership_qualification
 
 
 def tally(t=10, count=100):
@@ -43,6 +43,16 @@ invalidation_profiled_kills {count}
 invalidation_sampled_kills 1
 invalidation_hash_view_visits 5
 invalidation_map_unlink_ns 120
+== invalidation membership prototype (global translator; flags/state are not interval deltas) ==
+invalidation_membership_enabled 1
+invalidation_membership_reliable 1
+invalidation_membership_bytes 16777216
+invalidation_membership_inserts {count}
+invalidation_membership_view_visits {count}
+invalidation_membership_stale_visits 0
+invalidation_membership_removals {count}
+invalidation_membership_tracking_failures 0
+invalidation_membership_full_scans 0
 == where the time goes: ==
  {count} 0.25 1.25 7
 monitor calls by SVC_ number in engine_abi.h, ranked:
@@ -64,6 +74,8 @@ class Checks(unittest.TestCase):
         self.assertEqual(p['fallbacks']['unsupported form'], {'count':100, 'tcg_wall_away_milliseconds':12.5})
         self.assertEqual(p['fallback_sites'][0]['first_rip'], '0x1234')
         self.assertEqual(p['svc'], {'64':100})
+        self.assertEqual(p['membership_state'],dict(enabled=1,reliable=1,bytes=16777216))
+        self.assertEqual(p['membership_counters']['inserts'],100)
         self.assertEqual(p['host_calls']['7'], {'count':100, 'total_seconds':.25})
         self.assertEqual(p['invalidation_profile']['invalidation_map_unlink_ns'], 120)
         with self.assertRaises(ValueError):
@@ -81,6 +93,10 @@ class Checks(unittest.TestCase):
         self.assertEqual(d['per_cpu']['shadow fills'],30)
         self.assertEqual(d['global_translator']['cold blocks'],30)
         self.assertEqual(d['invalidation_profile_enabled'],1)
+        self.assertEqual(d['global_membership_state']['start'],d['global_membership_state']['end'])
+        self.assertEqual(d['global_membership_state']['end']['bytes'],16777216)
+        self.assertEqual(d['global_membership_counters']['inserts'],30)
+        self.assertTrue(membership_qualification(d,1)['qualified'])
         self.assertEqual(d['per_cpu_gauges']['end']['deepest monitor stack, bytes'],864)
         a['parsed']['svc']={'64':100,'10':5}
         b['parsed']['svc']={'64':130,'20':999}
@@ -108,13 +124,17 @@ class Checks(unittest.TestCase):
                 c.poll() # Identical publication does not consume another snapshot.
             with patch('hevc_tally.time.monotonic', return_value=6):
                 prefix.write_text(tally(13,130).replace('monitor lock waited 1.25','monitor lock waited 2.25'))
-                Path(str(prefix)+'.cpu1').write_text(tally(12,130).replace('monitor lock waited 1.25','monitor lock waited 99.00'))
+                Path(str(prefix)+'.cpu1').write_text(tally(12,130).replace('monitor lock waited 1.25','monitor lock waited 99.00').replace('invalidation_membership_bytes 16777216','invalidation_membership_bytes 999'))
                 c.poll()
             phase = c.phase(0,8)
             self.assertTrue(phase['all_expected_vcpus_present'])
             self.assertEqual(phase['global_translator']['cold blocks'],30) # Not60!
             self.assertEqual(set(phase['per_cpu']),{'0','1'})
             self.assertEqual(phase['global_monitor_source_cpu'],0)
+            self.assertEqual(phase['global_membership_source_cpu'],0)
+            self.assertEqual(phase['global_membership_counters']['inserts'],30)
+            self.assertEqual(phase['global_membership_state']['end']['bytes'],16777216)
+            self.assertNotIn('global_membership_state',phase['per_cpu']['1'])
             self.assertEqual(phase['global_monitor']['monitor_lock_wait_seconds'],1)
             self.assertNotIn('global_monitor',phase['per_cpu']['0'])
             self.assertNotIn('monitor_lock_wait_seconds',phase['per_cpu']['0']['per_cpu'])
@@ -124,6 +144,25 @@ class Checks(unittest.TestCase):
             self.assertEqual((root/'saved/cpu0-000000.txt').read_text(),tally(10,100))
             self.assertFalse(c.phase(5,8)['all_expected_vcpus_present'])
             self.assertEqual(c.errors,[])
+
+    def test_membership_modes_and_fallback_evidence(self):
+        phase=dict(global_membership_state=dict(start=dict(enabled=1,reliable=1,bytes=16777216),
+                    end=dict(enabled=1,reliable=1,bytes=16777216)),
+                    global_membership_cumulative_end=dict(tracking_failures=0,full_scans=0))
+        self.assertTrue(membership_qualification(phase,1)['qualified'])
+        for key in ('tracking_failures','full_scans'):
+            bad=copy.deepcopy(phase);bad['global_membership_cumulative_end'][key]=1
+            self.assertEqual(membership_qualification(bad,1)['issue'],'membershipFallbackObserved')
+        for endpoint in ('start','end'):
+            bad=copy.deepcopy(phase);bad['global_membership_state'][endpoint]['reliable']=0
+            self.assertEqual(membership_qualification(bad,1)['issue'],'membershipTrackingNotReliable')
+        self.assertEqual(membership_qualification({},1)['issue'],'membershipModeMissingOrMismatch')
+        self.assertFalse(membership_qualification(phase,0)['qualified'])
+        control=dict(global_membership_state=dict(start=dict(enabled=0,reliable=0,bytes=0),
+                     end=dict(enabled=0,reliable=0,bytes=0)))
+        self.assertTrue(membership_qualification(control,0)['qualified'])
+        control['global_membership_state']['end']['enabled']=1
+        self.assertFalse(membership_qualification(control,0)['qualified'])
 
     def test_resident_driver_uses_one_real_probe_and_preserves_phase_costs(self):
         path = Path(__file__).parents[1]/'probes/hevc-tally-driver.py'
@@ -155,7 +194,9 @@ class Checks(unittest.TestCase):
                 def start(self): pass
                 def stop(self): calls.append('stop')
                 def phase(self,start,end):
-                    return dict(start=start,end=end,all_expected_vcpus_present=True,invalidation_profile_enabled=1)
+                    return dict(start=start,end=end,all_expected_vcpus_present=True,invalidation_profile_enabled=1,
+                        global_membership_state=dict(start=dict(enabled=1,reliable=1,bytes=16777216),end=dict(enabled=1,reliable=1,bytes=16777216)),
+                        global_membership_cumulative_end=dict(tracking_failures=0,full_scans=0))
             def request(command,timeout):
                 calls.append(command)
                 if command['Executable']=='/bin/test': return {'ExitCode':0}
@@ -164,7 +205,7 @@ class Checks(unittest.TestCase):
                 self.assertNotIn('--raw',command['Arguments'])
                 clock[0]+=32
                 return dict(ExitCode=0,Stdout=json.dumps(report))
-            ns.update(arguments=[str(root/'results'),str(probe),str(root/'tally'),'1','30','12',str(prior),'1'],
+            ns.update(arguments=[str(root/'results'),str(probe),str(root/'tally'),'1','30','12',str(prior),'1','1'],
                       request=request,stage=lambda path:'/staged/probe',TallyCollector=FakeCollector,
                       time=types.SimpleNamespace(monotonic=lambda:clock[0],sleep=lambda seconds:clock.__setitem__(0,clock[0]+seconds)))
             with contextlib.redirect_stdout(io.StringIO()): ns['experiment']()
@@ -176,6 +217,14 @@ class Checks(unittest.TestCase):
             self.assertEqual(set(saved['phases']),{'idle_before','resident_probe','idle_after'})
             self.assertEqual(calls[-1],'stop')
             self.assertEqual(len([call for call in calls if isinstance(call,dict)]),2)
+            # A candidate whose observed mode differs keeps raw results but cannot qualify.
+            ns['arguments'][0]=str(root/'mismatch');ns['arguments'][8]='0'
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError,'incomplete periodic tally coverage'):
+                ns['experiment']()
+            mismatch=json.loads((root/'mismatch/result.json').read_text())
+            self.assertEqual(mismatch['result'],'INCONCLUSIVE')
+            self.assertEqual(mismatch['membership_qualification']['resident_probe']['issue'],'membershipModeMissingOrMismatch')
+            ns['arguments'][8]='1'
             # An ambiguous timed-out request must never be resent, nor followed by another guest command.
             calls.clear()
             ns['arguments'][0]=str(root/'failed')
@@ -207,19 +256,27 @@ class Checks(unittest.TestCase):
                 def launch(command,**kwargs):
                     launched.append((command,kwargs))
                     return types.SimpleNamespace(pid=123,returncode=0,poll=lambda:0)
-                argv=[str(path),str(app),str(machine),str(probe),str(reference),'--results',str(root/('allowed' if allow else 'default')),*extra,'--profile-invalidations']
-                environment={'LC_SEAMLESS_TEST':'1','VIM_SEAMLESS_PVG_SERVICE':'old','LC_HVDBT_PROFILE_INVALIDATION':'old','KEEP_ME':'yes'}
+                argv=[str(path),str(app),str(machine),str(probe),str(reference),'--results',str(root/('allowed' if allow else 'default')),*extra,'--profile-invalidations',*(['--membership-invalidation'] if allow else [])]
+                environment={'LC_SEAMLESS_TEST':'1','VIM_SEAMLESS_PVG_SERVICE':'old','LC_HVDBT_PROFILE_INVALIDATION':'old','LC_HVDBT_INVALIDATION_MEMBERSHIP':'old','KEEP_ME':'yes'}
                 with patch.object(sys,'argv',argv), patch('subprocess.Popen',side_effect=launch), \
                         patch.dict(os.environ,environment), patch('signal.signal'), contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(ns['main'](),0)
                 self.assertEqual(len(launched),1)
                 command,kwargs=launched[0]
                 self.assertEqual('--allow-running-vms' in command,allow)
+                self.assertEqual(command.count('--startup-timeline'),1)
+                invocation=json.loads((root/('allowed' if allow else 'default')/'invocation.json').read_text())
+                self.assertTrue(invocation['startup_timeline'].endswith('.startup.jsonl'))
                 self.assertEqual(command[command.index('--boot-wait')+1],str(wait))
                 self.assertIn('LC_HVDBT_PROFILE_INVALIDATION=1',command)
+                self.assertIn('LC_HVDBT_INVALIDATION_MEMBERSHIP='+str(int(allow)),command)
+                driver_args=[command[index+1] for index,value in enumerate(command) if value=='--driver-arg']
+                self.assertEqual(driver_args[-1],str(int(allow)))
+                self.assertEqual(len(driver_args),9)
                 self.assertIn('guest-bench',command[1]) # Exclusive CloneLease owner is retained.
                 self.assertFalse(any(key.startswith(('LC_SEAMLESS_','VIM_SEAMLESS_')) for key in kwargs['env']))
                 self.assertNotIn('LC_HVDBT_PROFILE_INVALIDATION',kwargs['env'])
+                self.assertNotIn('LC_HVDBT_INVALIDATION_MEMBERSHIP',kwargs['env'])
                 self.assertEqual(kwargs['env']['KEEP_ME'],'yes')
 
 
