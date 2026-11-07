@@ -24,6 +24,8 @@ def main():
     parser.add_argument('machine', type=Path)
     parser.add_argument('--deadline', type=int, default=1200, help='clone phase wall-clock seconds, at most 1800')
     parser.add_argument('--results', type=Path, help='new directory; default Build/image-decode/run-TIME-PID')
+    parser.add_argument('--output-color-space', choices=('srgb', 'source'), default='srgb')
+    parser.add_argument('--trials', type=int, choices=(1, 3), default=3)
     args = parser.parse_args()
     if not 60 <= args.deadline <= 1800:
         parser.error('--deadline must be between 60 and 1800 seconds')
@@ -84,7 +86,8 @@ def main():
         run([sys.executable, source/'scripts/test-image-decode.py', host], 30)
         run([sys.executable, source/'scripts/guest-bench', app, machine, tag, '--fresh-identifier',
              '--env', 'LC_HVDBT=1', '--driver', source/'probes/image-decode-driver.py',
-             '--driver-arg', results, '--driver-arg', host, '--driver-arg', guest], args.deadline)
+             '--driver-arg', results, '--driver-arg', host, '--driver-arg', guest,
+             '--driver-arg', args.output_color_space, '--driver-arg', str(args.trials)], args.deadline)
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
         print(f'FAIL image-decode experiment: {error}; evidence {results}', flush=True)
         return 128 + interrupted[0] if interrupted[0] else 1

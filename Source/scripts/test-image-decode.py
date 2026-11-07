@@ -70,6 +70,55 @@ def main():
             raise AssertionError('negative phase duration')
         print('PASS full RGBA bytes: row order, channel order, premultiplication and hashes')
 
+        source_raw = work/'source-space.rgba'
+        source_report = json.loads(run('--output-color-space', 'source', '--raw', str(source_raw)).stdout)
+        if source_raw.read_bytes() != expected:
+            raise AssertionError('source-space sRGB fixture did not preserve independently specified pixels')
+        if source_report['requested_output_color_space'] != 'source':
+            raise AssertionError('source-space mode was not reported')
+        for prefix in ('source', 'output'):
+            if source_report[prefix + '_color_space'] != 'kCGColorSpaceSRGB':
+                raise AssertionError('source-space fixture lost its explicit sRGB color space')
+            if source_report[prefix + '_icc_bytes'] <= 0 or len(source_report[prefix + '_icc_sha256']) != 64:
+                raise AssertionError('source-space ICC profile was not fingerprinted')
+        if (source_report['source_icc_bytes'], source_report['source_icc_sha256']) != (
+                source_report['output_icc_bytes'], source_report['output_icc_sha256']):
+            raise AssertionError('source-space mode changed the source profile')
+        if source_report['output_icc_sha256'] != report['output_icc_sha256']:
+            raise AssertionError('default sRGB and explicit source-sRGB output profiles differ')
+        run('--output-color-space', 'unknown', expected_exit=64)
+        run('--output-color-space', expected_exit=64)
+        run('--output-color-space', 'source', '--output-color-space', 'srgb', expected_exit=64)
+        # Independently encoded grayscale input must be refused in source mode, rather than silently converted to RGB.
+        gray = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 0, 0, 0, 0))
+                + chunk(b'IDAT', zlib.compress(b'\x00\x80')) + chunk(b'IEND', b''))
+        gray_source = work/'gray.png'
+        gray_source.write_bytes(gray)
+        result = subprocess.run([str(probe), '--full-resolution', str(gray_source), '--output-color-space', 'source'],
+                                capture_output=True, text=True, timeout=10)
+        if result.returncode != 7 or 'three-component RGB' not in result.stderr:
+            raise AssertionError(f'non-RGB source was not explicitly refused: {result.stderr}')
+        # A linear-light RGB PNG distinguishes preserving the source space from always drawing into sRGB.
+        # Its encoded RGB samples are specified independently; no ImageIO-generated fixture or checksum is used.
+        linear = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+                  + chunk(b'gAMA', struct.pack('>I', 100000))
+                  + chunk(b'cHRM', struct.pack('>8I', 31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000))
+                  + chunk(b'IDAT', zlib.compress(bytes([0, 128, 64, 32]))) + chunk(b'IEND', b''))
+        linear_source = work/'linear.png'
+        linear_source.write_bytes(linear)
+        linear_outputs = []
+        for mode in ('source', 'srgb'):
+            output = work/f'linear-{mode}.rgba'
+            result = subprocess.run([str(probe), '--full-resolution', str(linear_source),
+                                     '--output-color-space', mode, '--raw', str(output)],
+                                    capture_output=True, text=True, timeout=10)
+            if result.returncode:
+                raise AssertionError(f'linear RGB {mode} failed: {result.stderr}')
+            linear_outputs.append(output.read_bytes())
+        if linear_outputs[0] != bytes([128, 64, 32, 255]) or linear_outputs[1] == linear_outputs[0]:
+            raise AssertionError(f'source-space linear samples were converted or sRGB was not: {linear_outputs}')
+        print('PASS source-space exact pixels, ICC fingerprints, invalid modes and non-RGB refusal')
+
         existing = work/'existing.rgba'
         existing.write_bytes(b'keep this existing artifact')
         run('--raw', str(existing), expected_exit=8)

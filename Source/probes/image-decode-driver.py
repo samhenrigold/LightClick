@@ -162,6 +162,20 @@ def parse_report(text):
     for key in ('pixel_sha256', 'input_sha256'):
         if not isinstance(report.get(key), str) or not re.fullmatch('[0-9a-f]{64}', report[key]):
             raise RuntimeError(f'invalid {key}')
+    for prefix in ('source', 'output'):
+        count, digest = report.get(prefix + '_icc_bytes'), report.get(prefix + '_icc_sha256')
+        if (type(count) is not int or count < 0 or count > CAP or
+                (count == 0 and digest is not None) or
+                (count > 0 and (not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest)))):
+            raise RuntimeError(f'invalid {prefix} ICC profile report')
+    mode = report.get('requested_output_color_space')
+    if mode not in ('srgb', 'source'):
+        raise RuntimeError('invalid requested output color space')
+    if mode == 'srgb' and report.get('output_color_space') != 'kCGColorSpaceSRGB':
+        raise RuntimeError('sRGB output has unexpected color space')
+    if mode == 'source' and any(report.get('source_' + key) != report.get('output_' + key)
+                                for key in ('color_space', 'icc_bytes', 'icc_sha256')):
+        raise RuntimeError('source output did not preserve the source color space/profile')
     return report
 
 
@@ -218,9 +232,13 @@ def await_fixture(results):
 
 
 def experiment():
-    if len(arguments) != 3:
-        raise RuntimeError('driver requires results directory and host/guest probe paths')
-    results, host, guest_binary = map(Path, arguments)
+    if len(arguments) not in (3, 5):
+        raise RuntimeError('driver requires results directory, host/guest probe paths and optional color space/trial count')
+    output_space, trial_count = arguments[3:] if len(arguments) == 5 else ('srgb', '3')
+    if output_space not in ('srgb', 'source') or trial_count not in ('1', '3'):
+        raise RuntimeError('driver color space must be srgb/source and trials must be 1/3')
+    trial_count = int(trial_count)
+    results, host, guest_binary = map(Path, arguments[:3])
     trials = {'guest': [], 'host': []}
     try:
         await_fixture(results)
@@ -229,13 +247,16 @@ def experiment():
         raw = directory + '/first-image.rgba'
         encoded = export('encoded', directory, results/'Mojave.heic')
         guest_raw, host_raw = results/'guest-first.rgba', results/'host-first.rgba'
-        for trial in range(3):
+        for trial in range(trial_count):
             options = ['--full-resolution', OS_IMAGE, '--index', '0', '--timeout', '120',
-                       '--max-output-bytes', str(OUTPUT_CAP)] + (['--raw', raw] if trial == 0 else [])
+                       '--max-output-bytes', str(OUTPUT_CAP), '--output-color-space', output_space
+                       ] + (['--raw', raw] if trial == 0 else [])
             response = request({'Executable': guest, 'Arguments': options}, 130)
             if response.get('ExitCode') != 0:
                 raise RuntimeError(f'guest trial {trial + 1} failed: {response}')
             report = parse_report(response.get('Stdout') or '')
+            if report['requested_output_color_space'] != output_space:
+                raise RuntimeError('guest did not honor requested output color space')
             trials['guest'].append(report)
             (results/f'guest-{trial + 1}.json').write_text(json.dumps(report, indent=2)+'\n')
             if trial == 0:
@@ -249,20 +270,29 @@ def experiment():
             if response.returncode:
                 raise RuntimeError(f'host trial {trial + 1} failed: {response.stderr}')
             report = parse_report(response.stdout)
+            if report['requested_output_color_space'] != output_space:
+                raise RuntimeError('host did not honor requested output color space')
             trials['host'].append(report)
             (results/f'host-{trial + 1}.json').write_text(json.dumps(report, indent=2)+'\n')
-            print(f'fresh-process trial pair {trial + 1}/3 recorded', flush=True)
+            print(f'fresh-process trial pair {trial + 1}/{trial_count} recorded', flush=True)
         reference = trials['guest'][0]
         keys = ('input_sha256', 'input_bytes', 'item_index', 'item_count', 'width', 'height', 'row_bytes',
                 'output_bytes', 'orientation', 'orientation_applied', 'pixel_format', 'output_color_space',
                 'row_order', 'rendering_intent', 'pixel_sha256')
+        keys += ('source_color_space', 'source_icc_bytes', 'source_icc_sha256',
+                 'output_icc_bytes', 'output_icc_sha256', 'requested_output_color_space')
+        differences = []
         for side, reports in trials.items():
             for i, report in enumerate(reports, 1):
                 if report['input_sha256'] != encoded['sha256'] or report['input_bytes'] != encoded['size']:
                     raise RuntimeError(f'{side} trial {i} did not decode the exported encoded bytes')
                 for key in keys:
                     if report.get(key) != reference.get(key):
-                        raise RuntimeError(f'{side} trial {i} differs at {key}; unexplained mismatch')
+                        differences.append({'side': side, 'trial': i, 'field': key,
+                                            'guest_reference': reference.get(key), 'value': report.get(key)})
+        (results/'comparison-differences.json').write_text(json.dumps(differences, indent=2)+'\n')
+        if differences:
+            raise RuntimeError(f'unexplained comparison mismatches: {differences!r}')
         compare_bytes(guest_raw, host_raw)
         (results/'result.json').write_text(json.dumps({'result': 'PASS', 'exact_pixels': True, 'trials': trials,
             'note': 'Fresh processes; filesystem caches uncontrolled. Transfer outside decode timing. No application acceleration claim.'}, indent=2)+'\n')

@@ -30,7 +30,7 @@ def load_driver():
                  'PREFLIGHT_SECONDS', 'PREFLIGHT_TRANSIENT_ERRORS'}
     nodes = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
              or isinstance(node, ast.FunctionDef) and node.name in ('export', 'parse_report', 'staged_directory',
-                                                                   'await_fixture', 'experiment')
+                                                                   'await_fixture', 'compare_bytes', 'experiment')
              or isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in constants
                                                     for target in node.targets)]
     namespace = {}
@@ -125,13 +125,20 @@ def transport_checks(namespace, work):
 def report_checks(namespace):
     parse = namespace['parse_report']
     valid = {'format_version': 1, 'mode': 'full-resolution', 'width': 2, 'height': 2,
-             'row_bytes': 8, 'output_bytes': 16, 'pixel_sha256': 'a' * 64, 'input_sha256': 'b' * 64}
+             'row_bytes': 8, 'output_bytes': 16, 'pixel_sha256': 'a' * 64, 'input_sha256': 'b' * 64,
+             'requested_output_color_space': 'srgb', 'output_color_space': 'kCGColorSpaceSRGB',
+             'source_icc_bytes': 0, 'source_icc_sha256': None,
+             'output_icc_bytes': 100, 'output_icc_sha256': 'c' * 64}
     if parse(json.dumps(valid)) != valid:
         raise AssertionError('valid report changed')
     invalid = [dict(valid, format_version=2), dict(valid, mode='thumbnail'), dict(valid, width=0),
                dict(valid, width=True), dict(valid, height=-1), dict(valid, row_bytes=9),
                dict(valid, output_bytes=15), dict(valid, pixel_sha256='not-a-hash'),
                dict(valid, input_sha256='A' * 64),
+               dict(valid, output_icc_bytes=-1), dict(valid, source_icc_sha256='c' * 64),
+               dict(valid, output_icc_sha256=None), dict(valid, requested_output_color_space='invalid'),
+               dict(valid, output_color_space='kCGColorSpaceDisplayP3'),
+               dict(valid, requested_output_color_space='source', source_color_space='kCGColorSpaceSRGB'),
                dict(valid, width=1, height=namespace['OUTPUT_CAP'], row_bytes=4,
                     output_bytes=namespace['OUTPUT_CAP'] * 4), [], {'format_version': 1}]
     for report in invalid:
@@ -289,6 +296,80 @@ def preflight_checks(namespace, work):
     print(f'PASS actual experiment preflight: /bin/test, bounded fake-clock startup retries, aborts, {len(cases)} cases')
 
 
+
+def comparison_checks(namespace, work):
+    payload, encoded = bytes(range(16)), b'independent encoded fixture'
+    pixel_hash, input_hash = hashlib.sha256(payload).hexdigest(), hashlib.sha256(encoded).hexdigest()
+    for name, mode, count, mismatch in (('source-match', 'source', 1, False),
+                                        ('source-mismatch', 'source', 1, True),
+                                        ('default-match', 'srgb', 3, False)):
+        directory = work/name
+        directory.mkdir()
+        calls = []
+        space = 'kCGColorSpaceDisplayP3' if mode == 'source' else 'kCGColorSpaceSRGB'
+        reference = {'format_version': 1, 'mode': 'full-resolution', 'width': 2, 'height': 2,
+                     'row_bytes': 8, 'output_bytes': 16, 'input_bytes': len(encoded),
+                     'input_sha256': input_hash, 'pixel_sha256': pixel_hash,
+                     'requested_output_color_space': mode, 'source_color_space': space,
+                     'output_color_space': space, 'source_icc_bytes': 100, 'source_icc_sha256': 'a' * 64,
+                     'output_icc_bytes': 100, 'output_icc_sha256': 'a' * 64,
+                     'orientation': None, 'orientation_applied': False}
+
+        def check_options(options, side):
+            assert options[options.index('--output-color-space') + 1] == mode
+            calls.append(side)
+
+        def request(command, timeout):
+            if command['Executable'] == '/bin/test':
+                assert not calls
+                return {'ExitCode': 0}
+            check_options(command['Arguments'], 'guest')
+            return {'ExitCode': 0, 'Stdout': json.dumps(reference)}
+
+        def export(selector, staging, target):
+            value = encoded if selector == 'encoded' else payload
+            target.write_bytes(value)
+            return {'size': len(value), 'sha256': hashlib.sha256(value).hexdigest()}
+
+        def host_run(command, **kwargs):
+            check_options(command, 'host')
+            if '--raw' in command:
+                Path(command[command.index('--raw') + 1]).write_bytes(payload)
+            report = dict(reference)
+            if mismatch:
+                report.update(orientation=1, source_icc_sha256='b' * 64, output_icc_sha256='b' * 64)
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps(report))
+
+        previous = dict(namespace)
+        namespace.update(arguments=[str(directory), '/unused/host', '/unused/guest'] +
+                         ([mode, str(count)] if name != 'default-match' else []),
+                         request=request, export=export,
+                         stage=lambda _: '/private/var/tmp/VirtualIntelMac.Abc123/Transfer.bin',
+                         subprocess=types.SimpleNamespace(run=host_run))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    namespace['experiment']()
+                except SystemExit:
+                    assert mismatch, 'matching experiment unexpectedly failed'
+                else:
+                    assert not mismatch, 'metadata/profile mismatch unexpectedly passed'
+        finally:
+            namespace.update(previous)
+        result = json.loads((directory/'result.json').read_text())
+        assert result['result'] == ('FAIL' if mismatch else 'PASS')
+        assert calls == ['guest', 'host'] * count
+        assert (directory/'guest-first.rgba').read_bytes() == payload
+        assert (directory/'host-first.rgba').read_bytes() == payload
+        assert len(result['trials']['guest']) == len(result['trials']['host']) == count
+        differences = json.loads((directory/'comparison-differences.json').read_text())
+        if mismatch:
+            assert {entry['field'] for entry in differences} == {'orientation', 'source_icc_sha256', 'output_icc_sha256'}
+        else:
+            assert differences == []
+    print('PASS source-space one-trial forwarding, both raw artifacts before metadata/ICC failure, default three trials')
+
+
 def main():
     signal.alarm(30)
     namespace = load_driver()
@@ -296,6 +377,7 @@ def main():
         work = Path(temporary)
         transport_checks(namespace, work)
         preflight_checks(namespace, work)
+        comparison_checks(namespace, work)
     report_checks(namespace)
     path_checks(namespace)
     print('PASS embedded sender syntax; Python 2 runtime compatibility remains a guest check')

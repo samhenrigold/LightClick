@@ -13,7 +13,7 @@
 
 // FILE keeps the original 256x256 diagnostic. The opt-in experiment emits one JSON record on stdout:
 //   image-decode --full-resolution FILE [--index N] [--raw NEW_FILE] [--timeout SECONDS]
-//                [--max-output-bytes N]
+//                [--max-output-bytes N] [--output-color-space srgb|source]
 // Compile the same source for an arm64 host and an x86_64/macOS 10.14 guest. No AppKit or display is used.
 // Timings are individual phases, not a claim about Preview or native decoder hardware use.
 enum { INPUT_LIMIT = 512 * 1024 * 1024, OUTPUT_LIMIT = 512 * 1024 * 1024, DEFAULT_OUTPUT_LIMIT = 256 * 1024 * 1024 };
@@ -48,6 +48,23 @@ static int number(const char *text, uint64_t *out) {
     return 1;
 }
 
+static NSDictionary *profile(CGColorSpaceRef space) {
+    CFDataRef data = space ? CGColorSpaceCopyICCData(space) : NULL;
+    CFIndex length = data ? CFDataGetLength(data) : 0;
+    // An empty profile is absent. Never truncate CFIndex into CommonCrypto's CC_LONG.
+    if (length < 0 || length > INPUT_LIMIT) {
+        if (data)
+            CFRelease(data);
+        return nil;
+    }
+    NSDictionary *result = @{@"bytes" : @(length),
+                             @"sha256" : length > 0
+                                 ? (id)sha256(CFDataGetBytePtr(data), (size_t)length) : NSNull.null};
+    if (data)
+        CFRelease(data);
+    return result;
+}
+
 static int write_raw(const char *path, const void *bytes, size_t count) {
     // A measurement never replaces an existing artifact or follows an output symlink.
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
@@ -74,12 +91,19 @@ static int write_raw(const char *path, const void *bytes, size_t count) {
 
 static int full_resolution(int argc, char **argv) {
     const char *path = NULL, *raw = NULL;
+    const char *output_space = "srgb";
+    BOOL space_set = NO;
     uint64_t item = 0, timeout = 30, max_output = DEFAULT_OUTPUT_LIMIT;
     for (int i = 2; i < argc; i++) {
         const char *argument = argv[i];
         if (!strcmp(argument, "--raw") && i + 1 < argc && !raw)
             raw = argv[++i];
-        else if ((!strcmp(argument, "--index") || !strcmp(argument, "--timeout") ||
+        else if (!strcmp(argument, "--output-color-space") && i + 1 < argc && !space_set) {
+            output_space = argv[++i];
+            if (strcmp(output_space, "srgb") && strcmp(output_space, "source"))
+                return 64;
+            space_set = YES;
+        } else if ((!strcmp(argument, "--index") || !strcmp(argument, "--timeout") ||
                   !strcmp(argument, "--max-output-bytes")) && i + 1 < argc) {
             uint64_t value;
             if (!number(argv[++i], &value))
@@ -129,6 +153,7 @@ static int full_resolution(int argc, char **argv) {
     CGContextRef context = NULL;
     CFDictionaryRef properties = NULL;
     CFStringRef source_space_name = NULL;
+    CFStringRef output_space_name = NULL;
     unsigned char *pixels = NULL;
     size_t count = CGImageSourceGetCount(source), width = 0, height = 0, row = 0, length = 0;
     if (item >= count) {
@@ -169,7 +194,17 @@ static int full_resolution(int argc, char **argv) {
     length = row * height;
     phase = seconds();
     pixels = calloc(1, length);
-    space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    if (!strcmp(output_space, "source")) {
+        CGColorSpaceRef original = CGImageGetColorSpace(image);
+        if (!original || CGColorSpaceGetModel(original) != kCGColorSpaceModelRGB ||
+            CGColorSpaceGetNumberOfComponents(original) != 3) {
+            fputs("FAIL source output requires a three-component RGB color space\n", stderr);
+            status = 7;
+            goto done;
+        }
+        space = CGColorSpaceRetain(original);
+    } else
+        space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     if (pixels && space)
         context = CGBitmapContextCreate(pixels, width, height, 8, row, space,
                                        kCGBitmapByteOrder32Big | kCGImageAlphaPremultipliedLast);
@@ -200,6 +235,13 @@ static int full_resolution(int argc, char **argv) {
     CGColorSpaceRef source_space = CGImageGetColorSpace(image);
     if (source_space)
         source_space_name = CGColorSpaceCopyName(source_space);
+    output_space_name = CGColorSpaceCopyName(space);
+    NSDictionary *source_profile = profile(source_space), *output_profile = profile(space);
+    if (!source_profile || !output_profile) {
+        fputs("FAIL ICC profile exceeds the 512 MiB inspection budget\n", stderr);
+        status = 9;
+        goto done;
+    }
     id orientation = properties ? [(NSDictionary *)properties objectForKey:(id)kCGImagePropertyOrientation] : nil;
     NSDictionary *report = @{
         @"format_version" : @1,
@@ -214,7 +256,10 @@ static int full_resolution(int argc, char **argv) {
         @"source_bits_per_pixel" : @(CGImageGetBitsPerPixel(image)),
         @"source_alpha_info" : @(CGImageGetAlphaInfo(image)),
         @"source_color_space" : (id)source_space_name ?: (id)NSNull.null,
-        @"output_color_space" : @"kCGColorSpaceSRGB", @"pixel_format" : @"RGBA8-premultiplied",
+        @"source_icc_bytes" : source_profile[@"bytes"], @"source_icc_sha256" : source_profile[@"sha256"],
+        @"output_icc_bytes" : output_profile[@"bytes"], @"output_icc_sha256" : output_profile[@"sha256"],
+        @"requested_output_color_space" : @(output_space),
+        @"output_color_space" : (id)output_space_name ?: (id)NSNull.null, @"pixel_format" : @"RGBA8-premultiplied",
         @"row_order" : @"top-to-bottom", @"rendering_intent" : @"relative-colorimetric",
         @"pixel_sha256" : pixel_hash, @"raw_output" : raw ? @(raw) : (id)NSNull.null,
         @"timeout_seconds" : @(timeout), @"max_output_bytes" : @(max_output),
@@ -232,6 +277,8 @@ static int full_resolution(int argc, char **argv) {
         status = 9;
     }
 done:
+    if (output_space_name)
+        CFRelease(output_space_name);
     if (source_space_name)
         CFRelease(source_space_name);
     if (properties)
