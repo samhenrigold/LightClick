@@ -119,7 +119,6 @@ public final class SeamlessSession {
     private var activateWhenConnected = false
     private var fullScreenOffset: NSPoint?
     /// Where windows that have gone were dragged to, by title: a window comes back from full screen with a new number.
-    private var offsetsOfGoneWindows: [String: NSPoint] = [:]
     private var lastMenu: [GuestMenuItem]?
     private var nextDocument: UInt32 = 0
     private var documentPaths: [UInt32: String] = [:]
@@ -140,7 +139,8 @@ public final class SeamlessSession {
     public var distinctFrames: (() -> Int)?
     private var testStarted = false
     private let placeholderFrame: (surface: IOSurfaceRef, width: Int, height: Int)? = IOSurfaceCreate(
-        [kIOSurfaceWidth: 1, kIOSurfaceHeight: 1, kIOSurfaceBytesPerElement: 4, kIOSurfacePixelFormat: 0x4247_5241] as CFDictionary
+        [kIOSurfaceWidth: 1, kIOSurfaceHeight: 1, kIOSurfaceBytesPerElement: 4, kIOSurfacePixelFormat: 0x4247_5241]
+            as CFDictionary
     ).map { ($0, 1, 1) }
 
     public init(configuration: Configuration, guest: any SeamlessGuest, finished: @escaping () -> Void) {
@@ -426,6 +426,17 @@ public final class SeamlessSession {
         case .covers(let id, let rects):
             surfaces[id]?.guestCovers = rects
             if let surface = surfaces[id] { showCrops(of: [surface]) }
+        case .successor(let id, let next):
+            note("# window \(id) is now \(next)")
+            guard let surface = surfaces.removeValue(forKey: id) else { return }
+            // Told after a new window's first tick, whose proxy goes in favour of this one.
+            if let arrived = surfaces[next] {
+                surface.window = arrived.window
+                proxy?.send(SessionCommand.removeSurface(id: Int(next)))
+            }
+            surfaces[next] = surface
+            proxy?.send(SessionCommand.renameSurface(id: Int(id), to: Int(next)))
+            if surface.window.id == next { tellProxy(surface) }
         case .fullScreen(let id, let on):
             note("# window \(id) \(on ? "in" : "out of") full screen")
             setFullScreen(on, window: surfaces[id]?.window)
@@ -441,9 +452,6 @@ public final class SeamlessSession {
             if let surface = surfaces[id] { showCrops(of: [surface]) }
         case .gone(let id):
             note("# window \(id) gone")
-            if let surface = surfaces[id], let offset = surface.hostOffset, !surface.window.title.isEmpty {
-                offsetsOfGoneWindows[surface.window.title] = offset
-            }
             surfaces[id] = nil
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
             onWindowsChanged?()
@@ -488,7 +496,6 @@ public final class SeamlessSession {
         } else {
             guard let made = makeSurface(window) else { return }
             surface = made
-            surface.hostOffset = offsetsOfGoneWindows.removeValue(forKey: window.title)
             surfaces[window.id] = made
         }
         if let placing = surface.placing, window.x != surface.window.x || window.y != surface.window.y {
@@ -574,7 +581,8 @@ public final class SeamlessSession {
     private static var guestDisplayOrigin: NSPoint {
         guard let main = NSScreen.main else { return .zero }
         let primary = NSScreen.screens.first?.frame.height ?? main.frame.height
-        return NSPoint(x: main.frame.minX, y: primary - main.frame.maxY + max(0, main.frame.maxY - main.visibleFrame.maxY - 22))
+        return NSPoint(
+            x: main.frame.minX, y: primary - main.frame.maxY + max(0, main.frame.maxY - main.visibleFrame.maxY - 22))
     }
 
     /// So what depends on the guest's idea of its place comes out right: where a menu flips, zoom, and clipping at its display's edges.
@@ -583,7 +591,8 @@ public final class SeamlessSession {
         surface.placeTask?.cancel()
         surface.placeTask = Task { [weak self, weak surface] in
             try? await Task.sleep(for: .milliseconds(200))
-            guard !Task.isCancelled, let self, let surface, surface.window.level == 0, self.fullScreenOffset == nil else { return }
+            guard !Task.isCancelled, let self, let surface, surface.window.level == 0, self.fullScreenOffset == nil
+            else { return }
             let origin = Self.guestDisplayOrigin
             let window = surface.window
             let x = host.x - origin.x
@@ -605,7 +614,9 @@ public final class SeamlessSession {
             .min { $0.window.order < $1.window.order }
         let front = surfaces.values.filter { $0.hostOffset != nil && !$0.overlay && !$0.window.title.isEmpty }
             .min { $0.window.order < $1.window.order }
-        let offset = fullScreenOffset ?? surface.hostOffset ?? parent?.hostOffset ?? (surface.overlay ? front?.hostOffset : nil) ?? guestOffset ?? .zero
+        let offset =
+            fullScreenOffset ?? surface.hostOffset ?? parent?.hostOffset ?? (surface.overlay ? front?.hostOffset : nil)
+            ?? guestOffset ?? .zero
         let side = Double(window.margin)
         let width = Double(window.width) + 2 * side
         let height = Double(window.height) + 2 * side
@@ -631,7 +642,8 @@ public final class SeamlessSession {
     /// One frame of the guest's display, as windowed mode gets it. Everything shows the same surface, each through its own crop.
     public func frameArrived(surface: IOSurfaceRef?, bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) {
         arrived += 1
-        guard usesDisplayFrames, let current = surface ?? copies.copy(bytes, width: width, height: height, stride: stride)
+        guard usesDisplayFrames,
+            let current = surface ?? copies.copy(bytes, width: width, height: height, stride: stride)
         else { return }
         frame = (current, width, height)
         guard !surfaces.isEmpty else { return }
@@ -694,7 +706,8 @@ public final class SeamlessSession {
                 layer.addSublayer(sublayer)
                 surface.ownSurfaceLayer = sublayer
             }
-            let size = CGSize(width: Double(IOSurfaceGetWidth(own)) / scale, height: Double(IOSurfaceGetHeight(own)) / scale)
+            let size = CGSize(
+                width: Double(IOSurfaceGetWidth(own)) / scale, height: Double(IOSurfaceGetHeight(own)) / scale)
             let top = originY - (Double(window.y) - side)
             sublayer.frame = CGRect(
                 x: originX - (Double(window.x) - side), y: whole.height - top - size.height,
@@ -703,8 +716,10 @@ public final class SeamlessSession {
             sublayer.perform(NSSelectorFromString("setContentsChanged"))
             return
         }
-        surface.ownSurfaceLayer?.removeFromSuperlayer()
-        surface.ownSurfaceLayer = nil
+        if !(pixelSource?.hasSurfaces ?? false) {
+            surface.ownSurfaceLayer?.removeFromSuperlayer()
+            surface.ownSurfaceLayer = nil
+        }
         // Until its first one comes, this window has nothing of its own. What's in the frame could be anyone's.
         if pixelSource?.hasSurfaces ?? false {
             setPieces(of: surface, to: [], from: frame.surface, place: place, height: whole.height)
@@ -717,11 +732,16 @@ public final class SeamlessSession {
         layer.magnificationFilter = filter
         layer.minificationFilter = filter
         // In this window's terms. When the guest says, it's every app's; otherwise a session only knows its own app's windows.
-        let covers = (surface.guestCovers ?? surfaces.values.filter {
-            $0.window.order < window.order && $0.window.level == 0 && !$0.window.title.isEmpty && $0.window.group != window.group
-        }.map {
-            CGRect(x: Double($0.window.x), y: Double($0.window.y), width: Double($0.window.width), height: Double($0.window.height))
-        }).map { $0.offsetBy(dx: side - Double(window.x), dy: side - Double(window.y)) }
+        let covers =
+            (surface.guestCovers
+            ?? surfaces.values.filter {
+                $0.window.order < window.order && $0.window.level == 0 && !$0.window.title.isEmpty
+                    && $0.window.group != window.group
+            }.map {
+                CGRect(
+                    x: Double($0.window.x), y: Double($0.window.y), width: Double($0.window.width),
+                    height: Double($0.window.height))
+            }).map { $0.offsetBy(dx: side - Double(window.x), dy: side - Double(window.y)) }
         let visible = surface.overlay ? [whole] : SeamlessSession.uncovered(whole, by: covers)
         if visible == [whole] {
             layer.contents = frame.surface
@@ -784,7 +804,6 @@ public final class SeamlessSession {
             }
         }
     }
-
 
     // MARK: The proxy's side
 

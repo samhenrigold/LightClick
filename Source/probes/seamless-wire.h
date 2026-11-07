@@ -44,16 +44,22 @@ enum SWMType {
     SWM_DRAG_STATE = 55, // Guest to host: the guest's drag pasteboard, as JSON.
     SWM_DRAG_SEND = 56, // Host to guest: a document id, then a guest path: send that file back under that id.
     SWM_APP_STATE = 57, // Guest to host: JSON with the app's badge, and whether it wants attention.
-    SWM_CROP = 58, // Guest to host: show this window from the display's own frames. A frame for it is what shows where it's covered.
-    SWM_SET_PLACE = 68, // Host to guest: a window id, then x and y as int32, for the guest's own idea of where it is to match the host's.
+    SWM_CROP = 58, // Guest to host: show this window from the display's own frames. A frame for it is what shows where
+                   // it's covered.
+    SWM_SUCCESSOR = 69, // Guest to host: a window id, then the id it's now known by, as across full screen.
+    SWM_SET_PLACE = 68, // Host to guest: a window id, then x and y as int32, for the guest's own idea of where it is to
+                        // match the host's.
     SWM_RAISE = 67, // Host to guest: this window, in front of its app's others, before the press that follows.
     SWM_FULL_SCREEN = 65, // Guest to host: a window id, then 1 if it's in the guest's full screen, 0 if it's left.
     SWM_SET_FULL_SCREEN = 66, // Host to guest: a window id, then 1 for full screen, 0 to leave.
-    SWM_MATERIALS = 64, // Guest to host: a window id, a count, then material, active, x, y, width, height of each, from its top left.
+    SWM_MATERIALS = 64, // Guest to host: a window id, a count, then material, active, x, y, width, height of each, from
+                        // its top left.
     SWM_MINIMIZED = 62, // Guest to host: a window id, then 1 if it's gone into the guest's Dock, 0 if it's back.
     SWM_SET_MINIMIZED = 63, // Host to guest: a window id, then 1 to minimize it, 0 to bring it back.
-    SWM_COVERS = 61, // Guest to host: what's in front of a window on the display: its id, a count, then x, y, width, height of each.
-    SWM_SURFACE_ORIGIN = 60, // Guest to host: a window's own surface starts here on the display, in points: window id, x, y.
+    SWM_COVERS = 61, // Guest to host: what's in front of a window on the display: its id, a count, then x, y, width,
+                     // height of each.
+    SWM_SURFACE_ORIGIN =
+        60, // Guest to host: a window's own surface starts here on the display, in points: window id, x, y.
     SWM_OVERLAY = 59, // Guest to host: the same, with its frames' alpha as the shape: a menu, a popover, a sheet.
 };
 enum SWMPointerKind { SWM_MOVE = 0, SWM_DOWN = 1, SWM_UP = 2, SWM_DRAG = 3 };

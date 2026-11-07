@@ -445,9 +445,11 @@ static int run_menu_tool(const char *command, pid_t pid, CGWindowID id, const ch
     pid_t child = fork();
     if (!child) {
         if (x)
-            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text, "--x", x, "--y", y, (char *)NULL);
+            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text, "--x", x,
+                  "--y", y, (char *)NULL);
         else
-            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text, (char *)NULL);
+            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text,
+                  (char *)NULL);
         _exit(127);
     }
     int status = 127;
@@ -456,8 +458,9 @@ static int run_menu_tool(const char *command, pid_t pid, CGWindowID id, const ch
     return WIFEXITED(status) ? WEXITSTATUS(status) : 126;
 }
 
-// A press goes by position, and on the host this window can be somewhere nothing covers it, whatever does in the guest. So it's put in
-// front first, the way a click on it would, and the press waits to see that it has been: this runs in the order the host's events came.
+// A press goes by position, and on the host this window can be somewhere nothing covers it, whatever does in the guest.
+// So it's put in front first, the way a click on it would, and the press waits to see that it has been: this runs in
+// the order the host's events came.
 static void raise_for_press(struct Stream *s, CGWindowID id) {
     pid_t pid = session_app_pid ? session_app_pid : s->pid;
     if (s->test_pattern || !pid)
@@ -469,8 +472,8 @@ static void raise_for_press(struct Stream *s, CGWindowID id) {
     double started = now();
     while (!error && front_window_of(pid) != id && now() - started < 0.25)
         usleep(5000);
-    printf("# %.3f raised window %u for a press: error %d, front %u after %.0f ms\n", now(), id, error, front_window_of(pid),
-           (now() - started) * 1000);
+    printf("# %.3f raised window %u for a press: error %d, front %u after %.0f ms\n", now(), id, error,
+           front_window_of(pid), (now() - started) * 1000);
     fflush(stdout);
 }
 
@@ -1045,14 +1048,15 @@ static int drain_input(struct Stream *s) {
             swi_gesture(&context, g, point);
             s->gesture_events++;
         } else if (m.type == SWM_SET_MINIMIZED) {
-            printf("# %.1f host asks window %u minimized %u, app pid %d\n", now(), m.u.window_id, m.minimized, session_app_pid);
+            printf("# %.1f host asks window %u minimized %u, app pid %d\n", now(), m.u.window_id, m.minimized,
+                   session_app_pid);
             fflush(stdout);
             if (session_menu_tool && session_app_pid && !fork()) {
                 char pid[16], window[16];
                 snprintf(pid, sizeof(pid), "%d", session_app_pid);
                 snprintf(window, sizeof(window), "%u", m.u.window_id);
-                execl(session_menu_tool, session_menu_tool, "set-minimized", "--pid", pid, "--window", window, "--state",
-                      m.minimized ? "1" : "0", (char *)NULL);
+                execl(session_menu_tool, session_menu_tool, "set-minimized", "--pid", pid, "--window", window,
+                      "--state", m.minimized ? "1" : "0", (char *)NULL);
                 _exit(127);
             }
         } else if (m.type == SWM_SET_PLACE) {
@@ -1067,8 +1071,8 @@ static int drain_input(struct Stream *s) {
                 char pid[16], window[16];
                 snprintf(pid, sizeof(pid), "%d", session_app_pid);
                 snprintf(window, sizeof(window), "%u", m.u.window_id);
-                execl(session_menu_tool, session_menu_tool, "set-full-screen", "--pid", pid, "--window", window, "--state",
-                      m.minimized ? "1" : "0", (char *)NULL);
+                execl(session_menu_tool, session_menu_tool, "set-full-screen", "--pid", pid, "--window", window,
+                      "--state", m.minimized ? "1" : "0", (char *)NULL);
                 _exit(127);
             }
         } else if (m.type == SWM_FOCUS)
@@ -1517,6 +1521,8 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 
 struct TreeWindow {
     int full_screen, asked_full_screen;
+    double full_since, left_at; // When it went into full screen, unpaired, and when it left the screen for elsewhere.
+    CGWindowID became; // The window in full screen for this one, while it's away.
     int away; // Off the screen: see tree_window_is_away.
     uint32_t materials_hash;
     int minimized;
@@ -1911,7 +1917,8 @@ static int tree_send_covers(struct Stream *s, struct TreeWindow *w, const struct
     return send_all(s->fd, message, SWM_HEADER_SIZE + size);
 }
 
-// Whether a window of any app has the guest's whole display, as a full screen one has, which has every other window off the screen.
+// Whether a window of any app has the guest's whole display, as a full screen one has, which has every other window off
+// the screen.
 static int tree_display_is_taken(void) {
     CGRect display = CGDisplayBounds(CGMainDisplayID());
     for (int i = 0; i < tree_all_count; i++) {
@@ -1923,8 +1930,29 @@ static int tree_display_is_taken(void) {
     return 0;
 }
 
-// Is this window, which has taken the display's whole width and reached its bottom, in full screen? Only asked when that first holds, as
-// asking starts a program, and it's the only way of telling that from a zoomed window.
+// Is this window, which has taken the display's whole width and reached its bottom, in full screen? Only asked when
+// that first holds, as asking starts a program, and it's the only way of telling that from a zoomed window.
+static int tree_send_pair(struct Stream *s, uint16_t type, uint32_t first, uint32_t second) {
+    uint8_t message[SWM_HEADER_SIZE + 8];
+    swm_header(message, type, 8);
+    swm_w32(message + SWM_HEADER_SIZE, first);
+    swm_w32(message + SWM_HEADER_SIZE + 4, second);
+    return send_all(s->fd, message, sizeof(message));
+}
+
+// A window back from full screen is what its full screen window was, to the host, before the host hears anything else
+// of it.
+static int tree_send_return(struct Stream *s, struct TreeWindow *w, const struct TreeItem *item) {
+    if (!w->became)
+        return 0;
+    CGWindowID was = w->became;
+    w->became = 0;
+    w->away = 0;
+    printf("# %.3f window %u is back from %u\n", now(), item->id, was);
+    fflush(stdout);
+    return tree_send_pair(s, SWM_SUCCESSOR, was, item->id) || tree_send_pair(s, SWM_FULL_SCREEN, item->id, 0);
+}
+
 static int tree_send_full_screen(struct Stream *s, struct TreeWindow *w, const struct TreeItem *item) {
     CGRect display = CGDisplayBounds(CGMainDisplayID());
     int fills = item->layer == 0 && item->title[0] && item->bounds.size.width >= display.size.width &&
@@ -1947,17 +1975,19 @@ static int tree_send_full_screen(struct Stream *s, struct TreeWindow *w, const s
     if (full == w->full_screen)
         return 0;
     w->full_screen = full;
-    uint8_t message[SWM_HEADER_SIZE + 8];
-    swm_header(message, SWM_FULL_SCREEN, 8);
-    swm_w32(message + SWM_HEADER_SIZE, item->id);
-    swm_w32(message + SWM_HEADER_SIZE + 4, (uint32_t)full);
-    return send_all(s->fd, message, sizeof(message));
+    // Told once it's known which of the app's windows this is, after the look at what has left the screen.
+    if (full) {
+        w->full_since = now();
+        return 0;
+    }
+    return tree_send_pair(s, SWM_FULL_SCREEN, item->id, 0);
 }
 
 // Asks the app, as a minimized window isn't in WindowServer's list by its number, even when asked for by that number.
 // 2 for minimized, 1 for there but elsewhere, such as behind another app's full screen Space, and 0 for gone.
 static int tree_window_is_away(CGWindowID id, pid_t pid) {
-    // The app can't see one on another Space. shortcut: one closed meanwhile stays until it's asked about again, after the full screen.
+    // The app can't see one on another Space. shortcut: one closed meanwhile stays until it's asked about again, after
+    // the full screen.
     if (tree_display_is_taken())
         return 1;
     if (!session_menu_tool)
@@ -1993,8 +2023,12 @@ static int tree_send_materials(struct Stream *s, struct TreeWindow *w, const str
         const volatile struct SWSBackdrop *b = &tree_gpu_table->gpu_backdrops[i];
         if (b->id != item->id)
             continue;
-        int32_t row[6] = {(int32_t)b->material, (int32_t)b->active, (int32_t)(b->x - (float)item->bounds.origin.x),
-                          (int32_t)(b->y - (float)item->bounds.origin.y), (int32_t)b->width, (int32_t)b->height};
+        int32_t row[6] = {(int32_t)b->material,
+                          (int32_t)b->active,
+                          (int32_t)(b->x - (float)item->bounds.origin.x),
+                          (int32_t)(b->y - (float)item->bounds.origin.y),
+                          (int32_t)b->width,
+                          (int32_t)b->height};
         for (int k = 0; k < 6; k++) {
             swm_w32(message + SWM_HEADER_SIZE + 8 + n * 24 + (uint32_t)k * 4, (uint32_t)row[k]);
             hash = (hash ^ (uint32_t)row[k]) * 16777619u;
@@ -2122,8 +2156,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             // host's.
             // Mavericks' say where they start on the frame, not in the hook's rows, and always carry their shadow.
             int margin = own_surface && (darwin_major() == 13 || tree_surface_has_shadow(id)) ? item->margin
-                         : crop || tree_shared                                                  ? 0
-                                                                                                : item->margin;
+                         : crop || tree_shared                                                ? 0
+                                                                                              : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
                 sized = !CGSizeEqualToSize(bounds.size, w->bounds.size) || margin != w->margin;
             uint32_t seed = 0;
@@ -2163,6 +2197,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             s->alpha = (uint32_t)alpha;
             s->margin = margin;
             int kind = !no_pixels ? 0 : crop ? SWM_CROP : SWM_OVERLAY;
+            if (tree_shared && tree_send_return(s, w, item))
+                goto done;
             if (own_surface && tree_send_surface_origin(s, w, id))
                 goto done;
             if (own_surface && tree_send_materials(s, w, item))
@@ -2339,9 +2375,12 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
         for (int i = 0; i < TREE_MAX_WINDOWS; i++) {
             if (!windows[i].id || windows[i].seen || !tree_shared)
                 continue;
-            // Once it's away, only its coming back, or the app's going, changes that. Asked once, as asking starts a program.
+            // Once it's away, only its coming back, or the app's going, changes that. Asked once, as asking starts a
+            // program.
             if (!windows[i].away) {
                 windows[i].away = tree_window_is_away(windows[i].id, windows[i].pid);
+                if (windows[i].away == 1)
+                    windows[i].left_at = now();
                 if (windows[i].away == 2) {
                     windows[i].minimized = 1;
                     if (tree_send_minimized(s, windows[i].id, 1))
@@ -2350,6 +2389,32 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             }
             if (windows[i].away)
                 windows[i].seen = 1;
+        }
+        // A window newly in full screen is the same window to the host as the one of its app's that's just left the
+        // screen, so the host keeps its proxy, Space and place. Not by title: a document's can change, and two can
+        // share one. The window that left can do so a little after the new one's first seen, so this looks for a
+        // second. If none did, it's a window of its own.
+        for (int i = 0; tree_shared && i < TREE_MAX_WINDOWS; i++) {
+            if (!windows[i].id || !windows[i].full_since)
+                continue;
+            int left = -1;
+            for (int j = 0; j < TREE_MAX_WINDOWS; j++)
+                if (j != i && windows[j].id && windows[j].pid == windows[i].pid && windows[j].away == 1 &&
+                    !windows[j].became && now() - windows[j].left_at < 3 &&
+                    (left < 0 || windows[j].left_at > windows[left].left_at))
+                    left = j;
+            if (left < 0 && now() - windows[i].full_since < 1)
+                continue;
+            windows[i].full_since = 0;
+            if (left >= 0) {
+                windows[left].became = windows[i].id;
+                printf("# %.3f window %u is now %u\n", now(), windows[left].id, windows[i].id);
+                fflush(stdout);
+                if (tree_send_pair(s, SWM_SUCCESSOR, windows[left].id, windows[i].id))
+                    goto done;
+            }
+            if (tree_send_pair(s, SWM_FULL_SCREEN, windows[i].id, 1))
+                goto done;
         }
         for (int i = 0; i < TREE_MAX_WINDOWS; i++)
             if (windows[i].id && !windows[i].seen) {
@@ -2580,7 +2645,8 @@ static void *leap_describe(void *argument) {
         icon = NULL;
     if (icon)
         icon[strcspn(icon, "\r\n")] = 0;
-    // The whole line at once, with the list of apps also going down this connection. A failure ends the main loop's read.
+    // The whole line at once, with the list of apps also going down this connection. A failure ends the main loop's
+    // read.
     pthread_mutex_lock(&leap_send_lock);
     (void)(leap_send(job->fd, "described\t") || leap_send(job->fd, job->path) || leap_send(job->fd, "\t") ||
            leap_send(job->fd, json) || leap_send(job->fd, "\t") || leap_send(job->fd, icon ? icon : "") ||
@@ -3053,7 +3119,8 @@ int main(int argc, char **argv) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
         return leap(option(argc, argv, "--host", "10.0.2.2"), atoi(option(argc, argv, "--port", "7654")),
-                    option(argc, argv, "--menu-tool", ""), flag(argc, argv, "--own-surfaces"), flag(argc, argv, "--list-only"));
+                    option(argc, argv, "--menu-tool", ""), flag(argc, argv, "--own-surfaces"),
+                    flag(argc, argv, "--list-only"));
     }
     if (!strcmp(command, "tree") || !strcmp(command, "program-tree")) {
         // Only ever reads windows, so it's safe on the host; the program form opens an app, so it isn't.

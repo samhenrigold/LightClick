@@ -57,6 +57,7 @@ public enum SessionCommand: Codable, Hashable, Sendable {
     case setMenuBar([GuestMenuItem])
     case minimizeSurface(id: Int, minimized: Bool)
     case fullScreenSurface(id: Int, fullScreen: Bool)
+    case renameSurface(id: Int, to: Int)
     case setMaterials(id: Int, [GuestMaterial])
     case setDockMenu([GuestMenuItem])
     case setBadge(String?)

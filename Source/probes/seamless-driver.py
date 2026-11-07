@@ -441,6 +441,7 @@ def desktop(activation_only=False):
                                                     '/tmp/sg/ig open-file --session --path /tmp/seamless-second.txt --with TextEdit']}, 120)
     time.sleep(70)
     print('before the press', request({'Action': 'seamless-state'}, 60), flush=True)
+    print('the agent before the press:', request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60), flush=True)
     print(next(iter(rows()), ''), flush=True)
     pressed = time.time()
     request({'Action': 'seamless-toggle'}, 60)
@@ -455,6 +456,9 @@ def desktop(activation_only=False):
     for row in windows:
         print(row[:150], flush=True)
     check('windows appear for each app', len(windows) >= 2)
+    if not windows:
+        print('guest frame', capture(f'{tag}-no-windows.png'), flush=True)
+        print('the agent after no windows:', request({'Executable': '/bin/sh', 'Arguments': ['-c', '/bin/cat /var/tmp/seamless-ws-press; /bin/ls -l /var/tmp /usr/lib/seamless-ws-hook.dylib; /usr/bin/pgrep -x WindowServer; /bin/ps -axo pid,etime,command | /usr/bin/grep -E "/tmp/sg|agent" | /usr/bin/head -20; /usr/bin/tail -30 /var/log/system.log']}, 120), flush=True)
     for _ in range(3):
         print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
         time.sleep(1)
@@ -670,6 +674,8 @@ def desktop(activation_only=False):
         os.kill(safari, signal.SIGUSR2)
         time.sleep(8)
         print('after full screen', [row[-50:] for row in proxy_windows()], flush=True)
+        back_after_full_screen = any(f'id={window} ' in row and 'Seamless page' in row for row in rows())
+        check('the same proxy window is there after full screen', back_after_full_screen)
         said = (results/f'{tag}-clicks.txt.full-screen')
         print('proxy says', said.read_text() if said.exists() else 'nothing (or the display was asleep, and it really did)', flush=True)
         frame = capture(f'{tag}-desktop-frame.png')

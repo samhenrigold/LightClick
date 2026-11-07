@@ -82,7 +82,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         configuration.createsNewApplicationInstance = true
         // Sessions run on the engine, if this app's QEMU has it, and a test's private home has to reach the app.
         configuration.environment = ProcessInfo.processInfo.environment.filter {
-                        $0.key == "CFFIXED_USER_HOME" || $0.key.hasPrefix("LC_SEAMLESS_")
+            $0.key == "CFFIXED_USER_HOME" || $0.key.hasPrefix("LC_SEAMLESS_")
         }.merging(["LC_HVDBT": "1"]) { current, _ in current }
         NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, error in
             guard let error else { return }
@@ -153,6 +153,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
             dropViews.removeValue(forKey: id)
         case .fullScreenSurface(let id, let on):
             fullScreenSurface(id, on)
+        case .renameSurface(let id, let next):
+            renameSurface(id, next)
         case .setMaterials(let id, let rows):
             materials[id] = rows
             applyMaterials(id)
@@ -302,7 +304,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         }
         CATransaction.commit()
         window.level = NSWindow.Level(rawValue: level)
-                window.alphaValue = alpha
+        window.alphaValue = alpha
         // Cropped from the guest's display there's no guest shadow to show, so the window gets the host's own.
         window.hasShadow = margin == 0
         window.title = title
@@ -310,9 +312,11 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         setEventShape(of: window, margin: margin, size: frame.size)
         // A window with a title bar in its pixels moves on the host. What's in its layer doesn't care where it is.
         (window as? SurfaceWindow)?.margin = margin
-        (window as? SurfaceWindow)?.movedByUser = level == 0 && !title.isEmpty ? { [weak self] in
-            self?.surfaceMoved(id)
-        } : nil
+        (window as? SurfaceWindow)?.movedByUser =
+            level == 0 && !title.isEmpty
+            ? { [weak self] in
+                self?.surfaceMoved(id)
+            } : nil
         let isNewSurface = surfaces[id] == nil
         var updated = surface
         updated.order = order
@@ -331,7 +335,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
             first.window.makeKey()
             first.window.makeFirstResponder(first.input)
         }
-                // A measurement mustn't take the Mac from whoever is using it.
+        // A measurement mustn't take the Mac from whoever is using it.
         if isFirstSurface && ProcessInfo.processInfo.environment["LC_SEAMLESS_QUIET"] == nil { NSApp.activate() }
     }
 
@@ -341,13 +345,30 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         send(.surfaceMoved(windowID: id, x: frame.minX, y: primary - frame.maxY))
     }
 
+    /// The same NSWindow, Space and Dock entry: only the guest's number for it has changed.
+    private func renameSurface(_ id: Int, _ next: Int) {
+        guard let surface = surfaces.removeValue(forKey: id) else { return }
+        surfaces[next] = surface
+        SeamlessInputViewSetGuestWindow(surface.input, UInt32(clamping: next))
+        SeamlessInputViewSetRaisesWindow(surface.input, UInt32(clamping: next))
+        materials[next] = materials.removeValue(forKey: id)
+        materialViews[next] = materialViews.removeValue(forKey: id)
+        dropViews[next] = dropViews.removeValue(forKey: id)
+        if guestMinimizing.remove(id) != nil { guestMinimizing.insert(next) }
+        if fullScreenID == id { fullScreenID = next }
+        (surface.window as? SurfaceWindow)?.movedByUser = { [weak self] in self?.surfaceMoved(next) }
+    }
+
     private func fullScreenSurface(_ id: Int, _ on: Bool) {
-        guard let window = surfaces[id]?.window ?? (on ? nil : fullScreenID.flatMap { surfaces[$0]?.window }) else { return }
+        guard let window = surfaces[id]?.window ?? (on ? nil : fullScreenID.flatMap { surfaces[$0]?.window }) else {
+            return
+        }
         if on { fullScreenID = id }
         // A test's Space change would take the Mac from whoever's using it, unless nobody can see it.
         let environment = ProcessInfo.processInfo.environment
         if let log = environment["LC_SEAMLESS_CLICK_LOG"], CGDisplayIsAsleep(CGMainDisplayID()) == 0 {
-            try? "\(on ? "would enter" : "would leave") \(id)\n".write(toFile: log + ".full-screen", atomically: true, encoding: .utf8)
+            try? "\(on ? "would enter" : "would leave") \(id)\n".write(
+                toFile: log + ".full-screen", atomically: true, encoding: .utf8)
             if !on { fullScreenID = nil }
             return
         }
@@ -425,7 +446,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         let start = NSPoint(x: window.frame.width - margin - 3, y: margin + 3)
         func event(_ type: NSEvent.EventType, _ at: NSPoint) -> NSEvent? {
             NSEvent.mouseEvent(
-                with: type, location: at, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                with: type, location: at, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                context: nil,
                 eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
         }
         if let down = event(.leftMouseDown, start) { surface.input.mouseDown(with: down) }
@@ -446,15 +468,19 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         let source = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
         source.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, let front = self.surfaces.max(by: { Self.area($0.value) < Self.area($1.value) }) else { return }
+                guard let self, let front = self.surfaces.max(by: { Self.area($0.value) < Self.area($1.value) }) else {
+                    return
+                }
                 let command = (try? String(contentsOfFile: self.testCommandPath, encoding: .utf8)) ?? ""
                 if command.hasPrefix("report") {
                     let lines = self.surfaces.values.sorted { $0.order < $1.order }.map { surface -> String in
                         let frame = surface.window.frame
                         let top = (NSScreen.screens.first?.frame.height ?? 0) - frame.maxY
-                        return "\(surface.window.title)\t\(frame.minX)\t\(top)\t\(surface.offset.x)\t\(surface.offset.y)\t\(surface.window.isMiniaturized ? 1 : 0)\t\(surface.window.isVisible ? 1 : 0)"
+                        return
+                            "\(surface.window.title)\t\(frame.minX)\t\(top)\t\(surface.offset.x)\t\(surface.offset.y)\t\(surface.window.isMiniaturized ? 1 : 0)\t\(surface.window.isVisible ? 1 : 0)"
                     }
-                    try? (lines.joined(separator: "\n") + "\n").write(toFile: self.testCommandPath + ".report", atomically: true, encoding: .utf8)
+                    try? (lines.joined(separator: "\n") + "\n").write(
+                        toFile: self.testCommandPath + ".report", atomically: true, encoding: .utf8)
                     return
                 }
                 if command.hasPrefix("host-minimize") {
@@ -467,7 +493,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                 }
                 // By a window's title: `move-title`, `click-title` and, to show what a press does without its raise, `click-no-raise-title`.
                 let parts = command.split(separator: " ", maxSplits: 1).map(String.init)
-                if parts.count == 2, let named = self.surfaces.first(where: { $0.value.window.title.hasPrefix(parts[1]) }) {
+                if parts.count == 2,
+                    let named = self.surfaces.first(where: { $0.value.window.title.hasPrefix(parts[1]) })
+                {
                     switch parts[0] {
                     case "move-title":
                         let screen = named.value.window.screen?.visibleFrame ?? .zero
@@ -510,7 +538,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                     return
                 }
                 let screen = front.value.window.screen?.visibleFrame ?? .zero
-                front.value.window.setFrameOrigin(NSPoint(x: screen.maxX - front.value.window.frame.width, y: screen.minY))
+                front.value.window.setFrameOrigin(
+                    NSPoint(x: screen.maxX - front.value.window.frame.width, y: screen.minY))
                 self.surfaceMoved(front.key)
             }
         }
@@ -582,7 +611,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     }
 
     private func makeSurface(id: Int, frame: NSRect) -> Surface {
-        let window = SurfaceWindow(contentRect: frame, styleMask: [.borderless, .miniaturizable], backing: .buffered, defer: false)
+        let window = SurfaceWindow(
+            contentRect: frame, styleMask: [.borderless, .miniaturizable], backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
@@ -604,7 +634,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         SeamlessInputViewSetRaisesWindow(input, UInt32(clamping: id))
         window.observer = drop
         window.collectionBehavior = [.fullScreenPrimary, .fullScreenAuxiliary]
-        NotificationCenter.default.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) {
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main
+        ) {
             [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -617,7 +649,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                 }
             }
         }
-        NotificationCenter.default.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) {
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main
+        ) {
             [weak self] _ in
             MainActor.assumeIsolated { self?.guestFullScreening = false }
         }

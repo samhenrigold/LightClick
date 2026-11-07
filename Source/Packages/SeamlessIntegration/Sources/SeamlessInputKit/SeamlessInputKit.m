@@ -10,7 +10,12 @@ NSView *SeamlessMakeInputView(NSRect frame, void (^send)(NSData *bytes)) {
     return view;
 }
 
-void SeamlessInputViewSetRaisesWindow(NSView *view, uint32_t window) { ((SeamlessInputView *)view).raisesWindow = window; }
+void SeamlessInputViewSetGuestWindow(NSView *view, uint32_t window) {
+    ((SeamlessInputView *)view).guestWindow = window;
+}
+void SeamlessInputViewSetRaisesWindow(NSView *view, uint32_t window) {
+    ((SeamlessInputView *)view).raisesWindow = window;
+}
 void SeamlessInputViewSetGuestOffset(NSView *view, NSPoint offset) { ((SeamlessInputView *)view).guestOffset = offset; }
 
 void SeamlessInputViewForwardKeyEquivalent(NSView *view, NSEvent *event) {

@@ -15,7 +15,9 @@ public enum SessionWire {
         case hello = 1, window = 2, frame = 3, gone = 4
         case pointer = 16, key = 17, focus = 18
         case menu = 48, menuPress = 49, document = 50, quitApp = 51, appGone = 52
-        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58, overlay = 59, surfaceOrigin = 60, setPlace = 68, covers = 61, minimized = 62, setMinimized = 63, materials = 64, fullScreen = 65, setFullScreen = 66
+        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58, overlay = 59,
+            surfaceOrigin = 60, setPlace = 68, successor = 69, covers = 61, minimized = 62, setMinimized = 63,
+            materials = 64, fullScreen = 65, setFullScreen = 66
     }
 
     public struct Window: Equatable, Sendable {
@@ -55,6 +57,7 @@ public enum SessionWire {
         case surfaceOrigin(UInt32, x: Int32, y: Int32)
         case covers(UInt32, [CGRect])
         case minimized(UInt32, Bool)
+        case successor(UInt32, UInt32)
         case fullScreen(UInt32, Bool)
         case materials(UInt32, [GuestMaterial])
     }
@@ -105,7 +108,7 @@ public enum SessionWire {
             guard length == 4 else { return .bad }
         case .surfaceOrigin:
             guard length == 12 else { return .bad }
-        case .minimized, .fullScreen:
+        case .minimized, .fullScreen, .successor:
             guard length == 8 else { return .bad }
         case .materials:
             guard length >= 8, length <= 8 + 32 * 24, (length - 8) % 24 == 0 else { return .bad }
@@ -140,6 +143,8 @@ public enum SessionWire {
             return .message(.minimized(u32(bytes, body), u32(bytes, body + 4) != 0), used: used)
         case .setMinimized, .setFullScreen, .setPlace:
             return .bad
+        case .successor:
+            return .message(.successor(u32(bytes, body), u32(bytes, body + 4)), used: used)
         case .fullScreen:
             return .message(.fullScreen(u32(bytes, body), u32(bytes, body + 4) != 0), used: used)
         case .covers:
@@ -154,7 +159,8 @@ public enum SessionWire {
         case .surfaceOrigin:
             return .message(
                 .surfaceOrigin(
-                    u32(bytes, body), x: Int32(bitPattern: u32(bytes, body + 4)), y: Int32(bitPattern: u32(bytes, body + 8))),
+                    u32(bytes, body), x: Int32(bitPattern: u32(bytes, body + 4)),
+                    y: Int32(bitPattern: u32(bytes, body + 8))),
                 used: used)
         case .appGone: return .message(.appGone, used: used)
         case .menu: return .message(.menu(data(bytes, body, length)), used: used)
