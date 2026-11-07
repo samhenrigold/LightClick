@@ -3,6 +3,7 @@
 import base64
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import signal
@@ -315,6 +316,110 @@ def version_is_mojave():
     return request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60).get('Stdout', '').startswith('18.')
 
 
+def material_report(text):
+    """The proxy's guest window IDs and material layout, rejecting incomplete reports."""
+    reports = {}
+    pattern = r'(\d+)\trows (\d+)\tkinds (\d+)\tinside (true|false)\tviews (.*)'
+    for line in text.splitlines():
+        found = re.fullmatch(pattern, line)
+        if not found:
+            return {}
+        window, count, kinds = map(int, found.group(1, 2, 3))
+        views = [part for part in found[5].split(',') if part]
+        if window in reports:
+            return {}
+        reports[window] = (count, kinds, found[4] == 'true' and len(views) == kinds
+                           and all(part.endswith(':whole:in:mask') for part in views))
+    return reports
+
+
+def start_material_fixture(guest):
+    # A real bundle is needed: leap_list discovers only executables inside .app/Contents/MacOS. Nothing is installed
+    # in the host or guest Applications folder. Its sole window stays active and animating until clone cleanup.
+    info = plistlib.dumps({'CFBundleIdentifier': 'org.virtualintelmac.SeamlessMaterialsFixture',
+                          'CFBundleExecutable': 'SeamlessMaterials', 'CFBundleName': 'SeamlessMaterials',
+                          'CFBundlePackageType': 'APPL', 'LSMinimumSystemVersion': '10.14'})
+    script = '''set -eu
+app=/tmp/sg/SeamlessMaterials.app
+mkdir -p "$app/Contents/MacOS"
+cp "$1" "$app/Contents/MacOS/SeamlessMaterials"
+chmod 755 "$app/Contents/MacOS/SeamlessMaterials"
+printf '%s' "$2" | /usr/bin/base64 -D > "$app/Contents/Info.plist"
+u=$(/usr/bin/stat -f%Su /dev/console); uid=$(/usr/bin/id -u "$u")
+/bin/launchctl asuser "$uid" /usr/bin/sudo -u "$u" /usr/bin/env SEAMLESS_MATERIAL_FIXTURE=1 \
+    "$app/Contents/MacOS/SeamlessMaterials" demo-app </dev/null >/tmp/sg/materials-fixture.log 2>&1 &
+'''
+    launched = request({'Executable': '/bin/sh', 'Arguments': ['-c', script, 'sh', guest,
+                                                             base64.b64encode(info).decode()]}, 15)
+    if launched.get('ExitCode') != 0:
+        print('materials fixture launch failed:', launched, flush=True)
+        return None
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        said = request({'Executable': '/bin/cat', 'Arguments': ['/tmp/sg/materials-fixture.log']}, 5)
+        log = said.get('Stdout') or ''
+        (results/f'{tag}-materials-fixture.log').write_text(log)
+        ready = re.search(r'materials-fixture ready pid (\d+) window (\d+)', log)
+        if ready:
+            print(ready[0], flush=True)
+            return int(ready[2])
+        time.sleep(0.5)
+    return None
+
+
+def qualify_material_fixture(guest, window, proxy_windows, check):
+    check('the explicit materials fixture reached its guest window', window is not None)
+    if window is None:
+        return False
+    command_file = results/f'{tag}-clicks.txt.command'
+    materials_file = Path(str(command_file) + '.materials')
+    deadline = time.monotonic() + 45
+    expected = 0
+    report = None
+    saw_proxy = False
+    try:
+        while time.monotonic() < deadline:
+            # The hook's original window ID is also the key on the wire and in the proxy's report. Read both ends;
+            # a fixture that drew a backdrop but never exported it must fail, rather than silently skip this check.
+            said = request({'Executable': guest, 'Arguments': ['gpu', '--rows']}, 5)
+            raw = said.get('Stdout') or ''
+            (results/f'{tag}-materials-guest.txt').write_text(raw)
+            records = re.findall(rf'^backdrop id {window} order \d+ material (\d+) ', raw, re.M)[:32]
+            # tree_send_materials caps a window at 32 rows. ProxyApplication excludes material 26 (vibrant cutouts),
+            # so compare its count with precisely the same subset; the fixture's OS chooses all material numbers.
+            expected = sum(int(material) != 26 for material in records)
+            row = next((row for row in proxy_windows() if 'Seamless materials fixture' in row), '')
+            pid = re.search(r'pid=(\d+)', row)
+            if pid:
+                saw_proxy = True
+                materials_file.unlink(missing_ok=True)
+                command_file.write_text('materials-report')
+                try:
+                    os.kill(int(pid[1]), signal.SIGUSR2)
+                except ProcessLookupError:
+                    continue
+                reply_deadline = min(deadline, time.monotonic() + 2)
+                while time.monotonic() < reply_deadline and not materials_file.exists():
+                    time.sleep(0.05)
+                text = materials_file.read_text() if materials_file.exists() else ''
+                (results/f'{tag}-materials-proxy.txt').write_text(text)
+                report = material_report(text).get(window)
+                if expected > 0 and report and report[0] == expected and report[1] > 0 and report[2]:
+                    break
+            time.sleep(0.25)
+    finally:
+        # SIGUSR2 without a command is a move. A report command must not leak into later interaction checks.
+        command_file.write_text('')
+    print(f'materials fixture window {window}: guest rows {expected}, proxy {report}', flush=True)
+    check('the explicit fixture exported nonempty guest material rows', expected > 0)
+    check('the explicit fixture has its host proxy', saw_proxy)
+    check('its guest window ID and material count reach the proxy',
+          expected > 0 and report is not None and report[0] == expected)
+    passed = expected > 0 and report is not None and report[0] == expected and report[1] > 0 and report[2]
+    check('each fixture material has its masked view inside the proxy', passed)
+    return passed
+
+
 def tree_bench(seconds):
     # The windows the hook can't read, plus what it can, once each in one boot, to compare a machine's settings.
     install_hook()
@@ -549,7 +654,7 @@ def watch_guest():
     print('watching the guest:', target, flush=True)
 
 
-def desktop(activation_only=False):
+def desktop(activation_only=False, materials_only=False):
     # The Seamless button, on a running machine: press, the apps' windows appear and the machine's goes, a click reaches one, press,
     # and the machine's window is back.
     for old in results.glob(f'{tag}-*.png'):
@@ -557,22 +662,27 @@ def desktop(activation_only=False):
     # Before anything else asks the agent for anything: it has been seen to stop right after staging.
     watch_guest()
     guest = stage(guest_tool)
-    for app in ('Finder', 'TextEdit', 'Safari') if version_is_mojave() else ('TextEdit', 'Safari'):
+    mojave = version_is_mojave()
+    if materials_only and not mojave:
+        raise SystemExit('FAIL materials fixture qualification requires the inspected Mojave path')
+    apps = () if materials_only else ('Finder', 'TextEdit', 'Safari') if mojave else ('TextEdit', 'Safari')
+    for app in apps:
         run(guest, ['open-app', '--app', app])
-    time.sleep(12)
+    if not materials_only:
+        time.sleep(12)
     listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
     app_pid = next((row.split()[0] for row in listing.splitlines() if f'Build/bench/{tag}/' in row and 'Contents/MacOS/Light Click' in row), '0')
     meter = str(results/'seamless-present-meter')
 
     def rows():
-        return subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True).stdout.splitlines()
+        return subprocess.run([str(results/'seamless-guest'), 'list'], capture_output=True, text=True, timeout=5).stdout.splitlines()
 
     def machine_window():
         # AppKit's word: with the Mac's display asleep, WindowServer's list still says a hidden window's on screen.
-        return request({'Action': 'seamless-state'}, 60).get('WindowVisible')
+        return request({'Action': 'seamless-state'}, 5 if materials_only else 60).get('WindowVisible')
 
     def proxy_windows():
-        running = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
+        running = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True, timeout=5).stdout.splitlines()
         pids = {row.split()[0] for row in running if 'Seamless Apps/' in row and f'Build/bench/{tag}/' in row}
         return [row for row in rows() if re.search(r'pid=(\d+)', row).group(1) in pids and ' 0x0' not in row]
 
@@ -587,15 +697,20 @@ def desktop(activation_only=False):
         match = re.search(r'pid=(\d+)', found)
         return int(match.group(1)) if match else 0
 
-    for _ in range(240):
-        state = request({'Action': 'seamless-state'}, 60)
+    ready_deadline = time.monotonic() + 240
+    while time.monotonic() < ready_deadline:
+        state = request({'Action': 'seamless-state'}, 5)
         if state.get('Prepared') or 'Prepared' not in state:
             break
         time.sleep(1)
     # A second TextEdit window, in front of the first, for a press that only the host can tell apart.
-    request({'Executable': '/bin/sh', 'Arguments': ['-c', 'echo second > /tmp/seamless-second.txt; chmod 644 /tmp/seamless-second.txt; '
-                                                    '/tmp/sg/ig open-file --session --path /tmp/seamless-second.txt --with TextEdit']}, 120)
-    time.sleep(70)
+    fixture_window = start_material_fixture(guest) if materials_only else None
+    if materials_only and fixture_window is None:
+        raise SystemExit('FAIL materials fixture did not publish its guest window within 30 seconds')
+    if not materials_only:
+        request({'Executable': '/bin/sh', 'Arguments': ['-c', 'echo second > /tmp/seamless-second.txt; chmod 644 /tmp/seamless-second.txt; '
+                                                        '/tmp/sg/ig open-file --session --path /tmp/seamless-second.txt --with TextEdit']}, 120)
+        time.sleep(70)
     print('before the press', request({'Action': 'seamless-state'}, 60), flush=True)
     print('the agent before the press:', request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60), flush=True)
     print(next(iter(rows()), ''), flush=True)
@@ -605,7 +720,8 @@ def desktop(activation_only=False):
     first = None
     dumped = 0
     socket_at = 0
-    while time.time() - pressed < 180 and (len(windows) < 2 or machine_window()):
+    wanted_windows = 1 if materials_only else 2
+    while time.time() - pressed < 180 and (len(windows) < wanted_windows or machine_window()):
         windows = proxy_windows()
         if windows and first is None:
             first = time.time() - pressed
@@ -622,7 +738,7 @@ def desktop(activation_only=False):
     print(f'first window after {first} s, machine window gone after {time.time() - pressed:.1f} s', flush=True)
     for row in windows:
         print(row[:150], flush=True)
-    check('windows appear for each app', len(windows) >= 2)
+    check('windows appear for each app', len(windows) >= wanted_windows)
     if not windows:
         print('guest frame', capture(f'{tag}-no-windows.png'), flush=True)
         monitor_dump('no windows came')
@@ -633,6 +749,13 @@ def desktop(activation_only=False):
     windows = proxy_windows()
     check('the machine window hides', not machine_window())
     check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
+    if materials_only:
+        qualify_material_fixture(guest, fixture_window, proxy_windows, check)
+        request({'Action': 'seamless-toggle'}, 15)
+        print('PASS materials fixture' if all(checks) else 'FAIL materials fixture', flush=True)
+        if not all(checks):
+            raise SystemExit(1)
+        return
     if activation_only:
         # Using only what any build has: another app's window clicked, then whether the animating page keeps moving.
         page = next((re.search(r'id=(\d+)', row).group(1) for row in proxy_windows() if 'Seamless page' in row), None)
@@ -705,34 +828,10 @@ def desktop(activation_only=False):
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
         subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-desktop-{window}.png')], capture_output=True)
-    # Each proxy's material views against what the guest sent: one view per kind, covering the window, in its input view,
-    # masked, and every region inside it. Only their existence and frames: how they look needs an awake display.
-    said_materials = []
-    command_file = results/f'{tag}-clicks.txt.command'
-    for name in ('TextEdit', 'Safari', 'Finder'):
-        pid = proxy_pid(name)
-        if not pid:
-            continue
-        materials_file = results/f'{tag}-clicks.txt.command.materials'
-        materials_file.unlink(missing_ok=True)
-        command_file.write_text('materials-report')
-        os.kill(pid, signal.SIGUSR2)
-        time.sleep(0.5)
-        for line in (materials_file.read_text().splitlines() if materials_file.exists() else []):
-            print(f'materials {name}: {line}', flush=True)
-            said_materials.append(line)
-    # A SIGUSR2 with no command is a move: leave it that way for what follows.
-    command_file.write_text('')
-    sent = [line for line in said_materials if 'rows 0' not in line]
-    def right(line):
-        kinds = int(re.search(r'kinds (\d+)', line).group(1))
-        views = re.search(r'views (.*)$', line).group(1)
-        parts = [part for part in views.split(',') if part]
-        return 'inside true' in line and len(parts) == kinds and all(part.endswith(':whole:in:mask') for part in parts)
-    if sent:
-        check('each material the guest sent has its view, over the whole window', all(right(line) for line in sent))
-    else:
-        print('no window had materials from the guest', flush=True)
+    # Only the inspected Mojave path exports materials. A persistent fixture makes a missing report a failure, even
+    # when the stock apps have no material on this OS/appearance. Appearance itself still needs a visual comparison.
+    if mojave:
+        qualify_material_fixture(guest, start_material_fixture(guest), proxy_windows, check)
     # What the surfaces hold, against what's just been read from the proxies.
     held = results/f'{tag}-surfaces'
     shutil.rmtree(held, ignore_errors=True)
@@ -1099,6 +1198,8 @@ elif 'install-watcher' in arguments:
     install_watcher()
 elif arguments[0] == 'desktop' and 'activation' in arguments:
     desktop(activation_only=True)
+elif arguments[0] == 'desktop' and 'materials' in arguments:
+    desktop(materials_only=True)
 elif arguments[0] == 'desktop' and 'old-hook' in arguments:
     desktop_with_old_hook()
 elif arguments[0] == 'desktop':

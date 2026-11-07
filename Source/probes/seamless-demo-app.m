@@ -4,6 +4,8 @@
 // Built into seamless-guest as `seamless-guest demo-app`.
 #import <Cocoa/Cocoa.h>
 #import <OpenGL/gl.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 // A GL surface over a window's backing, which WindowServer composites separately: what a backing store alone can't
 // show.
@@ -50,6 +52,43 @@
     self.window.title = [self.window.title stringByAppendingString:@" typed"];
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
+    if (getenv("SEAMLESS_MATERIAL_FIXTURE")) {
+        // A persistent, active backdrop, independent of whichever stock apps happen to have one. The ordinary demo's
+        // translucent panel is alpha only, and its menu/sheet disappear before the desktop test reaches materials.
+        if (@available(macOS 10.14, *)) {
+            NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(120, 180, 420, 260)
+                                                           styleMask:NSTitledWindowMask | NSClosableWindowMask
+                                                             backing:NSBackingStoreBuffered
+                                                               defer:NO];
+            window.title = @"Seamless materials fixture";
+            NSVisualEffectView *effect = [[NSVisualEffectView alloc] initWithFrame:window.contentView.bounds];
+            effect.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            effect.material = NSVisualEffectMaterialSidebar;
+            effect.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+            effect.state = NSVisualEffectStateActive;
+            window.contentView = effect;
+            NSTextField *counter = [[NSTextField alloc] initWithFrame:NSMakeRect(24, 100, 360, 24)];
+            counter.bezeled = NO;
+            counter.editable = NO;
+            counter.drawsBackground = NO;
+            [effect addSubview:counter];
+            self.counter = counter;
+            self.window = window;
+            [window makeKeyAndOrderFront:nil];
+            [NSApp activateIgnoringOtherApps:YES];
+            [NSTimer scheduledTimerWithTimeInterval:1.0 / 30
+                                             target:self
+                                           selector:@selector(tick)
+                                           userInfo:nil
+                                            repeats:YES];
+            fprintf(stderr, "materials-fixture ready pid %d window %ld\n", getpid(), (long)window.windowNumber);
+            fflush(stderr);
+        } else {
+            fputs("materials-fixture unsupported: requires Mojave or later\n", stderr);
+            [NSApp terminate:nil];
+        }
+        return;
+    }
     NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(300, 300, 420, 260)
                                                    styleMask:NSTitledWindowMask | NSClosableWindowMask |
                                                              NSMiniaturizableWindowMask | NSResizableWindowMask
