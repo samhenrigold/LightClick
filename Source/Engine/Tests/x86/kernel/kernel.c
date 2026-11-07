@@ -877,6 +877,63 @@ static void test_double_fault(void) {
     kprintf("PASS double fault on an IST stack\n");
 }
 
+// What dtrace's fbt does to a kernel function: the push %rbp that starts it becomes int3 after it has run, and the handler
+// emulates the push by moving its own frame down 8 bytes, storing rbp where the push would, and returning past the int3.
+// The function then goes on from mov %rsp,%rbp. All of rbp, rsp and the return must come back with their full 64 bits.
+__asm__(".text\n"
+        ".globl _fbt_target\n_fbt_target:\n"
+        "  pushq %rbp\n"
+        "  movq %rsp, %rbp\n"
+        "  movq %rbp, %rax\n"
+        "  popq %rbp\n"
+        "  ret\n"
+        ".globl _fbt_isr3\n_fbt_isr3:\n"
+        "  subq $16, %rsp\n"
+        "  movq %rax, (%rsp)\n"
+        "  movq 16(%rsp), %rax\n  movq %rax, 8(%rsp)\n"
+        "  movq 24(%rsp), %rax\n  movq %rax, 16(%rsp)\n"
+        "  movq 32(%rsp), %rax\n  movq %rax, 24(%rsp)\n"
+        "  movq 40(%rsp), %rax\n  movq %rax, 32(%rsp)\n"
+        "  movq 48(%rsp), %rax\n  movq %rax, 40(%rsp)\n"
+        "  movq 32(%rsp), %rax\n  subq $8, %rax\n  movq %rbp, (%rax)\n  movq %rax, 32(%rsp)\n"
+        "  popq %rax\n"
+        "  iretq\n");
+extern char fbt_target[], fbt_isr3[];
+
+static u64 call_fbt_target(u64 *rsp_before, u64 *rsp_after, u64 *rbp_after) {
+    u64 rax, before, after, rbp;
+    // rbp is the operand under test, so nothing in here may address through it: results stay in registers until it's back.
+    __asm__ volatile("pushq %%rbp\n"
+                     "movabsq $0x1122334455667788, %%rbp\n"
+                     "movq %%rsp, %1\n"
+                     "call *%4\n"
+                     "movq %%rsp, %2\n"
+                     "movq %%rbp, %3\n"
+                     "popq %%rbp\n"
+                     : "=a"(rax), "=&r"(before), "=&r"(after), "=&r"(rbp)
+                     : "r"(fbt_target)
+                     : "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory");
+    *rsp_before = before, *rsp_after = after, *rbp_after = rbp;
+    return rax;
+}
+
+static void test_fbt_int3(void) {
+    for (int patched = 0; patched < 2; patched++) {
+        if (patched) {
+            set_gate(3, fbt_isr3, 0, 0);
+            *(volatile u8 *)fbt_target = 0xCC; // after it has run, so a translation of the push is there to go
+        }
+        u64 before, after, rbp;
+        u64 got = call_fbt_target(&before, &after, &rbp);
+        CHECK(got == before - 16, "patched %d: rbp inside %x, expected %x", patched, got, before - 16);
+        CHECK(after == before, "patched %d: rsp after %x, before %x", patched, after, before);
+        CHECK(rbp == 0x1122334455667788ULL, "patched %d: rbp after %x", patched, rbp);
+    }
+    *(volatile u8 *)fbt_target = 0x55;
+    set_gate(3, isr3, 3, 0);
+    kprintf("PASS kernel int3 with the handler emulating push rbp\n");
+}
+
 static void test_exception_cost(void) {
     fault_mode = M_EXIT_ON_FAULT;
     u64 n = 2000000, t = rdtsc();
@@ -892,6 +949,7 @@ void kmain(u64 ram) {
     kprintf("kernel up\n");
     setup_tables();
     test_double_fault();
+    test_fbt_int3();
     u64 boot_root = read_cr3() & ADDR;
     memcpy(kernel_pml4, phys(boot_root), 4096);
     u64 a = new_space(), b = new_space();
