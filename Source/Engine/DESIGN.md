@@ -549,10 +549,21 @@ Thus the earlier flat-workload observation that precise flags cost little did no
 
 The narrow fix inlines register `SAR r16,imm` with live flags, retaining the helper's exact flag model and upper
 48 register bits. Memory, CL, byte and rotate forms retain their old paths. Precise flags remain enabled. The same
-benchmark then measured 7.32–7.51 ns (median 7.42), alongside Rosetta 7.35–7.98 (7.39). This is a local improvement,
-not yet a whole-decoder or application speedup. Focused Engine and Rosetta tests each passed 202,752 assertions;
+benchmark then measured 7.32–7.51 ns (median 7.42), alongside Rosetta 7.35–7.98 (7.39).
+Focused Engine and Rosetta tests each passed 202,752 assertions;
 the kernel and C API preserved SAR flags/full RDX at the following fault, and the existing compatibility transcript
 still matched its recorded TCG SHA1. Baseline/optimized artifacts are in `/tmp/lightclick-vcphevc-sar-{baseline,optimized}`.
+The local fragment improvement is about 6.8x; a whole-decoder or application gain is not established.
+With identical previously compiled image probes, release-verified `engineering-loop-5` (bundled fast path confirmed)
+and old `engineering-loop-3` each ran two boots, serial new–old–new–old, with three source-P3 ImageIO draws per boot.
+The first pair's medians were 1255.243 versus 1478.340 ms (15.1% less time), but this did not replicate:
+the second pair was 1402.153 versus 1400.942 ms. Host load/caches were uncontrolled and unrelated VMs were allowed;
+even the unchanged native-host median drifted, from 147.129 versus 162.997 ms in the first pair to
+160.460 versus 154.473 ms in the second. All twelve guest trials retained identical pixel hashes and metadata;
+each boot's retained input and first-frame pixel bytes matched both prior Engine and TCG references exactly.
+Artifacts: `Build/image-decode/loop5-engine-sar16`, `loop5-control-old-engine`, and their `-r2` directories,
+with separate guest-correctness reports despite the expected modern-host mismatch. No Final Cut Pro or other
+application speedup follows from these measurements.
 
 ### Mojave's page faults: its kernel's bzero
 
