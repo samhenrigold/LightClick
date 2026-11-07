@@ -26,9 +26,9 @@ import types
 def load_driver():
     path = Path(__file__).resolve().parents[1]/'probes/image-decode-driver.py'
     tree = ast.parse(path.read_text(), filename=str(path))
-    constants = {'CAP', 'OUTPUT_CAP', 'TRANSFER_SECONDS', 'SENDER'}
+    constants = {'CAP', 'OUTPUT_CAP', 'TRANSFER_SECONDS', 'SENDER', 'OS_IMAGE'}
     nodes = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
-             or isinstance(node, ast.FunctionDef) and node.name in ('export', 'parse_report', 'staged_directory')
+             or isinstance(node, ast.FunctionDef) and node.name in ('export', 'parse_report', 'staged_directory', 'experiment')
              or isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in constants
                                                     for target in node.targets)]
     namespace = {}
@@ -207,11 +207,56 @@ def path_checks(namespace):
     print('PASS private staging, fixed OS/raw selectors, root ownership and symlink/escape refusals')
 
 
+def preflight_checks(namespace, work):
+    cases = [('present', {'ExitCode': 0}, 'after successful preflight', True),
+             ('absent', {'ExitCode': 1, 'Stderr': ''}, 'absent or not a regular file', False),
+             ('launch-error', {'Error': 'No such executable'}, 'did not execute successfully', False),
+             ('missing-exit', {'Stdout': ''}, 'did not execute successfully', False),
+             ('error-with-zero', {'ExitCode': 0, 'Error': 'launch failed'}, 'did not execute successfully', False),
+             ('unexpected-exit', {'ExitCode': 127}, 'did not execute successfully', False),
+             ('boolean-exit', {'ExitCode': False}, 'did not execute successfully', False),
+             ('invalid-response', None, 'did not execute successfully', False)]
+    for name, response, wanted, should_stage in cases:
+        result_directory = work/name
+        result_directory.mkdir()
+        staged, requests = [], []
+
+        def fake_request(command, timeout):
+            requests.append(command)
+            if command != {'Executable': '/bin/test', 'Arguments': ['-f', namespace['OS_IMAGE']]}:
+                return {'Error': 'wrong preflight executable or arguments'}
+            return response
+
+        def fake_stage(binary):
+            staged.append(binary)
+            # Stop at the first instruction after successful preflight: no transport, probe, or decoder can run.
+            raise RuntimeError('after successful preflight')
+
+        namespace.update(arguments=[str(result_directory), '/unused/host-probe', '/unused/guest-probe'],
+                         request=fake_request, stage=fake_stage)
+        try:
+            namespace['experiment']()
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f'{name}: experiment unexpectedly continued')
+        report = json.loads((result_directory/'result.json').read_text())
+        if wanted not in report['error'] or bool(staged) != should_stage:
+            raise AssertionError(f'{name}: wrong preflight classification/staging: {report}')
+        if len(requests) != 1 or report['trials'] != {'guest': [], 'host': []}:
+            raise AssertionError(f'{name}: work started after unsuccessful preflight')
+        if not should_stage and repr(response) not in report['error']:
+            raise AssertionError(f'{name}: full diagnostic response was not preserved')
+    print(f'PASS actual experiment preflight: /bin/test, absent vs launch failure, {len(cases)} cases')
+
+
 def main():
     signal.alarm(30)
     namespace = load_driver()
     with tempfile.TemporaryDirectory(prefix='lightclick-image-transport-check-') as temporary:
-        transport_checks(namespace, Path(temporary))
+        work = Path(temporary)
+        transport_checks(namespace, work)
+        preflight_checks(namespace, work)
     report_checks(namespace)
     path_checks(namespace)
     print('PASS embedded sender syntax; Python 2 runtime compatibility remains a guest check')

@@ -177,9 +177,12 @@ def experiment():
     results, host, guest_binary = map(Path, arguments)
     trials = {'guest': [], 'host': []}
     try:
-        exists = request({'Executable': '/usr/bin/test', 'Arguments': ['-f', OS_IMAGE]}, 15)
-        if exists.get('ExitCode') != 0:
-            raise RuntimeError(f'required OS fixture is absent: {OS_IMAGE}')
+        exists = request({'Executable': '/bin/test', 'Arguments': ['-f', OS_IMAGE]}, 15)
+        if (not isinstance(exists, dict) or 'Error' in exists or type(exists.get('ExitCode')) is not int
+                or exists['ExitCode'] not in (0, 1)):
+            raise RuntimeError(f'OS fixture preflight did not execute successfully: response {exists!r}')
+        if exists['ExitCode'] == 1:
+            raise RuntimeError(f'required OS fixture is absent or not a regular file: {OS_IMAGE}; response {exists!r}')
         guest = stage(guest_binary)
         directory = staged_directory(guest)
         raw = directory + '/first-image.rgba'
