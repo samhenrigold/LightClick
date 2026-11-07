@@ -433,6 +433,29 @@ static CGWindowID front_window_of(pid_t pid) {
     return front;
 }
 
+static const char *session_menu_tool;
+
+// Runs the menu tool, which is what Accessibility's grant names, and waits: what comes next depends on it being done.
+static int run_menu_tool(const char *command, pid_t pid, CGWindowID id, const char *x, const char *y) {
+    if (!session_menu_tool)
+        return 127;
+    char pid_text[16], window_text[16];
+    snprintf(pid_text, sizeof(pid_text), "%d", pid);
+    snprintf(window_text, sizeof(window_text), "%u", id);
+    pid_t child = fork();
+    if (!child) {
+        if (x)
+            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text, "--x", x, "--y", y, (char *)NULL);
+        else
+            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text, (char *)NULL);
+        _exit(127);
+    }
+    int status = 127;
+    if (child > 0)
+        waitpid(child, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 126;
+}
+
 // A press goes by position, and on the host this window can be somewhere nothing covers it, whatever does in the guest. So it's put in
 // front first, the way a click on it would, and the press waits to see that it has been: this runs in the order the host's events came.
 static void raise_for_press(struct Stream *s, CGWindowID id) {
@@ -442,24 +465,11 @@ static void raise_for_press(struct Stream *s, CGWindowID id) {
     activate_owner(s);
     if (front_window_of(pid) == id)
         return;
-    AXUIElementRef app = AXUIElementCreateApplication(pid);
-    CFArrayRef windows = NULL;
-    AXError error = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, (CFTypeRef *)&windows);
-    for (CFIndex i = 0; !error && windows && i < CFArrayGetCount(windows); i++) {
-        AXUIElementRef window = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
-        uint32_t number = 0;
-        if (_AXUIElementGetWindow(window, &number) == kAXErrorSuccess && number == id) {
-            error = AXUIElementPerformAction(window, kAXRaiseAction);
-            break;
-        }
-    }
-    if (windows)
-        CFRelease(windows);
-    CFRelease(app);
+    int error = run_menu_tool("raise-window", pid, id, NULL, NULL);
     double started = now();
     while (!error && front_window_of(pid) != id && now() - started < 0.25)
         usleep(5000);
-    printf("# %.3f raised window %u for a press: error %d, front %u after %.0f ms\n", now(), id, (int)error, front_window_of(pid),
+    printf("# %.3f raised window %u for a press: error %d, front %u after %.0f ms\n", now(), id, error, front_window_of(pid),
            (now() - started) * 1000);
     fflush(stdout);
 }
@@ -1045,6 +1055,15 @@ static int drain_input(struct Stream *s) {
                       m.minimized ? "1" : "0", (char *)NULL);
                 _exit(127);
             }
+        } else if (m.type == SWM_SET_PLACE) {
+            char x[16], y[16];
+            snprintf(x, sizeof(x), "%d", m.place_x);
+            snprintf(y, sizeof(y), "%d", m.place_y);
+            int error = run_menu_tool("place-window", session_app_pid ? session_app_pid : s->pid, m.u.window_id, x, y);
+            CGRect display = CGDisplayBounds(CGMainDisplayID());
+            printf("# %.3f placed window %u at %s,%s: error %d, display %.0fx%.0f\n", now(), m.u.window_id, x, y, error,
+                   display.size.width, display.size.height);
+            fflush(stdout);
         } else if (m.type == SWM_SET_FULL_SCREEN) {
             if (session_menu_tool && session_app_pid && !fork()) {
                 char pid[16], window[16];

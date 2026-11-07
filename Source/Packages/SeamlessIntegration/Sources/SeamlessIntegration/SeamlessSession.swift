@@ -70,6 +70,9 @@ public final class SeamlessSession {
         var pieces: [CALayer] = []
         /// Where the user dragged it to, relative to the guest's window, once they have. The guest's window stays put.
         var hostOffset: NSPoint?
+        /// Where the guest was asked to put this window after a move on the host, until it says. The proxy stays still through that.
+        var placing: (host: NSPoint, until: CFAbsoluteTime)?
+        var placeTask: Task<Void, Never>?
         /// Where its own surface starts on the guest's display, with its shadow, once the guest has said.
         var surfaceOrigin: (x: Int32, y: Int32)?
         var ownSurfaceLayer: CALayer?
@@ -488,6 +491,12 @@ public final class SeamlessSession {
             surface.hostOffset = offsetsOfGoneWindows.removeValue(forKey: window.title)
             surfaces[window.id] = made
         }
+        if let placing = surface.placing, window.x != surface.window.x || window.y != surface.window.y {
+            surface.placing = nil
+            if CFAbsoluteTimeGetCurrent() < placing.until {
+                surface.hostOffset = NSPoint(x: placing.host.x - Double(window.x), y: placing.host.y - Double(window.y))
+            }
+        }
         surface.window = window
         tellProxy(surface)
         onWindowsChanged?()
@@ -561,15 +570,37 @@ public final class SeamlessSession {
         for surface in surfaces.values { tellProxy(surface) }
     }
 
+    /// Where the guest's display's corner is on the host, top down: the main screen's, with its menu bar taking the place of the guest's.
+    private static var guestDisplayOrigin: NSPoint {
+        guard let main = NSScreen.main else { return .zero }
+        let primary = NSScreen.screens.first?.frame.height ?? main.frame.height
+        return NSPoint(x: main.frame.minX, y: primary - main.frame.maxY + max(0, main.frame.maxY - main.visibleFrame.maxY - 22))
+    }
+
+    /// So what depends on the guest's idea of its place comes out right: where a menu flips, zoom, and clipping at its display's edges.
+    /// Waits for the drag to stop. On the guest's display whole where it fits, which on another host screen means nearest to it there.
+    /// shortcut: one guest display, the size of the host's main screen, for all host screens, until QEMU's display has more than one.
+    private func placeInGuest(_ surface: Surface, host: NSPoint) {
+        surface.placeTask?.cancel()
+        surface.placeTask = Task { [weak self, weak surface] in
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled, let self, let surface, surface.window.level == 0, self.fullScreenOffset == nil else { return }
+            let origin = Self.guestDisplayOrigin
+            let screen = NSScreen.main?.frame.size ?? .zero
+            let window = surface.window
+            let x = max(0, min(host.x - origin.x, Double(screen.width) - Double(window.width)))
+            let y = max(0, min(host.y - origin.y, Double(screen.height) - Double(window.height)))
+            guard Int32(x) != window.x || Int32(y) != window.y else { return }
+            surface.placing = (host, CFAbsoluteTimeGetCurrent() + 1)
+            self.sendToGuest(SessionWire.setPlace(window: window.id, x: Int32(x), y: Int32(y)))
+        }
+    }
+
     private func tellProxy(_ surface: Surface) {
         let window = surface.window
         let primary = NSScreen.screens.first?.frame.height ?? 0
         if guestOffset == nil {
-            // Keeps this first window's guest position on the host's screen, near the middle.
-            let screen = NSScreen.main?.visibleFrame ?? .zero
-            guestOffset = NSPoint(
-                x: screen.midX - (Double(window.x) + Double(window.width) / 2),
-                y: primary - screen.midY - (Double(window.y) + Double(window.height) / 2))
+            guestOffset = Self.guestDisplayOrigin
         }
         // What pops up from a window goes where that window has been dragged.
         let parent = surfaces.values.filter { $0.hostOffset != nil && $0.window.group == window.group }
@@ -835,6 +866,7 @@ public final class SeamlessSession {
             let side = Double(surface.window.margin)
             surface.hostOffset = NSPoint(x: x + side - Double(surface.window.x), y: y + side - Double(surface.window.y))
             tellProxy(surface)
+            placeInGuest(surface, host: NSPoint(x: x + side, y: y + side))
         case .menuChosen(let path, _) where path.last == leaveTitle && leaveTitle != nil: onLeave?()
         case .menuChosen(let path, _): sendToGuest(SessionWire.text(.menuPress, path.joined(separator: "/")))
         case .openDocuments(let paths): for path in paths { sendDocument(path, flags: 0) }

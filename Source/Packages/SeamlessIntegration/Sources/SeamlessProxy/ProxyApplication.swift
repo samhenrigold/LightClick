@@ -448,6 +448,15 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
             MainActor.assumeIsolated {
                 guard let self, let front = self.surfaces.max(by: { Self.area($0.value) < Self.area($1.value) }) else { return }
                 let command = (try? String(contentsOfFile: self.testCommandPath, encoding: .utf8)) ?? ""
+                if command.hasPrefix("report") {
+                    let lines = self.surfaces.values.sorted { $0.order < $1.order }.map { surface -> String in
+                        let frame = surface.window.frame
+                        let top = (NSScreen.screens.first?.frame.height ?? 0) - frame.maxY
+                        return "\(surface.window.title)\t\(frame.minX)\t\(top)\t\(surface.offset.x)\t\(surface.offset.y)\t\(surface.window.isMiniaturized ? 1 : 0)\t\(surface.window.isVisible ? 1 : 0)"
+                    }
+                    try? (lines.joined(separator: "\n") + "\n").write(toFile: self.testCommandPath + ".report", atomically: true, encoding: .utf8)
+                    return
+                }
                 if command.hasPrefix("host-minimize") {
                     front.value.window.miniaturize(nil)
                     return

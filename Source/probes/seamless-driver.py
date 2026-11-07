@@ -454,6 +454,8 @@ def desktop():
     for row in windows:
         print(row[:150], flush=True)
     check('windows appear for each app', len(windows) >= 2)
+    asked = request({'Action': 'seamless-state'}, 60)
+    asked = (int(asked.get('RequestedWidth', 0)), int(asked.get('RequestedHeight', 0)))
     for _ in range(3):
         print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
         time.sleep(1)
@@ -461,31 +463,46 @@ def desktop():
     check('the machine window hides', not machine_window())
     check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
     # Two windows of one app overlapping in the guest and apart on the host: a press on the lower one is for it, not what's over it.
-    # The caret blinks only in the key window, so whether its window keeps changing says which window got the press.
     lower = next((re.search(r'id=(\d+)', row).group(1) for row in proxy_windows() if 'seamless-note' in row), None)
     textedit_pid = next((int(re.search(r'pid=(\d+)', row).group(1)) for row in proxy_windows() if 'seamless-note' in row), 0)
     if lower and textedit_pid:
-        def changes():
-            found = re.search(r'presented ([0-9.]+)', subprocess.run([meter, lower, '4'], capture_output=True, text=True).stdout)
-            return float(found.group(1)) if found else -1
         command = results/f'{tag}-clicks.txt.command'
-        # The other one in front, so what's being tested isn't already so.
-        command.write_text('click-title seamless-second')
-        os.kill(textedit_pid, signal.SIGUSR2)
-        time.sleep(1)
-        command.write_text('move-title seamless-note')
-        os.kill(textedit_pid, signal.SIGUSR2)
-        time.sleep(1)
-        command.write_text('click-no-raise-title seamless-note')
-        os.kill(textedit_pid, signal.SIGUSR2)
-        time.sleep(1)
-        without = changes()
-        command.write_text('click-title seamless-note')
-        os.kill(textedit_pid, signal.SIGUSR2)
-        time.sleep(1)
-        raised = changes()
-        print('a press on the covered window: changes/s, without raising', without, 'and with', raised, flush=True)
-        check('a press on a window that\'s covered in the guest reaches it', raised > without and raised > 0)
+        report_file = results/f'{tag}-clicks.txt.command.report'
+
+        def tell(what, wait=1.5):
+            command.write_text(what)
+            os.kill(textedit_pid, signal.SIGUSR2)
+            time.sleep(wait)
+
+        def report():
+            # Front first: title, the proxy's place on the host, and what's added to the guest's place to get it.
+            report_file.unlink(missing_ok=True)
+            tell('report', 0.5)
+            rows_said = [row.split('\t') for row in report_file.read_text().splitlines()]
+            return [(row[0], *map(float, row[1:])) for row in rows_said]
+
+        # The windows overlap in the guest: the same place on the lower one gets the upper one, without the raise.
+        tell('click-title seamless-second')
+        tell('click-no-raise-title seamless-note')
+        without = report()[0][0]
+        tell('click-title seamless-note')
+        raised = report()[0][0]
+        print('front after a press on the covered window: without raising', without, 'and with', raised, flush=True)
+        check('without the raise, that press goes to what covers it in the guest', without.startswith('seamless-second'))
+        check('a press on a window that\'s covered in the guest reaches it', raised.startswith('seamless-note'))
+        # Moved on the host, the guest's own idea follows, and nothing shows that on the host.
+        tell('click-title seamless-second')
+        start = next(row for row in report() if row[0].startswith('seamless-note'))
+        tell('move-title seamless-note', 0)
+        moved = None
+        for _ in range(2):
+            time.sleep(1)
+            after = next(row for row in report() if row[0].startswith('seamless-note'))
+            moved = moved or after
+        guest_at = lambda row: (row[1] - row[3], row[2] - row[4])
+        print('placed in the guest: from', guest_at(start), 'to', guest_at(after), 'on the host', after[1:3], flush=True)
+        check('moved on the host, it stays where it was put', moved[1:3] == after[1:3] and after[1:3] != start[1:3])
+        check('and the guest moves it too', guest_at(after) != guest_at(start))
     else:
         check('a press on a window that\'s covered in the guest reaches it', False)
     for row in windows:
@@ -591,6 +608,12 @@ def desktop():
         time.sleep(7)
         rate = page_rate()
         print('after coming back', rate, flush=True)
+        report_said = results/f'{tag}-clicks.txt.command.report'
+        report_said.unlink(missing_ok=True)
+        command.write_text('report')
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(0.5)
+        print('its proxy says', report_said.read_text() if report_said.exists() else 'nothing', flush=True)
         check('and the guest has it back too', rate >= 30)
         command.write_text('host-minimize')
         os.kill(safari, signal.SIGUSR2)
@@ -642,6 +665,12 @@ def desktop():
     said = request({'Executable': '/bin/sh', 'Arguments': ['-c', 'cat /tmp/seamless-leap-restore.log; /bin/ps -axo pid,ppid,pgid,command | /usr/bin/grep -E "/tmp/sg/" | /usr/bin/cut -c1-100']}, 60)
     print('restore log:', said.get('Stdout'), said.get('Error'), flush=True)
     check('the guest\'s Dock and shadows are put back', 'dock: 0' in (said.get('Stdout') or ''))
+    # The agent is the press's while windows are out, so what the tools saw is read once they're back.
+    said = request({'Executable': '/bin/sh', 'Arguments': ['-c', '/usr/bin/grep -hE "placed window|raised window" /tmp/sg/leap-*.log; true']}, 60).get('Stdout') or ''
+    print('the tools saw:', said[-800:], flush=True)
+    placed = re.findall(r'placed window \d+ at \S+: error (\d+), display (\d+)x(\d+)', said)
+    print('asked for', asked, flush=True)
+    check('the guest\'s display was what was asked', any(not int(e) and (int(w) * k, int(h) * k) == asked for e, w, h in placed for k in (1, 2)))
     # Generated apps shouldn't stay known to the Mac after a clone's gone.
     for bundle in (source/'Build/bench'/tag).glob('**/Seamless Apps/*/*/*.app'):
         subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', str(bundle)])
@@ -660,8 +689,9 @@ def desktop_with_old_hook():
     request({'Executable': '/bin/sh', 'Arguments': ['-c', add]}, 60)
 
     def lines():
-        said = request({'Executable': '/bin/sh', 'Arguments': ['-c', f'/usr/bin/grep -c seamless-ws-hook {plist}; true']}, 60).get('Stdout', '').strip()
-        print('hook lines in the plist:', said, flush=True)
+        result = request({'Executable': '/bin/sh', 'Arguments': ['-c', f'/usr/bin/grep -c seamless-ws-hook {plist}; true']}, 60)
+        said = result.get('Stdout', '').strip()
+        print('hook lines in the plist:', said if said else result, flush=True)
         return said
 
     print('PASS' if lines() == '1' else 'FAIL', 'the entry is there to start with', flush=True)
@@ -675,6 +705,8 @@ def desktop_with_old_hook():
         time.sleep(1)
     now = request({'Action': 'seamless-state'}, 60)
     print('in Seamless', now, 'after', time.time() - pressed, flush=True)
+    print('guest frame', capture(f'{tag}-old-hook-frame.png'), flush=True)
+    lines()
     request({'Action': 'seamless-toggle'}, 60)
     time.sleep(8)
     removed = lines() == '0'

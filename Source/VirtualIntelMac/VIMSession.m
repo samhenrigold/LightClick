@@ -250,6 +250,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 @property VIMInstallationActivity *sleepActivity;
 @property NSString *lastGuestMessage;
 @property NSTimer *resizeTimer;
+@property id seamlessScreenObserver;
 @property NSSize lastRequestedSize;
 @property BOOL resizeArmed;
 @property NSString *sleepDisabledBoot;
@@ -1662,6 +1663,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         [self.diagnostics writeResult:@{
             @"Active" : @([VIMSeamlessHost isActiveFor:self]),
             @"WindowVisible" : @(self.window.isVisible),
+            @"RequestedWidth" : @(self.lastRequestedSize.width),
+            @"RequestedHeight" : @(self.lastRequestedSize.height),
             @"OwnSurfaces" : @([VIMSeamlessHost hasOwnSurfacesFor:self]),
             @"Prepared" : @([VIMSeamlessHost isPreparedFor:self])
         }];
@@ -3515,6 +3518,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     return NSMakePoint(NSMinX(screen), primary - NSMaxY(screen));
 }
 - (void)setSeamlessWindowHidden:(BOOL)hidden {
+    [self setSeamlessMirrorsHostScreen:hidden];
     if (hidden) {
         [self.displayView releaseInputCapture];
         [self.window orderOut:nil];
@@ -3525,6 +3529,43 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             [self.window makeKeyAndOrderFront:nil];
         }
     }
+}
+// So the guest flips menus, zooms and clips as it would on this screen. A point in the guest stays one on the host, as windows
+// are shown at the guest's point size whatever its density.
+// shortcut: one guest display, the main screen's, for all host screens, until QEMU's display has more than one.
+// shortcut: Mavericks and its like only. A Mojave clone asked for this stopped answering (page frozen, agent timing out), not yet
+// understood; its display stays as it is until then, and a window's guest place follows within that.
+- (void)setSeamlessMirrorsHostScreen:(BOOL)mirrors {
+    if (!self.machine.preMetalGuest)
+        return;
+    if (!mirrors) {
+        if (self.seamlessScreenObserver)
+            [NSNotificationCenter.defaultCenter removeObserver:self.seamlessScreenObserver];
+        self.seamlessScreenObserver = nil;
+        self.lastRequestedSize = NSZeroSize;
+        [self scheduleResize];
+        return;
+    }
+    if (!self.resizeArmed || self.state.displayModePending)
+        return;
+    if (!self.seamlessScreenObserver) {
+        __weak VIMSession *weakSelf = self;
+        self.seamlessScreenObserver = [NSNotificationCenter.defaultCenter
+            addObserverForName:NSApplicationDidChangeScreenParametersNotification
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification *note) {
+                      [weakSelf setSeamlessMirrorsHostScreen:YES];
+                    }];
+    }
+    [self.resizeTimer invalidate];
+    BOOL retina = [self.displayMode isEqual:@"retina"];
+    NSSize pixels = VIMRequestedGuestPixelSize(NSScreen.mainScreen.frame.size, retina ? 2 : 1, self.machine.preMetalGuest, retina,
+                                               self.openGLLargeResizeReady);
+    self.lastRequestedSize = pixels;
+    [self.displayConnection requestWidth:pixels.width
+                                  height:pixels.height
+                                 density:self.machine.preMetalGuest ? (retina ? 2 : 1) : 0];
 }
 - (void)noteSeamlessChanged {
     [self updateSeamlessButton];
@@ -4219,7 +4260,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     return options | NSApplicationPresentationAutoHideToolbar | NSApplicationPresentationAutoHideMenuBar;
 }
 - (void)scheduleResize {
-    if (!self.resizeArmed || self.state.displayModePending)
+    if (!self.resizeArmed || self.state.displayModePending || self.seamlessScreenObserver)
         return;
     [self.resizeTimer invalidate];
     __weak VIMSession *weakSelf = self;

@@ -45,6 +45,7 @@ enum SWMType {
     SWM_DRAG_SEND = 56, // Host to guest: a document id, then a guest path: send that file back under that id.
     SWM_APP_STATE = 57, // Guest to host: JSON with the app's badge, and whether it wants attention.
     SWM_CROP = 58, // Guest to host: show this window from the display's own frames. A frame for it is what shows where it's covered.
+    SWM_SET_PLACE = 68, // Host to guest: a window id, then x and y as int32, for the guest's own idea of where it is to match the host's.
     SWM_RAISE = 67, // Host to guest: this window, in front of its app's others, before the press that follows.
     SWM_FULL_SCREEN = 65, // Guest to host: a window id, then 1 if it's in the guest's full screen, 0 if it's left.
     SWM_SET_FULL_SCREEN = 66, // Host to guest: a window id, then 1 for full screen, 0 to leave.
@@ -148,6 +149,7 @@ struct SWMText {
 };
 struct SWMMessage {
     uint32_t minimized; // SWM_SET_MINIMIZED, beside its window_id
+    int32_t place_x, place_y; // SWM_SET_PLACE, beside its window_id
     uint16_t type;
     union {
         uint32_t version; // SWM_HELLO
@@ -378,6 +380,9 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
         case SWM_SET_FULL_SCREEN:
             fixed = 8;
             break;
+        case SWM_SET_PLACE:
+            fixed = 12;
+            break;
         case SWM_POINTER:
             fixed = SWM_POINTER_SIZE;
             break;
@@ -429,6 +434,11 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
         case SWM_SET_FULL_SCREEN:
             m->u.window_id = swm_r32(p);
             m->minimized = swm_r32(p + 4);
+            break;
+        case SWM_SET_PLACE:
+            m->u.window_id = swm_r32(p);
+            m->place_x = (int32_t)swm_r32(p + 4);
+            m->place_y = (int32_t)swm_r32(p + 8);
             break;
         case SWM_MODIFIERS:
             m->u.modifiers = swm_r32(p);
