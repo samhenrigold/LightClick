@@ -261,7 +261,7 @@ _stub_rep_movs:
 2:  ret
 
     .org _stub_base + 0x280
-// rep stos with the pattern already in v24.
+// rep stos with the pattern already in x22. No NEON, as for movs: a kernel zeroes pages with CR0.TS set.
     .globl _stub_rep_stos
 _stub_rep_stos:
     ldr x16, [x18, #CTX_DF]
@@ -270,7 +270,8 @@ _stub_rep_stos:
     .org _stub_base + 0x2C0 // boundary, as above
 1:  sub x20, x1, x17
     tbnz x20, #63, 2f
-    stp q24, q24, [x7]
+    stp x22, x22, [x7]
+    stp x22, x22, [x7, #16]
     add x7, x7, #32
     mov x1, x20
     b 1b

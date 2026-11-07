@@ -1196,7 +1196,7 @@ static void emit_string(const Insn *in) {
     int sf = !tr_compat;
     u32 *start = tr_cc;
     u32 *skip = 0;
-    if (in->rep && !tr_no_bulk_rep && (sub == 0 || (sub == 2 && !tr_hybrid))) { // stos's dup is outside the stub, where CR0.TS could not be backed out of
+    if (in->rep && !tr_no_bulk_rep && (sub == 0 || sub == 2)) {
         // Bulk first: a stub moves whole 32-byte chunks with exact registers between them. The plain loop below does what is left.
         u32 *wraps[2] = {0, 0};
         if (tr_compat) { // the stub's sums are 64 bits wide: a run that would pass 4 GB takes the plain loop, which wraps
@@ -1212,8 +1212,14 @@ static void emit_string(const Insn *in) {
             }
         }
         movimm(S1, (u64)(32 / sz));
-        if (sub == 2)
-            E(0x4E000C00u | (u32)sz << 16 | V_S0); // dup v24.<T>, the accumulator
+        if (sub == 2) { // the pattern, in an integer register: under CR0.TS, as in a kernel's bzero, SIMD would trap
+            if (sz == 8)
+                mov_reg(1, S2, 0);
+            else
+                ubfx(1, S2, 0, 0, sz * 8);
+            for (int width = sz * 8; width < 64; width *= 2)
+                logic_sh(1, 1, 0, S2, S2, S2, 0, width); // orr x22, x22, x22, lsl #width
+        }
         bl_abs(STUB(PRIV_VA + OFF_STUBS + (sub == 0 ? STUB_OFF_REP_MOVS : STUB_OFF_REP_STOS)));
         for (int i = 0; i < 2; i++)
             if (wraps[i])
