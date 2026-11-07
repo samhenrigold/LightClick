@@ -163,7 +163,7 @@ static struct {
 
 extern char isr0[], isr3[], isr6[], isr8[], isr13[], isr14[], isr32[], isr33[], isr128[], syscall_entry[];
 extern char user_blob[], user_blob_end[], u_syscalls[], u_touch[], u_touch_write[], u_spin[], u_cli[], u_ud2[], u_div0[], u_int3[], u_noncanon[],
-    u_kernel_read[], u_int80[], u_flags_at_fault[], u_sar16_at_fault[], u_sar16_fault_load[], u_rmw_fault[], u_store_loop[], u_return_value[], u_rep_copy[], u_store_cross[], u_load_cross[], u_table_limits[], u_idt_base[], u_gdt_base[];
+    u_kernel_read[], u_int80[], u_flags_at_fault[], u_sar16_at_fault[], u_sar16_fault_load[], u_cl_self_count_at_fault[], u_cl_self_count_fault_load[], u_rmw_fault[], u_store_loop[], u_return_value[], u_rep_copy[], u_store_cross[], u_load_cross[], u_table_limits[], u_idt_base[], u_gdt_base[];
 extern u64 enter_user(u64 rip, u64 rsp, u64 rflags);
 extern __attribute__((noreturn)) void return_from_user(void);
 
@@ -220,7 +220,7 @@ typedef struct {
 static volatile u64 ticks;
 static volatile int apic_eoi_needed;
 static volatile u64 df_seen, df_resume_rsp;
-static u64 last_vector, last_err, last_cr2, last_rip, last_flags, last_rdi, last_rsp, last_rdx;
+static u64 last_vector, last_err, last_cr2, last_rip, last_flags, last_rdi, last_rsp, last_rdx, last_rcx;
 static u32 fault_count;
 enum { M_EXIT_ON_FAULT, M_DEMAND, M_COW, M_RET_ADJ };
 static int fault_mode;
@@ -249,6 +249,7 @@ void trap_dispatch(Frame *f) {
     last_rdi = f->rdi;
     last_rsp = f->rsp;
     last_rdx = f->rdx;
+    last_rcx = f->rcx;
     fault_count++;
     if (f->vector == 14) {
         last_cr2 = read_cr2();
@@ -430,6 +431,13 @@ static void test_precise(void) {
               "sar16 fault case %d status %x rip %x rdx %x flags %x", i, r, last_rip, last_rdx, last_flags);
     }
     kprintf("PASS sar16 flags and full RDX at fault before TEST\n");
+    // CL must be captured before its own destination changes: input count 1 becomes result low byte 2.
+    r = run_user3(u_cl_self_count_at_fault, 0x20000000, 0, 0x8000000000000001ULL);
+    CHECK(r == 0x10E && last_vector == 14 && last_cr2 == 0x20000000 &&
+          last_rip == user_rip(u_cl_self_count_fault_load) && last_rcx == 2 &&
+          (last_flags & 0x8C5) == 0x801,
+          "cl self-count fault status %x rip %x rcx %x flags %x", r, last_rip, last_rcx, last_flags);
+    kprintf("PASS CL self-count flags at fault before TEST\n");
     // Read-only page: the store of add must fault with CF still set from stc and the page unchanged.
     u64 ro = frame_alloc();
     *phys(ro) = 0x77;

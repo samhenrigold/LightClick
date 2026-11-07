@@ -750,11 +750,17 @@ static void emit_shift(const Insn *in, int live) {
             return;
         }
         int op2 = kind == SH_SHL ? 0 : kind == SH_SHR ? 1 : 2;
+        // RCX/ECX can be both the value and CL. Save the effective flag count before writing it.
+        // Do not move this ahead of memory shifts: their prepared address may still occupy S1.
+        bool count_in_destination = !mem && in->rm == 1 && live;
+        if (count_in_destination)
+            and_imm_w(S1, 1, bits - 1);
         var_shift(sf, op2, rd, d, 1);
         if (mem)
             ldst(0, sz, rd, a);
         if (live) {
-            and_imm_w(S1, 1, bits - 1);
+            if (!count_in_destination)
+                and_imm_w(S1, 1, bits - 1);
             u32 *skip = tr_cc;
             cbz(0, 0, S1, 0);
             if (kind == SH_SHL) {
