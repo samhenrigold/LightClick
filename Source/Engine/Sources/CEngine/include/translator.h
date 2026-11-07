@@ -17,6 +17,7 @@ typedef struct {
     bool keep_kernel_tables, no_bulk_rep, no_return_prediction, all_flags_live, no_reuse;
     uint64_t ram_below_4g; // 0: RAM is one piece. Otherwise GPA 4 GB and up is host RAM at this offset
     bool profile_invalidations; // opt-in: time and count hash probes for one of every 256 non-dead block kills
+    bool invalidation_membership; // opt-in prototype: conservative view-membership bits for shared-block hash invalidation
 } TrConfig;
 
 typedef struct {
@@ -76,6 +77,9 @@ typedef struct {
     uint64_t invalidation_sampled_registered, invalidation_sampled_shared;
     uint64_t invalidation_hash_view_visits, invalidation_hash_probes, invalidation_hash_removals;
     uint64_t invalidation_map_unlink_ns, invalidation_hash_fanout_ns, invalidation_icache_ns;
+    uint64_t invalidation_membership_enabled, invalidation_membership_reliable, invalidation_membership_bytes;
+    uint64_t invalidation_membership_inserts, invalidation_membership_view_visits, invalidation_membership_stale_visits;
+    uint64_t invalidation_membership_removals, invalidation_membership_tracking_failures, invalidation_membership_full_scans;
 } TrStats;
 TrStats tr_stats(void);
 

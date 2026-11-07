@@ -146,6 +146,7 @@ public final class Engine {
         config.no_bulk_rep = options.hybrid && environment["LC_HVDBT_NO_BULK"] == "1"
         config.no_reuse = environment["LC_HVDBT_NO_REUSE"] == "1"
         config.profile_invalidations = environment["LC_HVDBT_PROFILE_INVALIDATION"] == "1"
+        config.invalidation_membership = environment["LC_HVDBT_INVALIDATION_MEMBERSHIP"] == "1"
         config.no_return_prediction = options.hybrid && environment["LC_HVDBT_NO_RETURN_PREDICTION"] == "1"
         config.all_flags_live = options.hybrid && environment["LC_HVDBT_ALL_FLAGS"] == "1"
         config.keep_kernel_tables = !options.hybrid || environment["LC_HVDBT_KEEP_KPTI"] == "1"
@@ -493,6 +494,11 @@ public final class Engine {
             + "smc \(ctx.pointee.stat_smc) pfs \(ctx.pointee.stat_pf_delivered) pt-writes \(ctx.pointee.stat_pt_writes) "
             + "steps \(ctx.pointee.stat_steps) irqs \(ctx.pointee.stat_irq) view-evictions \(ctx.pointee.stat_view_evictions) unshadowed \(ctx.pointee.stat_pt_unshadow) pool-reclaims \(ctx.pointee.stat_pool_reclaim)"
         if t.insns > 0 { line += String(format: " words/insn %.2f", Double(t.words) / Double(t.insns)) }
+        if t.invalidation_membership_enabled != 0 {
+            line += "\nmembership (global translator, not per-vCPU): enabled \(t.invalidation_membership_enabled) reliable \(t.invalidation_membership_reliable) bytes \(t.invalidation_membership_bytes) "
+                + "inserts \(t.invalidation_membership_inserts) visits \(t.invalidation_membership_view_visits) stales \(t.invalidation_membership_stale_visits) removals \(t.invalidation_membership_removals) "
+                + "trackFailures \(t.invalidation_membership_tracking_failures) fullScans \(t.invalidation_membership_full_scans)"
+        }
         return line
     }
 

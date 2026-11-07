@@ -50,6 +50,9 @@ typedef struct {
 } HostBlock;
 static HostBlock *hblocks;
 static u32 hblock_count[2];
+// Only domain blocks (part 0) need this sidecar: 32 bytes * BLOCKS_MAX = 16 MiB, allocated only for the prototype.
+// Bits are a superset: replacement, forgetting and view reuse may leave stale bits, never omit a published target.
+static u64 (*shared_hash_views)[MAX_VIEWS / 64];
 #define BLOCK_BASE(part) ((part) ? BLOCKS_MAX : 0)
 #define BLOCK_TABLE_PART2 ((OFF_BLOCKS2 - OFF_BLOCKS) / sizeof(BlockEntry))
 #define KEY_PART(key) (((key) & KEY_DOMAIN) ? 0 : 1)
@@ -1174,6 +1177,18 @@ void tr_init(const TrConfig *config) {
     tr_stub_pushf = cfg.stub_pushf;
     tr_stub_sahf = cfg.stub_sahf;
     hblocks = calloc(BLOCKS_MAX * 2, sizeof(HostBlock));
+    free(shared_hash_views);
+    shared_hash_views = NULL;
+    stats.invalidation_membership_enabled = cfg.invalidation_membership;
+    stats.invalidation_membership_reliable = 0;
+    stats.invalidation_membership_bytes = 0;
+    if (cfg.invalidation_membership) {
+        shared_hash_views = calloc(BLOCKS_MAX, sizeof(*shared_hash_views));
+        stats.invalidation_membership_reliable = shared_hash_views != NULL;
+        stats.invalidation_membership_bytes = shared_hash_views ? BLOCKS_MAX * sizeof(*shared_hash_views) : 0;
+        if (!shared_hash_views)
+            stats.invalidation_membership_tracking_failures++;
+    }
     block_map = calloc(MAP_SIZE, sizeof(MapEntry));
     frame_head = calloc(cfg.ram_size >> 12, sizeof(u32));
     dead_slots = calloc(DEAD_SLOTS, sizeof(u32));
@@ -1291,7 +1306,43 @@ static void hash_empty(int view) {
         t[i * 2] = 0;
 }
 
+// Called under the existing translator lock, before publishing any hash value/key. Unknown targets disable the
+// optimization until a global hash flush: a missing membership bit must never silently leave an executable lookup.
+static void membership_track(int view, u64 rip, u64 arm) {
+    if (!stats.invalidation_membership_reliable)
+        return;
+    u64 base = PRIV_VA + OFF_CC;
+    if (view < 0 || view >= MAX_VIEWS || arm < base || ((arm - base) & 3) != 0 || (arm - base) / 4 > UINT32_MAX)
+        goto uncertain;
+    u32 word = (u32)((arm - base) / 4);
+    HostBlock *hb = block_at(word);
+    if (!hb || hb->entry_word != word || hb->rip != rip || hb->dead || !hb->registered)
+        goto uncertain;
+    if (hb->view & KEY_DOMAIN) {
+        u64 idx = (u64)(hb - hblocks);
+        if (idx >= BLOCKS_MAX)
+            goto uncertain;
+        shared_hash_views[idx][view / 64] |= 1ULL << (view % 64);
+        stats.invalidation_membership_inserts++;
+    }
+    return;
+uncertain:
+    stats.invalidation_membership_tracking_failures++;
+    stats.invalidation_membership_reliable = 0;
+}
+
+static void membership_clear_all(void) {
+    if (shared_hash_views) {
+        memset(shared_hash_views, 0, BLOCKS_MAX * sizeof(*shared_hash_views));
+        stats.invalidation_membership_reliable = 1; // Every hash is empty; future insertions can be tracked from scratch.
+    }
+}
+
 void tr_hash_insert(int view, uint64_t rip, uint64_t arm) {
+    if (cfg.invalidation_membership) {
+        membership_track(view, rip, arm);
+        __atomic_thread_fence(__ATOMIC_RELEASE); // Publish membership before an existing-key value as well as a new key.
+    }
     u64 *t = hash_table(view);
     if (hash_slots_used[view] >= HASH_ENTRIES / 4 * 3) {
         hash_empty(view);
@@ -1356,7 +1407,56 @@ static void hash_remove_profiled(int view, u64 rip) {
     stats.invalidation_hash_removals += removed;
 }
 
-static void hash_remove(int view, u64 rip);
+// Conservative bits can outlive a hash entry or view. Never remove a different block that now has the same RIP.
+static void hash_remove_entry(int view, u64 rip, u64 arm, bool sample) {
+    u64 *t = hash_table(view);
+    u32 h = crc32c64(rip) & (HASH_ENTRIES - 1);
+    u64 probes = 0, removed = 0;
+    for (u32 n = 0; n < HASH_ENTRIES; n++, h = (h + 1) & (HASH_ENTRIES - 1)) {
+        u64 key = t[h * 2];
+        probes++;
+        if (!key)
+            break;
+        if (key == rip) {
+            if (t[h * 2 + 1] == arm) {
+                t[h * 2] = 1;
+                removed = 1;
+            }
+            break;
+        }
+    }
+    stats.invalidation_membership_view_visits++;
+    stats.invalidation_membership_stale_visits += !removed;
+    stats.invalidation_membership_removals += removed;
+    if (sample) {
+        stats.invalidation_hash_view_visits++;
+        stats.invalidation_hash_probes += probes;
+        stats.invalidation_hash_removals += removed;
+    }
+}
+
+static void invalidate_shared_hashes(u32 idx, bool sample) {
+    HostBlock *hb = &hblocks[idx];
+    if (cfg.invalidation_membership && stats.invalidation_membership_reliable && idx < BLOCKS_MAX) {
+        for (u32 group = 0; group < MAX_VIEWS / 64; group++) {
+            u64 bits = shared_hash_views[idx][group];
+            while (bits) {
+                u32 bit = (u32)__builtin_ctzll(bits);
+                bits &= bits - 1;
+                hash_remove_entry((int)(group * 64 + bit), hb->rip, tr_cc_va(cc_base + hb->entry_word), sample);
+            }
+        }
+    } else {
+        if (cfg.invalidation_membership)
+            stats.invalidation_membership_full_scans++;
+        for (int view = 0; view <= view_high; view++) {
+            if (sample)
+                hash_remove_profiled(view, hb->rip);
+            else
+                hash_remove(view, hb->rip);
+        }
+    }
+}
 
 static void kill_block(u32 idx) {
     HostBlock *hb = &hblocks[idx];
@@ -1375,23 +1475,23 @@ static void kill_block(u32 idx) {
             map_remove((int)hb->view, hb->rip);
             stats.invalidation_map_unlink_ns += invalidation_ns(mach_absolute_time() - began);
             began = mach_absolute_time();
-            if (hb->view & KEY_DOMAIN) {
-                for (int v = 0; v <= view_high; v++)
-                    hash_remove_profiled(v, hb->rip);
-            } else
+            if (hb->view & KEY_DOMAIN)
+                invalidate_shared_hashes(idx, true);
+            else
                 hash_remove_profiled((int)hb->view, hb->rip);
             stats.invalidation_hash_fanout_ns += invalidation_ns(mach_absolute_time() - began);
         } else {
             map_remove((int)hb->view, hb->rip);
-            if (hb->view & KEY_DOMAIN) {
-                for (int v = 0; v <= view_high; v++)
-                    hash_remove(v, hb->rip);
-            } else
+            if (hb->view & KEY_DOMAIN)
+                invalidate_shared_hashes(idx, false);
+            else
                 hash_remove((int)hb->view, hb->rip);
         }
     }
-    // Keep eager hash removal and entry poisoning: SVC_DEAD starts with view_lookup, and dead-block reuse can revive an entry.
-    // Leaving stale hash entries is not a profiling shortcut. Reverse actual-view membership is a later experiment only.
+    if (shared_hash_views && idx < BLOCKS_MAX)
+        memset(shared_hash_views[idx], 0, sizeof(*shared_hash_views));
+    // Keep eager removal of every lookup to this entry and entry poisoning: SVC_DEAD starts with view_lookup,
+    // and dead-block reuse can revive an entry. Conservative membership never makes lookup entries lazy.
     u32 *entry = cc_base + hb->entry_word;
     *entry = WORD_DEAD;
     if (sample) {
@@ -1501,6 +1601,7 @@ void tr_flush_parked(bool everything) {
     for (int v = 0; v <= view_high; v++)
         memset(hash_table(v), 0, HASH_BYTES);
     memset(hash_slots_used, 0, sizeof hash_slots_used);
+    membership_clear_all(); // Both full and private-part flushes empty ALL view hashes before any block index is reused.
     cc_cursor[1] = cc_base + CC_PART2_WORD;
     hblock_count[1] = 0;
     pc_map_used[1] = (OFF_PCMAP2 - OFF_PCMAP) / sizeof(PcMap);

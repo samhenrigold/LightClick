@@ -369,6 +369,17 @@ public final class Tally: @unchecked Sendable {
         }
         o += String(format: "translation time     %12.1f ms\n", seconds(t.translate_ns) * 1000)
         o += "blocks invalidated   " + perSecond(t.invalidated) + "\n"
+        o += "\n== invalidation membership prototype (global translator; flags/state are not interval deltas) ==\n"
+        o += "invalidation_membership_enabled \(t.invalidation_membership_enabled)\n"
+        o += "invalidation_membership_reliable \(t.invalidation_membership_reliable)\n"
+        o += "invalidation_membership_bytes \(t.invalidation_membership_bytes)\n"
+        o += "invalidation_membership_inserts \(t.invalidation_membership_inserts)\n"
+        o += "invalidation_membership_view_visits \(t.invalidation_membership_view_visits)\n"
+        o += "invalidation_membership_stale_visits \(t.invalidation_membership_stale_visits)\n"
+        o += "invalidation_membership_removals \(t.invalidation_membership_removals)\n"
+        o += "invalidation_membership_tracking_failures \(t.invalidation_membership_tracking_failures)\n"
+        o += "invalidation_membership_full_scans \(t.invalidation_membership_full_scans)\n"
+        o += "Conservative bits may be stale; removals require the current ARM entry. Do not sum vCPU files.\n\n"
         if t.invalidation_profile_enabled != 0 {
             o += "\n== sampled invalidation cost (global translator; do not sum vCPU files) ==\n"
             o += "sample_period_kills 256; costs are unscaled sampled nanoseconds, including counting overhead\n"
