@@ -270,7 +270,9 @@ final class SeamlessHost: NSObject {
         let path = session.machinePath
         Task {
             let guest = AgentGuest(machinePath: path)
-            try? await Task.sleep(for: .seconds(20))
+            // A test staging its own programs at the same moment gets its connection ended, as a request did under clipboard setup.
+            let isTest = ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil
+            try? await Task.sleep(for: .seconds(isTest ? 90 : 20))
             for _ in 0..<60 {
                 guard VIMSession.running(forMachinePath: path) != nil else { return }
                 if await guest.run("/usr/bin/uname", ["-r"]).exitCode == 0 { break }
