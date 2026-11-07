@@ -69,7 +69,7 @@ extension ConfigurationWindow {
             [
                 [NSTextField(labelWithString: "Processors:"), cpu],
                 [NSTextField(labelWithString: "Memory:"), memoryColumn]
-            ], rowSpacing: 22)
+            ] + engineRows(), rowSpacing: 22)
         grid.column(at: 1).xPlacement = .leading
         grid.row(at: 1).yPlacement = .top
         return settingsColumn([
@@ -79,7 +79,67 @@ extension ConfigurationWindow {
     }
 
     @objc private func processorsChanged(_ sender: NSPopUpButton) {
-        commit(["CPUCount": sender.selectedTag()])
+        guard commit(["CPUCount": sender.selectedTag()]) else { return }
+        // The engine's rows depend on the count. Finish any memory being typed first, as a render would discard it.
+        window?.makeFirstResponder(nil)
+        if !invalidField { render() }
+    }
+
+    private static let runtimeHasEngine = EngineAvailability.runtimeHasEngine(
+        packaging: (Bundle.main.resourceURL?.appendingPathComponent("Runtime/Packaging.plist")).flatMap {
+            try? Data(contentsOf: $0)
+        })
+
+    /// Nothing on Intel, where the engine doesn't exist, or for a guest it would never run.
+    private func engineRows() -> [[NSView]] {
+        #if arch(arm64)
+            guard EngineAvailability.isOffered(for: (editable["Guest"] as? String).flatMap(Guest.init(rawValue:)))
+            else { return [] }
+            let reason = EngineAvailability.unavailableReason(
+                runtimeHasEngine: Self.runtimeHasEngine,
+                processors: (editable["CPUCount"] as? NSNumber)?.intValue ?? 0)
+            let hypervisor = reason == nil && editable["ExecutionEngine"] as? String == "on"
+            let engine = NSPopUpButton()
+            engine.addItems(withTitles: ["Software (TCG)", "Hypervisor"])
+            engine.selectItem(at: hypervisor ? 1 : 0)
+            engine.isEnabled = reason == nil
+            engine.target = self
+            engine.action = #selector(engineChanged)
+            engine.toolTip =
+                "Hypervisor runs the virtual Mac’s 64-bit code in a translator inside a virtual machine, which is faster. "
+                + "Software (TCG) emulates every instruction."
+            engine.widthAnchor.constraint(equalToConstant: 170).isActive = true
+            let meltdown = NSButton(
+                checkboxWithTitle: "Protect against Meltdown", target: self,
+                action: #selector(meltdownProtectionChanged))
+            meltdown.state = editable["MeltdownProtection"] as? String == "on" ? .on : .off
+            meltdown.isEnabled = hypervisor
+            meltdown.toolTip =
+                "On keeps the page table switch macOS makes at every system call. Off skips it in the Hypervisor engine: "
+                + "system calls are faster, and the virtual Mac loses its Meltdown protection. Versions of macOS without "
+                + "this protection aren’t affected."
+            var rows: [[NSView]] = [
+                [NSTextField(labelWithString: "Engine:"), engine], [NSGridCell.emptyContentView, meltdown]
+            ]
+            if let reason {
+                let note = settingsText(reason)
+                note.widthAnchor.constraint(equalToConstant: 280).isActive = true
+                rows.append([NSGridCell.emptyContentView, note])
+            }
+            return rows
+        #else
+            return []
+        #endif
+    }
+
+    @objc private func engineChanged(_ sender: NSPopUpButton) {
+        guard commit(["ExecutionEngine": sender.indexOfSelectedItem == 1 ? "on" : "off"]) else { return }
+        window?.makeFirstResponder(nil)
+        if !invalidField { render() }
+    }
+
+    @objc private func meltdownProtectionChanged(_ sender: NSButton) {
+        commit(["MeltdownProtection": sender.state == .on ? "on" : "off"])
     }
 
     @objc private func memoryStepped(_ sender: NSStepper) {

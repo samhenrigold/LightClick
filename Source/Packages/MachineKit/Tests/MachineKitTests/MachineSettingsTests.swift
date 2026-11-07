@@ -31,7 +31,9 @@ import Testing
         func restored(_ category: SettingsCategory, retina: Bool = true) -> NSDictionary? {
             SettingsDefaults.restored(category, supportsRetina: retina, processorCount: 2).map { $0 as NSDictionary }
         }
-        #expect(restored(.cpuAndMemory) == ["CPUCount": 2, "MemoryMiB": 4096])
+        #expect(
+            restored(.cpuAndMemory)
+                == ["CPUCount": 2, "MemoryMiB": 4096, "ExecutionEngine": "off", "MeltdownProtection": "off"])
         #expect(
             restored(.graphics)
                 == ["DisplayMode": "retina", "RetinaEnabled": true, "DisplayScalingFilter": "linear"])
@@ -42,6 +44,35 @@ import Testing
         #expect(
             restored(.sound) == ["AudioEnabled": true, "AudioInputDevice": "default", "AudioOutputDevice": "default"])
         #expect(restored(.hardDisk) == nil)
+    }
+}
+
+@Suite struct EngineAvailabilityTests {
+    @Test func onlyGuestsWithA64BitKernelAreOffered() {
+        #expect(!EngineAvailability.isOffered(for: .tiger))
+        #expect(!EngineAvailability.isOffered(for: .leopard))
+        #expect(!EngineAvailability.isOffered(for: nil))
+        for guest in Guest.allCases where guest != .tiger && guest != .leopard {
+            #expect(EngineAvailability.isOffered(for: guest))
+        }
+    }
+
+    @Test func theReceiptSaysWhetherTheRuntimeHasIt() throws {
+        func receipt(_ arguments: [String: [String]]) throws -> Data {
+            try PropertyListSerialization.data(
+                fromPropertyList: ["RuntimeBuild": ["ConfigureArguments": arguments]], format: .xml, options: 0)
+        }
+        #expect(EngineAvailability.runtimeHasEngine(packaging: try receipt(["arm64": ["-Dhvdbt_engine=/Engine"]])))
+        #expect(!EngineAvailability.runtimeHasEngine(packaging: try receipt(["arm64": ["--enable-tcg"]])))
+        #expect(!EngineAvailability.runtimeHasEngine(packaging: try receipt(["x86_64": ["-Dhvdbt_engine=/Engine"]])))
+        #expect(!EngineAvailability.runtimeHasEngine(packaging: Data("nonsense".utf8)))
+        #expect(!EngineAvailability.runtimeHasEngine(packaging: nil))
+    }
+
+    @Test func aReasonComesWithEveryRefusal() {
+        #expect(EngineAvailability.unavailableReason(runtimeHasEngine: true, processors: 8) == nil)
+        #expect(EngineAvailability.unavailableReason(runtimeHasEngine: true, processors: 9) != nil)
+        #expect(EngineAvailability.unavailableReason(runtimeHasEngine: false, processors: 4) != nil)
     }
 }
 

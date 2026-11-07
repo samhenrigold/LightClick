@@ -5,6 +5,8 @@
 /* Set by the app (MachineOptions). */
 /* LC_HVDBT (enum, default off): Run the guest's 64-bit code in the hypervisor engine, with TCG as its other half. Needs a QEMU configured with -Dhvdbt_engine. Apple silicon only. */
 #define LC_OPTION_LC_HVDBT "LC_HVDBT"
+/* LC_HVDBT_KEEP_KPTI (enum, default off): Keep XNU's Meltdown page table switch in code the engine translates. Off skips it, for faster system calls, and the guest loses Meltdown protection. Only the engine reads it. */
+#define LC_OPTION_LC_HVDBT_KEEP_KPTI "LC_HVDBT_KEEP_KPTI"
 /* VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY (path, default unset: no in-process renderer): The OpenGL host library QEMU loads into its own process. */
 #define LC_OPTION_VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY "VIM_PASSTHROUGH_OPENGL_INPROCESS_LIBRARY"
 /* VIM_PASSTHROUGH_OPENGL_INLINE (flag, default off): Have the in-process OpenGL host serve inline. */

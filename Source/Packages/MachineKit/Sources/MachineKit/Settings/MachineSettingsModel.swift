@@ -80,7 +80,11 @@ public enum SettingsDefaults {
         _ category: SettingsCategory, supportsRetina: Bool, processorCount: Int
     ) -> [String: Any]? {
         switch category {
-        case .cpuAndMemory: ["CPUCount": min(4, processorCount), "MemoryMiB": 4096]
+        case .cpuAndMemory:
+            [
+                "CPUCount": min(4, processorCount), "MemoryMiB": 4096, "ExecutionEngine": "off",
+                "MeltdownProtection": "off"
+            ]
         case .graphics:
             [
                 "DisplayMode": supportsRetina ? "retina" : "scaled", "RetinaEnabled": supportsRetina,
@@ -148,6 +152,37 @@ public struct SettingsHardwareLimits: Equatable, Sendable {
     /// A slider position, in megabytes, which can't exceed the limit.
     public func memoryMiB(fromSliderGiB value: Double) -> Int {
         min(maximumMemoryMiB, 1024 * Int(value.rounded()))
+    }
+}
+
+/// Who the CPU & Memory page offers the Hypervisor engine to.
+public enum EngineAvailability {
+    /// hvdbt_want_engine stops QEMU past this many vCPUs, so a launch uses software instead.
+    public static let maximumProcessors = 8
+
+    /// The engine takes over at a 64-bit kernel's entry. Tiger's and Leopard's kernels are 32-bit, so it would never run.
+    public static func isOffered(for guest: Guest?) -> Bool {
+        guard let guest else { return false }
+        return guest != .tiger && guest != .leopard
+    }
+
+    /// Whether the packaged runtime's QEMU for Apple silicon was configured with the engine, from Packaging.plist.
+    public static func runtimeHasEngine(packaging: Data?) -> Bool {
+        guard let packaging,
+            let receipt = try? PropertyListSerialization.propertyList(from: packaging, format: nil) as? [String: Any],
+            let build = receipt["RuntimeBuild"] as? [String: Any],
+            let configure = build["ConfigureArguments"] as? [String: [String]]
+        else { return false }
+        return configure["arm64"]?.contains { $0.hasPrefix("-Dhvdbt_engine=") } == true
+    }
+
+    /// Why the engine can't be chosen, or nil if it can.
+    public static func unavailableReason(runtimeHasEngine: Bool, processors: Int) -> String? {
+        if !runtimeHasEngine { return "This copy of Light Click was built without the Hypervisor engine." }
+        if processors > maximumProcessors {
+            return "Hypervisor runs up to \(maximumProcessors) processors, so this Mac uses Software."
+        }
+        return nil
     }
 }
 
