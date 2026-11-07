@@ -155,6 +155,33 @@ struct GuestAgentTests {
         #expect(script == "exec '/bin/sh' '-c' '" + long.replacingOccurrences(of: "'", with: "'\\''") + "'\n")
     }
 
+    /// The script must hand over exactly the arguments it was given: run by a real shell here, quotes, newlines and an
+    /// empty argument come back as they went, so a file name with an apostrophe can't turn into a different command.
+    @Test func aCommandSentAsAFileKeepsItsArgumentsExactly() async throws {
+        let fake = FakeGuestAgent { process in
+            process.path == "/usr/bin/mktemp"
+                ? .finished(exitCode: 0, output: "/private/tmp/vim-exec.Ab12Cd\n")
+                : .finished(exitCode: 0)
+        }
+        defer { fake.stop() }
+        let agent = try await connected(to: fake) { $0.isPreMetalGuest = true }
+        defer { agent.close() }
+        let arguments = [
+            "%s|", "Sam's file.txt", "", "two\nlines", "'", "$HOME `date` \\", String(repeating: "x", count: 1000)
+        ]
+        _ = try await agent.runExecutable("/usr/bin/printf", arguments: arguments, timeout: 0)
+        let script = fake.state.withLock { $0.files["/private/tmp/vim-exec.Ab12Cd/run.sh"] } ?? Data()
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+        shell.arguments = ["-c", String(decoding: script, as: UTF8.self)]
+        let output = Pipe()
+        shell.standardOutput = output
+        try shell.run()
+        shell.waitUntilExit()
+        let printed = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        #expect(printed == arguments.dropFirst().map { $0 + "|" }.joined())
+    }
+
     @Test func aTimeoutIsReportedAsInterruptedAndNotRetried() async throws {
         let fake = FakeGuestAgent { _ in .running }
         defer { fake.stop() }
