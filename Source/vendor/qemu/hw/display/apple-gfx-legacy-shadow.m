@@ -147,7 +147,7 @@ static os_unfair_lock seamless_latest_lock = OS_UNFAIR_LOCK_INIT;
 static id<MTLTexture> seamless_latest[8192]; /* After a window's, its shape's. */
 static uint64_t seamless_latest_passes[8192], seamless_sent_passes[8192];
 static struct SeamlessCopies seamless_copies[8192];
-static uint64_t seamless_copied, seamless_copies_dropped;
+static uint64_t seamless_copied, seamless_copies_dropped, seamless_copies_replaced;
 static void seamless_composite_drew(id<MTLTexture> texture, uint32_t window)
 {
     [texture retain];
@@ -158,45 +158,47 @@ static void seamless_composite_drew(id<MTLTexture> texture, uint32_t window)
     os_unfair_lock_unlock(&seamless_latest_lock);
     [old release];
 }
+static int seamless_make_copy(struct SeamlessCopies *copies, int i, id<MTLTexture> like)
+{
+    /* What a frame still shown is in goes on being its holder's, by its own reference. */
+    if (copies->hold[i]) mach_port_mod_refs(mach_task_self(), copies->hold[i], MACH_PORT_RIGHT_RECEIVE, -1);
+    if (copies->surface[i]) CFRelease(copies->surface[i]);
+    [copies->texture[i] release];
+    copies->hold[i] = 0;
+    copies->surface[i] = NULL;
+    copies->texture[i] = nil;
+    copies->held[i] = 0;
+    uint32_t width = (uint32_t)like.width, height = (uint32_t)like.height;
+    NSDictionary *properties = @{
+        (id)kIOSurfaceWidth: @(width), (id)kIOSurfaceHeight: @(height), (id)kIOSurfaceBytesPerElement: @4,
+        (id)kIOSurfacePixelFormat: @(IOSurfaceGetPixelFormat(like.iosurface))
+    };
+    copies->surface[i] = IOSurfaceCreate((CFDictionaryRef)properties);
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:like.pixelFormat
+                                                                                          width:width
+                                                                                         height:height
+                                                                                      mipmapped:NO];
+    descriptor.storageMode = like.storageMode;
+    copies->texture[i] = copies->surface[i] ? [like.device newTextureWithDescriptor:descriptor
+                                                                          iosurface:copies->surface[i]
+                                                                              plane:0]
+                                            : nil;
+    return copies->texture[i] && !mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &copies->hold[i]);
+}
 static int seamless_make_copies(struct SeamlessCopies *copies, id<MTLTexture> like)
 {
-    uint32_t width = (uint32_t)like.width, height = (uint32_t)like.height;
-    for (int i = 0; i < SEAMLESS_COPIES; i++) {
-        /* What a frame still held by the consumer is in keeps going through its right. */
-        if (copies->hold[i]) mach_port_mod_refs(mach_task_self(), copies->hold[i], MACH_PORT_RIGHT_RECEIVE, -1);
-        if (copies->surface[i]) CFRelease(copies->surface[i]);
-        [copies->texture[i] release];
-        copies->hold[i] = 0;
-        copies->surface[i] = NULL;
-        copies->texture[i] = nil;
-        copies->held[i] = 0;
-    }
-    copies->width = width;
-    copies->height = height;
-    for (int i = 0; i < SEAMLESS_COPIES; i++) {
-        NSDictionary *properties = @{
-            (id)kIOSurfaceWidth: @(width), (id)kIOSurfaceHeight: @(height), (id)kIOSurfaceBytesPerElement: @4,
-            (id)kIOSurfacePixelFormat: @(IOSurfaceGetPixelFormat(like.iosurface))
-        };
-        copies->surface[i] = IOSurfaceCreate((CFDictionaryRef)properties);
-        MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:like.pixelFormat
-                                                                                              width:width
-                                                                                             height:height
-                                                                                          mipmapped:NO];
-        descriptor.storageMode = like.storageMode;
-        copies->texture[i] = copies->surface[i] ? [like.device newTextureWithDescriptor:descriptor
-                                                                              iosurface:copies->surface[i]
-                                                                                  plane:0]
-                                                : nil;
-        if (!copies->texture[i] || mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &copies->hold[i])) {
+    copies->width = (uint32_t)like.width;
+    copies->height = (uint32_t)like.height;
+    for (int i = 0; i < SEAMLESS_COPIES; i++)
+        if (!seamless_make_copy(copies, i, like)) {
             copies->width = 0;
             return 0;
         }
-    }
     return 1;
 }
-static int seamless_free_copy(struct SeamlessCopies *copies)
+static int seamless_free_copy(struct SeamlessCopies *copies, id<MTLTexture> like)
 {
+    int unheld = -1;
     for (int i = 0; i < SEAMLESS_COPIES; i++) {
         struct {
             mach_msg_header_t header;
@@ -205,7 +207,16 @@ static int seamless_free_copy(struct SeamlessCopies *copies)
         while (__atomic_load_n(&copies->held[i], __ATOMIC_RELAXED) &&
                !mach_msg(&notice.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(notice), copies->hold[i], 0, 0))
             __atomic_fetch_sub(&copies->held[i], 1, __ATOMIC_RELAXED);
-        if (!copies->held[i] && !IOSurfaceIsInUse(copies->surface[i])) return i;
+        if (!copies->held[i]) {
+            if (!IOSurfaceIsInUse(copies->surface[i])) return i;
+            unheld = i;
+        }
+    }
+    /* Let go of but still in use: a layer's, say, and one that's not on the screen may not finish with it for a long time. It's
+     * left to them, and a new one takes its place, so only what's really being held can hold up a window's frames. */
+    if (unheld >= 0 && seamless_make_copy(copies, unheld, like)) {
+        __atomic_fetch_add(&seamless_copies_replaced, 1, __ATOMIC_RELAXED);
+        return unheld;
     }
     return -1;
 }
@@ -224,9 +235,18 @@ static void seamless_composite_finished(id<MTLCommandBuffer> command, uint32_t w
         struct SeamlessCopies *copies = &seamless_copies[slot];
         int index = -1;
         if ((copies->width == source.width && copies->height == source.height) || seamless_make_copies(copies, source))
-            index = seamless_free_copy(copies);
+            index = seamless_free_copy(copies, source);
         if (index < 0) {
             __atomic_fetch_add(&seamless_copies_dropped, 1, __ATOMIC_RELAXED);
+            /* Each so often, for telling a consumer that's holding frames from a guest that's stopped drawing them. */
+            static FILE *dropped;
+            static uint64_t dropped_count;
+            if (!dropped) dropped = fopen([NSString stringWithFormat:@"%s/dropped.txt", seamless_pvg_dir].UTF8String, "w");
+            if (dropped && dropped_count++ % 60 == 0) {
+                fprintf(dropped, "slot %u dropped %llu replaced %llu held %d %d %d\n", slot, (unsigned long long)dropped_count,
+                        (unsigned long long)seamless_copies_replaced, copies->held[0], copies->held[1], copies->held[2]);
+                fflush(dropped);
+            }
             [source release];
             continue;
         }
