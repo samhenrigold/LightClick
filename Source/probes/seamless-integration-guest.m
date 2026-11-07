@@ -239,6 +239,12 @@ static int printMinimized(int pid, uint32_t number) {
             answer = value == kCFBooleanTrue ? "minimized yes" : "minimized no";
             if (value)
                 CFRelease(value);
+            CFTypeRef full = NULL;
+            AXUIElementCopyAttributeValue(window, CFSTR("AXFullScreen"), &full);
+            if (full == kCFBooleanTrue)
+                printf("full screen yes\n");
+            if (full)
+                CFRelease(full);
             break;
         }
         CFRelease(windows);
@@ -248,7 +254,7 @@ static int printMinimized(int pid, uint32_t number) {
     return 0;
 }
 
-static int setMinimized(int pid, uint32_t number, int minimized) {
+static int setWindowFlag(int pid, uint32_t number, CFStringRef attribute, int on) {
     extern AXError _AXUIElementGetWindow(AXUIElementRef, uint32_t *);
     AXUIElementRef app = AXUIElementCreateApplication(pid);
     CFArrayRef windows = NULL;
@@ -258,8 +264,7 @@ static int setMinimized(int pid, uint32_t number, int minimized) {
             AXUIElementRef window = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
             uint32_t found = 0;
             if (_AXUIElementGetWindow(window, &found) == kAXErrorSuccess && found == number) {
-                result = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute,
-                                                      minimized ? kCFBooleanTrue : kCFBooleanFalse) != kAXErrorSuccess;
+                result = AXUIElementSetAttributeValue(window, attribute, on ? kCFBooleanTrue : kCFBooleanFalse) != kAXErrorSuccess;
                 break;
             }
         }
@@ -846,8 +851,11 @@ int main(int argc, char **argv) {
         if (!strcmp(command, "is-minimized"))
             return printMinimized(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")));
         if (!strcmp(command, "set-minimized"))
-            return setMinimized(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")),
-                                atoi(option(argc, argv, "--state", "1")));
+            return setWindowFlag(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")),
+                                 kAXMinimizedAttribute, atoi(option(argc, argv, "--state", "1")));
+        if (!strcmp(command, "set-full-screen"))
+            return setWindowFlag(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")),
+                                 CFSTR("AXFullScreen"), atoi(option(argc, argv, "--state", "1")));
         if (!strcmp(command, "icon"))
             return printIcon(option(argc, argv, "--path", ""));
         if (!strcmp(command, "menu"))

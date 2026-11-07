@@ -572,6 +572,7 @@ def desktop():
         # Not a pass or a fail yet: what a real guest full screen does to this window, and to the others.
         command.write_text('guest-full-screen')
         print('before full screen', [row[-50:] for row in proxy_windows()], flush=True)
+        (results/f'{tag}-clicks.txt.full-screen').unlink(missing_ok=True)
         os.kill(safari, signal.SIGUSR2)
         time.sleep(8)
         print('in full screen', [row[-50:] for row in proxy_windows()], flush=True)
@@ -580,6 +581,8 @@ def desktop():
         os.kill(safari, signal.SIGUSR2)
         time.sleep(8)
         print('after full screen', [row[-50:] for row in proxy_windows()], flush=True)
+        said = (results/f'{tag}-clicks.txt.full-screen')
+        print('proxy says', said.read_text() if said.exists() else 'nothing (or the display was asleep, and it really did)', flush=True)
         frame = capture(f'{tag}-desktop-frame.png')
         print('guest frame', frame, flush=True)
     pressed = time.time()

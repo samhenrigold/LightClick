@@ -994,6 +994,15 @@ static int drain_input(struct Stream *s) {
                       m.minimized ? "1" : "0", (char *)NULL);
                 _exit(127);
             }
+        } else if (m.type == SWM_SET_FULL_SCREEN) {
+            if (session_menu_tool && session_app_pid && !fork()) {
+                char pid[16], window[16];
+                snprintf(pid, sizeof(pid), "%d", session_app_pid);
+                snprintf(window, sizeof(window), "%u", m.u.window_id);
+                execl(session_menu_tool, session_menu_tool, "set-full-screen", "--pid", pid, "--window", window, "--state",
+                      m.minimized ? "1" : "0", (char *)NULL);
+                _exit(127);
+            }
         } else if (m.type == SWM_FOCUS)
             activate_owner(s);
         offset += used;
@@ -1439,6 +1448,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
+    int full_screen, asked_full_screen;
     int away; // Off the screen: see tree_window_is_away.
     uint32_t materials_hash;
     int minimized;
@@ -1833,9 +1843,55 @@ static int tree_send_covers(struct Stream *s, struct TreeWindow *w, const struct
     return send_all(s->fd, message, SWM_HEADER_SIZE + size);
 }
 
+// Whether a window of any app has the guest's whole display, as a full screen one has, which has every other window off the screen.
+static int tree_display_is_taken(void) {
+    CGRect display = CGDisplayBounds(CGMainDisplayID());
+    for (int i = 0; i < tree_all_count; i++) {
+        const struct TreeAll *w = &tree_all[i];
+        if (w->layer == 0 && w->bounds.size.width >= display.size.width &&
+            CGRectGetMaxY(w->bounds) >= CGRectGetMaxY(display))
+            return 1;
+    }
+    return 0;
+}
+
+// Is this window, which has taken the display's whole width and reached its bottom, in full screen? Only asked when that first holds, as
+// asking starts a program, and it's the only way of telling that from a zoomed window.
+static int tree_send_full_screen(struct Stream *s, struct TreeWindow *w, const struct TreeItem *item) {
+    CGRect display = CGDisplayBounds(CGMainDisplayID());
+    int fills = item->layer == 0 && item->title[0] && item->bounds.size.width >= display.size.width &&
+                CGRectGetMaxY(item->bounds) >= CGRectGetMaxY(display);
+    int full = 0;
+    if (fills && !w->full_screen && !w->asked_full_screen && session_menu_tool && item->pid) {
+        char pid_text[16], window[16];
+        snprintf(pid_text, sizeof(pid_text), "%d", item->pid);
+        snprintf(window, sizeof(window), "%u", item->id);
+        char *const ask[] = {(char *)session_menu_tool, "is-minimized", "--pid", pid_text, "--window", window, NULL};
+        char *said = run_tool(ask);
+        full = said && strstr(said, "full screen yes");
+        free(said);
+        w->asked_full_screen = 1;
+    } else {
+        full = fills && w->full_screen;
+    }
+    if (!fills)
+        w->asked_full_screen = 0;
+    if (full == w->full_screen)
+        return 0;
+    w->full_screen = full;
+    uint8_t message[SWM_HEADER_SIZE + 8];
+    swm_header(message, SWM_FULL_SCREEN, 8);
+    swm_w32(message + SWM_HEADER_SIZE, item->id);
+    swm_w32(message + SWM_HEADER_SIZE + 4, (uint32_t)full);
+    return send_all(s->fd, message, sizeof(message));
+}
+
 // Asks the app, as a minimized window isn't in WindowServer's list by its number, even when asked for by that number.
 // 2 for minimized, 1 for there but elsewhere, such as behind another app's full screen Space, and 0 for gone.
 static int tree_window_is_away(CGWindowID id, pid_t pid) {
+    // The app can't see one on another Space. shortcut: one closed meanwhile stays until it's asked about again, after the full screen.
+    if (tree_display_is_taken())
+        return 1;
     if (!session_menu_tool)
         return 0;
     char pid_text[16], window[16];
@@ -2042,6 +2098,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             if (own_surface && tree_send_surface_origin(s, w, id))
                 goto done;
             if (own_surface && tree_send_materials(s, w, item))
+                goto done;
+            if (tree_shared && tree_send_full_screen(s, w, item))
                 goto done;
             // With several apps, what's in front can be anyone's, which only the guest knows.
             if (tree_shared && crop && !own_surface) {

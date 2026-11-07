@@ -107,6 +107,9 @@ public final class SeamlessSession {
     private var appGone = false
     private var stopped = false
     private var activateWhenConnected = false
+    private var fullScreenOffset: NSPoint?
+    /// Where windows that have gone were dragged to, by title: a window comes back from full screen with a new number.
+    private var offsetsOfGoneWindows: [String: NSPoint] = [:]
     private var lastMenu: [GuestMenuItem]?
     private var nextDocument: UInt32 = 0
     private var documentPaths: [UInt32: String] = [:]
@@ -413,6 +416,10 @@ public final class SeamlessSession {
         case .covers(let id, let rects):
             surfaces[id]?.guestCovers = rects
             if let surface = surfaces[id] { showCrops(of: [surface]) }
+        case .fullScreen(let id, let on):
+            note("# window \(id) \(on ? "in" : "out of") full screen")
+            setFullScreen(on, window: surfaces[id]?.window)
+            proxy?.send(SessionCommand.fullScreenSurface(id: Int(id), fullScreen: on))
         case .materials(let id, let rows):
             surfaces[id]?.materials = rows
             proxy?.send(SessionCommand.setMaterials(id: Int(id), rows))
@@ -424,6 +431,9 @@ public final class SeamlessSession {
             if let surface = surfaces[id] { showCrops(of: [surface]) }
         case .gone(let id):
             note("# window \(id) gone")
+            if let surface = surfaces[id], let offset = surface.hostOffset, !surface.window.title.isEmpty {
+                offsetsOfGoneWindows[surface.window.title] = offset
+            }
             surfaces[id] = nil
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
             onWindowsChanged?()
@@ -468,6 +478,7 @@ public final class SeamlessSession {
         } else {
             guard let made = makeSurface(window) else { return }
             surface = made
+            surface.hostOffset = offsetsOfGoneWindows.removeValue(forKey: window.title)
             surfaces[window.id] = made
         }
         surface.window = window
@@ -529,6 +540,20 @@ public final class SeamlessSession {
         return Surface(window: window, context: context, layer: layer)
     }
 
+    /// All of this app's windows centred on the host's screen, as the guest's display is, the guest's size being what it is.
+    /// shortcut: not growing the guest's display to the host's, which Mavericks' can't go past 2560x1600 for, until there's a way to do
+    /// that for one window with the others where they were. So a host screen shows it at the guest's size, with black around.
+    private func setFullScreen(_ on: Bool, window: SessionWire.Window?) {
+        if on, let window, let screen = NSScreen.main?.frame {
+            fullScreenOffset = NSPoint(
+                x: (screen.width - Double(window.width)) / 2 - Double(window.x),
+                y: (screen.height - Double(window.y) - Double(window.height)) / 2)
+        } else {
+            fullScreenOffset = nil
+        }
+        for surface in surfaces.values { tellProxy(surface) }
+    }
+
     private func tellProxy(_ surface: Surface) {
         let window = surface.window
         let primary = NSScreen.screens.first?.frame.height ?? 0
@@ -544,7 +569,7 @@ public final class SeamlessSession {
             .min { $0.window.order < $1.window.order }
         let front = surfaces.values.filter { $0.hostOffset != nil && !$0.overlay && !$0.window.title.isEmpty }
             .min { $0.window.order < $1.window.order }
-        let offset = surface.hostOffset ?? parent?.hostOffset ?? (surface.overlay ? front?.hostOffset : nil) ?? guestOffset ?? .zero
+        let offset = fullScreenOffset ?? surface.hostOffset ?? parent?.hostOffset ?? (surface.overlay ? front?.hostOffset : nil) ?? guestOffset ?? .zero
         let side = Double(window.margin)
         let width = Double(window.width) + 2 * side
         let height = Double(window.height) + 2 * side
@@ -793,6 +818,9 @@ public final class SeamlessSession {
             if let id = surfaces.values.min(by: { $0.window.order < $1.window.order })?.window.id {
                 sendToGuest(SessionWire.value(.focus, id))
             }
+        case .surfaceLeftFullScreen(let id):
+            setFullScreen(false, window: nil)
+            sendToGuest(SessionWire.setFullScreen(window: UInt32(clamping: id), false))
         case .surfaceMinimized(let id, let minimized):
             sendToGuest(SessionWire.setMinimized(window: UInt32(clamping: id), minimized))
         case .surfaceMoved(let id, let x, let y):

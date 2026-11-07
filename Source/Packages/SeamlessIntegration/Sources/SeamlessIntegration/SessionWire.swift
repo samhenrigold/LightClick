@@ -15,7 +15,7 @@ public enum SessionWire {
         case hello = 1, window = 2, frame = 3, gone = 4
         case pointer = 16, key = 17, focus = 18
         case menu = 48, menuPress = 49, document = 50, quitApp = 51, appGone = 52
-        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58, overlay = 59, surfaceOrigin = 60, covers = 61, minimized = 62, setMinimized = 63, materials = 64
+        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58, overlay = 59, surfaceOrigin = 60, covers = 61, minimized = 62, setMinimized = 63, materials = 64, fullScreen = 65, setFullScreen = 66
     }
 
     public struct Window: Equatable, Sendable {
@@ -55,6 +55,7 @@ public enum SessionWire {
         case surfaceOrigin(UInt32, x: Int32, y: Int32)
         case covers(UInt32, [CGRect])
         case minimized(UInt32, Bool)
+        case fullScreen(UInt32, Bool)
         case materials(UInt32, [GuestMaterial])
     }
 
@@ -66,6 +67,13 @@ public enum SessionWire {
     }
 
     /// `bytes` comes from a guest, so everything here is checked against it, and nothing is trusted to fit.
+    public static func setFullScreen(window: UInt32, _ fullScreen: Bool) -> Data {
+        var out = header(.setFullScreen, length: 8)
+        put32(&out, window)
+        put32(&out, fullScreen ? 1 : 0)
+        return out
+    }
+
     public static func setMinimized(window: UInt32, _ minimized: Bool) -> Data {
         var out = header(.setMinimized, length: 8)
         put32(&out, window)
@@ -89,11 +97,11 @@ public enum SessionWire {
             guard length == 4 else { return .bad }
         case .surfaceOrigin:
             guard length == 12 else { return .bad }
-        case .minimized:
+        case .minimized, .fullScreen:
             guard length == 8 else { return .bad }
         case .materials:
             guard length >= 8, length <= 8 + 32 * 24, (length - 8) % 24 == 0 else { return .bad }
-        case .setMinimized:
+        case .setMinimized, .setFullScreen:
             return .bad
         case .covers:
             guard length >= 8, length <= 8 + 32 * 16, (length - 8) % 16 == 0 else { return .bad }
@@ -122,8 +130,10 @@ public enum SessionWire {
             return .message(.materials(u32(bytes, body), rows), used: used)
         case .minimized:
             return .message(.minimized(u32(bytes, body), u32(bytes, body + 4) != 0), used: used)
-        case .setMinimized:
+        case .setMinimized, .setFullScreen:
             return .bad
+        case .fullScreen:
+            return .message(.fullScreen(u32(bytes, body), u32(bytes, body + 4) != 0), used: used)
         case .covers:
             let rects = (0..<(length - 8) / 16).map { index -> CGRect in
                 func value(_ field: Int) -> Double {

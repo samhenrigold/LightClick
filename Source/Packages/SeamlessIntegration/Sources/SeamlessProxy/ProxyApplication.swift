@@ -151,6 +151,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
             materialViews[id] = nil
             surfaces.removeValue(forKey: id)?.window.close()
             dropViews.removeValue(forKey: id)
+        case .fullScreenSurface(let id, let on):
+            fullScreenSurface(id, on)
         case .setMaterials(let id, let rows):
             materials[id] = rows
             applyMaterials(id)
@@ -273,6 +275,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     private var guestMinimizing: Set<Int> = []
     private var materials: [Int: [GuestMaterial]] = [:]
     private var materialViews: [Int: [NSView]] = [:]
+    /// The surface in the host's full screen, and whether the guest asked for what's happening to it now.
+    private var fullScreenID: Int?
+    private var guestFullScreening = false
     private var clickSignal: DispatchSourceSignal?
     private var moveSignal: DispatchSourceSignal?
 
@@ -287,8 +292,14 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         let dragging = (window as? SurfaceWindow)?.isBeingDragged ?? false
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if window.frame != frame, !dragging { window.setFrame(frame, display: false) }
-        surface.host.frame = CGRect(origin: .zero, size: frame.size)
+        // A window in the host's full screen stays filling it, with the guest's where the session says.
+        if window.styleMask.contains(.fullScreen) {
+            surface.host.frame = CGRect(
+                origin: CGPoint(x: frame.minX - window.frame.minX, y: frame.minY - window.frame.minY), size: frame.size)
+        } else {
+            if window.frame != frame, !dragging { window.setFrame(frame, display: false) }
+            surface.host.frame = CGRect(origin: .zero, size: frame.size)
+        }
         CATransaction.commit()
         window.level = NSWindow.Level(rawValue: level)
                 window.alphaValue = alpha
@@ -328,6 +339,22 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         guard let surface = surfaces[id], let primary = NSScreen.screens.first?.frame.height else { return }
         let frame = surface.window.frame
         send(.surfaceMoved(windowID: id, x: frame.minX, y: primary - frame.maxY))
+    }
+
+    private func fullScreenSurface(_ id: Int, _ on: Bool) {
+        guard let window = surfaces[id]?.window ?? (on ? nil : fullScreenID.flatMap { surfaces[$0]?.window }) else { return }
+        if on { fullScreenID = id }
+        // A test's Space change would take the Mac from whoever's using it, unless nobody can see it.
+        let environment = ProcessInfo.processInfo.environment
+        if let log = environment["LC_SEAMLESS_CLICK_LOG"], CGDisplayIsAsleep(CGMainDisplayID()) == 0 {
+            try? "\(on ? "would enter" : "would leave") \(id)\n".write(toFile: log + ".full-screen", atomically: true, encoding: .utf8)
+            if !on { fullScreenID = nil }
+            return
+        }
+        guard window.styleMask.contains(.fullScreen) != on else { return }
+        guestFullScreening = true
+        window.backgroundColor = on ? .black : .clear
+        window.toggleFullScreen(nil)
     }
 
     /// Takes no events: what's under it is the guest's.
@@ -545,6 +572,24 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         drop.autoresizingMask = [.width, .height]
         input.addSubview(drop)
         window.observer = drop
+        window.collectionBehavior = [.fullScreenPrimary, .fullScreenAuxiliary]
+        NotificationCenter.default.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) {
+            [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.fullScreenID = nil
+                window.backgroundColor = .clear
+                if self.guestFullScreening {
+                    self.guestFullScreening = false
+                } else {
+                    self.send(.surfaceLeftFullScreen(windowID: id))
+                }
+            }
+        }
+        NotificationCenter.default.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) {
+            [weak self] _ in
+            MainActor.assumeIsolated { self?.guestFullScreening = false }
+        }
         for (name, minimized) in [
             (NSWindow.didMiniaturizeNotification, true), (NSWindow.didDeminiaturizeNotification, false)
         ] {
