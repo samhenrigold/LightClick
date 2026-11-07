@@ -1,0 +1,608 @@
+{
+  "format_version": 1,
+  "name": "LightClick-Keynote09-PDF",
+  "status": "CONTENT_SPEC_ONLY_PENDING_INSTALLED_SDEF",
+  "scope": "Synthetic disposable document; no source user document, network font, or media. No Keynote scripting terms assumed.",
+  "slide_size_points": [
+    1024,
+    768
+  ],
+  "slide_count": 24,
+  "bitmap_recipe": {
+    "count": 6,
+    "width": 512,
+    "height": 384,
+    "pixel_format": "RGB8",
+    "png_color_space": "sRGB",
+    "pixel_formula": "R=(x+17*seed)%256; G=(3*y+29*seed)%256; B=((x^y)+47*seed)%256",
+    "seeds": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "requested_font": "Helvetica",
+  "slides": [
+    {
+      "index": 1,
+      "title": "LightClick legacy export 01",
+      "body": "Deterministic Keynote 09 export fixture. Slide 01 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 1,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 2,
+      "title": "LightClick legacy export 02",
+      "body": "Deterministic Keynote 09 export fixture. Slide 02 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 2,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 3,
+      "title": "LightClick legacy export 03",
+      "body": "Deterministic Keynote 09 export fixture. Slide 03 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 3,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 4,
+      "title": "LightClick legacy export 04",
+      "body": "Deterministic Keynote 09 export fixture. Slide 04 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 4,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 5,
+      "title": "LightClick legacy export 05",
+      "body": "Deterministic Keynote 09 export fixture. Slide 05 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 5,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 6,
+      "title": "LightClick legacy export 06",
+      "body": "Deterministic Keynote 09 export fixture. Slide 06 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 6,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 7,
+      "title": "LightClick legacy export 07",
+      "body": "Deterministic Keynote 09 export fixture. Slide 07 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 1,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 8,
+      "title": "LightClick legacy export 08",
+      "body": "Deterministic Keynote 09 export fixture. Slide 08 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 2,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 9,
+      "title": "LightClick legacy export 09",
+      "body": "Deterministic Keynote 09 export fixture. Slide 09 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 3,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 10,
+      "title": "LightClick legacy export 10",
+      "body": "Deterministic Keynote 09 export fixture. Slide 10 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 4,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 11,
+      "title": "LightClick legacy export 11",
+      "body": "Deterministic Keynote 09 export fixture. Slide 11 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 5,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 12,
+      "title": "LightClick legacy export 12",
+      "body": "Deterministic Keynote 09 export fixture. Slide 12 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 6,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 13,
+      "title": "LightClick legacy export 13",
+      "body": "Deterministic Keynote 09 export fixture. Slide 13 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 1,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 14,
+      "title": "LightClick legacy export 14",
+      "body": "Deterministic Keynote 09 export fixture. Slide 14 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 2,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 15,
+      "title": "LightClick legacy export 15",
+      "body": "Deterministic Keynote 09 export fixture. Slide 15 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 3,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 16,
+      "title": "LightClick legacy export 16",
+      "body": "Deterministic Keynote 09 export fixture. Slide 16 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 4,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 17,
+      "title": "LightClick legacy export 17",
+      "body": "Deterministic Keynote 09 export fixture. Slide 17 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 5,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 18,
+      "title": "LightClick legacy export 18",
+      "body": "Deterministic Keynote 09 export fixture. Slide 18 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 6,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 19,
+      "title": "LightClick legacy export 19",
+      "body": "Deterministic Keynote 09 export fixture. Slide 19 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 1,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 20,
+      "title": "LightClick legacy export 20",
+      "body": "Deterministic Keynote 09 export fixture. Slide 20 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 2,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 21,
+      "title": "LightClick legacy export 21",
+      "body": "Deterministic Keynote 09 export fixture. Slide 21 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 3,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 22,
+      "title": "LightClick legacy export 22",
+      "body": "Deterministic Keynote 09 export fixture. Slide 22 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 4,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 23,
+      "title": "LightClick legacy export 23",
+      "body": "Deterministic Keynote 09 export fixture. Slide 23 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 5,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    },
+    {
+      "index": 24,
+      "title": "LightClick legacy export 24",
+      "body": "Deterministic Keynote 09 export fixture. Slide 24 of 24. ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.\nInput, output and rendering remain inside disposable benchmark storage.",
+      "bitmap_seed": 6,
+      "title_rect": [
+        64,
+        40,
+        896,
+        80
+      ],
+      "body_rect": [
+        64,
+        136,
+        896,
+        96
+      ],
+      "image_rect": [
+        128,
+        256,
+        768,
+        448
+      ]
+    }
+  ],
+  "future_export_gate": "Use only commands/properties/types confirmed by the exact installed application SDEF; record app version/binary architecture and SDEF hash. Refuse if creation/export API cannot be verified.",
+  "future_correctness_gate": "Export page_count=24, text/title semantic checks, exact page raster comparison against same guest/application baseline outside timing; do not treat PDF metadata-byte differences as page changes."
+}
