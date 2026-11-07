@@ -75,6 +75,7 @@ private final class WindowSurfaces: SeamlessPixelSource {
     private var surfaces: [UInt32: IOSurfaceRef] = [:]
     private var origins: [UInt32: (x: Int32, y: Int32)] = [:]
     private var holds: [UInt32: GuestSurfaceHold] = [:]
+    private(set) var frames = 0
     let noDisplayFile: URL
     weak var desktop: SeamlessDesktop?
     private var receiver: GuestWindowSurfaceReceiver?
@@ -100,6 +101,7 @@ private final class WindowSurfaces: SeamlessPixelSource {
 
     private func arrived(_ window: UInt32, _ surface: IOSurfaceRef, _ origin: (x: Int32, y: Int32), _ hold: GuestSurfaceHold?) {
         guard let desktop else { return }
+        frames += 1
         if surfaces.isEmpty { FileManager.default.createFile(atPath: noDisplayFile.path, contents: nil) }
         if surfaces[window] == nil {
             desktop.note(
@@ -242,6 +244,7 @@ final class SeamlessHost: NSObject {
         return GuestWindowSurfaceReceiver.environment(service: WindowSurfaces.service(identifier), directory: directory.path)
     }
 
+    @objc static func surfaceFrames(for session: VIMSession) -> Int { windowSurfaces[session.machinePath]?.frames ?? 0 }
     @objc static func isActive(for session: VIMSession) -> Bool { desktops[session.machinePath] != nil }
     @objc static func isPrepared(for session: VIMSession) -> Bool { SeamlessDesktop.isPrepared(machine: session.machinePath) }
     @objc static func hasOwnSurfaces(for session: VIMSession) -> Bool { windowSurfaces[session.machinePath]?.hasSurfaces ?? false }

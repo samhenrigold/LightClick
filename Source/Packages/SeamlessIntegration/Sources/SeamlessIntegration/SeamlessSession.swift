@@ -578,18 +578,16 @@ public final class SeamlessSession {
     }
 
     /// So what depends on the guest's idea of its place comes out right: where a menu flips, zoom, and clipping at its display's edges.
-    /// Waits for the drag to stop. On the guest's display whole where it fits, which on another host screen means nearest to it there.
-    /// shortcut: one guest display, the size of the host's main screen, for all host screens, until QEMU's display has more than one.
+    /// Waits for the drag to stop. The guest's side keeps it on its display whole.
     private func placeInGuest(_ surface: Surface, host: NSPoint) {
         surface.placeTask?.cancel()
         surface.placeTask = Task { [weak self, weak surface] in
             try? await Task.sleep(for: .milliseconds(200))
             guard !Task.isCancelled, let self, let surface, surface.window.level == 0, self.fullScreenOffset == nil else { return }
             let origin = Self.guestDisplayOrigin
-            let screen = NSScreen.main?.frame.size ?? .zero
             let window = surface.window
-            let x = max(0, min(host.x - origin.x, Double(screen.width) - Double(window.width)))
-            let y = max(0, min(host.y - origin.y, Double(screen.height) - Double(window.height)))
+            let x = host.x - origin.x
+            let y = host.y - origin.y
             guard Int32(x) != window.x || Int32(y) != window.y else { return }
             surface.placing = (host, CFAbsoluteTimeGetCurrent() + 1)
             self.sendToGuest(SessionWire.setPlace(window: window.id, x: Int32(x), y: Int32(y)))

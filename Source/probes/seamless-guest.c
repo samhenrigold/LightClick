@@ -1060,9 +1060,7 @@ static int drain_input(struct Stream *s) {
             snprintf(x, sizeof(x), "%d", m.place_x);
             snprintf(y, sizeof(y), "%d", m.place_y);
             int error = run_menu_tool("place-window", session_app_pid ? session_app_pid : s->pid, m.u.window_id, x, y);
-            CGRect display = CGDisplayBounds(CGMainDisplayID());
-            printf("# %.3f placed window %u at %s,%s: error %d, display %.0fx%.0f\n", now(), m.u.window_id, x, y, error,
-                   display.size.width, display.size.height);
+            printf("# %.3f placed window %u at %s,%s: error %d\n", now(), m.u.window_id, x, y, error);
             fflush(stdout);
         } else if (m.type == SWM_SET_FULL_SCREEN) {
             if (session_menu_tool && session_app_pid && !fork()) {

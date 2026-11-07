@@ -294,7 +294,16 @@ static int placeWindow(int pid, uint32_t number, double x, double y) {
     AXUIElementRef window = copyWindowNumbered(pid, number);
     if (!window)
         return 2;
-    CGPoint target = CGPointMake(x, y);
+    // On its display whole where it fits, as Mavericks clips at the display's edges and flipping goes by them.
+    CGRect display = CGDisplayBounds(CGMainDisplayID());
+    CGSize extent = CGSizeZero;
+    CFTypeRef size = NULL;
+    if (AXUIElementCopyAttributeValue(window, kAXSizeAttribute, &size) == kAXErrorSuccess && size) {
+        AXValueGetValue(size, kAXValueCGSizeType, &extent);
+        CFRelease(size);
+    }
+    CGPoint target = CGPointMake(MAX(0, MIN(x, display.size.width - extent.width)),
+                                 MAX(22, MIN(y, display.size.height - extent.height)));
     AXValueRef value = AXValueCreate(kAXValueCGPointType, &target);
     int result = AXUIElementSetAttributeValue(window, kAXPositionAttribute, value) != kAXErrorSuccess;
     CFRelease(value);

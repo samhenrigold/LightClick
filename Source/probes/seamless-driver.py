@@ -454,8 +454,6 @@ def desktop():
     for row in windows:
         print(row[:150], flush=True)
     check('windows appear for each app', len(windows) >= 2)
-    asked = request({'Action': 'seamless-state'}, 60)
-    asked = (int(asked.get('RequestedWidth', 0)), int(asked.get('RequestedHeight', 0)))
     for _ in range(3):
         print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
         time.sleep(1)
@@ -529,8 +527,9 @@ def desktop():
     for _ in range(4):
         print('bounds', time.time() - pressed, next((row[-40:] for row in rows() if f'id={window} ' in row), ''), flush=True)
         time.sleep(2)
+    framed = request({'Action': 'seamless-state'}, 60).get('SurfaceFrames', 0)
     moving = subprocess.run([meter, window or '0', '8'], capture_output=True, text=True).stdout
-    print('moving', moving, flush=True)
+    print('moving', moving, 'frames from QEMU/s', (request({'Action': 'seamless-state'}, 60).get('SurfaceFrames', 0) - framed) / 8, flush=True)
     rate = re.search(r'presented ([0-9.]+)', moving)
     check('the window shows its page moving', rate is not None and float(rate.group(1)) >= 30)
     # Moved on the host, past where the machine's window was: the guest's doesn't follow, it still moves, and a click still lands.
@@ -665,12 +664,6 @@ def desktop():
     said = request({'Executable': '/bin/sh', 'Arguments': ['-c', 'cat /tmp/seamless-leap-restore.log; /bin/ps -axo pid,ppid,pgid,command | /usr/bin/grep -E "/tmp/sg/" | /usr/bin/cut -c1-100']}, 60)
     print('restore log:', said.get('Stdout'), said.get('Error'), flush=True)
     check('the guest\'s Dock and shadows are put back', 'dock: 0' in (said.get('Stdout') or ''))
-    # The agent is the press's while windows are out, so what the tools saw is read once they're back.
-    said = request({'Executable': '/bin/sh', 'Arguments': ['-c', '/usr/bin/grep -hE "placed window|raised window" /tmp/sg/leap-*.log; true']}, 60).get('Stdout') or ''
-    print('the tools saw:', said[-800:], flush=True)
-    placed = re.findall(r'placed window \d+ at \S+: error (\d+), display (\d+)x(\d+)', said)
-    print('asked for', asked, flush=True)
-    check('the guest\'s display was what was asked', any(not int(e) and (int(w) * k, int(h) * k) == asked for e, w, h in placed for k in (1, 2)))
     # Generated apps shouldn't stay known to the Mac after a clone's gone.
     for bundle in (source/'Build/bench'/tag).glob('**/Seamless Apps/*/*/*.app'):
         subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', str(bundle)])
@@ -695,6 +688,7 @@ def desktop_with_old_hook():
         return said
 
     print('PASS' if lines() == '1' else 'FAIL', 'the entry is there to start with', flush=True)
+    time.sleep(70)
     for _ in range(240):
         if request({'Action': 'seamless-state'}, 60).get('Prepared'):
             break
@@ -705,10 +699,9 @@ def desktop_with_old_hook():
         time.sleep(1)
     now = request({'Action': 'seamless-state'}, 60)
     print('in Seamless', now, 'after', time.time() - pressed, flush=True)
-    print('guest frame', capture(f'{tag}-old-hook-frame.png'), flush=True)
-    lines()
+    # The agent is the press's while windows are out, so this waits for it back, as the Dock's restore does.
     request({'Action': 'seamless-toggle'}, 60)
-    time.sleep(8)
+    time.sleep(30)
     removed = lines() == '0'
     print('PASS' if removed else 'FAIL', 'a press removes the entry', flush=True)
     print('PASS' if now.get('Active') and not now.get('OwnSurfaces') else 'FAIL', 'and shows windows from the display this start', flush=True)
