@@ -76,6 +76,8 @@ public struct GuestSessionState: Sendable {
 
     public var mayHandOff: Bool { running && lifecycle.acceptsHandoff }
     public var mayRequestShutdown: Bool { running && !shutdownRequested && !preparing }
+    /// A reply from the requested shutdown may still affect the current run. A force stop or reset supersedes it.
+    public var acceptsShutdownReply: Bool { running && lifecycle.phase == .shuttingDown(.requested) }
     /// The app is quitting, and a session that's mid-setup or mid-handoff gets to finish.
     public var mayShutDownForQuit: Bool { running && !preparing && !relaunchForGraphics }
     public var mayForceReset: Bool { running && !lifecycle.resetRequested }

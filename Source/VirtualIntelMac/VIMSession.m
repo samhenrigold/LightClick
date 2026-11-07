@@ -4166,13 +4166,23 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
 - (void)shutdown:(id)sender {
     if (!self.guestSessionState.mayRequestShutdown)
         return;
+    NSTask *ownedTask = self.task;
+    VIMGuestAgent *ownedAgent = self.guestAgent;
     [self applyLifecycleEvent:VIMSessionEventShutdownRequested];
     self.shutdownButton.enabled = NO;
     [self.displayView releasePressedKeys];
     self.guestStatus.stringValue = @"Asking macOS to shut down…";
+    BOOL (^isCurrentRequest)(void) = ^BOOL {
+      return [self.guestSessionState acceptsShutdownReplyFromTask:ownedTask
+                                                            agent:ownedAgent
+                                                      currentTask:self.task
+                                                     currentAgent:self.guestAgent];
+    };
     void (^request)(void) = ^{
-      [self.guestAgent connectWithCompletion:^(NSError *connectionError) {
-        if (!self.task.running)
+      if (!isCurrentRequest())
+          return;
+      [ownedAgent connectWithCompletion:^(NSError *connectionError) {
+        if (!isCurrentRequest())
             return;
         if (connectionError) {
             [self applyLifecycleEvent:VIMSessionEventShutdownFailed];
@@ -4187,8 +4197,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
             [self logNote:@"Shutdown connection: %@", connectionError.localizedDescription];
             return;
         }
-        [self.guestAgent requestShutdownWithCompletion:^(NSError *error) {
-          if (!self.task.running)
+        [ownedAgent requestShutdownWithCompletion:^(NSError *error) {
+          if (!isCurrentRequest())
               return;
           // Do not send a second shutdown or an ACPI sleep request after an
           // ambiguous agent disconnect. The task's exit is the completion.
@@ -4203,6 +4213,8 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         [self.control execute:[self.lastRunState isEqual:@"paused"] ? @"cont" : @"system_wakeup"
                     arguments:@{}
                    completion:^(id result, NSError *error) {
+                     if (!isCurrentRequest())
+                         return;
                      if (error) {
                          [self applyLifecycleEvent:VIMSessionEventShutdownFailed];
                          self.shutdownButton.enabled = YES;

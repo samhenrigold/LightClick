@@ -164,6 +164,13 @@ public final class GuestSessionStateBridge: NSObject {
     public var nextRefreshStep: GuestRefreshStep { state.nextRefreshStep }
     public var mayHandOff: Bool { state.mayHandOff }
     public var mayRequestShutdown: Bool { state.mayRequestShutdown }
+    /// Keep task/agent identity here with the lifecycle decision: a previous emulator's reply must not act on a new run.
+    @objc(acceptsShutdownReplyFromTask:agent:currentTask:currentAgent:)
+    public func acceptsShutdownReply(
+        fromTask task: NSObject, agent: NSObject, currentTask: NSObject?, currentAgent: NSObject?
+    ) -> Bool {
+        state.acceptsShutdownReply && task === currentTask && agent === currentAgent
+    }
     public var mayShutDownForQuit: Bool { state.mayShutDownForQuit }
     public var mayForceReset: Bool { state.mayForceReset }
     public var mayStartGraphicsAction: Bool { state.mayStartGraphicsAction }

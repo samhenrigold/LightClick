@@ -116,6 +116,54 @@ private func after(_ events: SessionEvent...) -> SessionLifecycle {
     }
 }
 
+@Suite struct SessionShutdownReplyTests {
+    private func requesting() -> GuestSessionStateBridge {
+        let state = GuestSessionStateBridge()
+        state.running = true
+        for event in booted + [.shutdownRequested] { state.apply(event) }
+        return state
+    }
+
+    @Test func onlyTheRequestingTaskAndAgentMayContinueShutdown() {
+        let state = requesting()
+        let task = NSObject()
+        let agent = NSObject()
+        #expect(state.acceptsShutdownReply(fromTask: task, agent: agent, currentTask: task, currentAgent: agent))
+        #expect(!state.acceptsShutdownReply(fromTask: task, agent: agent, currentTask: NSObject(), currentAgent: agent))
+        #expect(!state.acceptsShutdownReply(fromTask: task, agent: agent, currentTask: task, currentAgent: NSObject()))
+        #expect(!state.acceptsShutdownReply(fromTask: task, agent: agent, currentTask: nil, currentAgent: agent))
+        #expect(!state.acceptsShutdownReply(fromTask: task, agent: agent, currentTask: task, currentAgent: nil))
+    }
+
+    @Test(arguments: [SessionEvent.forceStopRequested, .resetRequested, .emulatorStopped])
+    func aSupersedingStopRejectsReplies(_ event: SessionEvent) {
+        let state = requesting()
+        let task = NSObject()
+        let agent = NSObject()
+        state.apply(event)
+        #expect(!state.acceptsShutdownReply(fromTask: task, agent: agent, currentTask: task, currentAgent: agent))
+    }
+
+    @Test func anExitedTaskCannotContinueShutdownBeforeCleanup() {
+        let state = requesting()
+        let task = NSObject()
+        let agent = NSObject()
+        state.running = false
+        #expect(!state.acceptsShutdownReply(fromTask: task, agent: agent, currentTask: task, currentAgent: agent))
+    }
+
+    @Test func anOldReplyCannotShutDownANewEmulator() {
+        let state = requesting()
+        let oldTask = NSObject()
+        let oldAgent = NSObject()
+        state.apply(.emulatorStopped)
+        for event in booted + [.shutdownRequested] { state.apply(event) }
+        #expect(
+            !state.acceptsShutdownReply(
+                fromTask: oldTask, agent: oldAgent, currentTask: NSObject(), currentAgent: NSObject()))
+    }
+}
+
 @Suite struct SessionDecisionTests {
     private func state(_ change: (inout GuestSessionState) -> Void = { _ in }) -> GuestSessionState {
         var state = GuestSessionState()
