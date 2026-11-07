@@ -435,7 +435,7 @@ static void *hook_new_array(unsigned long size) {
     return memory;
 }
 static int update_origin_x, update_origin_y;
-static struct RectResult update_bounds, display_bounds; // This update's, and the largest seen, which is the display's.
+static struct RectResult update_bounds; // This update's.
 __attribute__((used)) void seamless_redraw_window(void *state, char *window) {
     if (layers_used || marked_window == NULL) {
         // First in this update: what's being updated, which is what a drawable of just that part is the size of. See
@@ -445,8 +445,6 @@ __attribute__((used)) void seamless_redraw_window(void *state, char *window) {
         update_origin_x = (int)bounds.x;
         update_origin_y = (int)bounds.y;
         update_bounds = bounds;
-        if (bounds.width * bounds.height > display_bounds.width * display_bounds.height)
-            display_bounds = bounds;
     }
     if (layers_used)
         forget_layers();
@@ -748,9 +746,9 @@ static int whole_window_due(uint32_t id, char *window) {
     // This update draws on a drawable of only what it updates, and all of a window with its shadow has to fit, or the
     // host would start it clear with part of it missing. What's past the display can't be drawn anyway. It stays due.
     enum { shadow = 96 };
-    double left = fmax(rect.x - shadow, display_bounds.x), top = fmax(rect.y - shadow, display_bounds.y);
-    double right = fmin(rect.x + rect.width + shadow, display_bounds.x + display_bounds.width);
-    double bottom = fmin(rect.y + rect.height + shadow, display_bounds.y + display_bounds.height);
+    double left = fmax(rect.x - shadow, 0), top = fmax(rect.y - shadow, 0);
+    double right = fmin(rect.x + rect.width + shadow, table->gpu_display_width);
+    double bottom = fmin(rect.y + rect.height + shadow, table->gpu_display_height);
     if (left < update_bounds.x || top < update_bounds.y || right > update_bounds.x + update_bounds.width ||
         bottom > update_bounds.y + update_bounds.height)
         return 0;
@@ -817,11 +815,8 @@ static char redraw_placed(char *state, char *window) {
             // What's opaque in the windows in front so far, which redraw_window adds to and cuts from those behind:
             // off, a window's surface has to keep what's covered, or a window in front leaves a hole of its shape.
             void *saved_opaque = *(void **)(state + 0x20);
-            uint8_t saved_unclipped = *(uint8_t *)(state + 0x66);
-            if (off) {
+            if (off)
                 *(void **)(state + 0x20) = NULL;
-                *(uint8_t *)(state + 0x66) = 1; // As window capture does: not cut to the window's global clip shape.
-            }
             if (!whole)
                 *(uint8_t *)(state + 0x6b) = 1;
             else if (whole_count < 64)
@@ -831,7 +826,6 @@ static char redraw_placed(char *state, char *window) {
                 if (*(void **)(state + 0x20))
                     region_release_fn(*(void **)(state + 0x20));
                 *(void **)(state + 0x20) = saved_opaque;
-                *(uint8_t *)(state + 0x66) = saved_unclipped;
             }
             *(void **)(state + 0x18) = saved_clip;
             *(uint8_t *)(state + 0x6b) = saved_shadow;
