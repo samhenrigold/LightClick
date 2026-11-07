@@ -166,8 +166,6 @@ public final class LaunchPlan: NSObject {
         // Development only. Per xnu's lapic_init, this alone switches Big Sur to x2APIC under a
         // hypervisor; Mountain Lion through Catalina also need the -x2apic boot argument.
         if appleSilicon && options.contains("--expose-x2apic") { cpu += ",+x2apic" }
-        // Test boots only: ERMS steers a guest libc's memcpy to rep movsb, which the engine copies in bulk. Not qualified for users.
-        if appleSilicon && ProcessInfo.processInfo.environment["LC_GUEST_ERMS"] == "1" { cpu += ",+erms" }
         // Mavericks rejects newer Intel models in cpuid_set_info before drivers
         // start (verified "Unsupported CPU" on the Ice Lake HVF host). Keep the
         // same supported Penryn identity as its TCG path; HVF still executes guest
