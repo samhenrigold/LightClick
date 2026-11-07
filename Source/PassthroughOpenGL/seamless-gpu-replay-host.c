@@ -128,6 +128,38 @@ static void SGFreeWindowStorage(struct SGWindow *w) {
     w->drawn = w->dirty = w->pending = 0;
 }
 
+// One buffer's storage. The caller keeps the bindings.
+static int SGMakeBuffer(struct DGHostContext *c, struct SGWindow *w, int i, int width, int height) {
+    size_t row = ((size_t)width * 4 + 63) & ~(size_t)63;
+    const CFStringRef keys[] = {kIOSurfaceWidth,       kIOSurfaceHeight,    kIOSurfaceBytesPerElement,
+                                kIOSurfaceBytesPerRow, kIOSurfaceAllocSize, kIOSurfacePixelFormat};
+    int64_t values[] = {width, height, 4, (int64_t)row, (int64_t)(row * (size_t)height), 0x42475241};
+    CFMutableDictionaryRef properties =
+        CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    for (unsigned k = 0; k < 6; ++k) {
+        CFNumberRef n = CFNumberCreate(NULL, kCFNumberSInt64Type, &values[k]);
+        CFDictionarySetValue(properties, keys[k], n);
+        CFRelease(n);
+    }
+    w->surface[i] = IOSurfaceCreate(properties);
+    CFRelease(properties);
+    if (!w->surface[i])
+        return 0;
+    glGenTextures(1, &w->texture[i]);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, w->texture[i]);
+    if (DGPrivateTextureImport(c->cgl, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA8, width, height, GL_BGRA,
+                               GL_UNSIGNED_INT_8_8_8_8_REV, w->surface[i], 0))
+        return 0;
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    int good = DGClearDrawableTexture(c, w->texture[i]);
+    glGenFramebuffersEXT(1, &w->framebuffer[i]);
+    glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, w->framebuffer[i]);
+    glFramebufferTexture2DEXT(GL_DRAW_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_RECTANGLE_ARB,
+                              w->texture[i], 0);
+    return good && glCheckFramebufferStatusEXT(GL_DRAW_FRAMEBUFFER_EXT) == GL_FRAMEBUFFER_COMPLETE_EXT;
+}
+
 static int SGMakeWindowStorage(struct DGHostContext *c, struct SGWindow *w, int width, int height) {
     GLint rectangle = 0, draw = 0, read = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_RECTANGLE_ARB, &rectangle);
@@ -136,38 +168,8 @@ static int SGMakeWindowStorage(struct DGHostContext *c, struct SGWindow *w, int 
     int good = 1;
     for (int i = 0; good && i < SG_BUFFERS; ++i)
         good = !mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &w->hold[i]);
-    for (int i = 0; good && i < SG_STORAGE; ++i) {
-        size_t row = ((size_t)width * 4 + 63) & ~(size_t)63;
-        const CFStringRef keys[] = {kIOSurfaceWidth,       kIOSurfaceHeight,    kIOSurfaceBytesPerElement,
-                                    kIOSurfaceBytesPerRow, kIOSurfaceAllocSize, kIOSurfacePixelFormat};
-        int64_t values[] = {width, height, 4, (int64_t)row, (int64_t)(row * (size_t)height), 0x42475241};
-        CFMutableDictionaryRef properties =
-            CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        for (unsigned k = 0; k < 6; ++k) {
-            CFNumberRef n = CFNumberCreate(NULL, kCFNumberSInt64Type, &values[k]);
-            CFDictionarySetValue(properties, keys[k], n);
-            CFRelease(n);
-        }
-        w->surface[i] = IOSurfaceCreate(properties);
-        CFRelease(properties);
-        good = w->surface[i] != NULL;
-        if (!good)
-            break;
-        glGenTextures(1, &w->texture[i]);
-        glBindTexture(GL_TEXTURE_RECTANGLE_ARB, w->texture[i]);
-        good = !DGPrivateTextureImport(c->cgl, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA8, width, height, GL_BGRA,
-                                       GL_UNSIGNED_INT_8_8_8_8_REV, w->surface[i], 0);
-        if (!good)
-            break;
-        glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        good = DGClearDrawableTexture(c, w->texture[i]);
-        glGenFramebuffersEXT(1, &w->framebuffer[i]);
-        glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, w->framebuffer[i]);
-        glFramebufferTexture2DEXT(GL_DRAW_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_RECTANGLE_ARB,
-                                  w->texture[i], 0);
-        good = good && glCheckFramebufferStatusEXT(GL_DRAW_FRAMEBUFFER_EXT) == GL_FRAMEBUFFER_COMPLETE_EXT;
-    }
+    for (int i = 0; good && i < SG_STORAGE; ++i)
+        good = SGMakeBuffer(c, w, i, width, height);
     glBindTexture(GL_TEXTURE_RECTANGLE_ARB, (GLuint)rectangle);
     glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, (GLuint)draw);
     glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, (GLuint)read);
@@ -239,10 +241,13 @@ static struct SGWindow *SGWindowFor(struct DGHostContext *c, const struct SGTree
     return w;
 }
 
-// A shared buffer nobody holds and nothing's reading, or -1. shortcut: with none free a frame waits for the next update
-// of any window, so a consumer stalled past all of them as the guest goes idle shows the last frame sent till something
-// changes.
-static int SGFreeBuffer(struct SGWindow *w) {
+// A shared buffer nobody holds and nothing's reading, or -1. One let go of but still in use, by a layer, say, which off
+// the screen may not finish with it for a long time, is left to them with a new one in its place: only what's really
+// being held holds up a window's frames. shortcut: with none free a frame waits for the next update of any window, so a
+// consumer holding all of them as the guest goes idle shows the last frame sent till something changes. The caller
+// keeps the bindings.
+static int SGFreeBuffer(struct DGHostContext *c, struct SGWindow *w) {
+    int unheld = -1;
     for (int n = 1; n <= SG_BUFFERS; ++n) {
         int i = (w->front + n) % SG_BUFFERS;
         struct {
@@ -252,10 +257,24 @@ static int SGFreeBuffer(struct SGWindow *w) {
         while (w->held[i] &&
                !mach_msg(&notice.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(notice), w->hold[i], 0, 0))
             --w->held[i];
-        if (!w->held[i] && !IOSurfaceIsInUse(w->surface[i]))
+        if (w->held[i])
+            continue;
+        if (!IOSurfaceIsInUse(w->surface[i]))
             return i;
+        unheld = i;
     }
-    return -1;
+    if (unheld < 0)
+        return -1;
+    glDeleteFramebuffersEXT(1, &w->framebuffer[unheld]);
+    glDeleteTextures(1, &w->texture[unheld]);
+    CFRelease(w->surface[unheld]);
+    w->framebuffer[unheld] = w->texture[unheld] = 0;
+    w->surface[unheld] = NULL;
+    GLint rectangle = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_RECTANGLE_ARB, &rectangle);
+    int good = SGMakeBuffer(c, w, unheld, w->width, w->height);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, (GLuint)rectangle);
+    return good ? unheld : -1;
 }
 
 struct SGSaved {
@@ -444,7 +463,7 @@ static void SGEndFrame(void) {
             w->pending = w->ready = 0;
             ++w->drops;
             next = w->front;
-        } else if ((next = SGFreeBuffer(w)) < 0) {
+        } else if ((next = SGFreeBuffer(sg_display, w)) < 0) {
             w->unsent = 1;
             ++sg_in_use;
             continue;
