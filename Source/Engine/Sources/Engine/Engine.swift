@@ -334,6 +334,7 @@ public final class Engine {
         ctx.pointee.ram_size = ramTop
         ctx.pointee.hybrid = options.hybrid ? 1 : 0
         let environment = ProcessInfo.processInfo.environment
+        ctx.pointee.profile_mmu_observations = environment["LC_HVDBT_MMU_OBSERVATIONS"] == "1" ? 1 : 0
         // ENGINE_SHARE: the keeper rule in a test with no fallbacks, as --smp is, so that it runs with vCPUs really side by side.
         ctx.pointee.share_user = (options.hybrid && environment["LC_HVDBT_NO_SHARE"] != "1") || environment["ENGINE_SHARE"] == "1" ? 1 : 0
         ctx.pointee.clts_on_host = options.hybrid && ProcessInfo.processInfo.environment["LC_HVDBT_CLTS_TCG"] == "1" ? 1 : 0

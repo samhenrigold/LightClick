@@ -356,6 +356,27 @@ public final class Tally: @unchecked Sendable {
         o += "  dropping a table   " + perSecond(c.stat_pt_writes_zap) + "\n"
         o += "  by one-word step   " + perSecond(c.stat_pt_step) + "\n"
         o += "  tables unshadowed  " + perSecond(c.stat_pt_unshadow) + "\n"
+        if c.profile_mmu_observations != 0 {
+            o += "\n== MMU observations (this vCPU; count/timing only, no skipped operations) ==\n"
+            o += "mmu_observations_enabled \(c.profile_mmu_observations)\n"
+            o += "mmu_counter_hz \(c.stat_mmu_counter_hz)\n"
+            o += "mmu_walk_sample_period 256\n"
+            o += "mmu_first_walk_calls \(c.stat_mmu_first_walk_calls)\n"
+            o += "mmu_first_walk_samples \(c.stat_mmu_first_walk_samples)\n"
+            o += "mmu_first_walk_sampled_ticks \(c.stat_mmu_first_walk_ticks)\n"
+            o += "mmu_locked_rewalk_calls \(c.stat_mmu_locked_rewalk_calls)\n"
+            o += "mmu_locked_rewalk_samples \(c.stat_mmu_locked_rewalk_samples)\n"
+            o += "mmu_locked_rewalk_sampled_ticks \(c.stat_mmu_locked_rewalk_ticks)\n"
+            let observed = withUnsafeBytes(of: c.stat_mmu_store_observed) { Array($0.bindMemory(to: UInt64.self)) }
+            let unchanged = withUnsafeBytes(of: c.stat_mmu_store_unchanged) { Array($0.bindMemory(to: UInt64.self)) }
+            for (index, kind) in ["plain32", "plain64", "lse32", "lse64"].enumerated() {
+                o += "mmu_\(kind)_observed \(observed[index])\n"
+                o += "mmu_\(kind)_observed_unchanged \(unchanged[index])\n"
+            }
+            o += "Sampled ticks are unscaled/nonserialized counter reads; divide by counter_hz for seconds.\n"
+            o += "Equality is an observation, not proof a store/zap can be skipped: concurrent walkers update A/D outside this lock.\n"
+            o += "Only aligned plain4/8 and LSE32/64 stores are observed; CAS already skips unchanged updates.\n\n"
+        }
         o += "cold blocks          " + perSecond(t.blocks) + "\n"
         o += "cold x86 insns       " + perSecond(t.insns) + "\n"
         o += "cold ARM words       " + perSecond(t.words) + "\n"

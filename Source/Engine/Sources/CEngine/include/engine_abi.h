@@ -299,7 +299,15 @@ typedef struct {
     EngineEvent events[EVENT_RING];
     uint64_t user_pf_next;
     EngineEvent user_pf[32]; // user page faults: rip, a is CR2, vector is the error code. What a process that dies of a signal touched last
+    // Opt-in observations only, appended to preserve every existing assembly/emitter offset. Per-vCPU, not c0 aggregates.
+    uint32_t profile_mmu_observations, pad_mmu_observations;
+    uint64_t stat_mmu_counter_hz;
+    uint64_t stat_mmu_first_walk_calls, stat_mmu_first_walk_samples, stat_mmu_first_walk_ticks;
+    uint64_t stat_mmu_locked_rewalk_calls, stat_mmu_locked_rewalk_samples, stat_mmu_locked_rewalk_ticks;
+    // Indices: plain32, plain64, LSE32, LSE64. Compare operand-width values observed before/after; no store is skipped.
+    uint64_t stat_mmu_store_observed[4], stat_mmu_store_unchanged[4];
 } EngineCtx;
+_Static_assert(sizeof(EngineCtx) <= CTX_SLOT, "EngineCtx must fit its existing per-vCPU slot");
 
 // Block table, one entry per translated block, ordered by arm_off because the code cache only grows.
 typedef struct {

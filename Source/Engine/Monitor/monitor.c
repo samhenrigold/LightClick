@@ -1673,6 +1673,47 @@ static void step_off(void) {
 
 static void shadow_write_finish(void);
 
+// Timing wraps the two existing call sites, not x86_walk itself: recursive A/D retries remain inside their caller's sample.
+// Counter reads are deliberately not serialized; these are sampled diagnostic ticks, not instruction-cycle measurements.
+typedef struct {
+    u64 began;
+    bool sampled; // CNTVCT zero is a valid sample, not a disabled sentinel.
+} MmuWalkSample;
+
+static inline MmuWalkSample mmu_walk_begin(bool locked) {
+    if (!c->profile_mmu_observations)
+        return (MmuWalkSample){0, false};
+    if (!c->stat_mmu_counter_hz)
+        c->stat_mmu_counter_hz = RSR(cntfrq_el0);
+    u64 count = locked ? ++c->stat_mmu_locked_rewalk_calls : ++c->stat_mmu_first_walk_calls;
+    bool sample = (count & 255) == 0;
+    return (MmuWalkSample){sample ? RSR(cntvct_el0) : 0, sample};
+}
+
+static inline void mmu_walk_end(bool locked, MmuWalkSample sample) {
+    if (!sample.sampled)
+        return;
+    u64 elapsed = RSR(cntvct_el0) - sample.began;
+    if (locked) {
+        c->stat_mmu_locked_rewalk_samples++;
+        c->stat_mmu_locked_rewalk_ticks += elapsed;
+    } else {
+        c->stat_mmu_first_walk_samples++;
+        c->stat_mmu_first_walk_ticks += elapsed;
+    }
+}
+
+static inline void mmu_observe_store(u32 kind, u64 before, u64 after) {
+    if (!c->profile_mmu_observations)
+        return;
+    if (!(kind & 1)) { // The value actually stored by W-sized LSE/plain stores, including wraparound.
+        before = (u32)before;
+        after = (u32)after;
+    }
+    c->stat_mmu_store_observed[kind]++;
+    c->stat_mmu_store_unchanged[kind] += before == after;
+}
+
 static void handle_data_abort(bool lower) {
     (void)lower;
     u64 far = c->far, esr = c->esr;
@@ -1694,7 +1735,9 @@ static void handle_data_abort(bool lower) {
         return;
     }
     u32 access = (write ? 2 : 0) | (c->cpl == 3 ? 4 : 0);
+    MmuWalkSample walk_sample = mmu_walk_begin(false);
     Walk w = x86_walk(c->cr3, far, access, true);
+    mmu_walk_end(false, walk_sample);
     if (!w.ok) {
         raise_pf(far, w.fault_err, rip_here(c->elr));
         return;
@@ -1746,7 +1789,9 @@ static void handle_data_abort(bool lower) {
     me->lock_site = 4;
     pool_reclaim();
     if (smp) { // The walk above took no lock, so nothing kept the entry from changing since. Under the lock every page-table store waits for this fill.
+        walk_sample = mmu_walk_begin(true);
         w = x86_walk(c->cr3, far, access, true);
+        mmu_walk_end(true, walk_sample);
         if (!w.ok || (!is_ram(w.gpa) && !is_direct(w.gpa))) {
             mon_unlock();
             return; // retry the access, which sorts out which of the above it is now
@@ -1794,12 +1839,20 @@ static void handle_data_abort(bool lower) {
                 mon_unlock();
                 return;
             }
+            // Observation only: other walkers can CAS A/D bits outside this lock. Equality does NOT prove a future
+            // skipped write/zap would be safe. Restrict the extra read to existing aligned 4/8-byte RAM store forms.
+            bool observe_plain = c->profile_mmu_observations && ((n == 8 && !(w.gpa & 7)) || (n == 4 && !(w.gpa & 3)));
+            u64 observed_old = 0;
+            if (observe_plain)
+                observed_old = n == 8 ? *(u64 *)RAM(w.gpa) : *(u32 *)RAM(w.gpa);
             if (n == 8)
                 *(u64 *)RAM(w.gpa) = val;
             else if (n == 4 && !(w.gpa & 3)) // one piece: another vCPU can read the table while this runs
                 *(u32 *)RAM(w.gpa) = (u32)val;
             else
                 memcpy(RAM(w.gpa), &val, n);
+            if (observe_plain)
+                mmu_observe_store(n == 8 ? 1 : 0, observed_old, val);
             pt_slot_changed(w.gpa & ~7ULL);
             if (((w.gpa & 7) + n) > 8)
                 pt_slot_changed((w.gpa & ~7ULL) + 8);
@@ -1841,6 +1894,7 @@ static void handle_data_abort(bool lower) {
                 *slot8 = next;
             else
                 *slot4 = (u32)next;
+            mmu_observe_store(wide ? 3 : 2, old, next);
             pt_slot_changed(w.gpa & ~7ULL);
             if (rt != 31)
                 c->x[rt] = old;
