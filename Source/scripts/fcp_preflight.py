@@ -198,6 +198,11 @@ finally:
 '''
 
 
+def wire_bool(value, expected):
+    """NSNumber JSON may encode native booleans as0/1; accept no other coercions."""
+    return type(value) in (bool,int) and value in (0,1) and value == expected
+
+
 def qualify_launch(report):
     """Observation never mistakes a live PID or an alert for an operational editor."""
     if not isinstance(report,dict) or report.get('result')!='OBSERVED_LAUNCH' or report.get('cleanup_errors')!=[] or report.get('app_log_at_limit') is not False:
@@ -205,7 +210,7 @@ def qualify_launch(report):
     observations=report.get('observations',[])
     if len(observations)!=3 or any(row.get('alive') is not True for row in observations):return 'EXITED_OR_INCOMPLETE'
     ax=observations[-1].get('ax',{})
-    if ax.get('result')!='OBSERVED_WINDOWS' or any(ax.get(key) is not True for key in ('identityMatched','identityStillMatched','axTrusted')) or not ax.get('windowCount') or ax.get('truncated') is not False or ax.get('deadlineExceeded') is not False:return 'INCONCLUSIVE'
+    if ax.get('result')!='OBSERVED_WINDOWS' or any(not wire_bool(ax.get(key),True) for key in ('identityMatched','identityStillMatched','axTrusted')) or not ax.get('windowCount') or not wire_bool(ax.get('truncated'),False) or not wire_bool(ax.get('deadlineExceeded'),False):return 'INCONCLUSIVE'
     nodes=[]
     def flatten(value):
         if isinstance(value,dict):

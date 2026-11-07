@@ -9,7 +9,7 @@ import plistlib
 import tempfile
 from pathlib import Path
 import unittest
-from fcp_preflight import GUEST, qualify_launch
+from fcp_preflight import GUEST, qualify_launch, wire_bool
 
 
 def observed():
@@ -20,6 +20,22 @@ def observed():
 
 
 class Checks(unittest.TestCase):
+    def test_known_native_boolean_fields_accept_only_bool_or_zero_one(self):
+        for value in (True,1):self.assertTrue(wire_bool(value,True))
+        for value in (False,0):self.assertTrue(wire_bool(value,False))
+        for value in ('1','0','true','false',2,-1,None,1.0,0.0,[],{}):
+            self.assertFalse(wire_bool(value,True));self.assertFalse(wire_bool(value,False))
+        actual={'Images':[{'CanDisconnect':True,'Format':'dmg','Slot':0,'Path':'/Users/shg/Downloads/FinalCutPro-10.1.dmg'}],
+                'MediaChangePending':False,'Inserted':1}
+        self.assertTrue(wire_bool(actual['Inserted'],True))
+        value=observed();ax=value['observations'][-1]['ax']
+        for key in ('identityMatched','identityStillMatched','axTrusted'):ax[key]=1
+        for key in ('truncated','deadlineExceeded'):ax[key]=0
+        self.assertEqual(qualify_launch(value),'OBSERVED_WINDOWS_REQUIRES_REVIEW')
+        for field in ('identityMatched','identityStillMatched','axTrusted','truncated','deadlineExceeded'):
+            bad=copy.deepcopy(value);bad['observations'][-1]['ax'][field]='1' if field.startswith('identity') or field=='axTrusted' else '0'
+            self.assertEqual(qualify_launch(bad),'INCONCLUSIVE')
+
     def test_pid_or_first_window_never_qualifies_editor(self):
         value=observed()
         self.assertEqual(qualify_launch(value),'OBSERVED_WINDOWS_REQUIRES_REVIEW')
@@ -53,7 +69,7 @@ class Checks(unittest.TestCase):
             def request(command,timeout):
                 calls.append(command)
                 if command.get('Executable')=='/usr/sbin/diskutil':return dict(ExitCode=0,Stdout=plistlib.dumps(dict(WholeDisks=['disk0'])).decode())
-                if command.get('Action')=='insert-disc':return dict(Inserted=True)
+                if command.get('Action')=='insert-disc':return dict(Images=[dict(CanDisconnect=True,Format='dmg',Slot=0,Path=str(dmg))],MediaChangePending=False,Inserted=1)
                 raise SystemExit('ambiguous collector timeout')
             ns.update(arguments=['mavericks-10.1',str(root/'results'),str(helper)],stage=lambda p:'/private/var/tmp/VirtualIntelMac.Abc123/Transfer.bin',request=request)
             with self.assertRaisesRegex(SystemExit,'ambiguous'):ns['experiment']()

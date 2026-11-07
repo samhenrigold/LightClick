@@ -10,7 +10,7 @@ import re
 import stat
 import sys
 sys.path.insert(0,str(source/'scripts'))
-from fcp_preflight import GUEST, qualify_launch
+from fcp_preflight import GUEST, qualify_launch, wire_bool
 
 CASES={
  'mavericks-10.1':dict(dmg='/Users/shg/Downloads/FinalCutPro-10.1.dmg',os_prefix='10.9.',variant='10.1',kind='app',payload='Final Cut Pro.app',app='/Applications/Final Cut Pro.app',identity=dict(CFBundleIdentifier='com.apple.FinalCut',CFBundleShortVersionString='10.1',CFBundleVersion='238755',CFBundleExecutable='Final Cut Pro')),
@@ -55,7 +55,7 @@ def experiment():
         if not isinstance(before,list) or not before or any(not isinstance(name,str) or not name.startswith('disk') or not name[4:].isdigit() for name in before):raise ValueError('invalid before whole-disk inventory')
         response=request({'Action':'insert-disc','Path':spec['dmg'],'Slot':0},120)
         evidence['insert_response']=response;save()
-        if not isinstance(response,dict) or response.get('Error') or response.get('Inserted') is not True:raise ValueError('readonly image insertion not confirmed')
+        if not isinstance(response,dict) or response.get('Error') or not wire_bool(response.get('Inserted'),True):raise ValueError('readonly image insertion not confirmed')
         inserted=True
         response=request({'Executable':'/usr/bin/python','Arguments':['-c',GUEST,json.dumps([spec,before])]},1100)
         evidence['collector_response']=response;save()
@@ -77,7 +77,7 @@ def experiment():
             try:
                 response=request({'Action':'insert-disc','Path':'','Slot':0},120)
                 evidence['detach_response']=response
-                if not isinstance(response,dict) or response.get('Error') or response.get('Inserted') is not False:evidence['result']='INCONCLUSIVE';evidence['detach_error']='detach not confirmed'
+                if not isinstance(response,dict) or response.get('Error') or not wire_bool(response.get('Inserted'),False):evidence['result']='INCONCLUSIVE';evidence['detach_error']='detach not confirmed'
             except BaseException as error:
                 evidence['result']='INCONCLUSIVE';evidence['detach_error']=repr(error)
         save()
