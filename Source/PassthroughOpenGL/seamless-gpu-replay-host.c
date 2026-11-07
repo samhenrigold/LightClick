@@ -273,7 +273,9 @@ static struct SGWindow *SGRedirect(struct DGHostContext *c, struct SGSaved *save
         ++sg_unplaced;
         return NULL;
     }
-    if (t->level < 0 || (!sg_display_off && t->width * t->height < 64 * 64))
+    // With the display on nobody's taking surfaces. What's drawn then wouldn't be cleared, as a window's drawn whole
+    // only when the mode goes on, and it builds up: a shadow goes black, drawn over itself in each update.
+    if (t->level < 0 || !sg_display_off)
         return NULL; // The desktop and the like: nobody asks for them.
     struct SGWindow *w = SGWindowFor(c, t);
     if (!w)
