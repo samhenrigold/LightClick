@@ -33,7 +33,7 @@ public protocol SeamlessPixelSource: AnyObject {
     /// `window` is the guest's window number. The surface holds it with real alpha, from `surfaceOrigin` on the guest's display,
     /// and can be bigger than it.
     func surface(forWindow window: UInt32) -> IOSurfaceRef?
-    /// Where it starts on the guest's display, if the surface itself says. Otherwise the guest's tool does.
+    /// Where it starts on the guest's display, in its pixels, if the surface itself says. Otherwise the guest's tool does, in points.
     func surfaceOrigin(forWindow window: UInt32) -> (x: Int32, y: Int32)?
     /// Whether windows are coming this way now, which leaves the display's frames with nothing current in them.
     var hasSurfaces: Bool { get }
@@ -613,7 +613,12 @@ public final class SeamlessSession {
         let layer = surface.layer
         if let own = pixelSource?.surface(forWindow: window.id) {
             // Until the guest says, at its window's place, which is right but for any shadow: with the display off, this is all there is.
-            let origin = pixelSource?.surfaceOrigin(forWindow: window.id) ?? surface.surfaceOrigin ?? (window.x, window.y)
+            var originX = Double(surface.surfaceOrigin?.x ?? window.x)
+            var originY = Double(surface.surfaceOrigin?.y ?? window.y)
+            if let pixels = pixelSource?.surfaceOrigin(forWindow: window.id) {
+                originX = Double(pixels.x) / scale
+                originY = Double(pixels.y) / scale
+            }
             setPieces(of: surface, to: [], from: own, place: place, height: whole.height)
             layer.mask = nil
             layer.contents = nil
@@ -628,9 +633,9 @@ public final class SeamlessSession {
                 surface.ownSurfaceLayer = sublayer
             }
             let size = CGSize(width: Double(IOSurfaceGetWidth(own)) / scale, height: Double(IOSurfaceGetHeight(own)) / scale)
-            let top = Double(origin.y) - (Double(window.y) - side)
+            let top = originY - (Double(window.y) - side)
             sublayer.frame = CGRect(
-                x: Double(origin.x) - (Double(window.x) - side), y: whole.height - top - size.height,
+                x: originX - (Double(window.x) - side), y: whole.height - top - size.height,
                 width: size.width, height: size.height)
             sublayer.contents = own
             sublayer.perform(NSSelectorFromString("setContentsChanged"))
