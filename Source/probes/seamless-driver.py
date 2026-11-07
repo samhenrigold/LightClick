@@ -453,6 +453,7 @@ def desktop():
     for _ in range(3):
         print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
         time.sleep(1)
+    windows = proxy_windows()
     check('the machine window hides', not machine_window())
     check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
     for row in windows:
@@ -610,6 +611,55 @@ def desktop():
     print('PASS seamless button' if all(checks) and machine_window() else 'FAIL seamless button', flush=True)
 
 
+def desktop_with_old_hook():
+    # A guest an earlier build left with the hook in WindowServer's job: a press takes it out and stays on the display's frames, and
+    # from the next start, the press injects it as usual.
+    install_hook()
+    plist = '/System/Library/LaunchDaemons/com.apple.WindowServer.plist'
+
+    def state(what):
+        said = request({'Executable': '/usr/bin/grep', 'Arguments': ['-c', 'seamless-ws-hook', plist]}, 60).get('Stdout', '').strip()
+        print(what, 'hook lines in the plist:', said, flush=True)
+        return said
+
+    def press(apps):
+        for _ in range(240):
+            if request({'Action': 'seamless-state'}, 60).get('Prepared'):
+                break
+            time.sleep(1)
+        request({'Action': 'seamless-toggle'}, 60)
+        pressed = time.time()
+        while time.time() - pressed < 120 and request({'Action': 'seamless-state'}, 60).get('WindowVisible'):
+            time.sleep(1)
+        time.sleep(5)
+        now = request({'Action': 'seamless-state'}, 60)
+        print('in Seamless', now, flush=True)
+        request({'Action': 'seamless-toggle'}, 60)
+        time.sleep(8)
+        return now
+
+    guest = stage(guest_tool)
+    run(guest, ['open-app', '--app', 'TextEdit'])
+    time.sleep(10)
+    print('PASS' if state('before') != '0' else 'FAIL', 'the entry is there to start with', flush=True)
+    first = press('TextEdit')
+    removed = state('after a press') == '0'
+    print('PASS' if removed else 'FAIL', 'a press removes the entry', flush=True)
+    print('PASS' if not first.get('OwnSurfaces') else 'FAIL', 'and stays on the display\'s frames this start', flush=True)
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', '(sleep 5; /sbin/reboot) >/dev/null 2>&1 &']}, 60)
+    time.sleep(120)
+    deadline = time.time() + 400
+    while time.time() < deadline and request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60).get('ExitCode') != 0:
+        time.sleep(5)
+    time.sleep(30)
+    guest = stage(guest_tool)
+    run(guest, ['open-app', '--app', 'TextEdit'])
+    time.sleep(10)
+    second = press('TextEdit')
+    print('PASS' if second.get('OwnSurfaces') else 'FAIL', 'from the next start, windows have their own surfaces', flush=True)
+    print('PASS old hook' if removed and second.get('OwnSurfaces') and not first.get('OwnSurfaces') else 'FAIL old hook', flush=True)
+
+
 def capture_bench():
     guest = stage(guest_tool)
     run(guest, ['capture-bench', '--app', 'Safari', '--open'])
@@ -700,6 +750,8 @@ if arguments[0] == 'capture-bench':
     capture_bench()
 elif arguments[0] == 'placement':
     placement()
+elif arguments[0] == 'desktop' and 'old-hook' in arguments:
+    desktop_with_old_hook()
 elif arguments[0] == 'desktop':
     desktop()
 elif arguments[0] == 'windowed':

@@ -2445,12 +2445,13 @@ struct LeapDescribe {
 // On its own thread: reading an app starts two programs, a second or more each in a guest that's emulated.
 static void *leap_describe(void *argument) {
     struct LeapDescribe *job = argument;
-    char *const read_it[] = {(char *)job->menu_tool, "describe", "--path", job->path, NULL};
-    char *const icon_of[] = {(char *)job->menu_tool, "icon", "--path", job->path, NULL};
-    char *description = run_tool(read_it), *icon = run_tool(icon_of);
+    char *const read_it[] = {(char *)job->menu_tool, "describe", "--icon", "--path", job->path, NULL};
+    char *description = run_tool(read_it);
     const char *json = description ? leap_line(description, '{') : "";
-    if (icon && (icon[0] == '#' || strchr(icon, ' ')))
-        icon[0] = 0;
+    // leap_line ended the JSON's line; the icon's the line after, if it has one.
+    char *icon = json[0] ? strchr(json, 0) + 1 : NULL;
+    if (icon && (description + strlen(description) >= icon || *icon == '#' || *icon == 0 || strchr(icon, ' ')))
+        icon = NULL;
     if (icon)
         icon[strcspn(icon, "\r\n")] = 0;
     // The whole line at once, with the list of apps also going down this connection. A failure ends the main loop's read.
@@ -2460,7 +2461,6 @@ static void *leap_describe(void *argument) {
            leap_send(job->fd, "\n"));
     pthread_mutex_unlock(&leap_send_lock);
     free(description);
-    free(icon);
     free(job);
     return NULL;
 }

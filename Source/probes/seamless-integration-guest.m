@@ -819,6 +819,10 @@ int main(int argc, char **argv) {
             if (!app)
                 return 2;
             printJSON(app);
+            if (flag(argc, argv, "--icon")) {
+                fflush(stdout);
+                printIcon(option(argc, argv, "--path", ""));
+            }
             return 0;
         }
         if (!strcmp(command, "redraw-display")) {
