@@ -147,7 +147,8 @@ public actor GuestAgent {
         _ path: String,
         arguments: [String],
         standardInput: Data? = nil,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        patience: TimeInterval = 0
     ) async throws(GuestAgentError) -> GuestProcessResult {
         // NSString's rule, under which "~/x" also counts as absolute, as it did in the original.
         guard !isClosed, (path as NSString).isAbsolutePath, timeout.isFinite, timeout >= 0, timeout <= 1200,
@@ -162,18 +163,34 @@ public actor GuestAgent {
         guard let pid = reply["pid"], let number = pid.number, number.int64Value > 0 else {
             throw .guest(.noProcessIdentifier)
         }
-        return try await waitForProcess(pid, deadline: deadline)
+        return try await waitForProcess(pid, deadline: deadline, patience: patience)
     }
 
+    /// - Parameter patience: How long the agent may go without answering a status poll, in all, before this gives up.
+    ///   Each poll still has its own five seconds; one that runs out is followed by synchronizing again on the same
+    ///   connection, and the process goes on in the guest regardless.
     private func waitForProcess(
         _ pid: JSONValue,
-        deadline: TimeInterval
+        deadline: TimeInterval,
+        patience: TimeInterval = 0
     ) async throws(GuestAgentError) -> GuestProcessResult {
+        var unansweredSince: TimeInterval?
         while true {
             guard !isClosed, !Task.isCancelled, deadline <= 0 || ProcessInfo.processInfo.systemUptime < deadline else {
                 throw .guest(.interrupted)
             }
-            let reply = try await command("guest-exec-status", arguments: ["pid": pid])
+            let reply: JSONValue
+            do throws(GuestAgentError) {
+                reply = try await command("guest-exec-status", arguments: ["pid": pid])
+                unansweredSince = nil
+            } catch {
+                let now = ProcessInfo.processInfo.systemUptime
+                let since = unansweredSince ?? now
+                guard case .control(.timedOut) = error, now - since < patience else { throw error }
+                unansweredSince = since
+                try? await connect()
+                continue
+            }
             guard let exited = reply["exited"]?.number else { throw .guest(.invalidProcessStatus) }
             if exited.boolValue { return try Self.decodeExitedProcess(reply) }
             let (requested, isRecovery) = shared.withLock { ($0.processPollInterval, $0.isRecoveryTransport) }

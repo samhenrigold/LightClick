@@ -40,7 +40,7 @@ private final class AgentGuest: SeamlessGuest {
                     return
                 }
                 // No deadline: a session's tool runs for as long as the app does.
-                agent.runExecutable(path, arguments: arguments, timeout: 0) { result, failure in
+                agent.runExecutable(path, arguments: arguments, timeout: 0, patience: 60) { result, failure in
                     let output = (result?["stdout"] as? Data).map { String(decoding: $0, as: UTF8.self) } ?? ""
                     continuation.resume(
                         returning: SeamlessGuestRun(
@@ -101,7 +101,9 @@ private final class WindowSurfaces: SeamlessPixelSource {
 
     static func service(_ identifier: String) -> String { "gold.samhenri.LightClick.seamless.\(identifier)" }
 
-    private func arrived(_ window: UInt32, _ surface: IOSurfaceRef, _ origin: (x: Int32, y: Int32), _ hold: GuestSurfaceHold?) {
+    private func arrived(
+        _ window: UInt32, _ surface: IOSurfaceRef, _ origin: (x: Int32, y: Int32), _ hold: GuestSurfaceHold?
+    ) {
         guard let desktop else { return }
         frames += 1
         counts[window, default: 0] += 1
@@ -124,9 +126,11 @@ private final class WindowSurfaces: SeamlessPixelSource {
         for (window, surface) in surfaces {
             let image = CIImage(ioSurface: surface)
             guard let colors = CGColorSpace(name: CGColorSpace.sRGB) else { continue }
-            let name = "surface-\(window)-\(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))-\(counts[window] ?? 0).png"
+            let name =
+                "surface-\(window)-\(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))-\(counts[window] ?? 0).png"
             try? CIContext().writePNGRepresentation(
-                of: image, to: URL(fileURLWithPath: directory).appending(path: name), format: .RGBA8, colorSpace: colors)
+                of: image, to: URL(fileURLWithPath: directory).appending(path: name), format: .RGBA8, colorSpace: colors
+            )
         }
     }
 
@@ -255,7 +259,8 @@ final class SeamlessHost: NSObject {
                     return true
                 }) ?? false
         else { return [:] }
-        return GuestWindowSurfaceReceiver.environment(service: WindowSurfaces.service(identifier), directory: directory.path)
+        return GuestWindowSurfaceReceiver.environment(
+            service: WindowSurfaces.service(identifier), directory: directory.path)
     }
 
     @objc static func saveSurfaces(for session: VIMSession, to directory: String) {
@@ -263,8 +268,12 @@ final class SeamlessHost: NSObject {
     }
     @objc static func surfaceFrames(for session: VIMSession) -> Int { windowSurfaces[session.machinePath]?.frames ?? 0 }
     @objc static func isActive(for session: VIMSession) -> Bool { desktops[session.machinePath] != nil }
-    @objc static func isPrepared(for session: VIMSession) -> Bool { SeamlessDesktop.isPrepared(machine: session.machinePath) }
-    @objc static func hasOwnSurfaces(for session: VIMSession) -> Bool { windowSurfaces[session.machinePath]?.hasSurfaces ?? false }
+    @objc static func isPrepared(for session: VIMSession) -> Bool {
+        SeamlessDesktop.isPrepared(machine: session.machinePath)
+    }
+    @objc static func hasOwnSurfaces(for session: VIMSession) -> Bool {
+        windowSurfaces[session.machinePath]?.hasSurfaces ?? false
+    }
 
     private static func makeDesktop(session: VIMSession, guest: AgentGuest) -> SeamlessDesktop? {
         let path = session.machinePath
@@ -289,7 +298,9 @@ final class SeamlessHost: NSObject {
     /// the app's only there to run one guest app.
     @objc static func prepare(for session: VIMSession) {
         let arguments = ProcessInfo.processInfo.arguments
-        guard !arguments.contains("--guest-diagnostics-root") || ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil,
+        guard
+            !arguments.contains("--guest-diagnostics-root")
+                || ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil,
             !arguments.contains("--seamless-session"),
             !arguments.contains("--seamless-make-proxy")
         else { return }
@@ -306,7 +317,9 @@ final class SeamlessHost: NSObject {
             }
             // Again now and then for apps opened since, while nothing's using the agent for long.
             while VIMSession.running(forMachinePath: path) != nil {
-                if desktops[path] == nil, let desktop = makeDesktop(session: session, guest: guest) { await desktop.prearm() }
+                if desktops[path] == nil, let desktop = makeDesktop(session: session, guest: guest) {
+                    await desktop.prearm()
+                }
                 try? await Task.sleep(for: .seconds(45))
             }
         }

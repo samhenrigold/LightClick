@@ -119,6 +119,21 @@ struct GuestAgentTests {
         )
     }
 
+    /// A status poll that goes unanswered is waited out, within the caller's patience, on the same connection: its late
+    /// reply is skipped and the process isn't started again. Runs against the real deadline, so it takes six seconds.
+    @Test func aSlowStatusPollIsWaitedOutWithPatience() async throws {
+        let fake = FakeGuestAgent { _ in .finished(exitCode: 0, output: "done") }
+        defer { fake.stop() }
+        fake.state.withLock { $0.latePolls = 1 }
+        let agent = try await connected(to: fake)
+        defer { agent.close() }
+        let result = try await agent.runExecutable("/fixture/setup", arguments: [], timeout: 0, patience: 30)
+        #expect(result.output == "done")
+        let (processes, syncs) = fake.state.withLock { ($0.processes.count, $0.syncs) }
+        #expect(processes == 1, "Never retry a potentially mutating command")
+        #expect(syncs == 2, "Synchronized again after the timeout")
+    }
+
     @Test func aTimeoutIsReportedAsInterruptedAndNotRetried() async throws {
         let fake = FakeGuestAgent { _ in .running }
         defer { fake.stop() }
