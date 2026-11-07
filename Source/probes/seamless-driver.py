@@ -499,6 +499,11 @@ echo started
     print('the watcher:', said, flush=True)
     if said.get('Error'):
         monitor_dump('the agent not answering the first request')
+        # Whether the guest answers at all while silent: QEMU's bytes each way on the socket, around a few more requests.
+        for _ in range(6):
+            sockets = subprocess.run(['netstat', '-anv', '-f', 'unix'], capture_output=True, text=True).stdout.splitlines()
+            print('## agent socket', [' '.join(row.split()[:10]) for row in sockets if 'guest-agent' in row], flush=True)
+            print('## a request', request({'Executable': '/usr/bin/true', 'Arguments': []}, 20), flush=True)
     print('watching the guest:', target, flush=True)
 
 
