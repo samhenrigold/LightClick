@@ -22,10 +22,10 @@ numbers are best of N and move 10-20% between runs. No Intel hardware was used: 
 | Rung | State |
 |---|---|
 | 1. Translator coverage | Done: integer ISA, flags, LSE, bl/ret, per-site indirect, SSE, SSE2, SSE3, SSSE3, MXCSR, rep, SMC, MMX, x87 but for the forms listed below. 32-bit user code runs in compatibility mode: see "Compatibility mode" |
-| 2. Differential testing | Done: fuzz, QEMU test-i386, a compiled corpus, lc-bench arithmetic, all matching Rosetta |
+| 2. Differential testing | Done: fuzz, QEMU test-i386, a compiled corpus, lc-bench arithmetic against Rosetta for 64-bit code; compatibility-mode checks against TCG, with the limitations below |
 | 3. Kernel model | Done: shadow paging, CR3 and PCID, IDT, syscall, iret, exceptions, in the monitor, passing a test kernel |
 | 4. APIC and device interface | Done: in-VM APIC hot paths; `engine_api.h`, exercised by a harness |
-| 5. QEMU accel | Hybrid with TCG written; never built into QEMU or booted. XNU has never run. See "Hybrid with TCG" |
+| 5. QEMU accel | Hybrid with TCG built and booted on Mavericks and Mojave, including i386 Keynote '09 on Mavericks. See "How long an application takes to start" and "Turning it on by default" for measured coverage and remaining blockers |
 
 ## Measured: correctness
 
@@ -163,7 +163,7 @@ Overhead estimate from these, at the real-guest rates in the brief (4 vCPU total
 The first contact with a real guest, built to find out what is missing rather than to be fast. One vCPU. `-Dhvdbt_engine=<Source/Engine>` builds it into QEMU, `LC_HVDBT=1` turns it on, `LC_HVDBT_TALLY=<file>` writes the tally. Without them no behaviour changes: the hooks are a null pointer test on slow paths (TB miss, kick, notdirty, DMA).
 
 - **Hand-off.** TCG runs firmware and boot loaders. The first TB miss in 64-bit mode at a high-half address is XNU's `vstart`: the engine takes the state from `CPUX86State` and runs on TCG's vCPU thread.
-- **Fallback.** Anything the engine can't do returns `ENGINE_RUN_FALLBACK` with the state precise at that instruction, as for an x86 fault. TCG runs that one instruction (`CF_NOIRQ`, count 1) and the next TB miss returns control. No normal TB is ever generated for a state the engine accepts, so a miss always comes. An instruction leaving 64-bit mode, or setting TF, means TCG keeps going until the state is acceptable: 32-bit processes run this way, slowly and correctly, as far as reading goes.
+- **Fallback.** Anything the engine can't do returns `ENGINE_RUN_FALLBACK` with the state precise at that instruction, as for an x86 fault. TCG runs that one instruction (`CF_NOIRQ`, count 1) and the next TB miss returns control. No normal TB is ever generated for a state the engine accepts, so a miss always comes. Leaving long mode, or setting TF, keeps execution on TCG until the state is acceptable. Flat 32-bit ring-3 compatibility code under a 64-bit kernel is accepted by the engine; 32-bit kernel execution is not. See "Compatibility mode".
 - **What goes back by design**, as its state stays QEMU's: `hlt`, `mov cr8`, every MSR but the syscall family, all #UD (SSE4 and AES are advertised, and only TCG knows them), popcnt (below). The monitor's `stop` is the mechanism, so each old "stops with a clear error" with a known rip now falls back. Stops with no rip are about the engine's limits and stay final, with a register dump and the VM paused.
 - **The APIC is QEMU's**, in both halves. The in-VM APIC is off, each access is a host exit, and the rates above don't apply. Interrupts are level-triggered as QEMU sees them: `irq_line` says one may wait, and the monitor acknowledges only when IF allows, since an acknowledged vector has left the APIC.
 - **RAM.** One host block, GPA 0 up to `ram_below_4g` and 4 GB upward, with `PI_RAM` per frame for holes inside that: anything else reaches the device callbacks. The map is read once at hand-off.
@@ -237,7 +237,7 @@ Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bit
 
 ## Compatibility mode
 
-32-bit user code on a 64-bit kernel runs on the engine, for the processes of Tiger through Snow Leopard and Final Cut-era apps. Ring 3, flat CS, DS, ES and SS, 32-bit CS and stack. Real mode, 16-bit code, 32-bit kernels and any segment with a base stay on TCG, and `hvdbt_want_engine` says which with a `refused:` row in the tally. XNU's layout is from memory, as it was never run: user CS, DS and the cthread GS in an LDT at 0x17, 0x1f and 0x37, reached from IA32_SYSENTER_CS 7, sysenter on the way in, sysexit or iretq on the way out, segments reloaded from the LDT in 64-bit mode just before.
+32-bit user code on a 64-bit kernel runs on the engine, measured with i386 Keynote '09 on Mavericks; see the launch table and profiling below. This does not qualify Tiger, Leopard or other guests with 32-bit kernels: those kernels stay on TCG. Accepted user code has ring 3, flat CS, DS, ES and SS, and 32-bit CS and stack. Real mode, 16-bit code, 32-bit kernels and non-flat CS, DS, ES or SS stay on TCG, and `hvdbt_want_engine` says which with a `refused:` row in the tally. The initial XNU layout assumptions were from memory: user CS, DS and the cthread GS in an LDT at 0x17, 0x1f and 0x37, reached from IA32_SYSENTER_CS 7, sysenter on the way in, sysexit or iretq on the way out, segments reloaded from the LDT in 64-bit mode just before. Real application runs do not prove every segment corner listed under "Not exact".
 
 - **A view of its own.** A view is an address space seen from one CPL and mode, so the same rip can hold 32-bit and 64-bit code, each with its blocks, lookup table and return stack. A 32-bit process uses two views, as a 64-bit one does. A mode change costs what a CPL change does.
 - **Decoder and emitters.** One global, `tr_compat`, read from the context per block: operand and stack sizes, no REX, 40-4F are inc and dec, moffs, pushad and popad, `ret` and `call` at four bytes, 16-bit addressing, `sidt` storing six bytes. Nothing in the 64-bit paths looks at it at run time.
@@ -248,7 +248,7 @@ Not measured: the rest of a boot, real device traffic, the TLB, TB and dirty-bit
 
 Measured: `Tests/diff-compat.sh` runs one image, `Tests/x86/compat/`, under the engine and under QEMU's TCG, since Rosetta on this macOS doesn't run i386. Reset vector and long mode under QEMU, then the same kernel: self checks through both, 2489 fuzz forms at 64 rounds, no x87 among them, and QEMU's `test-i386.c` built -m32, `test_floats` with its 32-bit fsave and fxsave formats included, without BCD, signals or `modify_ldt`. 7145 lines, identical. `run-all.sh` compares the engine with TCG's hash, runs the kernel through `engine_api.h` with boundary stops every 2 ms, and `hybrid.c` takes a BCD fallback in 32-bit code with the host moving the vCPU to 64-bit mode. No QEMU is needed but for `--update`.
 
-What TCG can't say. It stores pushad from the lowest address and leaves registers changed when popad faults, and a CPU doesn't, so CR2 there isn't compared and the registers are checked on the engine alone. It takes the x87 rule for two NaNs in SSE arithmetic where the SDM gives the first source, returns a denormal from min and max under DAZ where the engine gives zero, as Rosetta does, and raises MXCSR.DE by other rules; those inputs and that bit are left out of the 32-bit run, and the 64-bit fuzz holds the same emitters to Rosetta. Its `#GP` for a software int through an empty gate has the vector times 16, not 8, so only the low bits are compared. Agreement with TCG says nothing where TCG and the engine both have a thing wrong, about real CPUs where TCG differs from them, or about XNU, which has never run this.
+What TCG can't say. It stores pushad from the lowest address and leaves registers changed when popad faults, and a CPU doesn't, so CR2 there isn't compared and the registers are checked on the engine alone. It takes the x87 rule for two NaNs in SSE arithmetic where the SDM gives the first source, returns a denormal from min and max under DAZ where the engine gives zero, as Rosetta does, and raises MXCSR.DE by other rules; those inputs and that bit are left out of the 32-bit run, and the 64-bit fuzz holds the same emitters to Rosetta. Its `#GP` for a software int through an empty gate has the vector times 16, not 8, so only the low bits are compared. Agreement with TCG says nothing where TCG and the engine both have a thing wrong, or about real CPUs where TCG differs from them. XNU application coverage is separate evidence, recorded in the real-guest launch and long-run sections.
 
 Not exact: esp wraps in `pop`, `ret` and `call` near 4 GB (the commpage holds that end), an element straddling 4 GB in strings, the limit of fs and gs, a null fs or gs used for an access (a CPU gives #GP, this reads at base 0), CR2 for a faulting popad within the page, `push sreg` writing four bytes as TCG does.
 
@@ -645,9 +645,9 @@ A monitor lock held a long time now yields the host thread, as with more vCPUs t
 - A split locked access, across 16 bytes, stops rather than taking a bus lock.
 - APIC: x2APIC is absent, LVT error and thermal never fire, ESR reads 0.
 
-## What is left to boot XNU
+## Earlier pre-XNU bring-up checklist (historical)
 
-Honest order of risk, none of it started except as noted.
+The following checklist records the earlier pre-XNU assessment, not current support. Its statements that compatibility code had not run under XNU and that the decoder assumed 64-bit code are superseded by "Compatibility mode" and the measured Mavericks i386 Keynote '09 launches above. Genuine 32-bit kernels still stay on TCG. Current qualification and blockers are under "Turning it on by default".
 
 1. **Multi-vCPU.** Everything here ran on one vCPU. Monitor statics must split per vCPU, shadow tables and block maps need locks, invalidation needs IPIs (a killed block's return-stack entries on another vCPU), and the host's translator needs a lock. EnTSO was only proved on two vCPUs in the spike's litmus.
 2. **32-bit kernels,** up to 10.7 or so, stay on TCG, as do real mode and firmware. 32-bit user code: see "Compatibility mode", not yet run under XNU.
@@ -684,9 +684,9 @@ Recommendation:
 - **Mavericks**: not by default yet. The agent silence leaves the app unable to reach the guest for up to a minute at a time; it hasn't shown at 1 vCPU, in one boot, and 2 vCPUs haven't been reported separately. Once it is explained or 2-vCPU boots are clean, on by default for the counts shown clean.
 - **Every other guest**: off, as now, until each has its own boots.
 
-## Go or no-go
+## Earlier pre-XNU go/no-go (historical)
 
-Go for the next phase. Translated code matches Rosetta in steady state and passes every differential check available, and in-VM kernel paths cost about 2% of four vCPUs at real-guest rates with the x86 kernel model proven only on a test kernel of our own. That is not evidence about a booting Mac: nothing here has run XNU, one vCPU, 64-bit only.
+At that checkpoint, the recommendation was: go for the next phase. Translated code matched Rosetta in steady state and passed every differential check available, and in-VM kernel paths were estimated at about 2% of four vCPUs at real-guest rates with the x86 kernel model proven only on a test kernel of our own. That was not evidence about a booting Mac: XNU had not run, and the engine was one vCPU, 64-bit only. The real-guest results above supersede those coverage limits.
 Stop and reconsider if multi-vCPU shadow locking costs far more than the numbers here, or if a real guest's page-table write rate is above several million per second.
 
 ## Earlier spike measurements
