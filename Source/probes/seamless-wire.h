@@ -45,6 +45,7 @@ enum SWMType {
     SWM_DRAG_SEND = 56, // Host to guest: a document id, then a guest path: send that file back under that id.
     SWM_APP_STATE = 57, // Guest to host: JSON with the app's badge, and whether it wants attention.
     SWM_CROP = 58, // Guest to host: show this window from the display's own frames. A frame for it is what shows where it's covered.
+    SWM_RAISE = 67, // Host to guest: this window, in front of its app's others, before the press that follows.
     SWM_FULL_SCREEN = 65, // Guest to host: a window id, then 1 if it's in the guest's full screen, 0 if it's left.
     SWM_SET_FULL_SCREEN = 66, // Host to guest: a window id, then 1 for full screen, 0 to leave.
     SWM_MATERIALS = 64, // Guest to host: a window id, a count, then material, active, x, y, width, height of each, from its top left.
@@ -370,6 +371,7 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
         case SWM_DRAG_QUERY:
         case SWM_CROP:
         case SWM_OVERLAY:
+        case SWM_RAISE:
             fixed = SWM_GONE_SIZE;
             break;
         case SWM_SET_MINIMIZED:
@@ -420,6 +422,7 @@ static inline enum SWMParse swm_parse(const uint8_t *data, size_t avail, struct 
         case SWM_FOCUS:
         case SWM_CROP:
         case SWM_OVERLAY:
+        case SWM_RAISE:
             m->u.window_id = swm_r32(p);
             break;
         case SWM_SET_MINIMIZED:

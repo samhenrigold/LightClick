@@ -415,6 +415,55 @@ static void activate_owner(struct Stream *s) {
     }
 }
 
+extern AXError _AXUIElementGetWindow(AXUIElementRef, uint32_t *);
+static pid_t session_app_pid;
+
+// The first ordinary window of this process, in the guest's order.
+static CGWindowID front_window_of(pid_t pid) {
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+                                                 kCGNullWindowID);
+    CGWindowID front = 0;
+    for (CFIndex i = 0; list && !front && i < CFArrayGetCount(list); i++) {
+        CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
+        if (int_for(d, kCGWindowOwnerPID) == pid && int_for(d, kCGWindowLayer) == 0)
+            front = (CGWindowID)int_for(d, kCGWindowNumber);
+    }
+    if (list)
+        CFRelease(list);
+    return front;
+}
+
+// A press goes by position, and on the host this window can be somewhere nothing covers it, whatever does in the guest. So it's put in
+// front first, the way a click on it would, and the press waits to see that it has been: this runs in the order the host's events came.
+static void raise_for_press(struct Stream *s, CGWindowID id) {
+    pid_t pid = session_app_pid ? session_app_pid : s->pid;
+    if (s->test_pattern || !pid)
+        return;
+    activate_owner(s);
+    if (front_window_of(pid) == id)
+        return;
+    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    CFArrayRef windows = NULL;
+    AXError error = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, (CFTypeRef *)&windows);
+    for (CFIndex i = 0; !error && windows && i < CFArrayGetCount(windows); i++) {
+        AXUIElementRef window = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
+        uint32_t number = 0;
+        if (_AXUIElementGetWindow(window, &number) == kAXErrorSuccess && number == id) {
+            error = AXUIElementPerformAction(window, kAXRaiseAction);
+            break;
+        }
+    }
+    if (windows)
+        CFRelease(windows);
+    CFRelease(app);
+    double started = now();
+    while (!error && front_window_of(pid) != id && now() - started < 0.25)
+        usleep(5000);
+    printf("# %.3f raised window %u for a press: error %d, front %u after %.0f ms\n", now(), id, (int)error, front_window_of(pid),
+           (now() - started) * 1000);
+    fflush(stdout);
+}
+
 static void post_pointer(struct Stream *s, const struct SWMPointer *e) {
     s->pointer_events++;
     if (s->pointer_events <= 8 && !s->test_pattern) {
@@ -952,6 +1001,8 @@ static int drain_input(struct Stream *s) {
         if (m.type == SWM_POINTER) {
             if (!drag_pointer(&m.u.pointer))
                 post_pointer(s, &m.u.pointer);
+        } else if (m.type == SWM_RAISE) {
+            raise_for_press(s, m.u.window_id);
         } else if (m.type == SWM_DRAG_CANCEL)
             cancel_drag(s);
         else if (m.type == SWM_DRAG_QUERY)

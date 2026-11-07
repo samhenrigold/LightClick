@@ -67,6 +67,8 @@ static inline uint8_t SWIMomentumFromNSEvent(NSEventPhase phase) {
 @interface SeamlessInputView : NSView <NSTextInputClient>
 @property(copy) void (^send)(const uint8_t *bytes, size_t size);
 @property uint32_t guestWindow;
+// In a tree, the guest window a press is for. A press goes by position, which in the guest may be another window's.
+@property uint32_t raisesWindow;
 // With `absolute`, events carry guest screen points: this window's position on the host's screen, less this offset. For
 // a window that follows the guest's, where window-relative points chase themselves during a drag.
 @property BOOL absolute;
@@ -173,6 +175,10 @@ static inline uint8_t SWIMomentumFromNSEvent(NSEventPhase phase) {
 }
 - (void)sendPointer:(uint8_t)kind button:(uint8_t)button event:(NSEvent *)event {
     NSPoint p = [self wirePointFor:event];
+    if (kind == SWM_DOWN && self.raisesWindow) {
+        uint8_t raise[64];
+        self.send(raise, swm_put_u32_message(raise, sizeof(raise), SWM_RAISE, self.raisesWindow));
+    }
     struct SWMPointer e = {self.absolute ? 0 : self.guestWindow,
                            kind,
                            button,

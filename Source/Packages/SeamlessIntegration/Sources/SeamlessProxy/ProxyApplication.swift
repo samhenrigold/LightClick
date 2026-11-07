@@ -456,6 +456,24 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                     front.value.window.deminiaturize(nil)
                     return
                 }
+                // By a window's title: `move-title`, `click-title` and, to show what a press does without its raise, `click-no-raise-title`.
+                let parts = command.split(separator: " ", maxSplits: 1).map(String.init)
+                if parts.count == 2, let named = self.surfaces.first(where: { $0.value.window.title.hasPrefix(parts[1]) }) {
+                    switch parts[0] {
+                    case "move-title":
+                        let screen = named.value.window.screen?.visibleFrame ?? .zero
+                        named.value.window.setFrameOrigin(NSPoint(x: screen.minX, y: screen.minY))
+                        self.surfaceMoved(named.key)
+                    case "click-title":
+                        self.testClick(on: named.value)
+                    case "click-no-raise-title":
+                        SeamlessInputViewSetRaisesWindow(named.value.input, 0)
+                        self.testClick(on: named.value)
+                        SeamlessInputViewSetRaisesWindow(named.value.input, UInt32(clamping: named.key))
+                    default: break
+                    }
+                    return
+                }
                 if command.hasPrefix("guest-full-screen") {
                     // Control-Command-F, to the guest, as the key.
                     if let key = NSEvent.keyEvent(
@@ -511,7 +529,10 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     /// Real NSEvents through the real input view, from the window's middle. It doesn't exercise WindowServer's delivery,
     /// but it needs no permission and doesn't touch the host's pointer.
     private func testClick() {
-        guard let surface = surfaces.values.max(by: { Self.area($0) < Self.area($1) }) else { return }
+        if let surface = surfaces.values.max(by: { Self.area($0) < Self.area($1) }) { testClick(on: surface) }
+    }
+
+    private func testClick(on surface: Surface) {
         let window = surface.window
         let place = NSPoint(x: window.frame.width / 2, y: window.frame.height / 2)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
@@ -571,6 +592,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         drop.frame = input.bounds
         drop.autoresizingMask = [.width, .height]
         input.addSubview(drop)
+        SeamlessInputViewSetRaisesWindow(input, UInt32(clamping: id))
         window.observer = drop
         window.collectionBehavior = [.fullScreenPrimary, .fullScreenAuxiliary]
         NotificationCenter.default.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) {

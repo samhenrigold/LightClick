@@ -435,6 +435,10 @@ def desktop():
         if request({'Action': 'seamless-state'}, 60).get('Prepared'):
             break
         time.sleep(1)
+    # A second TextEdit window, in front of the first, for a press that only the host can tell apart.
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', 'echo second > /tmp/seamless-second.txt; chmod 644 /tmp/seamless-second.txt; '
+                                                    '/tmp/sg/ig open-file --session --path /tmp/seamless-second.txt --with TextEdit']}, 120)
+    time.sleep(8)
     print('before the press', request({'Action': 'seamless-state'}, 60), flush=True)
     print(next(iter(rows()), ''), flush=True)
     pressed = time.time()
@@ -456,6 +460,30 @@ def desktop():
     windows = proxy_windows()
     check('the machine window hides', not machine_window())
     check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
+    # Two windows of one app overlapping in the guest and apart on the host: a press on the lower one is for it, not what's over it.
+    # The caret blinks only in the key window, so whether its window keeps changing says which window got the press.
+    lower = next((re.search(r'id=(\d+)', row).group(1) for row in proxy_windows() if 'seamless-note' in row), None)
+    textedit_pid = next((int(re.search(r'pid=(\d+)', row).group(1)) for row in proxy_windows() if 'seamless-note' in row), 0)
+    if lower and textedit_pid:
+        def changes():
+            found = re.search(r'presented ([0-9.]+)', subprocess.run([meter, lower, '4'], capture_output=True, text=True).stdout)
+            return float(found.group(1)) if found else -1
+        command = results/f'{tag}-clicks.txt.command'
+        command.write_text('move-title seamless-note')
+        os.kill(textedit_pid, signal.SIGUSR2)
+        time.sleep(1)
+        command.write_text('click-no-raise-title seamless-note')
+        os.kill(textedit_pid, signal.SIGUSR2)
+        time.sleep(1)
+        without = changes()
+        command.write_text('click-title seamless-note')
+        os.kill(textedit_pid, signal.SIGUSR2)
+        time.sleep(1)
+        raised = changes()
+        print('a press on the covered window: changes/s, without raising', without, 'and with', raised, flush=True)
+        check('a press on a window that\'s covered in the guest reaches it', raised > without and raised > 0)
+    else:
+        check('a press on a window that\'s covered in the guest reaches it', False)
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
         subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-desktop-{window}.png')], capture_output=True)
