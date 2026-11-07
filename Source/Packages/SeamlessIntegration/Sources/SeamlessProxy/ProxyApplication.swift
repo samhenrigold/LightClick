@@ -472,6 +472,29 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                     return
                 }
                 let command = (try? String(contentsOfFile: self.testCommandPath, encoding: .utf8)) ?? ""
+                // What each window's material views are, against what the guest sent, for a test with the display asleep.
+                if command.hasPrefix("materials-report") {
+                    let lines = self.surfaces.keys.sorted().map { id -> String in
+                        let surface = self.surfaces[id]!
+                        let bounds = surface.input.bounds
+                        let rows = (self.materials[id] ?? []).filter { $0.material != 26 }
+                        let margin = (surface.window as? SurfaceWindow)?.margin ?? 0
+                        let inside = rows.allSatisfy {
+                            bounds.contains(
+                                NSRect(x: $0.x + margin, y: $0.y + margin, width: $0.width, height: $0.height))
+                        }
+                        let views = (self.materialViews[id] ?? []).compactMap { $0 as? NSVisualEffectView }
+                        let shown = views.map { view in
+                            "\(view.material.rawValue):\(view.frame == bounds ? "whole" : "\(view.frame)"):"
+                                + "\(view.superview === surface.input ? "in" : "out"):\(view.maskImage == nil ? "nomask" : "mask")"
+                        }
+                        return
+                            "\(id)\trows \(rows.count)\tkinds \(Set(rows.map(\.material)).count)\tinside \(inside)\tviews \(shown.joined(separator: ","))"
+                    }
+                    try? (lines.joined(separator: "\n") + "\n").write(
+                        toFile: self.testCommandPath + ".materials", atomically: true, encoding: .utf8)
+                    return
+                }
                 if command.hasPrefix("report") {
                     let lines = self.surfaces.sorted { $0.value.order < $1.value.order }.map { id, surface -> String in
                         let frame = surface.window.frame
@@ -537,9 +560,16 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                     self.testResize(front.value)
                     return
                 }
+                // A command this build doesn't know isn't a move.
+                guard command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || command.hasPrefix("move")
+                else { return }
                 let screen = front.value.window.screen?.visibleFrame ?? .zero
-                front.value.window.setFrameOrigin(
-                    NSPoint(x: screen.maxX - front.value.window.frame.width, y: screen.minY))
+                // The other corner if it's there already, as a window nearly the screen's size can be, so it always moves.
+                var corner = NSPoint(x: screen.maxX - front.value.window.frame.width, y: screen.minY)
+                if front.value.window.frame.origin == corner {
+                    corner = NSPoint(x: screen.minX, y: screen.maxY - front.value.window.frame.height)
+                }
+                front.value.window.setFrameOrigin(corner)
                 self.surfaceMoved(front.key)
             }
         }
