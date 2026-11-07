@@ -265,7 +265,7 @@ final class SeamlessHost: NSObject {
     @objc static func toggle(for session: VIMSession) {
         let path = session.machinePath
         if let desktop = desktops[path] {
-            desktop.finish()
+            desktop.finish(why: "the button")
             return
         }
         guard let machine = try? VIMMachine.load(URL(fileURLWithPath: path)),
@@ -344,7 +344,7 @@ final class SeamlessHost: NSObject {
     /// Whatever else happens to the app, a hidden machine comes back. Says whether there was one.
     @discardableResult @objc static func leaveAll() -> Bool {
         let any = !desktops.isEmpty
-        for desktop in desktops.values { desktop.finish() }
+        for desktop in desktops.values { desktop.finish(why: "Light Click's tile or quitting") }
         return any
     }
 
