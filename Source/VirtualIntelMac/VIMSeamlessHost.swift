@@ -73,6 +73,7 @@ private final class AgentGuest: SeamlessGuest {
 @MainActor
 private final class WindowSurfaces: SeamlessPixelSource {
     private var surfaces: [UInt32: IOSurfaceRef] = [:]
+    private var origins: [UInt32: (x: Int32, y: Int32)] = [:]
     let noDisplayFile: URL
     weak var desktop: SeamlessDesktop?
     private var receiver: GuestWindowSurfaceReceiver?
@@ -85,8 +86,9 @@ private final class WindowSurfaces: SeamlessPixelSource {
             guard !frame.isShape else { return }
             let surface = UnsafeTransfer(frame.surface)
             let window = frame.window
+            let origin = frame.origin
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.arrived(window, surface.value) }
+                MainActor.assumeIsolated { self?.arrived(window, surface.value, origin) }
             }
         }
         if receiver == nil { return nil }
@@ -94,13 +96,15 @@ private final class WindowSurfaces: SeamlessPixelSource {
 
     static func service(_ identifier: String) -> String { "gold.samhenri.LightClick.seamless.\(identifier)" }
 
-    private func arrived(_ window: UInt32, _ surface: IOSurfaceRef) {
+    private func arrived(_ window: UInt32, _ surface: IOSurfaceRef, _ origin: (x: Int32, y: Int32)) {
         guard let desktop else { return }
         if surfaces.isEmpty { FileManager.default.createFile(atPath: noDisplayFile.path, contents: nil) }
         if surfaces[window] == nil {
             desktop.note("# window \(window)'s own surface: \(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))")
         }
         surfaces[window] = surface
+        // Mavericks' say where they start, and Mojave's leave that to the tool.
+        origins[window] = origin == (0, 0) ? nil : origin
         desktop.windowPixelsChanged(window)
     }
 
@@ -108,9 +112,12 @@ private final class WindowSurfaces: SeamlessPixelSource {
 
     func surface(forWindow window: UInt32) -> IOSurfaceRef? { surfaces[window] }
 
+    func surfaceOrigin(forWindow window: UInt32) -> (x: Int32, y: Int32)? { origins[window] }
+
     /// The display's frames are what show the window that's coming back.
     func stop() {
         surfaces = [:]
+        origins = [:]
         desktop = nil
         try? FileManager.default.removeItem(at: noDisplayFile)
     }
@@ -213,7 +220,7 @@ final class SeamlessHost: NSObject {
     }
 
     /// For QEMU, before it starts: where to send each window's surface, once a guest has been asked for them. Nothing goes
-    /// there until then. Not Mavericks' half of this, which turns on a second run of its GL.
+    /// there until then.
     @objc static func qemuEnvironment(for session: VIMSession) -> [String: String] {
         guard let machine = try? VIMMachine.load(URL(fileURLWithPath: session.machinePath)),
             let identifier = machine.configuration["Identifier"] as? String
@@ -227,7 +234,6 @@ final class SeamlessHost: NSObject {
             }) ?? false
         else { return [:] }
         return GuestWindowSurfaceReceiver.environment(service: WindowSurfaces.service(identifier), directory: directory.path)
-            .filter { $0.key.hasPrefix("VIM_SEAMLESS_PVG") }
     }
 
     @objc static func isActive(for session: VIMSession) -> Bool { desktops[session.machinePath] != nil }

@@ -128,7 +128,10 @@ public final class SeamlessDesktop {
         }
         var ownSurfaces = false
         if pixelSource != nil {
-            let injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
+            // shortcut: Mavericks only when asked, since a window that hasn't changed there has no surface yet, and a page's repaint
+            // can miss it. Make it the default once those are right.
+            let alsoBuild = environment["LC_SEAMLESS_MAVERICKS_SURFACES"] != nil ? "13F34" : "18G103"
+            let injected = await guest.run("/bin/sh", ["-c", Self.injectScript, "sh", alsoBuild])
             note("# hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)\(injected.failure ?? "")")
             ownSurfaces = injected.exitCode == 0
             if stopped { return }
@@ -162,7 +165,8 @@ public final class SeamlessDesktop {
             // Mavericks has been seen to drop the agent's connection during this and be set up regardless. Without Accessibility there are only no menus.
             _ = await guest.run("/bin/sh", ["-c", SeamlessSession.setupScript, "sh", tool, menuTool])
             // On Mojave, ready for a press to load into WindowServer.
-            if await guest.run("/usr/bin/uname", ["-r"]).output.hasPrefix("18."),
+            let release = await guest.run("/usr/bin/uname", ["-r"]).output
+            if release.hasPrefix("18.") || release.hasPrefix("13."),
                 let hook = await guest.stage(tools.appending(path: "seamless-ws-hook.dylib")),
                 let injector = await guest.stage(tools.appending(path: "seamless-ws-inject"))
             {
@@ -180,8 +184,7 @@ public final class SeamlessDesktop {
     /// dies and logs the user out, so it's only for the one build it's been run on, is tried once per guest start and is never
     /// retried, whatever happened. Exit 0 means the hook's in this WindowServer; anything else leaves the display's frames.
     private static let injectScript = """
-        [ "$(/usr/bin/uname -r | /usr/bin/cut -d. -f1)" = 18 ] || exit 3
-        [ "$(/usr/bin/sw_vers -buildVersion)" = 18G103 ] || exit 3
+        case "$(/usr/bin/sw_vers -buildVersion)" in 18G103|$1) ;; *) exit 3;; esac
         [ -x /tmp/sg/ws-inject ] && [ -f /tmp/sg/hook.dylib ] || exit 3
         /usr/bin/grep -q seamless-ws-hook /System/Library/LaunchDaemons/com.apple.WindowServer.plist && exit 3
         pid=$(/usr/bin/pgrep -x WindowServer); [ -n "$pid" ] || exit 3

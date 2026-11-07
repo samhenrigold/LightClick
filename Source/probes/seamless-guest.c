@@ -2528,7 +2528,7 @@ static void leap_set_home(void) {
 
 // Asks the hook, if it's loaded and has this, for each window on its own surface in place of the display.
 static int leap_set_own_surfaces(const char *self, int on) {
-    if (access(SWS_PATH, R_OK) || darwin_major() != 18)
+    if (access(SWS_PATH, R_OK) || (darwin_major() != 18 && darwin_major() != 13))
         return 0;
     char scale[32];
     snprintf(scale, sizeof(scale), "%g", display_scale());
@@ -2545,7 +2545,7 @@ static int leap_restore(const char *menu_tool) {
     if (!_NSGetExecutablePath(self, &length))
         leap_set_own_surfaces(self, 0);
     // WindowServer has only been drawing what changes, and the display hasn't been getting even that.
-    if (menu_tool && menu_tool[0] && darwin_major() == 18) {
+    if (menu_tool && menu_tool[0] && (darwin_major() == 18 || darwin_major() == 13)) {
         sleep(1);
         char *const redraw[] = {(char *)menu_tool, "redraw-display", NULL};
         free(run_tool(redraw));
