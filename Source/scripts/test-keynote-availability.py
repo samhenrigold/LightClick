@@ -28,7 +28,8 @@ def main():
     guest={'basestring':str}
     exec(compile(tree,'fixed guest metadata functions','exec'),guest)
     assert guest['APPS']==['/Applications/Keynote.app',"/Applications/iWork '09/Keynote.app",
-                          "/Applications/iWork '09/Numbers.app","/Applications/iWork '09/Pages.app"]
+                          "/Applications/iWork '09/Numbers.app","/Applications/iWork '09/Pages.app",
+                          '/Applications/Numbers.app','/Applications/Pages.app','/Applications/Final Cut Pro.app']
     assert guest['SYSTEM']=='/System/Library/CoreServices/SystemVersion.plist'
     with tempfile.TemporaryDirectory(prefix='lightclick-keynote-metadata-test-') as temporary:
         root=Path(temporary).resolve()

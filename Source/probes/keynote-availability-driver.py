@@ -11,7 +11,8 @@ import xml.etree.ElementTree as ET
 INVENTORY = r'''import base64, binascii, hashlib, json, os, plistlib, signal, stat, struct, sys
 signal.alarm(15)
 APPS = ['/Applications/Keynote.app', "/Applications/iWork '09/Keynote.app",
-        "/Applications/iWork '09/Numbers.app", "/Applications/iWork '09/Pages.app"]
+        "/Applications/iWork '09/Numbers.app", "/Applications/iWork '09/Pages.app",
+        '/Applications/Numbers.app', '/Applications/Pages.app', '/Applications/Final Cut Pro.app']
 SYSTEM = '/System/Library/CoreServices/SystemVersion.plist'
 def regular(path, limit):
     if os.path.realpath(path) != path:

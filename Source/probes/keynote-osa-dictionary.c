@@ -1,4 +1,5 @@
-// Fixed guest Keynote dictionary extraction, not a host application launcher or generic scripting API.
+// Fixed guest iWork dictionary extraction: keynote/numbers/pages and direct/iwork09 enums, never arbitrary apps.
+// The original output-only invocation still selects direct Keynote for existing collectors.
 // Verified SDK: OpenScripting/ASDebugging.h declares
 // OSAError OSACopyScriptingDefinitionFromURL(CFURLRef,SInt32,CFDataRef*), macOS10.5+, modeFlags=0.
 #include <Carbon/Carbon.h>
@@ -13,6 +14,14 @@
 
 #define APP "/Applications/Keynote.app"
 #define PREFIX "/private/var/tmp/LightClickKeynote."
+static const char *application(const char *name,const char *location) {
+    if (strcmp(location,"direct") && strcmp(location,"iwork09")) return NULL;
+    int legacy=!strcmp(location,"iwork09");
+    if (!strcmp(name,"keynote")) return legacy ? "/Applications/iWork '09/Keynote.app" : APP;
+    if (!strcmp(name,"numbers")) return legacy ? "/Applications/iWork '09/Numbers.app" : "/Applications/Numbers.app";
+    if (!strcmp(name,"pages")) return legacy ? "/Applications/iWork '09/Pages.app" : "/Applications/Pages.app";
+    return NULL;
+}
 static int destination(const char *path) {
     if (strncmp(path,PREFIX,strlen(PREFIX))) return 0;
     const char *token=path+strlen(PREFIX), *end=token;
@@ -28,18 +37,20 @@ static int destination(const char *path) {
 }
 
 int main(int argc,char **argv) {
-    if (argc!=2 || !destination(argv[1])) {
+    const char *app=argc==2 ? APP : argc==4 ? application(argv[1],argv[2]) : NULL;
+    const char *output=argc==2 ? argv[1] : argc==4 ? argv[3] : "";
+    if (!app || !destination(output)) {
         fputs("FAIL expected this collector's canonical private root-owned sdef.native output\n",stderr);
         return 64;
     }
     alarm(12);
     char actual[PATH_MAX];
     struct stat info;
-    if (!realpath(APP,actual) || strcmp(actual,APP) || lstat(APP,&info) || !S_ISDIR(info.st_mode)) {
-        fputs("FAIL fixed Keynote app absent or noncanonical\n",stderr);
+    if (!realpath(app,actual) || strcmp(actual,app) || lstat(app,&info) || !S_ISDIR(info.st_mode)) {
+        fputs("FAIL fixed iWork app absent or noncanonical\n",stderr);
         return 3;
     }
-    CFURLRef url=CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,(const UInt8 *)APP,strlen(APP),true);
+    CFURLRef url=CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,(const UInt8 *)app,strlen(app),true);
     CFDataRef data=NULL;
     OSAError status=url ? OSACopyScriptingDefinitionFromURL(url,0,&data) : paramErr;
     if (url) CFRelease(url);
@@ -49,7 +60,7 @@ int main(int argc,char **argv) {
         if (data) CFRelease(data);
         return 4;
     }
-    int fd=open(argv[1],O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK,0600);
+    int fd=open(output,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK,0600);
     if (fd<0) {
         perror("FAIL exclusive dictionary output");CFRelease(data);return 5;
     }
@@ -64,8 +75,8 @@ int main(int argc,char **argv) {
     int closed=close(fd);
     CFRelease(data);
     if (left || closed) {
-        unlink(argv[1]);fputs("FAIL incomplete dictionary output\n",stderr);return 6;
+        unlink(output);fputs("FAIL incomplete dictionary output\n",stderr);return 6;
     }
-    printf("PASS fixed Keynote OSA dictionary bytes=%ld\n",(long)length);
+    printf("PASS fixed iWork OSA dictionary bytes=%ld app=%s\n",(long)length,app);
     return 0;
 }

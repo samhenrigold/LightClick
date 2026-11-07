@@ -25,7 +25,7 @@ def load():
 def guest_functions(driver):
     tree=ast.parse(driver['COLLECTOR'])
     tree.body=[node for node in tree.body if isinstance(node,(ast.Import,ast.FunctionDef)) or isinstance(node,ast.Assign)
-               and any(isinstance(target,ast.Name) and target.id in ('APP','SUFFIXES') for target in node.targets)]
+               and any(isinstance(target,ast.Name) and target.id in ('APP','SUFFIXES','TARGETS') for target in node.targets)]
     ns={}
     exec(compile(tree,'fixed Keynote collector functions','exec'),ns)
     return ns
@@ -67,12 +67,14 @@ def helper_checks(root):
         except ValueError: assert option!='valid'
         else: assert option=='valid'
     ns['os']=saved_os
-    for mode in ('success','timeout','launch-error','native'):
+    for mode in ('success','timeout','launch-error','native','native-target'):
         directory=root/('tool-'+mode)
         directory.mkdir()
         clock,killed,limits=[0.0],[],[]
         def popen(command,**options):
-            assert command==(['/fixed/staged/helper',str(directory)+'/sdef.native'] if mode=='native' else ['/usr/bin/sdef',str(app)])
+            expected=(['/fixed/staged/helper','numbers','direct',str(directory)+'/sdef.native'] if mode=='native-target' else
+                      ['/fixed/staged/helper',str(directory)+'/sdef.native'] if mode=='native' else ['/usr/bin/sdef',str(app)])
+            assert command==expected
             assert options['close_fds'] is True
             options['preexec_fn']()
             if mode=='launch-error': raise OSError('mock unavailable sdef')
@@ -83,11 +85,12 @@ def helper_checks(root):
         ns.update(subprocess=types.SimpleNamespace(Popen=popen),
                   resource=types.SimpleNamespace(RLIMIT_FSIZE=1,RLIMIT_CPU=2,setrlimit=lambda key,value:limits.append((key,value))),
                   time=types.SimpleNamespace(time=lambda:clock[0],sleep=lambda value:clock.__setitem__(0,clock[0]+value)))
-        try: result=ns['extract'](str(directory),'/fixed/staged/helper' if mode=='native' else None)
+        try: result=ns['extract'](str(directory),'/fixed/staged/helper' if mode.startswith('native') else None,
+                                  ('numbers','direct')if mode=='native-target'else None)
         except OSError: assert mode=='launch-error'
         else:
             assert result['timed_out']==(mode=='timeout') and clock[0]<=17.1
-            assert result['mode']==('native-osa' if mode=='native' else 'sdef-tool')
+            assert result['mode']==('native-osa' if mode.startswith('native') else 'sdef-tool')
             assert (directory/'sdef.stdout').read_bytes()==b'<dictionary/>'
         assert limits==[(1,(2*1024*1024,2*1024*1024)),(2,(10,10))]
     print('PASS fixed resource/framework walk, no symlink escape, private-directory checks, exact sdef argv/resource/time caps')
@@ -120,11 +123,31 @@ def native_helper_checks(root):
             tempfile=types.SimpleNamespace(mkdtemp=lambda **kwargs:'/private/var/tmp/LightClickKeynote.ABC123'),
             os=types.SimpleNamespace(umask=lambda mode:None,lstat=lambda path:types.SimpleNamespace(st_mode=stat.S_IFDIR),
                 path=types.SimpleNamespace(realpath=lambda path:path,lexists=lambda path:False)),
-            extract=lambda directory,helper:calls.append(('extract',helper))or {'mode':'native-osa' if helper else 'sdef-tool'},
+            extract=lambda directory,helper,target=None:calls.append(('extract',helper))or {'mode':'native-osa' if helper else 'sdef-tool'},
             store=lambda path,data:calls.append(('store',path)))
         ns['collect'](helper,hashlib.sha256(payload).hexdigest()) if native else ns['collect']()
         assert ('walk' in calls)==(not native)
         assert ('extract',helper if native else None)in calls
+    # A new target uses actual inventory metadata; a stale version/ID is rejected before extraction.
+    for selector,location in (('numbers','direct'),('pages','iwork09'),('not-whitelisted','direct')):
+        ns=guest_functions(load());calls=[]
+        app_info={'CFBundleIdentifier':'fixture.bundle','CFBundleShortVersionString':'fixture.version','CFBundleVersion':'fixture.build'}
+        expected=dict(app_info,path=ns['TARGETS'].get(selector,{}).get(location,'/Users/no'))
+        ns.update(read=lambda *args:b'fixed info',plistlib=types.SimpleNamespace(readPlistFromString=lambda data:app_info),
+                  validated_helper=lambda *args:helper,private=lambda *args:None,
+                  resources=lambda:(_ for _ in ()).throw(AssertionError('native walk forbidden')),
+                  tempfile=types.SimpleNamespace(mkdtemp=lambda **kwargs:'/private/var/tmp/LightClickKeynote.ABC123'),
+                  os=types.SimpleNamespace(umask=lambda mode:None,lstat=lambda path:types.SimpleNamespace(st_mode=stat.S_IFDIR),
+                    path=types.SimpleNamespace(realpath=lambda path:path,lexists=lambda path:False)),
+                  extract=lambda directory,helper,target:calls.append(target)or {'mode':'native-osa'},store=lambda *args:None)
+        try:ns['collect'](helper,'hash',(selector,location),expected)
+        except ValueError:assert selector=='not-whitelisted'
+        else:assert calls==[(selector,location)]
+        if selector!='not-whitelisted':
+            expected['CFBundleVersion']='changed'
+            try:ns['collect'](helper,'hash',(selector,location),expected)
+            except ValueError:pass
+            else:raise AssertionError('stale inventory version accepted')
     print('PASS staged helper identity/hash/private scope and native collection without another resource walk')
 
 
