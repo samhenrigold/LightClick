@@ -918,7 +918,7 @@ DOCK_STATE = ('user=$(/usr/bin/stat -f %Su /dev/console); home=$(eval echo ~$use
               'echo "user $user"; echo "autohide $(/usr/bin/sudo -u $user /usr/bin/defaults read com.apple.dock autohide 2>&1)"; '
               'echo "delay $(/usr/bin/sudo -u $user /usr/bin/defaults read com.apple.dock autohide-delay 2>&1)"; '
               '/bin/ls $home/Library/LaunchAgents/com.mac.virtualintelmac.seamless-restore.plist 2>&1; '
-              '/bin/cat /tmp/seamless-leap-restore.log 2>&1 | /usr/bin/tail -5; true')
+              '/bin/cat /tmp/seamless-leap-restore.log 2>&1 | /usr/bin/tail -5; echo "login item ran: $(/bin/cat $home/Library/Logs/seamless-restore.log 2>&1)"; true')
 
 
 def hard_stop():

@@ -2757,7 +2757,8 @@ static const char leap_hide_dock[] =
     "  [ -n \"$hide\" ] && back=\"defaults write com.apple.dock autohide -bool $hide\"\n"
     "  back=\"$back; defaults delete com.apple.dock autohide-delay\"\n"
     "  [ -n \"$delay\" ] && back=\"$back; defaults write com.apple.dock autohide-delay -float $delay\"\n"
-    "  back=\"$back; /usr/bin/killall Dock; rm -f $plist; launchctl remove com.mac.virtualintelmac.seamless-restore; "
+    "  back=\"$back; /usr/bin/killall Dock; date > $HOME/Library/Logs/seamless-restore.log; rm -f $plist; "
+    "launchctl remove com.mac.virtualintelmac.seamless-restore; "
     "true\"\n"
     // Written straight to its file and flushed before the Dock's preference changes, so a guest stopped hard at any
     // point after has what puts it back: the preferences daemon writes in its own time.
