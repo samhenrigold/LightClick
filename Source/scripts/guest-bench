@@ -25,10 +25,12 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import uuid
 
 from startup_timeline import StartupTimeline, preserve_startup_logs
+from diagnostics_evidence import retain_timeout
 
 from clone_lease import CloneLease, LeaseRefused, process_identity
 
@@ -127,6 +129,12 @@ def request(command, timeout):
                 file.write(str(result.get('Stderr') or result.get('Error') or ''))
             return result
         time.sleep(1)
+    try:
+        retained = retain_timeout(channel, source/'Build/bench', args.tag, app_pid=process.pid, timeout=timeout)
+        print(f'Diagnostics timeout evidence: {retained}', file=sys.stderr, flush=True)
+    except Exception as error:
+        # Evidence is best effort: its failure must not replace the timeout or prevent owned-clone cleanup.
+        print(f'Diagnostics timeout evidence could not be retained: {error}', file=sys.stderr, flush=True)
     raise SystemExit(f'Timed out waiting for {command}')
 
 
