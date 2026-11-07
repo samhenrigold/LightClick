@@ -2808,6 +2808,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         [self applyLifecycleEvent:VIMSessionEventDesktopReached];
         [self updateClipboardForBoot:boot];
         [self restoreDisplaySelectionForBoot:boot];
+        [self offerGuestPayloadUpdate];
     }
     [self scheduleGuestStatusRefreshAfter:policy().refreshInterval];
 }
@@ -4078,6 +4079,38 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     self.state.reconciledBoot = nil;
     [self refreshGuestStatus];
+}
+// A newer app's guest support goes in only when the user says so, through the same repair as the menu.
+- (void)offerGuestPayloadUpdate {
+    NSURL *journal = [self.machine.URL URLByAppendingPathComponent:@"State/GuestInstallation.plist"];
+    if (self.payloadUpdateOffered || !self.guestSessionState.mayStartGraphicsAction ||
+        !VIMGuestHasTrait(self.machine.guest, VIMGuestTraitParavirtualizedGraphics) ||
+        !self.machine.hasPublishedGuestGraphics || ![NSFileManager.defaultManager fileExistsAtPath:journal.path])
+        return;
+    NSString *version = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"";
+    if (![VIMGuestPayloadUpdate
+            offersUpdateWithMachine:self.machine.URL
+                              guest:self.machine.guest
+                            runtime:[NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime"]
+                         appVersion:version])
+        return;
+    self.payloadUpdateOffered = YES;
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = @"Update graphics support?";
+    VIMSetInstallerAlertIcon(alert, self.machine.guest);
+    alert.informativeText =
+        @"This version of Light Click has newer graphics support for this Mac. Save your work first. "
+        @"Keep this Mac running until the update finishes, then restart it.";
+    [alert addButtonWithTitle:@"Update Now"];
+    [alert addButtonWithTitle:@"Later"];
+    [alert beginSheetModalForWindow:self.window
+                  completionHandler:^(NSModalResponse response) {
+                    if (response != NSAlertFirstButtonReturn || !self.task.running)
+                        return;
+                    NSError *failure = nil;
+                    if (![VIMSession repairMachine:self.machine error:&failure])
+                        VIMPresentError(failure, self.window);
+                  }];
 }
 - (IBAction)finishGraphicsSetup:(id)sender {
     if (!self.guestSessionState.mayStartGraphicsAction)

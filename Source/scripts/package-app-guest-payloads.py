@@ -4,6 +4,7 @@
 Build-host tooling only. Archives are never extracted or installed on the host.
 Existing release inputs remain untouched. Big Sur native/GL setup is separate.
 """
+import hashlib
 import argparse
 import lzma
 import io
@@ -237,6 +238,8 @@ def build(source, output, surface_helper=None, bigsur_helpers=None, iosurface_ro
     # Big Sur keeps its own Metal/OpenGL/compiler stack. Only our two small
     # adapters ship; native GPU bundles are prepared from the actual guest.
     receipt['Guests']['bigsur']=build_bigsur(source,output,bigsur_helpers)
+    for record in receipt['Guests'].values():  # the app compares this with what a machine last prepared
+        record['ArchiveSHA256'] = hashlib.sha256((output/record['Archive']).read_bytes()).hexdigest()
     (output/'Payloads.plist').write_bytes(plistlib.dumps(receipt, sort_keys=True))
     return receipt
 

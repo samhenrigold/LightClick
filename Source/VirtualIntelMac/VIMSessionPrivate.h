@@ -35,6 +35,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic) BOOL preparationRequested;
 @property(nonatomic) BOOL installationRequested;
 @property BOOL repairArchivePending;
+@property BOOL payloadUpdateOffered; // asked once per session whether to take newer guest support
 @property(nonatomic, nullable) NSDictionary *completionGuestReport;
 - (void)logMessage:(NSString *)message;
 - (void)showHeadlessRepairProgress:(NSString *)message;
