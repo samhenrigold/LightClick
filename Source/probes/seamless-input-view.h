@@ -67,6 +67,8 @@ static inline uint8_t SWIMomentumFromNSEvent(NSEventPhase phase) {
 @interface SeamlessInputView : NSView <NSTextInputClient>
 @property(copy) void (^send)(const uint8_t *bytes, size_t size);
 @property uint32_t guestWindow;
+// In a tree, the guest window a press is for. A press goes by position, which in the guest may be another window's.
+@property uint32_t raisesWindow;
 // With `absolute`, events carry guest screen points: this window's position on the host's screen, less this offset. For
 // a window that follows the guest's, where window-relative points chase themselves during a drag.
 @property BOOL absolute;
@@ -103,9 +105,10 @@ static inline uint8_t SWIMomentumFromNSEvent(NSEventPhase phase) {
     [super updateTrackingAreas];
     if (_area)
         [self removeTrackingArea:_area];
-    // Always, not just when key: hovering a background window updates its cursor and tracking areas on a real Mac.
+    // Only with this app active: the guest has one pointer, and it shouldn't jump because the host's passed over a window.
+    // shortcut: a background window's hover doesn't update in the guest, as it would on a real Mac; a click there still carries its place.
     _area = [[NSTrackingArea alloc] initWithRect:NSZeroRect
-                                         options:NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect
+                                         options:NSTrackingMouseMoved | NSTrackingActiveInActiveApp | NSTrackingInVisibleRect
                                            owner:self
                                         userInfo:nil];
     [self addTrackingArea:_area];
@@ -173,6 +176,10 @@ static inline uint8_t SWIMomentumFromNSEvent(NSEventPhase phase) {
 }
 - (void)sendPointer:(uint8_t)kind button:(uint8_t)button event:(NSEvent *)event {
     NSPoint p = [self wirePointFor:event];
+    if (kind == SWM_DOWN && self.raisesWindow) {
+        uint8_t raise[64];
+        self.send(raise, swm_put_u32_message(raise, sizeof(raise), SWM_RAISE, self.raisesWindow));
+    }
     struct SWMPointer e = {self.absolute ? 0 : self.guestWindow,
                            kind,
                            button,
@@ -185,7 +192,9 @@ static inline uint8_t SWIMomentumFromNSEvent(NSEventPhase phase) {
 }
 static inline uint8_t SWIButton(NSEvent *event) { return event.buttonNumber > 2 ? 2 : (uint8_t)event.buttonNumber; }
 - (void)mouseMoved:(NSEvent *)e {
-    [self sendPointer:SWM_MOVE button:0 event:e];
+    // Only the window that's really under the pointer: one of this app's can be behind another of its own.
+    if ([NSWindow windowNumberAtPoint:NSEvent.mouseLocation belowWindowWithWindowNumber:0] == self.window.windowNumber)
+        [self sendPointer:SWM_MOVE button:0 event:e];
 }
 - (void)mouseDown:(NSEvent *)e {
     [self.window makeFirstResponder:self];

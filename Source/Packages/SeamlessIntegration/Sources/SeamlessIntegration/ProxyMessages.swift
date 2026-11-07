@@ -35,6 +35,8 @@ public enum ProxyEvent: Codable, Hashable, Sendable {
     case surfaceMoved(windowID: Int, x: Double, y: Double)
     /// The host's Dock or the user took this window there or brought it back, not the guest.
     case surfaceMinimized(windowID: Int, minimized: Bool)
+    /// The user took this window out of the host's full screen, not the guest.
+    case surfaceLeftFullScreen(windowID: Int)
     case dragDropped(windowID: Int, x: Double, y: Double)
     case pointerLeftWithButtonDown(windowID: Int)
     case promiseRequested(id: Int, destination: String)
@@ -54,6 +56,8 @@ public enum ProxyEvent: Codable, Hashable, Sendable {
 public enum SessionCommand: Codable, Hashable, Sendable {
     case setMenuBar([GuestMenuItem])
     case minimizeSurface(id: Int, minimized: Bool)
+    case fullScreenSurface(id: Int, fullScreen: Bool)
+    case renameSurface(id: Int, to: Int)
     case setMaterials(id: Int, [GuestMaterial])
     case setDockMenu([GuestMenuItem])
     case setBadge(String?)

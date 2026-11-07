@@ -77,7 +77,8 @@ public final class SessionDiagnostics: NSObject {
 
     /// Actions that need no exclusive use of the agent. Framebuffer and emulator reports don't use it at all, and
     /// process-only inspection can share it with a provisioning child. None stages files or changes that transaction.
-    static let actionsThatDontNeedTheAgentAlone: Set<String> = ["seamless-state", "seamless-toggle", "test-click", 
+    static let actionsThatDontNeedTheAgentAlone: Set<String> = [
+        "seamless-state", "seamless-save-surfaces", "seamless-toggle", "test-click",
         "capture", "inspect-hardware", "guest-processes", "guest-process-sample", "installer-log", "cursor-state",
         "network-details", "configuration", "display-state", "display-fingerprint", "display-buffer-count",
         "display-acquire-async", "pointer-workload", "key-workload", "fullscreen", "passthrough-opengl-release-bql",

@@ -239,6 +239,12 @@ static int printMinimized(int pid, uint32_t number) {
             answer = value == kCFBooleanTrue ? "minimized yes" : "minimized no";
             if (value)
                 CFRelease(value);
+            CFTypeRef full = NULL;
+            AXUIElementCopyAttributeValue(window, CFSTR("AXFullScreen"), &full);
+            if (full == kCFBooleanTrue)
+                printf("full screen yes\n");
+            if (full)
+                CFRelease(full);
             break;
         }
         CFRelease(windows);
@@ -248,24 +254,60 @@ static int printMinimized(int pid, uint32_t number) {
     return 0;
 }
 
-static int setMinimized(int pid, uint32_t number, int minimized) {
+// The window with this number, retained. The caller releases it.
+static AXUIElementRef copyWindowNumbered(int pid, uint32_t number) {
     extern AXError _AXUIElementGetWindow(AXUIElementRef, uint32_t *);
-    AXUIElementRef app = AXUIElementCreateApplication(pid);
+    AXUIElementRef app = AXUIElementCreateApplication(pid), found = NULL;
     CFArrayRef windows = NULL;
-    int result = 2;
     if (AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, (CFTypeRef *)&windows) == kAXErrorSuccess && windows) {
-        for (CFIndex i = 0; i < CFArrayGetCount(windows); i++) {
+        for (CFIndex i = 0; !found && i < CFArrayGetCount(windows); i++) {
             AXUIElementRef window = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
-            uint32_t found = 0;
-            if (_AXUIElementGetWindow(window, &found) == kAXErrorSuccess && found == number) {
-                result = AXUIElementSetAttributeValue(window, kAXMinimizedAttribute,
-                                                      minimized ? kCFBooleanTrue : kCFBooleanFalse) != kAXErrorSuccess;
-                break;
-            }
+            uint32_t each = 0;
+            if (_AXUIElementGetWindow(window, &each) == kAXErrorSuccess && each == number)
+                found = (AXUIElementRef)CFRetain(window);
         }
         CFRelease(windows);
     }
     CFRelease(app);
+    return found;
+}
+
+static int setWindowFlag(int pid, uint32_t number, CFStringRef attribute, int on) {
+    AXUIElementRef window = copyWindowNumbered(pid, number);
+    if (!window)
+        return 2;
+    int result = AXUIElementSetAttributeValue(window, attribute, on ? kCFBooleanTrue : kCFBooleanFalse) != kAXErrorSuccess;
+    CFRelease(window);
+    return result;
+}
+
+static int raiseWindow(int pid, uint32_t number) {
+    AXUIElementRef window = copyWindowNumbered(pid, number);
+    if (!window)
+        return 2;
+    int result = AXUIElementPerformAction(window, kAXRaiseAction) != kAXErrorSuccess;
+    CFRelease(window);
+    return result;
+}
+
+static int placeWindow(int pid, uint32_t number, double x, double y) {
+    AXUIElementRef window = copyWindowNumbered(pid, number);
+    if (!window)
+        return 2;
+    // On its display whole where it fits, as Mavericks clips at the display's edges and flipping goes by them.
+    CGRect display = CGDisplayBounds(CGMainDisplayID());
+    CGSize extent = CGSizeZero;
+    CFTypeRef size = NULL;
+    if (AXUIElementCopyAttributeValue(window, kAXSizeAttribute, &size) == kAXErrorSuccess && size) {
+        AXValueGetValue(size, kAXValueCGSizeType, &extent);
+        CFRelease(size);
+    }
+    CGPoint target = CGPointMake(MAX(0, MIN(x, display.size.width - extent.width)),
+                                 MAX(22, MIN(y, display.size.height - extent.height)));
+    AXValueRef value = AXValueCreate(kAXValueCGPointType, &target);
+    int result = AXUIElementSetAttributeValue(window, kAXPositionAttribute, value) != kAXErrorSuccess;
+    CFRelease(value);
+    CFRelease(window);
     return result;
 }
 
@@ -819,6 +861,10 @@ int main(int argc, char **argv) {
             if (!app)
                 return 2;
             printJSON(app);
+            if (flag(argc, argv, "--icon")) {
+                fflush(stdout);
+                printIcon(option(argc, argv, "--path", ""));
+            }
             return 0;
         }
         if (!strcmp(command, "redraw-display")) {
@@ -841,9 +887,17 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(command, "is-minimized"))
             return printMinimized(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")));
+        if (!strcmp(command, "raise-window"))
+            return raiseWindow(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")));
+        if (!strcmp(command, "place-window"))
+            return placeWindow(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")),
+                               atof(option(argc, argv, "--x", "0")), atof(option(argc, argv, "--y", "0")));
         if (!strcmp(command, "set-minimized"))
-            return setMinimized(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")),
-                                atoi(option(argc, argv, "--state", "1")));
+            return setWindowFlag(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")),
+                                 kAXMinimizedAttribute, atoi(option(argc, argv, "--state", "1")));
+        if (!strcmp(command, "set-full-screen"))
+            return setWindowFlag(atoi(option(argc, argv, "--pid", "0")), (uint32_t)atoi(option(argc, argv, "--window", "0")),
+                                 CFSTR("AXFullScreen"), atoi(option(argc, argv, "--state", "1")));
         if (!strcmp(command, "icon"))
             return printIcon(option(argc, argv, "--path", ""));
         if (!strcmp(command, "menu"))

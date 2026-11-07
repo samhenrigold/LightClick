@@ -560,6 +560,10 @@ symbol and branch validation, and `PVGMetalCompat` runs inside WindowServer [rea
 4. **Hand that surface to the host** without a CPU copy (below).
 5. **Headless:** skip the framebuffer composite with `WSDisplayUpdatesAreDisabled` or by returning early once all windows are delivered.
 
+### Moving windows with the Dock's transform: for guests with no hook
+
+`probes/seamless-atlas/` (a library for the Dock, what injects it, and a control tool; a Mojave experiment, kept as the only hook-free option) calls `SLSSetWindowTransform` from inside the Dock. It moves windows whole and live: 60 frames/s at 7680x4320, no visible CPU cost, and hit testing follows each window to its tile. **But alpha fails:** a display can't erase damage without an opaque desktop, so shadow alpha builds up to near-opaque. So it could only replace cropping, as opaque windows with host shadows. Menus and sheets have to stay at their logical place, with the pointer mapped per window, and `mouseLocation` stays wrong for a tiled window with no fix. A black band once showed after a mode switch: set the mode first, then the transforms. Its first check is Mavericks, and whichever later guests lack a hook.
+
 ### A CA plug-in layer may need no hook
 
 `com.apple.WindowServer.CGSWindow` is a CA plug-in type [read]. A client layer of that type shows a live window, wherever it's placed, whether covered or not; WindowServer composites it
@@ -586,6 +590,33 @@ offsets. Whether a normal client may make that layer is unknown.
 | vmware-svga | Hook composites through PassthroughOpenGL, so the texture is **already on the host GPU**. Host exports an IOSurface per window to the app through the existing `VIMSurfaceFrameMessage` capability transport and `presentSurface:` | None | [inferred]; `display-surface-message.h`, `passthrough-opengl-surfaces-host.c` exist. Needs a window identity marked in the GL stream or the guest IOSurface name |
 | PVG | Hook composites to a Metal texture in the guest; host sees it inside `apple-gfx` only as commands | Unknown | **Open.** Options: guest-RAM-backed shared buffer that the helper's gather (`gpu-performance-notes.md`) imports without copy; or a blit to a shared buffer, per window, in a region the helper maps. Needs a real read of `apple-gfx-helper.m` |
 | Fallback | Shared guest memory: wired pages with a physical list through the driver, host reads them | One | [inferred]; `gather` proves the host half for PVG |
+
+### Who owns a window's surface
+
+Each frame sent carries a Mach send-once right to its buffer's port. Whoever has the frame keeps the right while it's in use. Its going, by letting go or by dying, is what makes the buffer writable again, along with `IOSurfaceIsInUse`. A frame that can't get a free buffer waits or is dropped, and is never written over one that's held.
+
+- Mavericks: a window draws in a private buffer, copied to a free shared one at the end of a frame, so waiting loses nothing.
+- Mojave: the guest reuses its surfaces when it likes, so what's sent is a copy, made in the marker's command buffer.
+- With a viewer stalling 300 ms every 30 frames, surfaces reused before it took them went from 72 to 0 on Mavericks and from 2682 to 0 on Mojave [measured]. CPU isn't measurably higher.
+- shortcut: geometry goes with the frame only on Mavericks. On Mojave the origin is zero and the tool's window says where it is.
+- shortcut: with no free buffer, a frame waits for the next update, so a consumer stalled past all of them as the guest goes idle shows the last frame sent until something changes.
+
+### A covered window keeps going
+
+One app with two animated windows, the second under the first (`probes/seamless-two-windows.m`), per second [measured]:
+
+| Guest | Animates by | Side by side: app draws, presented | Covered: app draws, presented |
+| --- | --- | --- | --- |
+| Mavericks | AppKit | 51, 50 | 53, 55 |
+| Mavericks | Core Animation | 0, 60 | 0, 61 |
+| Mojave | AppKit | 41, 41 | 60, 59 |
+| Mojave | Core Animation | 0, 59 | 0, 63 |
+
+Neither guest throttles or clips a covered window here. Covered in Mavericks' guest, `occlusionState` says so. In Mojave's, with this mode on, it doesn't, and that was checked from the rows: both windows at one place, the second behind.
+
+### What the display still does for a window
+
+With the display off, three things keep a window's surface whole on Mavericks. `gl_prepare_layers` cuts each layer by the opaque ones in front, so it sees one window's layers at a time. `redraw_window` skips what's covered by the region at `state+0x20`, so that starts empty for each window. And a layer that samples what's behind it, such as Safari's address field, reads the drawable, so the drawable gets the window's surface first. shortcut: only that window's, so what's over another window samples clear there.
 
 ## Rejected, now
 

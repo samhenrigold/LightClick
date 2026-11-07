@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import GuestControl
 import SeamlessIntegration
 
@@ -74,6 +75,9 @@ private final class AgentGuest: SeamlessGuest {
 private final class WindowSurfaces: SeamlessPixelSource {
     private var surfaces: [UInt32: IOSurfaceRef] = [:]
     private var origins: [UInt32: (x: Int32, y: Int32)] = [:]
+    private var holds: [UInt32: GuestSurfaceHold] = [:]
+    private(set) var frames = 0
+    private var counts: [UInt32: Int] = [:]
     let noDisplayFile: URL
     weak var desktop: SeamlessDesktop?
     private var receiver: GuestWindowSurfaceReceiver?
@@ -87,8 +91,9 @@ private final class WindowSurfaces: SeamlessPixelSource {
             let surface = UnsafeTransfer(frame.surface)
             let window = frame.window
             let origin = frame.origin
+            let hold = frame.hold
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.arrived(window, surface.value, origin) }
+                MainActor.assumeIsolated { self?.arrived(window, surface.value, origin, hold) }
             }
         }
         if receiver == nil { return nil }
@@ -96,19 +101,34 @@ private final class WindowSurfaces: SeamlessPixelSource {
 
     static func service(_ identifier: String) -> String { "gold.samhenri.LightClick.seamless.\(identifier)" }
 
-    private func arrived(_ window: UInt32, _ surface: IOSurfaceRef, _ origin: (x: Int32, y: Int32)) {
+    private func arrived(_ window: UInt32, _ surface: IOSurfaceRef, _ origin: (x: Int32, y: Int32), _ hold: GuestSurfaceHold?) {
         guard let desktop else { return }
+        frames += 1
+        counts[window, default: 0] += 1
         if surfaces.isEmpty { FileManager.default.createFile(atPath: noDisplayFile.path, contents: nil) }
         if surfaces[window] == nil {
-            desktop.note("# window \(window)'s own surface: \(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))")
+            desktop.note(
+                "# window \(window)'s own surface: \(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))")
         }
         surfaces[window] = surface
         // Mavericks' say where they start, and Mojave's leave that to the tool.
         origins[window] = origin == (0, 0) ? nil : origin
         desktop.windowPixelsChanged(window)
+        holds[window] = hold  // The last frame's goes, its layer having this one now.
     }
 
     var hasSurfaces: Bool { !surfaces.isEmpty }
+
+    /// For a test: each window's latest surface as a PNG, named with its window, size and frame count.
+    func save(to directory: String) {
+        for (window, surface) in surfaces {
+            let image = CIImage(ioSurface: surface)
+            guard let colors = CGColorSpace(name: CGColorSpace.sRGB) else { continue }
+            let name = "surface-\(window)-\(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))-\(counts[window] ?? 0).png"
+            try? CIContext().writePNGRepresentation(
+                of: image, to: URL(fileURLWithPath: directory).appending(path: name), format: .RGBA8, colorSpace: colors)
+        }
+    }
 
     func surface(forWindow window: UInt32) -> IOSurfaceRef? { surfaces[window] }
 
@@ -118,6 +138,7 @@ private final class WindowSurfaces: SeamlessPixelSource {
     func stop() {
         surfaces = [:]
         origins = [:]
+        holds = [:]
         desktop = nil
         try? FileManager.default.removeItem(at: noDisplayFile)
     }
@@ -227,36 +248,66 @@ final class SeamlessHost: NSObject {
         else { return [:] }
         let directory = surfaceDirectory(identifier)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        guard windowSurfaces[session.machinePath] != nil
-            || WindowSurfaces(machineIdentifier: identifier, directory: directory).map({
-                windowSurfaces[session.machinePath] = $0
-                return true
-            }) ?? false
+        guard
+            windowSurfaces[session.machinePath] != nil
+                || WindowSurfaces(machineIdentifier: identifier, directory: directory).map({
+                    windowSurfaces[session.machinePath] = $0
+                    return true
+                }) ?? false
         else { return [:] }
         return GuestWindowSurfaceReceiver.environment(service: WindowSurfaces.service(identifier), directory: directory.path)
     }
 
+    @objc static func saveSurfaces(for session: VIMSession, to directory: String) {
+        windowSurfaces[session.machinePath]?.save(to: directory)
+    }
+    @objc static func surfaceFrames(for session: VIMSession) -> Int { windowSurfaces[session.machinePath]?.frames ?? 0 }
     @objc static func isActive(for session: VIMSession) -> Bool { desktops[session.machinePath] != nil }
+    @objc static func isPrepared(for session: VIMSession) -> Bool { SeamlessDesktop.isPrepared(machine: session.machinePath) }
     @objc static func hasOwnSurfaces(for session: VIMSession) -> Bool { windowSurfaces[session.machinePath]?.hasSurfaces ?? false }
+
+    private static func makeDesktop(session: VIMSession, guest: AgentGuest) -> SeamlessDesktop? {
+        let path = session.machinePath
+        guard let machine = try? VIMMachine.load(URL(fileURLWithPath: path)),
+            let identifier = machine.configuration["Identifier"] as? String
+        else { return nil }
+        let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let origin = session.seamlessGuestOffset
+        return SeamlessDesktop(
+            configuration: .init(
+                tools: tools, proxyExecutable: tools.appending(path: "SeamlessProxy"),
+                bundles: home.appending(path: "Library/Caches/Light Click/Seamless Apps/\(identifier)"),
+                savedBundles: home.appending(path: "Applications/Light Click"),
+                machine: .init(identifier: identifier, name: name, path: path),
+                log: FileManager.default.temporaryDirectory.appending(path: "lc-seamless-\(identifier.prefix(8)).log"),
+                guestOffset: NSPoint(x: origin.x.rounded(), y: origin.y.rounded())),
+            guest: guest)
+    }
 
     /// So the button's quick from the first press. Once the guest's agent answers, and not while something's measuring it or
     /// the app's only there to run one guest app.
     @objc static func prepare(for session: VIMSession) {
         let arguments = ProcessInfo.processInfo.arguments
-        guard !arguments.contains("--guest-diagnostics-root"), !arguments.contains("--seamless-session"),
+        guard !arguments.contains("--guest-diagnostics-root") || ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil,
+            !arguments.contains("--seamless-session"),
             !arguments.contains("--seamless-make-proxy")
         else { return }
         let path = session.machinePath
         Task {
             let guest = AgentGuest(machinePath: path)
-            try? await Task.sleep(for: .seconds(20))
+            // A test staging its own programs at the same moment gets its connection ended, as a request did under clipboard setup.
+            let isTest = ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil
+            try? await Task.sleep(for: .seconds(isTest ? 90 : 20))
             for _ in 0..<60 {
                 guard VIMSession.running(forMachinePath: path) != nil else { return }
-                if await guest.run("/usr/bin/uname", ["-r"]).exitCode == 0 {
-                    _ = await SeamlessDesktop.prepare(guest: guest, tools: tools, machine: path)
-                    return
-                }
+                if await guest.run("/usr/bin/uname", ["-r"]).exitCode == 0 { break }
                 try? await Task.sleep(for: .seconds(15))
+            }
+            // Again now and then for apps opened since, while nothing's using the agent for long.
+            while VIMSession.running(forMachinePath: path) != nil {
+                if desktops[path] == nil, let desktop = makeDesktop(session: session, guest: guest) { await desktop.prearm() }
+                try? await Task.sleep(for: .seconds(45))
             }
         }
     }
@@ -268,21 +319,7 @@ final class SeamlessHost: NSObject {
             desktop.finish(why: "the button")
             return
         }
-        guard let machine = try? VIMMachine.load(URL(fileURLWithPath: path)),
-            let identifier = machine.configuration["Identifier"] as? String
-        else { return }
-        let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let origin = session.seamlessGuestOffset
-        let desktop = SeamlessDesktop(
-            configuration: .init(
-                tools: tools, proxyExecutable: tools.appending(path: "SeamlessProxy"),
-                bundles: home.appending(path: "Library/Caches/Light Click/Seamless Apps/\(identifier)"),
-                savedBundles: home.appending(path: "Applications/Light Click"),
-                machine: .init(identifier: identifier, name: name, path: path),
-                log: FileManager.default.temporaryDirectory.appending(path: "lc-seamless-\(identifier.prefix(8)).log"),
-                guestOffset: NSPoint(x: origin.x.rounded(), y: origin.y.rounded())),
-            guest: AgentGuest(machinePath: path))
+        guard let desktop = makeDesktop(session: session, guest: AgentGuest(machinePath: path)) else { return }
         desktops[path] = desktop
         session.noteSeamlessChanged()
         let surfaces = windowSurfaces[path]
@@ -290,18 +327,27 @@ final class SeamlessHost: NSObject {
         desktop.pixelSource = surfaces
         desktop.hasOwnSurfaces = { surfaces?.hasSurfaces ?? false }
         // The window only goes once something's there in its place, and comes back if nothing is.
+        // Goes as soon as what replaces it is up, with a limit for a window that never gets its first frame.
+        let hide = {
+            guard !windowHidden.contains(path), desktops[path] === desktop else { return }
+            windowHidden.insert(path)
+            session.setSeamlessWindowHidden(true)
+        }
+        var sawWindow = false
         desktop.windowsChanged = { count in
             if count > 0, !windowHidden.contains(path) {
-                windowHidden.insert(path)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    MainActor.assumeIsolated {
-                        if windowHidden.contains(path) { session.setSeamlessWindowHidden(true) }
-                    }
+                if desktop.hasReplacedDisplay {
+                    hide()
+                } else if !sawWindow {
+                    sawWindow = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { MainActor.assumeIsolated { hide() } }
                 }
             } else if count == 0, windowHidden.contains(path) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                     MainActor.assumeIsolated {
-                        if desktops[path] === desktop, desktop.windowCount == 0 { desktop.finish(why: "no windows left") }
+                        if desktops[path] === desktop, desktop.windowCount == 0 {
+                            desktop.finish(why: "no windows left")
+                        }
                     }
                 }
             }

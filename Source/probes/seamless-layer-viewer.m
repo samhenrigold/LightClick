@@ -177,6 +177,29 @@ static CALayer *make_layer(Node *n, CFTimeInterval renderNow) {
             layer.opacity = (float)number(item, 1);
         else if ([name isEqual:@"cornerRadius"])
             layer.cornerRadius = number(item, 1);
+        else if ([name isEqual:@"continuousCorners"]) {
+            if (@available(macOS 10.15, *))
+                layer.cornerCurve = kCACornerCurveContinuous;
+        } else if ([name isEqual:@"borderWidth"])
+            layer.borderWidth = number(item, 1);
+        else if ([name isEqual:@"borderColor"]) {
+            Node *c = item.items[1];
+            CGColorRef color = CGColorCreateSRGB(number(c, 0), number(c, 1), number(c, 2), number(c, 3));
+            layer.borderColor = color;
+            CGColorRelease(color);
+        } else if ([name isEqual:@"contentsRect"]) {
+            Node *v = item.items[1];
+            layer.contentsRect = CGRectMake(number(v, 1), number(v, 2), number(v, 3), number(v, 4));
+        } else if ([name isEqual:@"minificationFilter"] || [name isEqual:@"magnificationFilter"]) {
+            NSString *filter = [[item wordAt:1] isEqual:@"nearest"]     ? kCAFilterNearest
+                               : [[item wordAt:1] isEqual:@"trilinear"] ? kCAFilterTrilinear
+                                                                        : kCAFilterLinear;
+            if ([name hasPrefix:@"min"])
+                layer.minificationFilter = filter;
+            else
+                layer.magnificationFilter = filter;
+        } else if ([name isEqual:@"contentsOpaque"])
+            layer.opaque = YES;
         else if ([name isEqual:@"contentsScale"])
             layer.contentsScale = number(item, 1);
         else if ([name isEqual:@"contentsGravity"]) {
@@ -304,8 +327,8 @@ int main(int argc, char **argv) {
         animate = animateSeconds > 0;
         known = [NSSet setWithArray:@[
             @"allowsGroupBlending", @"hitTestsAsOpaque", @"allowsEdgeAntialiasing", @"edgeAntialiasingMask",
-            @"hitTestsContentsAlphaChannel", @"allowsHitTesting", @"minificationFilter", @"contentsScaling",
-            @"cornerContents", @"cornerContentsCenter"
+            @"hitTestsContentsAlphaChannel", @"allowsHitTesting", @"contentsScaling", @"cornerContents",
+            @"cornerContentsCenter"
         ]];
         unknown = [NSMutableDictionary new];
         NSArray<NSString *> *trees = [all componentsSeparatedByString:@"== census"];

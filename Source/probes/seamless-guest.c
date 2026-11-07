@@ -415,6 +415,68 @@ static void activate_owner(struct Stream *s) {
     }
 }
 
+extern AXError _AXUIElementGetWindow(AXUIElementRef, uint32_t *);
+static pid_t session_app_pid;
+
+// The first ordinary window of this process, in the guest's order.
+static CGWindowID front_window_of(pid_t pid) {
+    CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+                                                 kCGNullWindowID);
+    CGWindowID front = 0;
+    for (CFIndex i = 0; list && !front && i < CFArrayGetCount(list); i++) {
+        CFDictionaryRef d = CFArrayGetValueAtIndex(list, i);
+        if (int_for(d, kCGWindowOwnerPID) == pid && int_for(d, kCGWindowLayer) == 0)
+            front = (CGWindowID)int_for(d, kCGWindowNumber);
+    }
+    if (list)
+        CFRelease(list);
+    return front;
+}
+
+static const char *session_menu_tool;
+
+// Runs the menu tool, which is what Accessibility's grant names, and waits: what comes next depends on it being done.
+static int run_menu_tool(const char *command, pid_t pid, CGWindowID id, const char *x, const char *y) {
+    if (!session_menu_tool)
+        return 127;
+    char pid_text[16], window_text[16];
+    snprintf(pid_text, sizeof(pid_text), "%d", pid);
+    snprintf(window_text, sizeof(window_text), "%u", id);
+    pid_t child = fork();
+    if (!child) {
+        if (x)
+            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text, "--x", x,
+                  "--y", y, (char *)NULL);
+        else
+            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text,
+                  (char *)NULL);
+        _exit(127);
+    }
+    int status = 127;
+    if (child > 0)
+        waitpid(child, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 126;
+}
+
+// A press goes by position, and on the host this window can be somewhere nothing covers it, whatever does in the guest.
+// So it's put in front first, the way a click on it would, and the press waits to see that it has been: this runs in
+// the order the host's events came.
+static void raise_for_press(struct Stream *s, CGWindowID id) {
+    pid_t pid = session_app_pid ? session_app_pid : s->pid;
+    if (s->test_pattern || !pid)
+        return;
+    activate_owner(s);
+    if (front_window_of(pid) == id)
+        return;
+    int error = run_menu_tool("raise-window", pid, id, NULL, NULL);
+    double started = now();
+    while (!error && front_window_of(pid) != id && now() - started < 0.25)
+        usleep(5000);
+    printf("# %.3f raised window %u for a press: error %d, front %u after %.0f ms\n", now(), id, error,
+           front_window_of(pid), (now() - started) * 1000);
+    fflush(stdout);
+}
+
 static void post_pointer(struct Stream *s, const struct SWMPointer *e) {
     s->pointer_events++;
     if (s->pointer_events <= 8 && !s->test_pattern) {
@@ -952,6 +1014,8 @@ static int drain_input(struct Stream *s) {
         if (m.type == SWM_POINTER) {
             if (!drag_pointer(&m.u.pointer))
                 post_pointer(s, &m.u.pointer);
+        } else if (m.type == SWM_RAISE) {
+            raise_for_press(s, m.u.window_id);
         } else if (m.type == SWM_DRAG_CANCEL)
             cancel_drag(s);
         else if (m.type == SWM_DRAG_QUERY)
@@ -984,14 +1048,31 @@ static int drain_input(struct Stream *s) {
             swi_gesture(&context, g, point);
             s->gesture_events++;
         } else if (m.type == SWM_SET_MINIMIZED) {
-            printf("# %.1f host asks window %u minimized %u, app pid %d\n", now(), m.u.window_id, m.minimized, session_app_pid);
+            printf("# %.1f host asks window %u minimized %u, app pid %d\n", now(), m.u.window_id, m.minimized,
+                   session_app_pid);
             fflush(stdout);
             if (session_menu_tool && session_app_pid && !fork()) {
                 char pid[16], window[16];
                 snprintf(pid, sizeof(pid), "%d", session_app_pid);
                 snprintf(window, sizeof(window), "%u", m.u.window_id);
-                execl(session_menu_tool, session_menu_tool, "set-minimized", "--pid", pid, "--window", window, "--state",
-                      m.minimized ? "1" : "0", (char *)NULL);
+                execl(session_menu_tool, session_menu_tool, "set-minimized", "--pid", pid, "--window", window,
+                      "--state", m.minimized ? "1" : "0", (char *)NULL);
+                _exit(127);
+            }
+        } else if (m.type == SWM_SET_PLACE) {
+            char x[16], y[16];
+            snprintf(x, sizeof(x), "%d", m.place_x);
+            snprintf(y, sizeof(y), "%d", m.place_y);
+            int error = run_menu_tool("place-window", session_app_pid ? session_app_pid : s->pid, m.u.window_id, x, y);
+            printf("# %.3f placed window %u at %s,%s: error %d\n", now(), m.u.window_id, x, y, error);
+            fflush(stdout);
+        } else if (m.type == SWM_SET_FULL_SCREEN) {
+            if (session_menu_tool && session_app_pid && !fork()) {
+                char pid[16], window[16];
+                snprintf(pid, sizeof(pid), "%d", session_app_pid);
+                snprintf(window, sizeof(window), "%u", m.u.window_id);
+                execl(session_menu_tool, session_menu_tool, "set-full-screen", "--pid", pid, "--window", window,
+                      "--state", m.minimized ? "1" : "0", (char *)NULL);
                 _exit(127);
             }
         } else if (m.type == SWM_FOCUS)
@@ -1439,6 +1520,9 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 #define TREE_SHADOW_MARGIN 96
 
 struct TreeWindow {
+    int full_screen, asked_full_screen;
+    double full_since, left_at; // When it went into full screen, unpaired, and when it left the screen for elsewhere.
+    CGWindowID became; // The window in full screen for this one, while it's away.
     int away; // Off the screen: see tree_window_is_away.
     uint32_t materials_hash;
     int minimized;
@@ -1833,9 +1917,79 @@ static int tree_send_covers(struct Stream *s, struct TreeWindow *w, const struct
     return send_all(s->fd, message, SWM_HEADER_SIZE + size);
 }
 
+// Whether a window of any app has the guest's whole display, as a full screen one has, which has every other window off
+// the screen.
+static int tree_display_is_taken(void) {
+    CGRect display = CGDisplayBounds(CGMainDisplayID());
+    for (int i = 0; i < tree_all_count; i++) {
+        const struct TreeAll *w = &tree_all[i];
+        if (w->layer == 0 && w->bounds.size.width >= display.size.width &&
+            CGRectGetMaxY(w->bounds) >= CGRectGetMaxY(display))
+            return 1;
+    }
+    return 0;
+}
+
+// Is this window, which has taken the display's whole width and reached its bottom, in full screen? Only asked when
+// that first holds, as asking starts a program, and it's the only way of telling that from a zoomed window.
+static int tree_send_pair(struct Stream *s, uint16_t type, uint32_t first, uint32_t second) {
+    uint8_t message[SWM_HEADER_SIZE + 8];
+    swm_header(message, type, 8);
+    swm_w32(message + SWM_HEADER_SIZE, first);
+    swm_w32(message + SWM_HEADER_SIZE + 4, second);
+    return send_all(s->fd, message, sizeof(message));
+}
+
+// A window back from full screen is what its full screen window was, to the host, before the host hears anything else
+// of it.
+static int tree_send_return(struct Stream *s, struct TreeWindow *w, const struct TreeItem *item) {
+    if (!w->became)
+        return 0;
+    CGWindowID was = w->became;
+    w->became = 0;
+    w->away = 0;
+    printf("# %.3f window %u is back from %u\n", now(), item->id, was);
+    fflush(stdout);
+    return tree_send_pair(s, SWM_SUCCESSOR, was, item->id) || tree_send_pair(s, SWM_FULL_SCREEN, item->id, 0);
+}
+
+static int tree_send_full_screen(struct Stream *s, struct TreeWindow *w, const struct TreeItem *item) {
+    CGRect display = CGDisplayBounds(CGMainDisplayID());
+    int fills = item->layer == 0 && item->title[0] && item->bounds.size.width >= display.size.width &&
+                CGRectGetMaxY(item->bounds) >= CGRectGetMaxY(display);
+    int full = 0;
+    if (fills && !w->full_screen && !w->asked_full_screen && session_menu_tool && item->pid) {
+        char pid_text[16], window[16];
+        snprintf(pid_text, sizeof(pid_text), "%d", item->pid);
+        snprintf(window, sizeof(window), "%u", item->id);
+        char *const ask[] = {(char *)session_menu_tool, "is-minimized", "--pid", pid_text, "--window", window, NULL};
+        char *said = run_tool(ask);
+        full = said && strstr(said, "full screen yes");
+        free(said);
+        w->asked_full_screen = 1;
+    } else {
+        full = fills && w->full_screen;
+    }
+    if (!fills)
+        w->asked_full_screen = 0;
+    if (full == w->full_screen)
+        return 0;
+    w->full_screen = full;
+    // Told once it's known which of the app's windows this is, after the look at what has left the screen.
+    if (full) {
+        w->full_since = now();
+        return 0;
+    }
+    return tree_send_pair(s, SWM_FULL_SCREEN, item->id, 0);
+}
+
 // Asks the app, as a minimized window isn't in WindowServer's list by its number, even when asked for by that number.
 // 2 for minimized, 1 for there but elsewhere, such as behind another app's full screen Space, and 0 for gone.
 static int tree_window_is_away(CGWindowID id, pid_t pid) {
+    // The app can't see one on another Space. shortcut: one closed meanwhile stays until it's asked about again, after
+    // the full screen.
+    if (tree_display_is_taken())
+        return 1;
     if (!session_menu_tool)
         return 0;
     char pid_text[16], window[16];
@@ -1869,8 +2023,12 @@ static int tree_send_materials(struct Stream *s, struct TreeWindow *w, const str
         const volatile struct SWSBackdrop *b = &tree_gpu_table->gpu_backdrops[i];
         if (b->id != item->id)
             continue;
-        int32_t row[6] = {(int32_t)b->material, (int32_t)b->active, (int32_t)(b->x - (float)item->bounds.origin.x),
-                          (int32_t)(b->y - (float)item->bounds.origin.y), (int32_t)b->width, (int32_t)b->height};
+        int32_t row[6] = {(int32_t)b->material,
+                          (int32_t)b->active,
+                          (int32_t)(b->x - (float)item->bounds.origin.x),
+                          (int32_t)(b->y - (float)item->bounds.origin.y),
+                          (int32_t)b->width,
+                          (int32_t)b->height};
         for (int k = 0; k < 6; k++) {
             swm_w32(message + SWM_HEADER_SIZE + 8 + n * 24 + (uint32_t)k * 4, (uint32_t)row[k]);
             hash = (hash ^ (uint32_t)row[k]) * 16777619u;
@@ -1996,9 +2154,10 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             }
             // Room for the guest's shadow if its surface has one, or else there's the window's own shape for the
             // host's.
-            int margin = own_surface && tree_surface_has_shadow(id) ? item->margin
-                         : crop || tree_shared                      ? 0
-                                                                    : item->margin;
+            // Mavericks' say where they start on the frame, not in the hook's rows, and always carry their shadow.
+            int margin = own_surface && (darwin_major() == 13 || tree_surface_has_shadow(id)) ? item->margin
+                         : crop || tree_shared                                                ? 0
+                                                                                              : item->margin;
             int moved = !CGRectEqualToRect(bounds, w->bounds),
                 sized = !CGSizeEqualToSize(bounds.size, w->bounds.size) || margin != w->margin;
             uint32_t seed = 0;
@@ -2038,9 +2197,13 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             s->alpha = (uint32_t)alpha;
             s->margin = margin;
             int kind = !no_pixels ? 0 : crop ? SWM_CROP : SWM_OVERLAY;
+            if (tree_shared && tree_send_return(s, w, item))
+                goto done;
             if (own_surface && tree_send_surface_origin(s, w, id))
                 goto done;
             if (own_surface && tree_send_materials(s, w, item))
+                goto done;
+            if (tree_shared && tree_send_full_screen(s, w, item))
                 goto done;
             // With several apps, what's in front can be anyone's, which only the guest knows.
             if (tree_shared && crop && !own_surface) {
@@ -2212,9 +2375,12 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
         for (int i = 0; i < TREE_MAX_WINDOWS; i++) {
             if (!windows[i].id || windows[i].seen || !tree_shared)
                 continue;
-            // Once it's away, only its coming back, or the app's going, changes that. Asked once, as asking starts a program.
+            // Once it's away, only its coming back, or the app's going, changes that. Asked once, as asking starts a
+            // program.
             if (!windows[i].away) {
                 windows[i].away = tree_window_is_away(windows[i].id, windows[i].pid);
+                if (windows[i].away == 1)
+                    windows[i].left_at = now();
                 if (windows[i].away == 2) {
                     windows[i].minimized = 1;
                     if (tree_send_minimized(s, windows[i].id, 1))
@@ -2223,6 +2389,32 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             }
             if (windows[i].away)
                 windows[i].seen = 1;
+        }
+        // A window newly in full screen is the same window to the host as the one of its app's that's just left the
+        // screen, so the host keeps its proxy, Space and place. Not by title: a document's can change, and two can
+        // share one. The window that left can do so a little after the new one's first seen, so this looks for a
+        // second. If none did, it's a window of its own.
+        for (int i = 0; tree_shared && i < TREE_MAX_WINDOWS; i++) {
+            if (!windows[i].id || !windows[i].full_since)
+                continue;
+            int left = -1;
+            for (int j = 0; j < TREE_MAX_WINDOWS; j++)
+                if (j != i && windows[j].id && windows[j].pid == windows[i].pid && windows[j].away == 1 &&
+                    !windows[j].became && now() - windows[j].left_at < 3 &&
+                    (left < 0 || windows[j].left_at > windows[left].left_at))
+                    left = j;
+            if (left < 0 && now() - windows[i].full_since < 1)
+                continue;
+            windows[i].full_since = 0;
+            if (left >= 0) {
+                windows[left].became = windows[i].id;
+                printf("# %.3f window %u is now %u\n", now(), windows[left].id, windows[i].id);
+                fflush(stdout);
+                if (tree_send_pair(s, SWM_SUCCESSOR, windows[left].id, windows[i].id))
+                    goto done;
+            }
+            if (tree_send_pair(s, SWM_FULL_SCREEN, windows[i].id, 1))
+                goto done;
         }
         for (int i = 0; i < TREE_MAX_WINDOWS; i++)
             if (windows[i].id && !windows[i].seen) {
@@ -2411,6 +2603,8 @@ static int flag(int argc, char **argv, const char *name) {
 // for. It and they end when the host's connection does. Lines, each a tab-separated list:
 //   to the host:  apps NAME BUNDLE NAME BUNDLE ...  and  described BUNDLE JSON ICON-BASE64
 //   from the host: describe BUNDLE  and  run NAME PORT
+static pthread_mutex_t leap_send_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static int leap_send(int fd, const char *text) {
     for (size_t sent = 0, length = strlen(text); sent < length;) {
         ssize_t wrote = send(fd, text + sent, length - sent, 0);
@@ -2433,20 +2627,34 @@ static char *leap_line(char *text, char start) {
     return "";
 }
 
-static int leap_describe(int fd, const char *menu_tool, char *path) {
-    char *const read_it[] = {(char *)menu_tool, "describe", "--path", path, NULL};
-    char *const icon_of[] = {(char *)menu_tool, "icon", "--path", path, NULL};
-    char *description = run_tool(read_it), *icon = run_tool(icon_of);
+struct LeapDescribe {
+    int fd;
+    const char *menu_tool;
+    char path[PATH_MAX];
+};
+
+// On its own thread: reading an app starts two programs, a second or more each in a guest that's emulated.
+static void *leap_describe(void *argument) {
+    struct LeapDescribe *job = argument;
+    char *const read_it[] = {(char *)job->menu_tool, "describe", "--icon", "--path", job->path, NULL};
+    char *description = run_tool(read_it);
     const char *json = description ? leap_line(description, '{') : "";
-    if (icon && (icon[0] == '#' || strchr(icon, ' ')))
-        icon[0] = 0;
+    // leap_line ended the JSON's line; the icon's the line after, if it has one.
+    char *icon = json[0] ? strchr(json, 0) + 1 : NULL;
+    if (icon && (description + strlen(description) >= icon || *icon == '#' || *icon == 0 || strchr(icon, ' ')))
+        icon = NULL;
     if (icon)
         icon[strcspn(icon, "\r\n")] = 0;
-    int failed = leap_send(fd, "described\t") || leap_send(fd, path) || leap_send(fd, "\t") || leap_send(fd, json) ||
-                 leap_send(fd, "\t") || leap_send(fd, icon ? icon : "") || leap_send(fd, "\n");
+    // The whole line at once, with the list of apps also going down this connection. A failure ends the main loop's
+    // read.
+    pthread_mutex_lock(&leap_send_lock);
+    (void)(leap_send(job->fd, "described\t") || leap_send(job->fd, job->path) || leap_send(job->fd, "\t") ||
+           leap_send(job->fd, json) || leap_send(job->fd, "\t") || leap_send(job->fd, icon ? icon : "") ||
+           leap_send(job->fd, "\n"));
+    pthread_mutex_unlock(&leap_send_lock);
     free(description);
-    free(icon);
-    return failed;
+    free(job);
+    return NULL;
 }
 
 #define LEAP_CHILDREN 64
@@ -2641,7 +2849,7 @@ static void leap_arrange_restore(const char *menu_tool) {
     fcntl(ends[1], F_SETFD, FD_CLOEXEC);
 }
 
-static int leap(const char *host, int port, const char *menu_tool, int own_surfaces) {
+static int leap(const char *host, int port, const char *menu_tool, int own_surfaces, int list_only) {
     char self[PATH_MAX];
     uint32_t length = sizeof(self);
     if (_NSGetExecutablePath(self, &length))
@@ -2651,8 +2859,8 @@ static int leap(const char *host, int port, const char *menu_tool, int own_surfa
         printf("# ERROR can't reach the host: %s\n", strerror(errno));
         return 3;
     }
-    leap_arrange_restore(menu_tool);
-    if (own_surfaces && leap_set_own_surfaces(self, 1)) {
+    if (list_only) {
+    } else if (leap_arrange_restore(menu_tool), own_surfaces && leap_set_own_surfaces(self, 1)) {
         if (leap_send(fd, "gpu\n"))
             return 0;
     } else {
@@ -2677,8 +2885,15 @@ static int leap(const char *host, int port, const char *menu_tool, int own_surfa
                     *first = 0;
                 if (second)
                     *second = 0;
-                if (first && !strcmp(line, "describe") && leap_describe(fd, menu_tool, first + 1))
-                    goto done;
+                if (first && !strcmp(line, "describe")) {
+                    struct LeapDescribe *job = calloc(1, sizeof(*job));
+                    pthread_t thread;
+                    job->fd = fd;
+                    job->menu_tool = menu_tool;
+                    snprintf(job->path, sizeof(job->path), "%s", first + 1);
+                    if (!pthread_create(&thread, NULL, leap_describe, job))
+                        pthread_detach(thread);
+                }
                 if (second && !strcmp(line, "run"))
                     leap_run(self, menu_tool, first + 1, second + 1);
                 if (!strcmp(line, "gpu-off")) {
@@ -2697,7 +2912,10 @@ static int leap(const char *host, int port, const char *menu_tool, int own_surfa
         if (strcmp(listed, last) || now() - said > 3) {
             said = now();
             strcpy(last, listed);
-            if (leap_send(fd, listed))
+            pthread_mutex_lock(&leap_send_lock);
+            int failed = leap_send(fd, listed);
+            pthread_mutex_unlock(&leap_send_lock);
+            if (failed)
                 break;
         }
     }
@@ -2812,9 +3030,13 @@ int main(int argc, char **argv) {
         }
         if (option(argc, argv, "--census", NULL))
             t->gpu_census = atoi(option(argc, argv, "--census", "0"));
+        if (option(argc, argv, "--no-marker", NULL))
+            t->gpu_no_marker = (uint32_t)atoi(option(argc, argv, "--no-marker", "0"));
         if (option(argc, argv, "--no-shadow", NULL))
             t->gpu_no_shadow = (uint32_t)atoi(option(argc, argv, "--no-shadow", "0"));
         if (option(argc, argv, "--mode", NULL)) {
+            t->gpu_display_width = (uint32_t)CGDisplayPixelsWide(CGMainDisplayID());
+            t->gpu_display_height = (uint32_t)CGDisplayPixelsHigh(CGMainDisplayID());
             t->gpu_mode = (uint32_t)atoi(option(argc, argv, "--mode", "0"));
             // Needs the session, which --skip-desktop joins. Without it, the windows wait for something to draw.
             extern void seamless_poke_update(void);
@@ -2897,7 +3119,8 @@ int main(int argc, char **argv) {
         if (geteuid() == 0 && !in_session)
             return run_in_console_session(argc, argv, 1);
         return leap(option(argc, argv, "--host", "10.0.2.2"), atoi(option(argc, argv, "--port", "7654")),
-                    option(argc, argv, "--menu-tool", ""), flag(argc, argv, "--own-surfaces"));
+                    option(argc, argv, "--menu-tool", ""), flag(argc, argv, "--own-surfaces"),
+                    flag(argc, argv, "--list-only"));
     }
     if (!strcmp(command, "tree") || !strcmp(command, "program-tree")) {
         // Only ever reads windows, so it's safe on the host; the program form opens an app, so it isn't.

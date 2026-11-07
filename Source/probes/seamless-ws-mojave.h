@@ -431,7 +431,7 @@ static void gpu_compose_one(uint32_t id) {
                                          512 + (int)(0xb0 | ((id >> 8) & 0xf)));
         struct RectResult point = {bounds.x, bounds.y, 1, 1};
         void *one = region_from_rect(point);
-        if (w->marker && one) {
+        if (w->marker && one && !table->gpu_no_marker) {
             gpu_marking = 1;
             gpu_composite(window, w->marker, &bounds, one, 1);
             gpu_marking = 0;
@@ -591,72 +591,69 @@ static void census_blob(const void *object, uint32_t seed, void *surface) {
     if (found < 4096)
         census_log(0, "(blob %u)", found); // Into the stream the tree is being printed to.
 }
-// For telling whether the host can have a guest's surface: binds it in a pass on a surface whose size says which. With
-// Metal from here, in WindowServer's own process, on a queue of its own.
+// For telling whether the host can have a guest's surface: a copy of a pixel of it to a surface whose size says which,
+// on the compositor's own queue, as anything that opens a Metal device here can hang, this being WindowServer.
+typedef struct {
+    unsigned long x, y, z;
+} MetalTriple;
 static void identify_surface(void *surface, uint32_t slot) {
-    void (*objc_msgSend)(void) = dlsym(RTLD_DEFAULT, "objc_msgSend");
+    void *(*send)(void *, void *) = dlsym(RTLD_DEFAULT, "objc_msgSend");
     void *(*sel_getUid)(const char *) = dlsym(RTLD_DEFAULT, "sel_getUid");
     void *(*objc_getClass)(const char *) = dlsym(RTLD_DEFAULT, "objc_getClass");
-    void *(*make_device)(void) = dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
     void *(*make_surface)(const void *) = dlsym(RTLD_DEFAULT, "IOSurfaceCreate");
-    static void *device, *queue;
-    if (!objc_msgSend || !make_device || !make_surface)
-        return;
-    void *pool = objc_autoreleasePoolPush();
-    if (!device) {
-        device = make_device();
-        queue = ((void *(*)(void *, void *))objc_msgSend)(device, sel_getUid("newCommandQueue"));
-    }
-    typedef void *(*DescriptorMake)(void *, void *, unsigned long, unsigned long, unsigned long, char);
-    typedef void *(*TextureMake)(void *, void *, void *, void *, unsigned long);
-    void *descriptors = objc_getClass("MTLTextureDescriptor");
-    void *selector = sel_getUid("texture2DDescriptorWithPixelFormat:width:height:mipmapped:");
-    void *selector_texture = sel_getUid("newTextureWithDescriptor:iosurface:plane:");
-    // The bound one.
-    void *descriptor =
-        ((DescriptorMake)objc_msgSend)(descriptors, selector, 80, surface_width(surface), surface_height(surface), 0);
-    ((void (*)(void *, void *, unsigned long))objc_msgSend)(descriptor, sel_getUid("setUsage:"), 1);
-    void *texture = ((TextureMake)objc_msgSend)(device, selector_texture, descriptor, surface, 0);
-    // The one the size of which says.
-    int width = 512 + (int)(slot & 0xff), height = 512 + (int)(0xd0 | ((slot >> 8) & 0xf));
     void *(*dictionary)(const void *, const void **, const void **, long, const void *, const void *) =
         dlsym(RTLD_DEFAULT, "CFDictionaryCreate");
     void *(*number)(const void *, long, const void *) = dlsym(RTLD_DEFAULT, "CFNumberCreate");
-    const void **key_callbacks = dlsym(RTLD_DEFAULT, "kCFTypeDictionaryKeyCallBacks");
-    const void **value_callbacks = dlsym(RTLD_DEFAULT, "kCFTypeDictionaryValueCallBacks");
+    const void *key_callbacks = dlsym(RTLD_DEFAULT, "kCFTypeDictionaryKeyCallBacks");
+    const void *value_callbacks = dlsym(RTLD_DEFAULT, "kCFTypeDictionaryValueCallBacks");
     const void **key_names[] = {dlsym(RTLD_DEFAULT, "kIOSurfaceWidth"), dlsym(RTLD_DEFAULT, "kIOSurfaceHeight"),
                                 dlsym(RTLD_DEFAULT, "kIOSurfaceBytesPerElement"),
                                 dlsym(RTLD_DEFAULT, "kIOSurfacePixelFormat")};
+    void *display = main_display_device();
+    int accelerator = display && (*((uint8_t *)display + 0x64) & 0x10) ? display_accelerator(display) : 0;
+    char *compositor = metal_compositor(accelerator);
+    char *context = compositor ? *(char **)(compositor + 0x10) : NULL;
+    void *queue = context ? *(void **)(context + 0x88) : NULL;
+    static unsigned told;
+    if (told++ < 6)
+        note("identify %u: queue %p\n", slot, queue);
+    if (!queue || !send || !make_surface || !dictionary || !number)
+        return;
+    void *pool = objc_autoreleasePoolPush();
+    void *device = send(queue, sel_getUid("device"));
+    typedef void *(*DescriptorMake)(void *, void *, unsigned long, unsigned long, unsigned long, char);
+    typedef void *(*TextureMake)(void *, void *, void *, void *, unsigned long);
+    void *descriptors = objc_getClass("MTLTextureDescriptor");
+    void *make = sel_getUid("texture2DDescriptorWithPixelFormat:width:height:mipmapped:");
+    void *wrap = sel_getUid("newTextureWithDescriptor:iosurface:plane:");
+    void *descriptor =
+        ((DescriptorMake)send)(descriptors, make, 80, surface_width(surface), surface_height(surface), 0);
+    void *texture = ((TextureMake)send)(device, wrap, descriptor, surface, 0);
+    int width = 512 + (int)(slot & 0xff), height = 512 + (int)(0xd0 | ((slot >> 8) & 0xf));
     int32_t values[] = {width, height, 4, 0x42475241};
     const void *keys[4], *numbers[4];
     for (int i = 0; i < 4; i++) {
         keys[i] = *key_names[i];
         numbers[i] = number(NULL, 3 /* kCFNumberSInt32Type */, &values[i]);
     }
-    void *properties = dictionary(NULL, keys, numbers, 4, key_callbacks, value_callbacks);
-    void *target_surface = make_surface(properties);
+    void *target_surface = make_surface(dictionary(NULL, keys, numbers, 4, key_callbacks, value_callbacks));
     void *target_descriptor =
-        ((DescriptorMake)objc_msgSend)(descriptors, selector, 80, (unsigned long)width, (unsigned long)height, 0);
-    ((void (*)(void *, void *, unsigned long))objc_msgSend)(target_descriptor, sel_getUid("setUsage:"), 4);
-    void *target = target_surface
-                       ? ((TextureMake)objc_msgSend)(device, selector_texture, target_descriptor, target_surface, 0)
-                       : NULL;
+        ((DescriptorMake)send)(descriptors, make, 80, (unsigned long)width, (unsigned long)height, 0);
+    void *target = target_surface ? ((TextureMake)send)(device, wrap, target_descriptor, target_surface, 0) : NULL;
+    if (told <= 6)
+        note("identify %u: texture %p target %p\n", slot, texture, target);
     if (texture && target) {
-        void *pass = ((void *(*)(void *, void *))objc_msgSend)(objc_getClass("MTLRenderPassDescriptor"),
-                                                               sel_getUid("renderPassDescriptor"));
-        void *attachments = ((void *(*)(void *, void *))objc_msgSend)(pass, sel_getUid("colorAttachments"));
-        void *first = ((void *(*)(void *, void *, unsigned long))objc_msgSend)(
-            attachments, sel_getUid("objectAtIndexedSubscript:"), 0);
-        ((void (*)(void *, void *, void *))objc_msgSend)(first, sel_getUid("setTexture:"), target);
-        ((void (*)(void *, void *, unsigned long))objc_msgSend)(first, sel_getUid("setLoadAction:"), 2);
-        ((void (*)(void *, void *, unsigned long))objc_msgSend)(first, sel_getUid("setStoreAction:"), 1);
-        void *commands = ((void *(*)(void *, void *))objc_msgSend)(queue, sel_getUid("commandBuffer"));
-        void *encoder = ((void *(*)(void *, void *, void *))objc_msgSend)(
-            commands, sel_getUid("renderCommandEncoderWithDescriptor:"), pass);
-        ((void (*)(void *, void *, void *, unsigned long))objc_msgSend)(
-            encoder, sel_getUid("setFragmentTexture:atIndex:"), texture, 0);
-        ((void (*)(void *, void *))objc_msgSend)(encoder, sel_getUid("endEncoding"));
-        ((void (*)(void *, void *))objc_msgSend)(commands, sel_getUid("commit"));
+        void *commands = send(queue, sel_getUid("commandBuffer"));
+        void *encoder = send(commands, sel_getUid("blitCommandEncoder"));
+        MetalTriple zero = {0, 0, 0}, one = {1, 1, 1};
+        ((void (*)(void *, void *, void *, unsigned long, unsigned long, MetalTriple, MetalTriple, void *,
+                   unsigned long, unsigned long, MetalTriple))send)(
+            encoder,
+            sel_getUid("copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:destinationSlice:"
+                       "destinationLevel:destinationOrigin:"),
+            texture, 0, 0, zero, one, target, 0, 0, zero);
+        send(encoder, sel_getUid("endEncoding"));
+        send(commands, sel_getUid("commit"));
     }
     objc_autoreleasePoolPop(pool);
 }
@@ -683,7 +680,7 @@ static void surface_show_hook(void *object, unsigned a, unsigned b) {
 // that, its locations at +0x18 and its colors at +0x20, as Gradient::set_colors and GradientLayer::set_property read.
 static void (*gradient_show_original)(void *, unsigned, unsigned);
 static void gradient_show_hook(char *layer, unsigned a, unsigned b) {
-    const char *gradient = census_printing ? layer + 0x10 : NULL;
+    const char *gradient = census_printing ? *(const char **)(layer + 0x10) : NULL;
     size_t count = gradient ? *(const size_t *)(gradient + 0x10) : 0;
     const float *colors = gradient ? *(const float *const *)(gradient + 0x20) : NULL;
     const float *locations = gradient ? *(const float *const *)(gradient + 0x18) : NULL;

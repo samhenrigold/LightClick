@@ -76,8 +76,10 @@ static const char *const wanted[] = {
     "_WSArenaAlloc",
     "_CGRegionCreateCopy",
     "_CGRegionGetBoundingBox",
+    "_gl_prepare_layers",
+    "_CGRegionCreateUnionWithRegion",
 };
-static void *resolved[24];
+static void *resolved[26];
 static void *(*session_data)(void);
 static void **(*server_gl)(void);
 static void *placement_targets[3];
@@ -417,10 +419,15 @@ static void *hook_new_array(unsigned long size) {
     void *memory = malloc(size ? size : 1);
     if (!memory)
         abort();
-    if (building_window && pthread_equal(pthread_self(), building_thread)) {
+    // Only what _WSArenaAlloc asks for is a layer. Anything else's address, once freed, can come back as another
+    // window's layer by another allocator, and would keep the window it was recorded for.
+    if (building_window && pthread_equal(pthread_self(), building_thread) &&
+        __builtin_return_address(0) == (char *)resolved[21] + 17) {
         size_t slot = ((uintptr_t)memory >> 4) % LAYER_SLOTS;
         for (int tries = 0; tries < 16; tries++, slot = (slot + 1) % LAYER_SLOTS)
-            if (!layer_owner[slot].layer) {
+            // The same address again: what had it was freed, and it's now this window's. Keeping the first gave one
+            // window's layers to another, and put TextEdit's body in Safari's surface.
+            if (!layer_owner[slot].layer || layer_owner[slot].layer == memory) {
                 layer_owner[slot].layer = memory;
                 layer_owner[slot].window = building_window;
                 break;
@@ -429,7 +436,9 @@ static void *hook_new_array(unsigned long size) {
     return memory;
 }
 static int update_origin_x, update_origin_y;
-static struct RectResult update_bounds, display_bounds; // This update's, and the largest seen, which is the display's.
+static struct RectResult update_bounds; // This update's.
+static struct RectResult front_rects[64]; // The windows before this one in this update, which goes front first.
+static unsigned front_count;
 __attribute__((used)) void seamless_redraw_window(void *state, char *window) {
     if (layers_used || marked_window == NULL) {
         // First in this update: what's being updated, which is what a drawable of just that part is the size of. See
@@ -439,8 +448,7 @@ __attribute__((used)) void seamless_redraw_window(void *state, char *window) {
         update_origin_x = (int)bounds.x;
         update_origin_y = (int)bounds.y;
         update_bounds = bounds;
-        if (bounds.width * bounds.height > display_bounds.width * display_bounds.height)
-            display_bounds = bounds;
+        front_count = 0;
     }
     if (layers_used)
         forget_layers();
@@ -448,16 +456,44 @@ __attribute__((used)) void seamless_redraw_window(void *state, char *window) {
     building_window = window;
     building_thread = pthread_self();
 }
+static char *layer_window(const void *layer) {
+    size_t slot = ((uintptr_t)layer >> 4) % LAYER_SLOTS;
+    for (int tries = 0; tries < 16; tries++, slot = (slot + 1) % LAYER_SLOTS)
+        if (layer_owner[slot].layer == layer)
+            return layer_owner[slot].window;
+    return NULL;
+}
+// gl_prepare_layers walks an update's layers front to back and cuts from each what the opaque ones in front cover, and
+// that would leave a hole in a window's own surface in the shape of the window in front. So with the display off it
+// sees one window's layers at a time. What it returns runs back to front through +0xa8, and the layers run on through
+// +0.
+static void *(*prepare_original)(char *, void *, float);
+static void *prepare_by_window(char *layers, void *context, float scale) {
+    if (!table || !table->gpu_mode)
+        return prepare_original(layers, context, scale);
+    char *prepared = NULL;
+    while (layers) {
+        char *owner = layer_window(layers), *last = layers, *rest;
+        while ((rest = *(char **)last) && layer_window(rest) == owner)
+            last = rest;
+        *(char **)last = NULL;
+        char *run = prepare_original(layers, context, scale);
+        *(char **)last = rest;
+        if (run) {
+            char *front = run;
+            while (*(char **)(front + 0xa8))
+                front = *(char **)(front + 0xa8);
+            *(char **)(front + 0xa8) = prepared;
+            prepared = run;
+        }
+        layers = rest;
+    }
+    return prepared;
+}
 __attribute__((used)) void seamless_composite_layer(const void *layer) {
     building_window = 0;
     layers_used = 1;
-    char *owner = NULL;
-    size_t slot = ((uintptr_t)layer >> 4) % LAYER_SLOTS;
-    for (int tries = 0; tries < 16; tries++, slot = (slot + 1) % LAYER_SLOTS)
-        if (layer_owner[slot].layer == layer) {
-            owner = layer_owner[slot].window;
-            break;
-        }
+    char *owner = layer_window(layer);
     owner ? marks++ : unmarked++;
     // CoreGraphics calls GL through its own context record, as CGLMacro does: the renderer first, then the dispatch
     // table, whose slots are the wire's opcodes. glDeleteTextures, slot 59, at +0x1e0 in _CGXGLDeleteTexture shows it.
@@ -714,9 +750,9 @@ static int whole_window_due(uint32_t id, char *window) {
     // This update draws on a drawable of only what it updates, and all of a window with its shadow has to fit, or the
     // host would start it clear with part of it missing. What's past the display can't be drawn anyway. It stays due.
     enum { shadow = 96 };
-    double left = fmax(rect.x - shadow, display_bounds.x), top = fmax(rect.y - shadow, display_bounds.y);
-    double right = fmin(rect.x + rect.width + shadow, display_bounds.x + display_bounds.width);
-    double bottom = fmin(rect.y + rect.height + shadow, display_bounds.y + display_bounds.height);
+    double left = fmax(rect.x - shadow, 0), top = fmax(rect.y - shadow, 0);
+    double right = fmin(rect.x + rect.width + shadow, table->gpu_display_width);
+    double bottom = fmin(rect.y + rect.height + shadow, table->gpu_display_height);
     if (left < update_bounds.x || top < update_bounds.y || right > update_bounds.x + update_bounds.width ||
         bottom > update_bounds.y + update_bounds.height)
         return 0;
@@ -775,13 +811,45 @@ static char redraw_placed(char *state, char *window) {
             uint8_t saved_shadow = *(uint8_t *)(state + 0x6b);
             void *saved_clip = *(void **)(state + 0x18);
             struct RectResult everywhere = {0, 0, 16384, 16384};
-            void *clip = whole ? region_with_rect(everywhere) : region_copy(saved_clip);
+            // What an update changed is only what's visible, and what's covered would keep what was there last on a
+            // window's own surface: half of a thing moving out from under another window. So an update that touches a
+            // window draws what's covered of it too, and one with nothing in front costs no more than it did. shortcut:
+            // what changes only where it's covered brings no update, so it waits for one that touches the window.
+            struct RectResult rect = window_screen_rect(window);
+            void *clip = region_with_rect(whole ? everywhere : update_bounds);
+            int touches = rect.x < update_bounds.x + update_bounds.width && update_bounds.x < rect.x + rect.width &&
+                          rect.y < update_bounds.y + update_bounds.height && update_bounds.y < rect.y + rect.height;
+            for (unsigned i = 0; !whole && touches && i < front_count; i++) {
+                double left = fmax(rect.x, front_rects[i].x), top = fmax(rect.y, front_rects[i].y);
+                double right = fmin(rect.x + rect.width, front_rects[i].x + front_rects[i].width);
+                double bottom = fmin(rect.y + rect.height, front_rects[i].y + front_rects[i].height);
+                if (left >= right || top >= bottom)
+                    continue;
+                void *(*region_union)(void *, void *) = (void *(*)(void *, void *))resolved[25];
+                void *covered = region_with_rect((struct RectResult){left, top, right - left, bottom - top});
+                void *grown = region_union(clip, covered);
+                region_release_fn(covered);
+                region_release_fn(clip);
+                clip = grown;
+            }
+            if (front_count < 64)
+                front_rects[front_count++] = rect;
             *(void **)(state + 0x18) = clip;
+            // What's opaque in the windows in front so far, which redraw_window adds to and cuts from those behind:
+            // off, a window's surface has to keep what's covered, or a window in front leaves a hole of its shape.
+            void *saved_opaque = *(void **)(state + 0x20);
+            if (off)
+                *(void **)(state + 0x20) = NULL;
             if (!whole)
                 *(uint8_t *)(state + 0x6b) = 1;
             else if (whole_count < 64)
                 whole_windows[whole_count++] = window;
             char drew = redraw_original(state, window);
+            if (off) {
+                if (*(void **)(state + 0x20))
+                    region_release_fn(*(void **)(state + 0x20));
+                *(void **)(state + 0x20) = saved_opaque;
+            }
             *(void **)(state + 0x18) = saved_clip;
             *(uint8_t *)(state + 0x6b) = saved_shadow;
             region_release_fn(clip);
@@ -813,7 +881,7 @@ static char redraw_placed(char *state, char *window) {
 
 #include "seamless-ws-mojave.h"
 
-#define MAVERICKS_PATCHES 2
+#define MAVERICKS_PATCHES 3
 static struct Patch mavericks_patches[MAVERICKS_PATCHES];
 static void **new_array_pointer;
 
@@ -839,9 +907,13 @@ static int mavericks_prepare(void) {
     region_with_rect = (void *(*)(struct RectResult))placement_targets[1];
     region_release_fn = (void (*)(void *))placement_targets[2];
     region_copy = resolved[22];
+    static const uint8_t prepare_prologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41,
+                                               0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x28};
     const struct Patch patches[MAVERICKS_PATCHES] = {
         PUSHES_PATCH(resolved[18], seamless_layer_entry, seamless_layer_continue),
-        PUSHES_PATCH(placement_targets[0], redraw_placed, redraw_original)};
+        PUSHES_PATCH(placement_targets[0], redraw_placed, redraw_original),
+        {resolved[24], prepare_prologue, sizeof(prepare_prologue), sizeof(prepare_prologue),
+         (const void *)prepare_by_window, (void **)&prepare_original}};
     memcpy(mavericks_patches, patches, sizeof(patches));
     return 1;
 }
@@ -959,7 +1031,7 @@ __attribute__((constructor)) static void start(void) {
         }
         if (ready && table && build->full && (tree_in_gl || !access("/var/tmp/seamless-ws-placement", F_OK)) &&
             mavericks_prepare() &&
-            patches_apply(tree_in_gl ? mavericks_patches : mavericks_patches + 1, tree_in_gl ? 2 : 1)) {
+            patches_apply(tree_in_gl ? mavericks_patches : mavericks_patches + 1, tree_in_gl ? MAVERICKS_PATCHES : 1)) {
             if (tree_in_gl)
                 __atomic_store_n(new_array_pointer, (void *)hook_new_array, __ATOMIC_SEQ_CST);
             table->installed_pid = getpid();
