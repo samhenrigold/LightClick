@@ -77,8 +77,9 @@ static const char *const wanted[] = {
     "_CGRegionCreateCopy",
     "_CGRegionGetBoundingBox",
     "_gl_prepare_layers",
+    "_CGRegionCreateUnionWithRegion",
 };
-static void *resolved[25];
+static void *resolved[26];
 static void *(*session_data)(void);
 static void **(*server_gl)(void);
 static void *placement_targets[3];
@@ -436,6 +437,8 @@ static void *hook_new_array(unsigned long size) {
 }
 static int update_origin_x, update_origin_y;
 static struct RectResult update_bounds; // This update's.
+static struct RectResult front_rects[64]; // The windows before this one in this update, which goes front first.
+static unsigned front_count;
 __attribute__((used)) void seamless_redraw_window(void *state, char *window) {
     if (layers_used || marked_window == NULL) {
         // First in this update: what's being updated, which is what a drawable of just that part is the size of. See
@@ -445,6 +448,7 @@ __attribute__((used)) void seamless_redraw_window(void *state, char *window) {
         update_origin_x = (int)bounds.x;
         update_origin_y = (int)bounds.y;
         update_bounds = bounds;
+        front_count = 0;
     }
     if (layers_used)
         forget_layers();
@@ -807,10 +811,29 @@ static char redraw_placed(char *state, char *window) {
             uint8_t saved_shadow = *(uint8_t *)(state + 0x6b);
             void *saved_clip = *(void **)(state + 0x18);
             struct RectResult everywhere = {0, 0, 16384, 16384};
-            // All of what this update's drawable holds, rather than what it changed: that leaves out what's covered,
-            // which on a window's own surface would keep what was there last, such as a moving thing's old place.
-            void *clip = whole || update_bounds.width > 0 ? region_with_rect(whole ? everywhere : update_bounds)
-                                                          : region_copy(saved_clip);
+            // What an update changed is only what's visible, and what's covered would keep what was there last on a
+            // window's own surface: half of a thing moving out from under another window. So an update that touches a
+            // window draws what's covered of it too, and one with nothing in front costs no more than it did. shortcut:
+            // what changes only where it's covered brings no update, so it waits for one that touches the window.
+            struct RectResult rect = window_screen_rect(window);
+            void *clip = region_with_rect(whole ? everywhere : update_bounds);
+            int touches = rect.x < update_bounds.x + update_bounds.width && update_bounds.x < rect.x + rect.width &&
+                          rect.y < update_bounds.y + update_bounds.height && update_bounds.y < rect.y + rect.height;
+            for (unsigned i = 0; !whole && touches && i < front_count; i++) {
+                double left = fmax(rect.x, front_rects[i].x), top = fmax(rect.y, front_rects[i].y);
+                double right = fmin(rect.x + rect.width, front_rects[i].x + front_rects[i].width);
+                double bottom = fmin(rect.y + rect.height, front_rects[i].y + front_rects[i].height);
+                if (left >= right || top >= bottom)
+                    continue;
+                void *(*region_union)(void *, void *) = (void *(*)(void *, void *))resolved[25];
+                void *covered = region_with_rect((struct RectResult){left, top, right - left, bottom - top});
+                void *grown = region_union(clip, covered);
+                region_release_fn(covered);
+                region_release_fn(clip);
+                clip = grown;
+            }
+            if (front_count < 64)
+                front_rects[front_count++] = rect;
             *(void **)(state + 0x18) = clip;
             // What's opaque in the windows in front so far, which redraw_window adds to and cuts from those behind:
             // off, a window's surface has to keep what's covered, or a window in front leaves a hole of its shape.
