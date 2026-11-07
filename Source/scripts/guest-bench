@@ -149,7 +149,9 @@ def stop_test_processes(process, work):
             process.wait(timeout=3)
         deadline = time.monotonic()+20
         while time.monotonic() < deadline:
-            listing = subprocess.run(['ps', '-axo', 'pid=,stat=,lstart=,comm='], capture_output=True, text=True, timeout=5)
+            # process_identity uses UTC; both observations must encode the same birth time regardless of host TZ.
+            listing = subprocess.run(['ps', '-axo', 'pid=,stat=,lstart=,comm='], capture_output=True, text=True,
+                                     timeout=5, env={**os.environ, 'TZ': 'UTC'})
             if listing.returncode or listing.stderr.strip() or not listing.stdout.strip():
                 raise RuntimeError('could not inspect remaining clone processes')
             leftovers = []
