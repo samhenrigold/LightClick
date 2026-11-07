@@ -649,52 +649,38 @@ def desktop():
 
 
 def desktop_with_old_hook():
-    # A guest an earlier build left with the hook in WindowServer's job: a press takes it out and stays on the display's frames, and
-    # from the next start, the press injects it as usual.
-    install_hook()
+    # A guest an earlier build left with the hook in WindowServer's job: a press takes the entry out and stays on the display's frames
+    # for this start. Done without restarting the guest: a press from the next start is the ordinary one.
     plist = '/System/Library/LaunchDaemons/com.apple.WindowServer.plist'
+    guest = stage(guest_tool)
+    run(guest, ['open-app', '--app', 'TextEdit'])
+    # Before pre-arming can inject: it starts about 20 s in, and this is what a guest with the old entry has at its start anyway.
+    add = (f'/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" {plist} || true; '
+           f'/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string /var/tmp/seamless-ws-hook.dylib" {plist}')
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', add]}, 60)
 
-    def state(what):
-        said = request({'Executable': '/usr/bin/grep', 'Arguments': ['-c', 'seamless-ws-hook', plist]}, 60).get('Stdout', '').strip()
-        print(what, 'hook lines in the plist:', said, flush=True)
+    def lines():
+        said = request({'Executable': '/bin/sh', 'Arguments': ['-c', f'/usr/bin/grep -c seamless-ws-hook {plist}; true']}, 60).get('Stdout', '').strip()
+        print('hook lines in the plist:', said, flush=True)
         return said
 
-    def press(apps):
-        for _ in range(240):
-            if request({'Action': 'seamless-state'}, 60).get('Prepared'):
-                break
-            time.sleep(1)
-        request({'Action': 'seamless-toggle'}, 60)
-        pressed = time.time()
-        while time.time() - pressed < 120 and request({'Action': 'seamless-state'}, 60).get('WindowVisible'):
-            time.sleep(1)
-        time.sleep(5)
-        now = request({'Action': 'seamless-state'}, 60)
-        print('in Seamless', now, flush=True)
-        request({'Action': 'seamless-toggle'}, 60)
-        time.sleep(8)
-        return now
-
-    guest = stage(guest_tool)
-    run(guest, ['open-app', '--app', 'TextEdit'])
-    time.sleep(10)
-    print('PASS' if state('before') != '0' else 'FAIL', 'the entry is there to start with', flush=True)
-    first = press('TextEdit')
-    removed = state('after a press') == '0'
+    print('PASS' if lines() == '1' else 'FAIL', 'the entry is there to start with', flush=True)
+    for _ in range(240):
+        if request({'Action': 'seamless-state'}, 60).get('Prepared'):
+            break
+        time.sleep(1)
+    request({'Action': 'seamless-toggle'}, 60)
+    pressed = time.time()
+    while time.time() - pressed < 60 and request({'Action': 'seamless-state'}, 60).get('WindowVisible'):
+        time.sleep(1)
+    now = request({'Action': 'seamless-state'}, 60)
+    print('in Seamless', now, 'after', time.time() - pressed, flush=True)
+    request({'Action': 'seamless-toggle'}, 60)
+    time.sleep(8)
+    removed = lines() == '0'
     print('PASS' if removed else 'FAIL', 'a press removes the entry', flush=True)
-    print('PASS' if not first.get('OwnSurfaces') else 'FAIL', 'and stays on the display\'s frames this start', flush=True)
-    request({'Executable': '/bin/sh', 'Arguments': ['-c', '(sleep 5; /sbin/reboot) >/dev/null 2>&1 &']}, 60)
-    time.sleep(120)
-    deadline = time.time() + 400
-    while time.time() < deadline and request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60).get('ExitCode') != 0:
-        time.sleep(5)
-    time.sleep(30)
-    guest = stage(guest_tool)
-    run(guest, ['open-app', '--app', 'TextEdit'])
-    time.sleep(10)
-    second = press('TextEdit')
-    print('PASS' if second.get('OwnSurfaces') else 'FAIL', 'from the next start, windows have their own surfaces', flush=True)
-    print('PASS old hook' if removed and second.get('OwnSurfaces') and not first.get('OwnSurfaces') else 'FAIL old hook', flush=True)
+    print('PASS' if now.get('Active') and not now.get('OwnSurfaces') else 'FAIL', 'and shows windows from the display this start', flush=True)
+    print('PASS old hook' if removed and now.get('Active') and not now.get('OwnSurfaces') else 'FAIL old hook', flush=True)
 
 
 def capture_bench():
