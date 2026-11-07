@@ -149,8 +149,10 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         case .removeSurface(let id):
             materials[id] = nil
             materialViews[id] = nil
-            surfaces.removeValue(forKey: id)?.window.close()
-            dropViews.removeValue(forKey: id)
+            let removed = surfaces.removeValue(forKey: id)
+            removed?.route.invalidate()
+            dropViews.removeValue(forKey: id)?.route.invalidate()
+            removed?.window.close()
         case .fullScreenSurface(let id, let on):
             fullScreenSurface(id, on)
         case .renameSurface(let id, let next):
@@ -265,6 +267,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     }
 
     private struct Surface {
+        let route: ProxyWindowRoute
         var window: NSWindow
         var host: CALayer
         var input: NSView
@@ -314,7 +317,8 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         (window as? SurfaceWindow)?.margin = margin
         (window as? SurfaceWindow)?.movedByUser =
             level == 0 && !title.isEmpty
-            ? { [weak self] in
+            ? { [weak self, route = surface.route] in
+                guard let id = route.windowID else { return }
                 self?.surfaceMoved(id)
             } : nil
         let isNewSurface = surfaces[id] == nil
@@ -347,7 +351,14 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
 
     /// The same NSWindow, Space and Dock entry: only the guest's number for it has changed.
     private func renameSurface(_ id: Int, _ next: Int) {
-        guard let surface = surfaces.removeValue(forKey: id) else { return }
+        guard id != next, let surface = surfaces.removeValue(forKey: id) else { return }
+        let displaced = surfaces.removeValue(forKey: next)
+        let displacedDrop = dropViews.removeValue(forKey: next)
+        if let displaced, displaced.route !== surface.route { displaced.route.invalidate() }
+        if let displacedDrop, displacedDrop.route !== surface.route { displacedDrop.route.invalidate() }
+        // Retire callbacks before close notifications can fire; never close the source's own host window.
+        if let displaced, displaced.window !== surface.window { displaced.window.close() }
+        surface.route.rename(to: next)
         surfaces[next] = surface
         SeamlessInputViewSetGuestWindow(surface.input, UInt32(clamping: next))
         SeamlessInputViewSetRaisesWindow(surface.input, UInt32(clamping: next))
@@ -356,7 +367,6 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         dropViews[next] = dropViews.removeValue(forKey: id)
         if guestMinimizing.remove(id) != nil { guestMinimizing.insert(next) }
         if fullScreenID == id { fullScreenID = next }
-        (surface.window as? SurfaceWindow)?.movedByUser = { [weak self] in self?.surfaceMoved(next) }
     }
 
     private func fullScreenSurface(_ id: Int, _ on: Bool) {
@@ -641,6 +651,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
     }
 
     private func makeSurface(id: Int, frame: NSRect) -> Surface {
+        let route = ProxyWindowRoute(windowID: id)
         let window = SurfaceWindow(
             contentRect: frame, styleMask: [.borderless, .miniaturizable], backing: .buffered, defer: false)
         window.isOpaque = false
@@ -648,7 +659,10 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         window.hasShadow = false
         window.isReleasedWhenClosed = false
         let input = SeamlessMakeInputView(NSRect(origin: .zero, size: frame.size)) { [weak self] bytes in
-            MainActor.assumeIsolated { self?.send(.input(bytes: bytes)) }
+            MainActor.assumeIsolated {
+                guard route.windowID != nil else { return }
+                self?.send(.input(bytes: bytes))
+            }
         }
         input.autoresizingMask = [.width, .height]
         input.wantsLayer = true
@@ -657,7 +671,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         let host = hostClass.init()
         host.anchorPoint = .zero
         input.layer?.addSublayer(host)
-        let drop = ProxyDropView(windowID: id, sink: self)
+        let drop = ProxyDropView(route: route, sink: self)
         drop.frame = input.bounds
         drop.autoresizingMask = [.width, .height]
         input.addSubview(drop)
@@ -679,9 +693,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
         NotificationCenter.default.addObserver(
             forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main
         ) {
-            [weak self] _ in
+            [weak self, weak window] _ in
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, let window, let id = route.windowID else { return }
                 self.fullScreenID = nil
                 window.backgroundColor = .clear
                 if self.guestFullScreening {
@@ -695,14 +709,17 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
             forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main
         ) {
             [weak self] _ in
-            MainActor.assumeIsolated { self?.guestFullScreening = false }
+            MainActor.assumeIsolated {
+                guard route.windowID != nil else { return }
+                self?.guestFullScreening = false
+            }
         }
         for (name, minimized) in [
             (NSWindow.didMiniaturizeNotification, true), (NSWindow.didDeminiaturizeNotification, false)
         ] {
             NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    guard let self else { return }
+                    guard let self, let id = route.windowID else { return }
                     if self.guestMinimizing.remove(id) == nil {
                         self.send(.surfaceMinimized(windowID: id, minimized: minimized))
                     }
@@ -710,7 +727,7 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
             }
         }
         dropViews[id] = drop
-        return Surface(window: window, host: host, input: input, order: 0)
+        return Surface(route: route, window: window, host: host, input: input, order: 0)
     }
 
     /// The window's pixels include its shadow, which mustn't take clicks. Only the guest window itself does.

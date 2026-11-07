@@ -11,7 +11,7 @@ protocol ProxyEventSink: AnyObject {
 /// The hosted layer from `seamless-apps` draws over this view; these methods don't depend on it.
 @MainActor
 final class ProxyDropView: NSView, NSDraggingSource, NSFilePromiseProviderDelegate {
-    private let windowID: Int
+    let route: ProxyWindowRoute
     private weak var sink: (any ProxyEventSink)?
     private var lastMouseEvent: NSEvent?
     private var leftWithButtonDown = false
@@ -19,8 +19,12 @@ final class ProxyDropView: NSView, NSDraggingSource, NSFilePromiseProviderDelega
     private var promises: [Int: (any Error)?] = [:]
     private var promiseCompletions: [Int: @Sendable ((any Error)?) -> Void] = [:]
 
-    init(windowID: Int, sink: any ProxyEventSink) {
-        self.windowID = windowID
+    convenience init(windowID: Int, sink: any ProxyEventSink) {
+        self.init(route: ProxyWindowRoute(windowID: windowID), sink: sink)
+    }
+
+    init(route: ProxyWindowRoute, sink: any ProxyEventSink) {
+        self.route = route
         self.sink = sink
         super.init(frame: .zero)
         registerForDraggedTypes([.fileURL])
@@ -38,6 +42,7 @@ final class ProxyDropView: NSView, NSDraggingSource, NSFilePromiseProviderDelega
     private func point(_ info: any NSDraggingInfo) -> NSPoint { convert(info.draggingLocation, from: nil) }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard let windowID = route.windowID else { return [] }
         let urls =
             sender.draggingPasteboard.readObjects(
                 forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
@@ -49,14 +54,19 @@ final class ProxyDropView: NSView, NSDraggingSource, NSFilePromiseProviderDelega
     }
 
     override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard let windowID = route.windowID else { return [] }
         let location = point(sender)
         sink?.send(.dragMoved(windowID: windowID, x: location.x, y: location.y))
         return .copy
     }
 
-    override func draggingExited(_ sender: (any NSDraggingInfo)?) { sink?.send(.dragExited) }
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        guard route.windowID != nil else { return }
+        sink?.send(.dragExited)
+    }
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        guard let windowID = route.windowID else { return false }
         let location = point(sender)
         sink?.send(.dragDropped(windowID: windowID, x: location.x, y: location.y))
         return true
@@ -66,6 +76,7 @@ final class ProxyDropView: NSView, NSDraggingSource, NSFilePromiseProviderDelega
 
     /// Called with every event the window gets. Only this edge matters here: the input view forwards the drag itself.
     func observe(_ event: NSEvent) {
+        guard let windowID = route.windowID else { return }
         switch event.type {
         case .leftMouseDown:
             lastMouseEvent = event
