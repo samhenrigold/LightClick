@@ -1652,6 +1652,25 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                                   self.state.clipboardPending || self.agentHeldExclusively];
     if (!command)
         return;
+    // Asked many times a second by a test, and none need the agent. Going through what follows would start clipboard setup on it
+    // each time, which ended the connection under whatever was using the agent.
+    if ([command[@"Action"] isEqual:@"seamless-state"]) {
+        [self.diagnostics writeResult:@{
+            @"Active" : @([VIMSeamlessHost isActiveFor:self]),
+            @"WindowVisible" : @(self.window.isVisible),
+            @"OwnSurfaces" : @([VIMSeamlessHost hasOwnSurfacesFor:self])
+        }];
+        return;
+    }
+    if ([command[@"Action"] isEqual:@"seamless-toggle"]) {
+        [self toggleSeamless:nil];
+        [self.diagnostics writeResult:@{@"Active" : @([VIMSeamlessHost isActiveFor:self])}];
+        return;
+    }
+    if ([command[@"Action"] isEqual:@"test-click"]) {
+        [self.diagnostics writeResult:@{@"At" : @(self.displayView.testClick)}];
+        return;
+    }
     self.state.diagnosticPending = YES;
     void (^finish)(NSDictionary *) = ^(NSDictionary *result) {
       [self.diagnostics writeResult:result];
@@ -1865,20 +1884,6 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     }
     if ([command[@"Action"] isEqual:@"display-frames"]) {
         finish(@{@"Arrived" : @(self.displayView.arrivedFrames), @"Distinct" : @(self.displayView.differentFrames)});
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"seamless-state"]) {
-        finish(@{@"Active" : @([VIMSeamlessHost isActiveFor:self]), @"WindowVisible" : @(self.window.isVisible),
-                 @"OwnSurfaces" : @([VIMSeamlessHost hasOwnSurfacesFor:self])});
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"seamless-toggle"]) {
-        [self toggleSeamless:nil];
-        finish(@{@"Active" : @([VIMSeamlessHost isActiveFor:self])});
-        return;
-    }
-    if ([command[@"Action"] isEqual:@"test-click"]) {
-        finish(@{@"At" : @(self.displayView.testClick)});
         return;
     }
     if ([command[@"Action"] isEqual:@"display-request"]) {
