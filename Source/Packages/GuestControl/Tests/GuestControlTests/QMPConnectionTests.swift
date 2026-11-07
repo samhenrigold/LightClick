@@ -328,8 +328,40 @@ struct QMPConnectionTests {
         }
     }
 
-    /// A timed-out QGA stream must synchronize again before reuse. The discard applies to any error, even a clean
-    /// rejection, and the fresh connection re-sends the sentinel.
+    /// A guest agent that times out keeps its socket and synchronizes again on it, skipping the late reply. QEMU takes one
+    /// client at a time, so a new one could sit unread until it noticed the old one had gone. Runs against the real
+    /// five-second deadline, so it takes six seconds.
+    @Test func aTimedOutGuestAgentSynchronizesAgainOnTheSameSocket() async throws {
+        let connections = Recorder<Bool>()
+        let server = FakeSocketServer { peer in
+            guard let sync = peer.readRequest(), let token = sync.request["arguments"]?["id"] else { return }
+            connections.append(sync.hadSentinel)
+            peer.send(raw: Data([0xff]))
+            peer.send(["return": token])
+            guard peer.read() != nil else { return }
+            usleep(6_000_000)
+            peer.send(["return": ["late": true]])
+            guard let again = peer.readRequest(), let next = again.request["arguments"]?["id"] else { return }
+            connections.append(again.hadSentinel)
+            peer.send(raw: Data([0xff]))
+            peer.send(["return": next])
+            guard peer.read() != nil else { return }
+            peer.send(["return": ["ok": true]])
+        }
+        defer { server.stop() }
+        let agent = QMPConnection(socketPath: server.path, mode: .guestAgent)
+        defer { agent.close() }
+        try await agent.connect()
+        let slow = await failure { () async throws(QMPError) in _ = try await agent.execute("guest-ping") }
+        #expect(slow == .timedOut)
+        let notReady = await failure { () async throws(QMPError) in _ = try await agent.execute("guest-ping") }
+        #expect(notReady == .notReady, "Nothing's sent until it has synchronized again")
+        try await agent.connect()
+        #expect(try await agent.execute("guest-ping")["ok"] == true, "The late reply was skipped")
+        #expect(connections.all == [true, true], "Both synchronizations were on the one connection, with the sentinel")
+    }
+
+    /// Any other QGA error, even a clean rejection, drops the connection, and the fresh one re-sends the sentinel.
     @Test func anyGuestAgentErrorRequiresSynchronizingAgain() async throws {
         let connections = Recorder<Bool>()
         let server = FakeSocketServer { peer in

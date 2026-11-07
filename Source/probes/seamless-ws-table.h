@@ -84,6 +84,9 @@ struct SWSTable {
     volatile uint32_t gpu_no_marker;
     // The tool writes these with the mode: the display's size, in points.
     volatile uint32_t gpu_display_width, gpu_display_height;
+    // The tool writes these, as the host says: windows it shows that the guest may have covered. On Mavericks an update
+    // draws them as if nothing were in front, so what changes where they're covered still comes.
+    volatile uint32_t gpu_force_visible_count, gpu_force_visible[64];
     // The tool writes this: how many surface updates to print the layer trees of.
     volatile int32_t gpu_census;
     // What a census printed as contents, by the index it printed: top row first, 4 bytes a pixel, in the arena.

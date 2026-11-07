@@ -180,6 +180,25 @@ public final class GuestAgentBridge: NSObject {
         runExecutable(path, arguments: arguments, standardInput: nil, timeout: timeout, completion: completion)
     }
 
+    /// For a long-running process: the agent may go `patience` seconds in all without answering a status poll.
+    @objc(runExecutable:arguments:timeout:patience:completion:)
+    public func runExecutable(
+        _ path: String,
+        arguments: [String],
+        timeout: TimeInterval,
+        patience: TimeInterval,
+        completion: @escaping DictionaryCompletion
+    ) {
+        start(
+            { [agent] () async throws(GuestAgentError) in
+                let result = try await agent.runExecutable(
+                    path, arguments: arguments, timeout: timeout, patience: patience)
+                return Self.dictionary(for: result)
+            },
+            completion: completion
+        )
+    }
+
     /// Small private setup input goes through stdin, never argv or a saved command file. Intended for account
     /// provisioning; bulk payloads belong on support media.
     @objc(runExecutable:arguments:standardInput:timeout:completion:)

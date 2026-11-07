@@ -1,6 +1,7 @@
 // One app with two animated windows, for telling whether a covered window goes quiet because the app stops drawing or
 // because the compositor leaves it out. Run as an app, in a guest's session. /tmp/seamless-two-mode says what animates:
-// "draw", AppKit drawing from a timer, or "ca", a Core Animation animation the app has no part in once it's set. When
+// "draw", AppKit drawing from a timer, "ca", a Core Animation animation the app has no part in once it's set, or "ca2",
+// that in the second window only, so once it's covered nothing on the display changes because of it. When
 // /tmp/seamless-two-cover appears, the second window goes under the first, covered exactly. /tmp/seamless-two.txt has
 // each window's counts, each second.
 //
@@ -36,7 +37,9 @@
     NSString *mode = [NSString stringWithContentsOfFile:@"/tmp/seamless-two-mode"
                                                encoding:NSUTF8StringEncoding
                                                   error:NULL];
-    drawing = ![[mode stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] isEqual:@"ca"];
+    mode = [mode stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    drawing = ![mode hasPrefix:@"ca"];
+    BOOL secondOnly = [mode isEqual:@"ca2"];
     for (int i = 0; i < 2; i++) {
         windows[i] = [[NSWindow alloc] initWithContentRect:NSMakeRect(120 + i * 560, 200, 500, 400)
                                                  styleMask:NSTitledWindowMask
@@ -45,8 +48,9 @@
         windows[i].title = i ? @"Second" : @"First";
         views[i] = [[TwoView alloc] initWithFrame:NSMakeRect(0, 0, 500, 400)];
         windows[i].contentView = views[i];
-        if (!drawing) {
+        if (!drawing)
             views[i].wantsLayer = YES;
+        if (!drawing && (i == 1 || !secondOnly)) {
             CALayer *square = [CALayer layer];
             square.frame = CGRectMake(0, 100, 100, 100);
             square.backgroundColor = CGColorGetConstantColor(kCGColorBlack);

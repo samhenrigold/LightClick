@@ -110,6 +110,9 @@ public final class SeamlessSession {
     /// A menu item and Dock menu item with this title calls `onLeave`, rather than going to the guest, and so does asking the proxy to quit.
     public var leaveTitle: String?
     public var onLeave: (() -> Void)?
+    /// The guest windows whose proxies the host is showing some of, for the guest to keep drawing where they're covered.
+    public private(set) var shownWindows: Set<UInt32> = []
+    public var onShownWindowsChanged: (() -> Void)?
     public var onWindowsChanged: (() -> Void)?
     /// Whether the guest app had gone first.
     public var onProxyClosed: ((Bool) -> Void)?
@@ -269,6 +272,7 @@ public final class SeamlessSession {
             + "('kTCCServiceAccessibility','$(/bin/ps -o comm= -p $PPID)',1,1,1);"
         return
             "mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp \"$1\" /tmp/sg/g; cp \"$2\" /tmp/sg/ig; chmod 755 /tmp/sg/g /tmp/sg/ig; "
+            + "[ -n \"$3\" ] && cp \"$3\" /tmp/sg/press.sh; [ -n \"$4\" ] && cp \"$4\" /tmp/sg/inject.sh; "
             + "/usr/bin/sqlite3 \"/Library/Application Support/com.apple.TCC/TCC.db\" \"\(rows.joined())\(agentRow)\" 2>&1; "
             // After this script has answered, since the agent has been seen to stop answering for minutes if tccd goes under it.
             + "/bin/ps -o comm= -p $PPID; (sleep 1; /usr/bin/killall tccd) </dev/null >/dev/null 2>&1 &"
@@ -435,6 +439,10 @@ public final class SeamlessSession {
                 proxy?.send(SessionCommand.removeSurface(id: Int(next)))
             }
             surfaces[next] = surface
+            if shownWindows.remove(id) != nil {
+                shownWindows.insert(next)
+                onShownWindowsChanged?()
+            }
             proxy?.send(SessionCommand.renameSurface(id: Int(id), to: Int(next)))
             if surface.window.id == next { tellProxy(surface) }
         case .fullScreen(let id, let on):
@@ -453,6 +461,7 @@ public final class SeamlessSession {
         case .gone(let id):
             note("# window \(id) gone")
             surfaces[id] = nil
+            if shownWindows.remove(id) != nil { onShownWindowsChanged?() }
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
             onWindowsChanged?()
         case .menu(let json):
@@ -494,7 +503,9 @@ public final class SeamlessSession {
         if let existing = surfaces[window.id] {
             surface = existing
         } else {
-            note("# new window \(window.id) \"\(window.title)\" level \(window.level) \(window.width)x\(window.height) at \(window.x),\(window.y)")
+            note(
+                "# new window \(window.id) \"\(window.title)\" level \(window.level) \(window.width)x\(window.height) at \(window.x),\(window.y)"
+            )
             guard let made = makeSurface(window) else { return }
             surface = made
             surfaces[window.id] = made
@@ -879,6 +890,11 @@ public final class SeamlessSession {
             sendToGuest(SessionWire.setFullScreen(window: UInt32(clamping: id), false))
         case .surfaceMinimized(let id, let minimized):
             sendToGuest(SessionWire.setMinimized(window: UInt32(clamping: id), minimized))
+        case .surfaceShown(let id, let shown):
+            let window = UInt32(clamping: id)
+            guard shownWindows.contains(window) != shown else { return }
+            if shown { shownWindows.insert(window) } else { shownWindows.remove(window) }
+            onShownWindowsChanged?()
         case .surfaceMoved(let id, let x, let y):
             guard let surface = surfaces[UInt32(clamping: id)] else { return }
             let side = Double(surface.window.margin)

@@ -78,8 +78,9 @@ static const char *const wanted[] = {
     "_CGRegionGetBoundingBox",
     "_gl_prepare_layers",
     "_CGRegionCreateUnionWithRegion",
+    "_create_opaque_shape_above_for_window",
 };
-static void *resolved[26];
+static void *resolved[27];
 static void *(*session_data)(void);
 static void **(*server_gl)(void);
 static void *placement_targets[3];
@@ -881,7 +882,24 @@ static char redraw_placed(char *state, char *window) {
 
 #include "seamless-ws-mojave.h"
 
-#define MAVERICKS_PATCHES 3
+// What of a window isn't under an opaque one, which is what's visible of it. A window's damage that isn't visible
+// brings no update, so a window animating where it's covered would stop. For a window the host says it's showing, all
+// of it is visible.
+static void *(*opaque_above_original)(char *);
+static void *opaque_above_by_host(char *window) {
+    if (table && table->gpu_mode) {
+        const uint8_t *state = *(const uint8_t **)(window + 0xe0);
+        uint32_t id = state ? *(const uint32_t *)state : 0;
+        for (uint32_t i = 0; id && i < table->gpu_force_visible_count && i < 64; i++)
+            if (table->gpu_force_visible[i] == id) {
+                struct RectResult everywhere = {0, 0, 16384, 16384};
+                return region_with_rect(everywhere);
+            }
+    }
+    return opaque_above_original(window);
+}
+
+#define MAVERICKS_PATCHES 4
 static struct Patch mavericks_patches[MAVERICKS_PATCHES];
 static void **new_array_pointer;
 
@@ -913,7 +931,8 @@ static int mavericks_prepare(void) {
         PUSHES_PATCH(resolved[18], seamless_layer_entry, seamless_layer_continue),
         PUSHES_PATCH(placement_targets[0], redraw_placed, redraw_original),
         {resolved[24], prepare_prologue, sizeof(prepare_prologue), sizeof(prepare_prologue),
-         (const void *)prepare_by_window, (void **)&prepare_original}};
+         (const void *)prepare_by_window, (void **)&prepare_original},
+        PUSHES_PATCH(resolved[26], opaque_above_by_host, opaque_above_original)};
     memcpy(mavericks_patches, patches, sizeof(patches));
     return 1;
 }

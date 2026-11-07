@@ -34,6 +34,8 @@ final class FakeGuestAgent: Sendable {
         var failWriteAtChunk: Int?
         var shortWrites = false
         var syncs = 0
+        /// Status polls answered only after the client's five-second deadline, as from a guest that's slow to answer.
+        var latePolls = 0
     }
 
     let state = Mutex(State())
@@ -86,6 +88,11 @@ final class FakeGuestAgent: Sendable {
                     peer.send(["return": ["pid": .number(pid as NSNumber)]])
                 }
             case "guest-exec-status":
+                let late = state.withLock { state in
+                    defer { state.latePolls = max(0, state.latePolls - 1) }
+                    return state.latePolls > 0
+                }
+                if late { usleep(6_000_000) }
                 peer.send(["return": status(pid: arguments["pid"]?.number?.intValue ?? 0)])
             case "guest-file-open":
                 let handle = state.withLock { state in

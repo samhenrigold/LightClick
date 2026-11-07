@@ -37,6 +37,8 @@ public enum ProxyEvent: Codable, Hashable, Sendable {
     case surfaceMinimized(windowID: Int, minimized: Bool)
     /// The user took this window out of the host's full screen, not the guest.
     case surfaceLeftFullScreen(windowID: Int)
+    /// Whether any of this window is on the host's screen now, from AppKit's occlusion state.
+    case surfaceShown(windowID: Int, shown: Bool)
     case dragDropped(windowID: Int, x: Double, y: Double)
     case pointerLeftWithButtonDown(windowID: Int)
     case promiseRequested(id: Int, destination: String)

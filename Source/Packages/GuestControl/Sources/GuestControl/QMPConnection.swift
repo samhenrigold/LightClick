@@ -66,7 +66,8 @@ public actor QMPConnection {
     public func connect() throws(QMPError) {
         guard !isReady else { return }
         do throws(QMPError) {
-            try openSocket()
+            // After a timeout the socket is still this agent's, and synchronizing again on it is what makes it usable.
+            if socketState.withLock({ $0.descriptor }) < 0 { try openSocket() }
             switch mode {
             case .guestAgent:
                 let token = JSONValue.number(NSNumber(value: UInt64.random(in: .min ... .max) & UInt64(Int64.max)))
@@ -83,9 +84,16 @@ public actor QMPConnection {
             isReady = true
         } catch {
             Self.trace("connecting to \(path): \(error)")
-            discardDescriptor()
+            if !keepsSocket(after: error) { discardDescriptor() }
             throw error
         }
+    }
+
+    /// A guest agent that's slow to answer keeps its socket. QEMU serves one client at a time, and learns that a closed
+    /// one has gone only when its main loop gets round to it; until then a new client's requests sit unread. So a close
+    /// on a timeout turned a busy guest into one that seemed gone, sometimes for minutes.
+    private func keepsSocket(after error: QMPError) -> Bool {
+        mode == .guestAgent && error == .timedOut && !socketState.withLock { $0.isStopped }
     }
 
     private static let tracing = ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil
@@ -175,8 +183,11 @@ public actor QMPConnection {
                     continue
                 }
                 Self.trace("\(command): \(error)")
-                // A timed-out QGA stream must synchronize again before reuse.
-                if mode == .guestAgent { discardDescriptor() }
+                // A QGA stream must synchronize again before reuse: on the same socket after a timeout, as the next
+                // `connect()` does, and on a new one after anything else.
+                if mode == .guestAgent {
+                    if keepsSocket(after: error) { isReady = false } else { discardDescriptor() }
+                }
                 throw error
             }
         }

@@ -400,6 +400,23 @@ def windowed(seconds):
 def monitor_dump(why):
     # Where the agent's UART, COM2 at 0x2f8, and its interrupt are. IIR goes last, as reading it can clear what it says.
     print('# from the monitor,', why, flush=True)
+    # Both ends of the agent's socket: whether QEMU still holds a client the app has let go.
+    pids = [row.split()[0] for row in subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
+            if f'Build/bench/{tag}/' in row]
+    if pids:
+        said = subprocess.run(['lsof', '-n', '-U', '-a', '-p', ','.join(pids)], capture_output=True, text=True).stdout
+        print('## lsof', '\n'.join(row for row in said.splitlines() if 'guest-agent' in row or '->' in row)[:3000], flush=True)
+        # A connection waiting in the listener's queue unaccepted points at QEMU's loop not reaching the hang-up.
+        said = subprocess.run(['netstat', '-anv', '-f', 'unix'], capture_output=True, text=True).stdout
+        print('## netstat', '\n'.join(row for row in said.splitlines() if 'guest-agent' in row)[:2000], flush=True)
+        qemu = [row.split()[0] for row in subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
+                if f'Build/bench/{tag}/' in row and 'qemu-system' in row]
+        if qemu:
+            sample = results/f'{tag}-qemu.sample.txt'
+            subprocess.run(['sample', qemu[0], '3', '-file', str(sample)], capture_output=True)
+            text = sample.read_text() if sample.exists() else ''
+            main = text.split('Thread_')[1] if 'Thread_' in text else ''
+            print('## qemu main thread', main[:3000], flush=True)
     for command in ('info chardev', 'info pic', 'info ioapic', 'info lapic', 'i/b 0x2f9', 'i/b 0x2fb', 'i/b 0x2fc', 'i/b 0x2fd', 'i/b 0x2fe', 'i/b 0x2fa', 'i/b 0x2fd'):
         print(f'## {command}', request({'Action': 'monitor', 'Command': command}, 30), flush=True)
 
@@ -425,11 +442,87 @@ def cpu_percent(seconds=16):
     print(f'cpu_percent {percent:.0f}, load {load}', flush=True)
 
 
+WATCH_PORT = 57391
+# In one shell. A sample of the agent now and then says where it's stuck, if it is.
+WATCHER = r'''
+agent=$(/usr/bin/pgrep -f opengl-guest-agent | /usr/bin/head -1)
+comm=opengl-guest-agent
+report() { /usr/bin/nc -w 1 10.0.2.2 "$1"; }
+{ echo "agent pid $agent is $comm"; /bin/ls /Library/LaunchDaemons | /usr/bin/grep -iE "virtual|intel|agent|qemu"; /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"; } | report "$1"
+# Late timers or wakeups show as a 0.1 s sleep taking over a second, logged with the guest's own clock.
+/usr/bin/perl -MTime::HiRes=usleep,time -e '$| = 1; while (1) { $t = time; usleep(100000); $d = time - $t; printf "oversleep %.3f s at %.3f\n", $d, $t if $d > 1 }' >/tmp/seamless-oversleep.log 2>&1 </dev/null &
+(
+n=0
+while :; do
+  n=$((n + 1))
+  agent=$(/usr/bin/pgrep -f opengl-guest-agent | /usr/bin/head -1)
+  {
+    /bin/date
+    /bin/ps -axo pid,ppid,stat,etime,pcpu,command | /usr/bin/grep -E "$comm|/tmp/sg|ws-inject|WindowServer|tccd|perl" | /usr/bin/grep -v grep | /usr/bin/cut -c1-120
+    /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"
+    /bin/cat /var/tmp/seamless-ws-press 2>/dev/null
+    # Which way it's stuck: waiting on tty output is the transmit path, on input a lost receive.
+    /bin/ps -o pid,stat,wchan,etime,command -p $agent | /usr/bin/tail -1 | /usr/bin/cut -c1-120
+    /bin/stty -a -f /dev/cu.serial2 2>&1 | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-400; echo
+    /usr/bin/tail -3 /tmp/seamless-oversleep.log
+    /usr/bin/tail -2 /var/log/system.log | /usr/bin/cut -c1-180
+    if [ $((n % 5)) = 0 ]; then
+      /usr/sbin/ioreg -l -w0 -r -c Apple16X50UARTSync 2>/dev/null | /usr/bin/grep -vE "^ *$" | /usr/bin/cut -c1-140 | /usr/bin/head -40
+      /usr/sbin/ioreg -l -w0 -r -n Apple16X50Serial 2>/dev/null | /usr/bin/grep -iE "count|state|error|overrun|bytes" | /usr/bin/cut -c1-140 | /usr/bin/head -20
+      /usr/bin/sample $agent 1 -file /tmp/seamless-watch.sample >/dev/null 2>&1
+      /usr/bin/grep -A25 "Call graph" /tmp/seamless-watch.sample | /usr/bin/cut -c1-110
+      /usr/sbin/lsof -p $agent 2>/dev/null | /usr/bin/grep -E "serial|cu\\." | /usr/bin/cut -c1-110
+    fi
+    echo
+  } | report "$1"
+  /bin/sleep 2
+done
+) >/tmp/seamless-watch.err 2>&1 </dev/null &
+echo started
+'''
+
+
+def install_watcher():
+    # Once, into a private copy of the test machine: the watcher as a launchd job, so it reports from boot, before the
+    # agent may go quiet. Then a clean shutdown, and the clone kept as that copy, with its own identifier.
+    copy = Path(arguments[arguments.index('install-watcher') + 1])
+    script = WATCHER.replace('"$1"', str(WATCH_PORT))
+    plist = ('<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>'
+             '<key>Label</key><string>gold.samhenri.seamless-watch</string>'
+             '<key>ProgramArguments</key><array><string>/bin/sh</string><string>/usr/local/libexec/seamless-watch.sh</string></array>'
+             '<key>RunAtLoad</key><true/><key>AbandonProcessGroup</key><true/></dict></plist>')
+    install = ('/bin/mkdir -p /usr/local/libexec && printf %s "$1" > /usr/local/libexec/seamless-watch.sh && '
+               f"/bin/echo '{plist}' > /Library/LaunchDaemons/gold.samhenri.seamless-watch.plist && "
+               '/usr/sbin/chown root:wheel /Library/LaunchDaemons/gold.samhenri.seamless-watch.plist && '
+               '/bin/chmod 644 /Library/LaunchDaemons/gold.samhenri.seamless-watch.plist && echo installed')
+    said = request({'Executable': '/bin/sh', 'Arguments': ['-c', install, 'sh', script]}, 60)
+    print('install:', said, flush=True)
+    if 'installed' not in (said.get('Stdout') or ''):
+        return
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', '/sbin/shutdown -h +0 >/dev/null 2>&1 &']}, 30)
+    clone = next((source/'Build/bench'/tag/'home/Library/Application Support/Light Click/Machines').glob('Clone of *.vintelmac'))
+    for _ in range(120):
+        running = subprocess.run(['ps', '-axo', 'command='], capture_output=True, text=True).stdout
+        if not any(f'Build/bench/{tag}/' in row and 'qemu-system' in row for row in running.splitlines()):
+            break
+        time.sleep(1)
+    else:
+        print('the guest never shut down, so nothing was kept', flush=True)
+        return
+    shutil.rmtree(copy, ignore_errors=True)
+    subprocess.run(['cp', '-c', '-R', str(clone), str(copy)], check=True)
+    (copy/'State/PendingConfiguration.plist').unlink(missing_ok=True)
+    print('kept', copy, flush=True)
+
+
 def watch_guest():
     # What the guest's doing, sent by the guest over its own network: when its agent stops answering, there's no asking it.
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(('127.0.0.1', 0))
+    try:
+        listener.bind(('127.0.0.1', WATCH_PORT))
+    except OSError:
+        listener.bind(('127.0.0.1', 0))
     listener.listen(16)
     port = listener.getsockname()[1]
     target = results/f'{tag}-guest-watch.txt'
@@ -443,37 +536,16 @@ def watch_guest():
                     file.write(chunk)
     threading.Thread(target=receive, daemon=True).start()
     # In one shell, so $PPID is the agent. A sample of it now and then says where it's stuck, if it is.
-    script = r'''
-agent=$PPID
-comm=$(/bin/ps -o comm= -p $agent)
-report() { /usr/bin/nc -w 1 10.0.2.2 "$1"; }
-{ echo "agent pid $agent is $comm"; /bin/ls /Library/LaunchDaemons | /usr/bin/grep -iE "virtual|intel|agent|qemu"; /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"; } | report "$1"
-(
-n=0
-while :; do
-  n=$((n + 1))
-  {
-    /bin/date
-    /bin/ps -axo pid,ppid,stat,etime,pcpu,command | /usr/bin/grep -E "$comm|/tmp/sg|ws-inject|WindowServer|tccd" | /usr/bin/grep -v grep | /usr/bin/cut -c1-120
-    /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"
-    /bin/cat /var/tmp/seamless-ws-press 2>/dev/null
-    /usr/bin/tail -2 /var/log/system.log | /usr/bin/cut -c1-180
-    if [ $((n % 5)) = 0 ]; then
-      /usr/bin/sample $agent 1 -file /tmp/seamless-watch.sample >/dev/null 2>&1
-      /usr/bin/grep -A25 "Call graph" /tmp/seamless-watch.sample | /usr/bin/cut -c1-110
-      /usr/sbin/lsof -p $agent 2>/dev/null | /usr/bin/grep -E "serial|cu\\." | /usr/bin/cut -c1-110
-    fi
-    echo
-  } | report "$1"
-  /bin/sleep 2
-done
-) >/tmp/seamless-watch.err 2>&1 </dev/null &
-echo started
-'''
+    script = WATCHER
     said = request({'Executable': '/bin/sh', 'Arguments': ['-c', script, 'sh', str(port)]}, 30)
     print('the watcher:', said, flush=True)
     if said.get('Error'):
         monitor_dump('the agent not answering the first request')
+        # Whether the guest answers at all while silent: QEMU's bytes each way on the socket, around a few more requests.
+        for _ in range(6):
+            sockets = subprocess.run(['netstat', '-anv', '-f', 'unix'], capture_output=True, text=True).stdout.splitlines()
+            print('## agent socket', [' '.join(row.split()[:10]) for row in sockets if 'guest-agent' in row], flush=True)
+            print('## a request', request({'Executable': '/usr/bin/true', 'Arguments': []}, 20), flush=True)
     print('watching the guest:', target, flush=True)
 
 
@@ -532,11 +604,17 @@ def desktop(activation_only=False):
     windows = []
     first = None
     dumped = 0
+    socket_at = 0
     while time.time() - pressed < 180 and (len(windows) < 2 or machine_window()):
         windows = proxy_windows()
         if windows and first is None:
             first = time.time() - pressed
         # While the agent's silent, not after: it has been seen to come back.
+        # Bytes each way on the agent's socket, often, to tell an unanswered request from an answer that never arrives.
+        if first is None and time.time() - pressed > 2 and time.time() - socket_at > 4:
+            socket_at = time.time()
+            sockets = subprocess.run(['netstat', '-anv', '-f', 'unix'], capture_output=True, text=True).stdout.splitlines()
+            print(f'## {time.time() - pressed:.0f} s agent socket', [' '.join(row.split()[:10]) for row in sockets if 'guest-agent' in row], flush=True)
         if first is None and time.time() - pressed > 12 + dumped * 25 and dumped < 3:
             dumped += 1
             monitor_dump(f'{time.time() - pressed:.0f} s after a press with no windows yet')
@@ -935,6 +1013,8 @@ if arguments[0] == 'capture-bench':
     capture_bench()
 elif arguments[0] == 'placement':
     placement()
+elif 'install-watcher' in arguments:
+    install_watcher()
 elif arguments[0] == 'desktop' and 'activation' in arguments:
     desktop(activation_only=True)
 elif arguments[0] == 'desktop' and 'old-hook' in arguments:

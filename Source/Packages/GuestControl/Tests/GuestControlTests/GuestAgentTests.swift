@@ -119,6 +119,69 @@ struct GuestAgentTests {
         )
     }
 
+    /// A status poll that goes unanswered is waited out, within the caller's patience, on the same connection: its late
+    /// reply is skipped and the process isn't started again. Runs against the real deadline, so it takes six seconds.
+    @Test func aSlowStatusPollIsWaitedOutWithPatience() async throws {
+        let fake = FakeGuestAgent { _ in .finished(exitCode: 0, output: "done") }
+        defer { fake.stop() }
+        fake.state.withLock { $0.latePolls = 1 }
+        let agent = try await connected(to: fake)
+        defer { agent.close() }
+        let result = try await agent.runExecutable("/fixture/setup", arguments: [], timeout: 0, patience: 30)
+        #expect(result.output == "done")
+        let (processes, syncs) = fake.state.withLock { ($0.processes.count, $0.syncs) }
+        #expect(processes == 1, "Never retry a potentially mutating command")
+        #expect(syncs == 2, "Synchronized again after the timeout")
+    }
+
+    /// Over a serial port, a long command goes as a file and runs by name, so no request line is long.
+    @Test func aLongCommandToASerialGuestGoesAsAFile() async throws {
+        let fake = FakeGuestAgent { process in
+            process.path == "/usr/bin/mktemp"
+                ? .finished(exitCode: 0, output: "/private/var/tmp/VirtualIntelMac.Ab12Cd\n")
+                : .finished(exitCode: 0, output: "ran")
+        }
+        defer { fake.stop() }
+        let agent = try await connected(to: fake) { $0.isPreMetalGuest = true }
+        defer { agent.close() }
+        let long = String(repeating: "it's long ", count: 300)
+        let result = try await agent.runExecutable("/bin/sh", arguments: ["-c", long], timeout: 0)
+        #expect(result.output == "ran")
+        let (processes, files) = fake.state.withLock { ($0.processes, $0.files) }
+        #expect(processes.map(\.path).prefix(2) == ["/usr/bin/mktemp", "/bin/sh"])
+        #expect(processes.dropFirst().first?.arguments == ["/private/var/tmp/VirtualIntelMac.Ab12Cd/run.sh"])
+        #expect(processes.allSatisfy { $0.arguments.joined().count < GuestAgent.longestUARTRequest })
+        let script = String(decoding: files["/private/var/tmp/VirtualIntelMac.Ab12Cd/run.sh"] ?? Data(), as: UTF8.self)
+        #expect(script == "exec '/bin/sh' '-c' '" + long.replacingOccurrences(of: "'", with: "'\\''") + "'\n")
+    }
+
+    /// The script must hand over exactly the arguments it was given: run by a real shell here, quotes, newlines and an
+    /// empty argument come back as they went, so a file name with an apostrophe can't turn into a different command.
+    @Test func aCommandSentAsAFileKeepsItsArgumentsExactly() async throws {
+        let fake = FakeGuestAgent { process in
+            process.path == "/usr/bin/mktemp"
+                ? .finished(exitCode: 0, output: "/private/var/tmp/VirtualIntelMac.Ab12Cd\n")
+                : .finished(exitCode: 0)
+        }
+        defer { fake.stop() }
+        let agent = try await connected(to: fake) { $0.isPreMetalGuest = true }
+        defer { agent.close() }
+        let arguments = [
+            "%s|", "Sam's file.txt", "", "two\nlines", "'", "$HOME `date` \\", String(repeating: "x", count: 1000)
+        ]
+        _ = try await agent.runExecutable("/usr/bin/printf", arguments: arguments, timeout: 0)
+        let script = fake.state.withLock { $0.files["/private/var/tmp/VirtualIntelMac.Ab12Cd/run.sh"] } ?? Data()
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+        shell.arguments = ["-c", String(decoding: script, as: UTF8.self)]
+        let output = Pipe()
+        shell.standardOutput = output
+        try shell.run()
+        shell.waitUntilExit()
+        let printed = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        #expect(printed == arguments.dropFirst().map { $0 + "|" }.joined())
+    }
+
     @Test func aTimeoutIsReportedAsInterruptedAndNotRetried() async throws {
         let fake = FakeGuestAgent { _ in .running }
         defer { fake.stop() }
