@@ -37,6 +37,15 @@ Trying to execute that query while the long-lived leap command owns the guest ag
 Host titles can be withheld, so qualification identifies the fixture proxy by owner/PID and correlates its original
 guest window ID, rather than depending on its title. `scripts/test-seamless-materials.py` covers those failure cases.
 
+An opt-in `guest-bench --startup-timeline` now retains phase observations and this fresh clone's app, prearm and
+GuestStatus logs. One combined materials/profile run (`loop3-startup-hevc-r2`) observed QEMU at 2.73 s, a fresh
+`DesktopRunning` status at 34.47 s, `Prepared` at 102.35 s, press at 106.45 s, first proxy at 108.35 s and hidden VM
+window at 109.45 s. These use one host monotonic clock and are observation upper bounds. The click-log harness
+deliberately delays prearming 90 s, versus the product's 20 s; `Prepared` means staging complete, not completed hook
+injection/proxy prearming. These numbers must not be treated as production cold-readiness measurements. An earlier
+timeline omitted the desktop event because the persisted flag was integer 1 rather than a plist boolean; the observer
+now handles that actual schema, and the earlier run was not backfilled.
+
 ## Try it on your Mac
 
 Open any machine, wait for its desktop, then press **Seamless** in its toolbar, or **Actions > Seamless**. The window goes, and each guest app with a window becomes a host app of its own, with a Dock tile and a Cmd-Tab entry, in the same place on the screen, in the same running machine. Nothing's installed and nothing restarts. To come back: **Show in Light Click Window** in any of those apps' own menu or Dock menu, Quit from one's Dock menu, or a click on Light Click's Dock tile. Quitting an app from its menu or with Cmd-Q quits it in the guest; when the last window's gone, the machine's window returns. So does it if a proxy dies, or the guest's side ends, or the machine stops. The window stays until something's there to take its place, and if nothing is, it says so.
