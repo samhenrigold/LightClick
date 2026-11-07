@@ -435,7 +435,8 @@ static CGWindowID front_window_of(pid_t pid) {
 
 static const char *session_menu_tool;
 
-// Runs the menu tool, which is what Accessibility's grant names, and waits: the press after it depends on it being done.
+// Runs the menu tool, which is what Accessibility's grant names, and waits: the press after it depends on it being
+// done.
 static int raise_with_menu_tool(pid_t pid, CGWindowID id) {
     if (!session_menu_tool)
         return 127;
@@ -444,7 +445,8 @@ static int raise_with_menu_tool(pid_t pid, CGWindowID id) {
     snprintf(window_text, sizeof(window_text), "%u", id);
     pid_t child = fork();
     if (!child) {
-        execl(session_menu_tool, session_menu_tool, "raise-window", "--pid", pid_text, "--window", window_text, (char *)NULL);
+        execl(session_menu_tool, session_menu_tool, "raise-window", "--pid", pid_text, "--window", window_text,
+              (char *)NULL);
         _exit(127);
     }
     int status = 127;
@@ -1063,7 +1065,8 @@ static int drain_input(struct Stream *s) {
                 snprintf(window, sizeof(window), "%u", m.u.window_id);
                 snprintf(x, sizeof(x), "%d", m.place_x);
                 snprintf(y, sizeof(y), "%d", m.place_y);
-                execl(session_menu_tool, session_menu_tool, "place-window", "--pid", pid, "--window", window, "--x", x, "--y", y, (char *)NULL);
+                execl(session_menu_tool, session_menu_tool, "place-window", "--pid", pid, "--window", window, "--x", x,
+                      "--y", y, (char *)NULL);
                 _exit(127);
             }
         } else if (m.type == SWM_SET_FULL_SCREEN) {
@@ -1521,7 +1524,8 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 
 struct TreeWindow {
     int full_screen, asked_full_screen;
-    double first_seen, full_since, left_at; // When it was new, went into full screen unpaired, and left the screen for elsewhere.
+    double first_seen, full_since,
+        left_at; // When it was new, went into full screen unpaired, and left the screen for elsewhere.
     CGWindowID became; // The window in full screen for this one, while it's away.
     int away; // Off the screen: see tree_window_is_away.
     uint32_t materials_hash;
@@ -2589,6 +2593,19 @@ static int capture_bench(const char *app) {
     return 0;
 }
 
+// Window IDs with commas between them, which the host says it's showing.
+static void set_force_visible(struct SWSTable *t, const char *list) {
+    uint32_t count = 0;
+    for (const char *p = list; *p && count < 64;) {
+        t->gpu_force_visible[count++] = (uint32_t)strtoul(p, (char **)&p, 10);
+        if (*p == ',')
+            p++;
+        else
+            break;
+    }
+    t->gpu_force_visible_count = count;
+}
+
 static const char *option(int argc, char **argv, const char *name, const char *fallback) {
     for (int i = 2; i + 1 < argc; i++)
         if (!strcmp(argv[i], name))
@@ -2899,6 +2916,19 @@ static int leap(const char *host, int port, const char *menu_tool, int own_surfa
                 }
                 if (second && !strcmp(line, "run"))
                     leap_run(self, menu_tool, first + 1, second + 1);
+                // The windows the host's showing, IDs with commas between them: gpu-visible\t1,2,3
+                if (first && !strcmp(line, "gpu-visible")) {
+                    int mapped_fd = open(SWS_PATH, O_RDWR);
+                    struct SWSTable *mapped = mapped_fd >= 0 ? mmap(NULL, sizeof(struct SWSTable),
+                                                                    PROT_READ | PROT_WRITE, MAP_SHARED, mapped_fd, 0)
+                                                             : MAP_FAILED;
+                    if (mapped != MAP_FAILED) {
+                        set_force_visible(mapped, first + 1);
+                        munmap(mapped, sizeof(struct SWSTable));
+                    }
+                    if (mapped_fd >= 0)
+                        close(mapped_fd);
+                }
                 if (!strcmp(line, "gpu-off")) {
                     leap_set_own_surfaces(self, 0);
                     leap_hide_for_frames();
@@ -3033,6 +3063,8 @@ int main(int argc, char **argv) {
         }
         if (option(argc, argv, "--census", NULL))
             t->gpu_census = atoi(option(argc, argv, "--census", "0"));
+        if (option(argc, argv, "--force-visible", NULL))
+            set_force_visible(t, option(argc, argv, "--force-visible", ""));
         if (option(argc, argv, "--no-marker", NULL))
             t->gpu_no_marker = (uint32_t)atoi(option(argc, argv, "--no-marker", "0"));
         if (option(argc, argv, "--no-shadow", NULL))
