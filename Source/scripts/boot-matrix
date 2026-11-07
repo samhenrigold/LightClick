@@ -25,7 +25,8 @@ A CASE is one quoted string, a name and then switches:
     KEY=VALUE   an upper-case word is an environment variable for the app and QEMU; it overrides --env
 
 Every boot gets its own work directory, an APFS clone titled "Clone of <machine>", and a private home through
-CFFIXED_USER_HOME, with forwarded ports off, so boots can run side by side and beside other VMs. The work directory
+CFFIXED_USER_HOME, with forwarded ports off. A global OS-held lease serializes clone tests across worktrees and refuses
+existing VMs. The work directory
 must be on the machine's volume. LC_HVDBT=1 also writes a tally, which that boot then must produce.
 
 One PASS or FAIL line per boot, a SUMMARY line per case, then a last line to read: exit 0 all passed, 1 a failure,
@@ -50,6 +51,8 @@ import subprocess
 import sys
 import threading
 import time
+
+from clone_lease import CloneLease, LeaseRefused
 
 source = Path(__file__).resolve().parents[1]
 QEMU = 'qemu-system-x86_64'
@@ -591,7 +594,7 @@ def main():
     parser.add_argument('--machine', type=Path, required=True, help='only ever read, to clone it')
     parser.add_argument('cases', nargs='+', metavar='CASE')
     parser.add_argument('--env', action='append', default=[], metavar='K=V', help='for every case')
-    parser.add_argument('--parallel', type=int, default=1, help='boots at once; each takes the machine\'s full RAM')
+    parser.add_argument('--parallel', type=int, default=1, help='must be 1: clone tests hold one global lease')
     parser.add_argument('--capture', type=int, metavar='SECONDS', help='screencapture the window this often')
     parser.add_argument('--results', type=Path, help='default Build/boot-matrix/results-<time>')
     parser.add_argument('--work', type=Path, default=source/'Build/boot-matrix', help='parent of the work directories')
@@ -608,6 +611,8 @@ def main():
         parser.error(str(error))
     if len({case.name for case in cases}) != len(cases) or options.parallel < 1:
         parser.error('case names must differ, and --parallel starts at 1')
+    if options.parallel != 1:
+        parser.error('--parallel must be 1: only one clone test may run at a time')
     options.app, options.machine = options.app.resolve(), options.machine.resolve()
     root = options.work.resolve()
     options.work = root/f'run-{os.getpid()}'
@@ -637,13 +642,22 @@ def main():
 
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, interrupted)  # never raises, so the cleanup can't be cut short by a second Ctrl-C
+    lease = CloneLease()
+    try:
+        lease.acquire()
+    except (LeaseRefused, OSError, subprocess.TimeoutExpired) as error:
+        say(f'REFUSED {error}')
+        return 2
     options.work.mkdir(parents=True)
 
     def run_one(boot):
         return (boot.label, ['not run']) if stopping.is_set() else boot.run()
 
-    with concurrent.futures.ThreadPoolExecutor(options.parallel) as pool:
-        outcomes = dict(pool.map(run_one, boots))
+    try:
+        with concurrent.futures.ThreadPoolExecutor(options.parallel) as pool:
+            outcomes = dict(pool.map(run_one, boots))
+    finally:
+        lease.close()
     try:
         options.work.rmdir()
     except OSError:

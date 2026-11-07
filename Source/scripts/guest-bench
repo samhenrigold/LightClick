@@ -17,6 +17,7 @@ re-enters the console user's session itself, on any guest from Mavericks up:
     scripts/lc-bench-compare Build/bench/gpu-off.txt Build/bench/gpu-on.txt
 """
 import argparse
+import atexit
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,8 @@ import signal
 import subprocess
 import time
 import uuid
+
+from clone_lease import CloneLease, LeaseRefused, process_identity
 
 source = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -46,6 +49,13 @@ parser.add_argument('--driver-arg', action='append', default=[], help='passed to
 parser.add_argument('--sample', type=int, help='sample QEMU for this many seconds during the workload, into Build/bench/<tag>.sample')
 parser.add_argument('--fresh-identifier', action='store_true', help='give the clone its own machine identifier')
 args = parser.parse_args()
+clone_lease = CloneLease()
+try:
+    clone_lease.acquire()
+except (LeaseRefused, OSError, subprocess.TimeoutExpired) as error:
+    parser.exit(2, f'REFUSED {error}\n')
+# Keep ownership through the cleanup below, including setup failures before its try/finally.
+atexit.register(clone_lease.close)
 bench = source/'Build/bench/lc-bench'
 events = source/'Build/bench'/f'{args.tag}.events'
 if args.events:
@@ -90,9 +100,6 @@ if args.fresh_identifier:
     # What a Seamless session's sockets and proxies are named from, which a clone shouldn't share with a live session.
     subprocess.run(['plutil', '-replace', 'Identifier', '-string', str(uuid.uuid4()).upper(), str(machine/'Machine.plist')], check=True)
 env = dict(os.environ, CFFIXED_USER_HOME=str(home))
-process = subprocess.Popen([str(app/'Contents/MacOS/Light Click'), '--open-vm', str(machine), '--guest-diagnostics-root',
-                            str(diagnostics)], env=env, stdout=(work/'app.log').open('w'), stderr=subprocess.STDOUT,
-                           stdin=subprocess.DEVNULL)
 identifier = subprocess.check_output(['plutil', '-extract', 'Identifier', 'raw', '-o', '-', str(machine/'Machine.plist')],
                                      text=True).strip().upper()
 channel = diagnostics/identifier
@@ -131,7 +138,51 @@ def stage(program):
     return path
 
 
+def stop_test_processes(process, work):
+    """Stop this run's processes; unknown ownership leaves its work intact."""
+    try:
+        process.terminate()
+        try:
+            process.wait(timeout=6)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+        deadline = time.monotonic()+20
+        while time.monotonic() < deadline:
+            listing = subprocess.run(['ps', '-axo', 'pid=,comm='], capture_output=True, text=True, timeout=5)
+            if listing.returncode or listing.stderr.strip() or not listing.stdout.strip():
+                raise RuntimeError('could not inspect remaining clone processes')
+            leftovers = []
+            for line in listing.stdout.splitlines():
+                fields = line.split(None, 1)
+                if len(fields) != 2 or not fields[0].isdigit():
+                    raise RuntimeError('incomplete clone process inspection')
+                if fields[1].startswith(str(work)+'/'):
+                    pid = int(fields[0])
+                    stamp = process_identity(pid)
+                    if stamp is not None:
+                        leftovers.append((pid, stamp))
+            if not leftovers:
+                return None
+            for pid, stamp in leftovers:
+                if process_identity(pid) == stamp:
+                    try:
+                        os.kill(pid, signal.SIGKILL if time.monotonic() > deadline-15 else signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+            time.sleep(1)
+        return 'owned clone processes did not exit'
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        return str(error)
+
+
+process = subprocess.Popen([str(app/'Contents/MacOS/Light Click'), '--open-vm', str(machine), '--guest-diagnostics-root',
+                            str(diagnostics)], env=env, stdout=(work/'app.log').open('w'), stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL)
 try:
+    def interrupted(number, frame):
+        raise SystemExit(128+number)
+    signal.signal(signal.SIGTERM, interrupted)
     time.sleep(args.boot_wait)
     deadline = time.time()+300
     while not channel.is_dir():
@@ -187,26 +238,13 @@ try:
         (source/'Build/bench'/f'{args.tag}.txt').write_text(text)
         print(text)
 finally:
-    process.send_signal(signal.SIGTERM)
-    time.sleep(6)
-    if process.poll() is None:
-        process.kill()
-    # Everything left that runs from this clone: its QEMU, and any helper QEMU spawned.
-    deadline = time.time()+20
-    while time.time() < deadline:
-        listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
-        # Match the executable's path only: another app's VM may be using a disk in this folder.
-        leftovers = [int(line.split()[0]) for line in listing.splitlines()
-                     if line.split(None, 1)[1].startswith(str(work)+'/')]
-        if not leftovers:
-            break
-        for pid in leftovers:
-            os.kill(pid, signal.SIGKILL if time.time() > deadline-15 else signal.SIGTERM)
-        time.sleep(1)
-    else:
-        print(f'WARNING: processes from {work} are still running')
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    cleanup_failure = stop_test_processes(process, work)
     if (machine/'State/session.log').exists():
         shutil.copyfile(machine/'State/session.log', source/'Build/bench'/f'{args.tag}.session.log')
+    if cleanup_failure:
+        raise RuntimeError(f'Clone cleanup failed: {cleanup_failure}; retained evidence at {work}')
     shutil.rmtree(work, ignore_errors=True)
     # CFFIXED_USER_HOME doesn't redirect preferences: remove what this clone's paths left in them.
     listing = subprocess.run(['defaults', 'read', 'gold.samhenri.LightClick'], capture_output=True, text=True).stdout
