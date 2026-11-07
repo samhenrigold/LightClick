@@ -46,11 +46,28 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual([row['elapsed_seconds'] for row in rows], [0.0, 3.5, 3.5])
 
     def test_false_or_malformed_status_is_not_desktop(self):
-        for report in ({'DesktopRunning': False}, {'DesktopRunning': 'true'}, [], None):
+        reports = [{'DesktopRunning': value} for value in (False, 0, 'true', '1', 2, -1, 1.0)]
+        for report in [*reports, [], None]:
             (self.machine/'State/GuestStatus.plist').write_bytes(plistlib.dumps({'Report': report})
                                                                if report is not None else b'')
             self.observe()
         self.assertEqual(len(self.rows()), 1)
+
+    def test_actual_integer_desktop_flag_and_raw_status_retention(self):
+        report = {'Report': {'DesktopRunning': 1, 'GuestVersion': '10.14.6'}}
+        status = self.machine/'State/GuestStatus.plist'
+        status.write_bytes(plistlib.dumps(report, fmt=plistlib.FMT_BINARY))
+        self.clock[0] = 125.0
+        self.observe()
+        self.assertEqual(self.rows()[-1]['phase'], 'desktop_running')
+        self.assertEqual(self.rows()[-1]['elapsed_seconds'], 25.0)
+        destination = self.root/'retained-status'
+        destination.mkdir()
+        copied = preserve_startup_logs(self.root, destination, 'fixture', self.root,
+                                       'ABCDEF12', False, machine=self.machine)
+        self.assertEqual(copied, [str(destination/'fixture.GuestStatus.plist')])
+        self.assertEqual((destination/'fixture.GuestStatus.plist').read_bytes(), status.read_bytes())
+        self.assertEqual(plistlib.loads(status.read_bytes()), report)
 
     def test_only_exact_qemu_path_and_owned_parent_are_observed(self):
         self.observe(f'20 11 {self.qemu} -machine q35\n21 10 {self.qemu}.other -machine q35')

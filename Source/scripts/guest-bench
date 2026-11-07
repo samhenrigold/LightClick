@@ -265,8 +265,8 @@ finally:
         cleanup_failure = stop_test_processes(process, work)
     if timeline:
         timeline.record('process_cleanup_finished', error=cleanup_failure)
-        copied = preserve_startup_logs(work, source/'Build/bench', args.tag,
-                                       Path(env.get('TMPDIR', '/tmp')), identifier, args.fresh_identifier)
+        copied = preserve_startup_logs(work, source/'Build/bench', args.tag, Path(env.get('TMPDIR', '/tmp')),
+                                       identifier, args.fresh_identifier, machine=machine)
         timeline.record('startup_logs_retained', paths=copied, fresh_identifier=args.fresh_identifier)
         timeline.close()
     if (machine/'State/session.log').exists():

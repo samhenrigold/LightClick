@@ -34,7 +34,9 @@ class StartupTimeline:
             try:
                 with (machine/'State/GuestStatus.plist').open('rb') as file:
                     status = plistlib.load(file)
-                if status.get('Report', {}).get('DesktopRunning') is True:
+                desktop = status.get('Report', {}).get('DesktopRunning')
+                # The host's JSONValue -> NSNumber -> plist path persists this flag as integer 1.
+                if desktop is True or (type(desktop) is int and desktop == 1):
                     self.seen.add('desktop_running')
                     self.record('desktop_running', source='fresh GuestStatus.plist')
             except (OSError, ValueError, TypeError, AttributeError, plistlib.InvalidFileException):
@@ -72,7 +74,7 @@ class StartupTimeline:
             self.file.close()
 
 
-def preserve_startup_logs(work, destination, tag, temporary, identifier, fresh_identifier):
+def preserve_startup_logs(work, destination, tag, temporary, identifier, fresh_identifier, machine=None):
     """Copy only this clone's app log and logs named with its newly assigned identifier."""
     copied = []
     app_log = work/'app.log'
@@ -80,6 +82,12 @@ def preserve_startup_logs(work, destination, tag, temporary, identifier, fresh_i
         target = destination/f'{tag}.app.log'
         shutil.copyfile(app_log, target)
         copied.append(str(target))
+    if machine is not None:
+        status = machine/'State/GuestStatus.plist'
+        if status.is_file() and not status.is_symlink():
+            target = destination/f'{tag}.GuestStatus.plist'
+            shutil.copyfile(status, target)
+            copied.append(str(target))
     if fresh_identifier:
         name = f'lc-seamless-{identifier[:8]}.log'
         for log in [temporary/name, *temporary.glob(name+'.*')]:
