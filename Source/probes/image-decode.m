@@ -13,7 +13,7 @@
 
 // FILE keeps the original 256x256 diagnostic. The opt-in experiment emits one JSON record on stdout:
 //   image-decode --full-resolution FILE [--index N] [--raw NEW_FILE] [--timeout SECONDS]
-//                [--max-output-bytes N] [--output-color-space srgb|source]
+//                [--max-output-bytes N] [--output-color-space srgb|source] [--repeat-draw-seconds 1..30]
 // Compile the same source for an arm64 host and an x86_64/macOS 10.14 guest. No AppKit or display is used.
 // Timings are individual phases, not a claim about Preview or native decoder hardware use.
 enum { INPUT_LIMIT = 512 * 1024 * 1024, OUTPUT_LIMIT = 512 * 1024 * 1024, DEFAULT_OUTPUT_LIMIT = 256 * 1024 * 1024 };
@@ -92,8 +92,8 @@ static int write_raw(const char *path, const void *bytes, size_t count) {
 static int full_resolution(int argc, char **argv) {
     const char *path = NULL, *raw = NULL;
     const char *output_space = "srgb";
-    BOOL space_set = NO;
-    uint64_t item = 0, timeout = 30, max_output = DEFAULT_OUTPUT_LIMIT;
+    BOOL space_set = NO, repeat_set = NO;
+    uint64_t item = 0, timeout = 30, max_output = DEFAULT_OUTPUT_LIMIT, repeat_seconds = 0;
     for (int i = 2; i < argc; i++) {
         const char *argument = argv[i];
         if (!strcmp(argument, "--raw") && i + 1 < argc && !raw)
@@ -103,6 +103,10 @@ static int full_resolution(int argc, char **argv) {
             if (strcmp(output_space, "srgb") && strcmp(output_space, "source"))
                 return 64;
             space_set = YES;
+        } else if (!strcmp(argument, "--repeat-draw-seconds") && i + 1 < argc && !repeat_set) {
+            if (!number(argv[++i], &repeat_seconds) || !repeat_seconds || repeat_seconds > 30)
+                return 64;
+            repeat_set = YES;
         } else if ((!strcmp(argument, "--index") || !strcmp(argument, "--timeout") ||
                   !strcmp(argument, "--max-output-bytes")) && i + 1 < argc) {
             uint64_t value;
@@ -119,7 +123,8 @@ static int full_resolution(int argc, char **argv) {
         else
             return 64;
     }
-    if (!path || !timeout || timeout > 120 || !max_output || max_output > OUTPUT_LIMIT || item > SIZE_MAX)
+    if (!path || !timeout || timeout > 120 || !max_output || max_output > OUTPUT_LIMIT || item > SIZE_MAX ||
+        (repeat_seconds && timeout < repeat_seconds + 5))
         return 64;
     alarm((unsigned)timeout);
     struct stat st;
@@ -149,8 +154,10 @@ static int full_resolution(int argc, char **argv) {
     }
     int status = 0;
     CGImageRef image = NULL;
-    CGColorSpaceRef space = NULL;
+    CGColorSpaceRef space = NULL, initial_image_space = NULL;
     CGContextRef context = NULL;
+    NSMutableArray *repeat_rows = nil;
+    double repeat_elapsed = 0;
     CFDictionaryRef properties = NULL;
     CFStringRef source_space_name = NULL;
     CFStringRef output_space_name = NULL;
@@ -218,10 +225,59 @@ static int full_resolution(int argc, char **argv) {
     CGContextSetBlendMode(context, kCGBlendModeCopy);
     // An untransformed bitmap draw stores the CGImage's first row first. The independent 2x2 PNG check covers this
     // layout and premultiplication; a flipped CTM reverses these rows. EXIF orientation is deliberately not applied.
-    phase = seconds();
-    CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
-    CGContextFlush(context);
-    double decode_ms = (seconds() - phase) * 1000;
+    double decode_ms = 0;
+    if (!repeat_seconds) {
+        phase = seconds();
+        CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+        CGContextFlush(context);
+        decode_ms = (seconds() - phase) * 1000;
+    } else {
+        // Resident warm-decode diagnostic: immutable encoded bytes and one output allocation, fresh ImageIO objects.
+        // Real input SHA precedes this phase; final pixel SHA follows it. No per-iteration hash substitutes for a draw.
+        initial_image_space = CGImageGetColorSpace(image);
+        if (initial_image_space)
+            CGColorSpaceRetain(initial_image_space);
+        size_t initial_bpc = CGImageGetBitsPerComponent(image), initial_bpp = CGImageGetBitsPerPixel(image);
+        CGImageAlphaInfo initial_alpha = CGImageGetAlphaInfo(image);
+        repeat_rows = [NSMutableArray array];
+        double repeat_started = seconds();
+        while (repeat_rows.count < 256 && seconds() - repeat_started < repeat_seconds) {
+          @autoreleasepool {
+            CGImageRelease(image);
+            image = NULL;
+            CFRelease(source);
+            source = NULL;
+            phase = seconds();
+            source = CGImageSourceCreateWithData((CFDataRef)encoded, (CFDictionaryRef)options);
+            double iteration_source_ms = (seconds() - phase) * 1000;
+            if (!source || CGImageSourceGetCount(source) != count) {
+                fputs("FAIL repeated ImageIO source identity\n", stderr);
+                status = 5;
+                goto done;
+            }
+            phase = seconds();
+            image = CGImageSourceCreateImageAtIndex(source, (size_t)item, (CFDictionaryRef)options);
+            double iteration_image_ms = (seconds() - phase) * 1000;
+            CGColorSpaceRef current_space = image ? CGImageGetColorSpace(image) : NULL;
+            if (!image || CGImageGetWidth(image) != width || CGImageGetHeight(image) != height ||
+                CGImageGetBitsPerComponent(image) != initial_bpc || CGImageGetBitsPerPixel(image) != initial_bpp ||
+                CGImageGetAlphaInfo(image) != initial_alpha ||
+                (initial_image_space ? !current_space || !CFEqual(initial_image_space, current_space) : current_space != NULL)) {
+                fputs("FAIL repeated image layout or color-space identity\n", stderr);
+                status = 5;
+                goto done;
+            }
+            phase = seconds();
+            CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+            CGContextFlush(context);
+            double draw_ms = (seconds() - phase) * 1000;
+            decode_ms += draw_ms;
+            [repeat_rows addObject:@{@"source_create_ms": @(iteration_source_ms), @"image_create_ms": @(iteration_image_ms),
+                                     @"forced_draw_ms": @(draw_ms)}];
+          }
+        }
+        repeat_elapsed = seconds() - repeat_started;
+    }
     phase = seconds();
     NSString *pixel_hash = sha256(pixels, length);
     double pixel_hash_ms = (seconds() - phase) * 1000;
@@ -271,6 +327,14 @@ static int full_resolution(int argc, char **argv) {
             @"total_before_report" : @((seconds() - began) * 1000)
         }
     };
+    if (repeat_seconds) {
+        NSMutableDictionary *extended = [NSMutableDictionary dictionaryWithDictionary:report];
+        extended[@"repeat_draw"] = @{@"requested_seconds": @(repeat_seconds), @"elapsed_seconds": @(repeat_elapsed),
+            @"iterations": @(repeat_rows.count), @"iteration_limit": @256, @"per_iteration": repeat_rows,
+            @"termination": repeat_elapsed >= repeat_seconds ? @"duration" : @"iteration_limit",
+            @"note": @"Resident warm decode: fresh source/image per iteration, one bitmap allocation. Real input SHA before loop; final pixel SHA after loop. No application-speed claim."};
+        report = extended;
+    }
     NSData *json = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:&error];
     if (!json || fwrite(json.bytes, 1, json.length, stdout) != json.length || fputc('\n', stdout) == EOF) {
         fputs("FAIL JSON report\n", stderr);
@@ -285,12 +349,15 @@ done:
         CFRelease(properties);
     if (context)
         CGContextRelease(context);
+    if (initial_image_space)
+        CGColorSpaceRelease(initial_image_space);
     if (space)
         CGColorSpaceRelease(space);
     free(pixels);
     if (image)
         CGImageRelease(image);
-    CFRelease(source);
+    if (source)
+        CFRelease(source);
     return status;
 }
 
