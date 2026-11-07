@@ -1521,7 +1521,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 
 struct TreeWindow {
     int full_screen, asked_full_screen;
-    double full_since, left_at; // When it went into full screen, unpaired, and when it left the screen for elsewhere.
+    double first_seen, full_since, left_at; // When it was new, went into full screen unpaired, and left the screen for elsewhere.
     CGWindowID became; // The window in full screen for this one, while it's away.
     int away; // Off the screen: see tree_window_is_away.
     uint32_t materials_hash;
@@ -2197,6 +2197,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             s->alpha = (uint32_t)alpha;
             s->margin = margin;
             int kind = !no_pixels ? 0 : crop ? SWM_CROP : SWM_OVERLAY;
+            if (!w->first_seen)
+                w->first_seen = now();
             if (tree_shared && tree_send_return(s, w, item))
                 goto done;
             if (own_surface && tree_send_surface_origin(s, w, id))
@@ -2398,12 +2400,13 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             if (!windows[i].id || !windows[i].full_since)
                 continue;
             int left = -1;
-            for (int j = 0; j < TREE_MAX_WINDOWS; j++)
+            // Only for a number that's new: one that was already this window has nothing to take over from.
+            for (int j = 0; windows[i].full_since - windows[i].first_seen < 3 && j < TREE_MAX_WINDOWS; j++)
                 if (j != i && windows[j].id && windows[j].pid == windows[i].pid && windows[j].away == 1 &&
                     !windows[j].became && now() - windows[j].left_at < 3 &&
                     (left < 0 || windows[j].left_at > windows[left].left_at))
                     left = j;
-            if (left < 0 && now() - windows[i].full_since < 1)
+            if (left < 0 && windows[i].full_since - windows[i].first_seen < 3 && now() - windows[i].full_since < 1)
                 continue;
             windows[i].full_since = 0;
             if (left >= 0) {

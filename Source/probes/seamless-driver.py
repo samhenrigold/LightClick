@@ -382,6 +382,8 @@ def windowed(seconds):
             time.sleep(1)
         print('windowed_' + timing.communicate()[0].strip().replace('\n', '\nwindowed_'), flush=True)
         time.sleep(7)
+    print('windowed_', end='', flush=True)
+    cpu_percent()
     # And over the frames, what its window really shows, by that one window's ID.
     presenting = subprocess.Popen([meter, window, str(seconds)], stdout=subprocess.PIPE, text=True) if window else None
     first = request({'Action': 'display-frames'}, 60)
@@ -398,8 +400,29 @@ def windowed(seconds):
 def monitor_dump(why):
     # Where the agent's UART, COM2 at 0x2f8, and its interrupt are. IIR goes last, as reading it can clear what it says.
     print('# from the monitor,', why, flush=True)
-    for command in ('info pic', 'info ioapic', 'info lapic', 'i/b 0x2f9', 'i/b 0x2fb', 'i/b 0x2fc', 'i/b 0x2fd', 'i/b 0x2fe', 'i/b 0x2fa', 'i/b 0x2fd'):
+    for command in ('info chardev', 'info pic', 'info ioapic', 'info lapic', 'i/b 0x2f9', 'i/b 0x2fb', 'i/b 0x2fc', 'i/b 0x2fd', 'i/b 0x2fe', 'i/b 0x2fa', 'i/b 0x2fd'):
         print(f'## {command}', request({'Action': 'monitor', 'Command': command}, 30), flush=True)
+
+
+def cpu_seconds():
+    # All of this clone's: the app, QEMU, and any proxies, which are generated under its folder.
+    total = 0.0
+    rows = subprocess.run(['ps', '-axo', 'time=,command='], capture_output=True, text=True).stdout.splitlines()
+    for row in rows:
+        if f'Build/bench/{tag}/' not in row:
+            continue
+        clock = row.split()[0].split(':')
+        total += sum(float(part) * 60 ** index for index, part in enumerate(reversed(clock)))
+    return total
+
+
+def cpu_percent(seconds=16):
+    # The whole cost of showing the page moving, for the same number on windowed's side and seamless's.
+    start, at = cpu_seconds(), time.time()
+    time.sleep(seconds)
+    percent = (cpu_seconds() - start) / (time.time() - at) * 100
+    load = subprocess.run(['uptime'], capture_output=True, text=True).stdout.split('load average')[-1].strip()
+    print(f'cpu_percent {percent:.0f}, load {load}', flush=True)
 
 
 def watch_guest():
@@ -436,7 +459,7 @@ while :; do
     /bin/cat /var/tmp/seamless-ws-press 2>/dev/null
     /usr/bin/tail -2 /var/log/system.log | /usr/bin/cut -c1-180
     if [ $((n % 5)) = 0 ]; then
-      /usr/bin/sample "$comm" 1 -file /tmp/seamless-watch.sample >/dev/null 2>&1
+      /usr/bin/sample $agent 1 -file /tmp/seamless-watch.sample >/dev/null 2>&1
       /usr/bin/grep -A25 "Call graph" /tmp/seamless-watch.sample | /usr/bin/cut -c1-110
       /usr/sbin/lsof -p $agent 2>/dev/null | /usr/bin/grep -E "serial|cu\\." | /usr/bin/cut -c1-110
     fi
@@ -508,10 +531,15 @@ def desktop(activation_only=False):
     request({'Action': 'seamless-toggle'}, 60)
     windows = []
     first = None
+    dumped = 0
     while time.time() - pressed < 180 and (len(windows) < 2 or machine_window()):
         windows = proxy_windows()
         if windows and first is None:
             first = time.time() - pressed
+        # While the agent's silent, not after: it has been seen to come back.
+        if first is None and time.time() - pressed > 12 + dumped * 25 and dumped < 3:
+            dumped += 1
+            monitor_dump(f'{time.time() - pressed:.0f} s after a press with no windows yet')
         time.sleep(0.1)
     print(f'first window after {first} s, machine window gone after {time.time() - pressed:.1f} s', flush=True)
     for row in windows:
@@ -570,7 +598,7 @@ def desktop(activation_only=False):
             report_file.unlink(missing_ok=True)
             tell('report', 0.5)
             rows_said = [row.split('\t') for row in report_file.read_text().splitlines()]
-            return [(row[0], *map(float, row[1:])) for row in rows_said]
+            return [(row[0], *map(float, row[1:5])) for row in rows_said]
 
         # The windows overlap in the guest: the same place on the lower one gets the upper one, without the raise.
         tell('click-title seamless-second')
@@ -626,6 +654,7 @@ def desktop(activation_only=False):
     for _ in range(4):
         print('bounds', time.time() - pressed, next((row[-40:] for row in rows() if f'id={window} ' in row), ''), flush=True)
         time.sleep(2)
+    cpu_percent()
     framed = request({'Action': 'seamless-state'}, 60).get('SurfaceFrames', 0)
     moving = subprocess.run([meter, window or '0', '8'], capture_output=True, text=True).stdout
     print('moving', moving, 'frames from QEMU/s', (request({'Action': 'seamless-state'}, 60).get('SurfaceFrames', 0) - framed) / 8, flush=True)
