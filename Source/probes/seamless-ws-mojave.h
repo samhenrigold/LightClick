@@ -69,6 +69,12 @@ static struct GPUWindow *gpu_windows;
 static uint32_t gpu_damaged[256];
 static unsigned gpu_damaged_count;
 static int gpu_busy, gpu_marking;
+static struct {
+    void *surface;
+    uint32_t slot;
+} identify_queue[256];
+static unsigned identify_count;
+static const void *(*cf_retain)(const void *);
 static void (*contributors_original)(void *, void *);
 static struct RectResult (*window_rect)(void *);
 static void *gpu_contributors[64];
@@ -110,8 +116,10 @@ static void clear_hook(void *metal, void *region, float alpha) {
 static char generate_layers_hook(char *state, char *window) {
     if (gpu_marking) // No layers, so all it draws is its clear, which is all that's wanted of it.
         return 0;
+    static int was_on;
+    if (table && !table->gpu_mode)
+        was_on = 0;
     if (!table || !table->gpu_mode || gpu_busy) // Inside a composite it does what it always does.
-
         return generate_layers_original(state, window);
     table->gpu_generate_calls++;
     uint32_t id = *(const uint32_t *)(window + 0x10);
@@ -172,6 +180,11 @@ static char generate_layers_hook(char *state, char *window) {
         uint32_t id;
         struct RectResult rect;
     } known[SWS_TREE];
+    // Each time the mode goes on, all of every window, as nothing else would ever draw what doesn't change.
+    if (!was_on) {
+        was_on = 1;
+        memset(known, 0, sizeof(known));
+    }
     unsigned k = 0;
     while (k < SWS_TREE && known[k].id && known[k].id != id)
         k++;
@@ -486,8 +499,14 @@ static void gpu_compose_damaged(void) {
 }
 
 static void (*update_original)(void *, double);
+static void identify_surface(void *surface, uint32_t slot);
 static void update_hook(void *context, double time) {
     update_original(context, time);
+    for (unsigned i = 0; i < identify_count; i++) {
+        identify_surface(identify_queue[i].surface, identify_queue[i].slot);
+        cf_release(identify_queue[i].surface);
+    }
+    identify_count = 0;
     gpu_compose_damaged();
 }
 
@@ -548,18 +567,100 @@ static void census_blob(const void *object, uint32_t seed, void *surface) {
             memcpy(table->arena + table->arena_used, surface_base(surface), size);
             table->gpu_blobs[found] =
                 (struct SWSBlob){(uint32_t)width, (uint32_t)height, (uint32_t)row, table->arena_used};
+            uint64_t sum = 0;
+            const uint8_t *pixels = table->arena + table->arena_used;
+            for (size_t y = 0; y < height; y++)
+                for (size_t x = 0; x < width; x++)
+                    sum += pixels[y * row + x * 4 + 1];
+            census_log(0, "(blob-sum %u %llu)", found, sum);
             table->arena_used += size;
             census_seen[found] = object;
             census_seen_seed[found] = seed;
             table->gpu_blob_count = found + 1;
         }
         surface_unlock(surface, 1, NULL);
+        // Not here, with CA's locks held and an update underway: binding it from inside this hung the guest.
+        if (found < 4096 && identify_count < 256) {
+            cf_retain(surface);
+            identify_queue[identify_count].surface = surface;
+            identify_queue[identify_count++].slot = found + 1;
+        }
     }
     if (found == 4096 && surface)
         census_log(0, "(no-blob)");
     if (found < 4096)
         census_log(0, "(blob %u)", found); // Into the stream the tree is being printed to.
 }
+// For telling whether the host can have a guest's surface: binds it in a pass on a surface whose size says which. With
+// Metal from here, in WindowServer's own process, on a queue of its own.
+static void identify_surface(void *surface, uint32_t slot) {
+    void (*objc_msgSend)(void) = dlsym(RTLD_DEFAULT, "objc_msgSend");
+    void *(*sel_getUid)(const char *) = dlsym(RTLD_DEFAULT, "sel_getUid");
+    void *(*objc_getClass)(const char *) = dlsym(RTLD_DEFAULT, "objc_getClass");
+    void *(*make_device)(void) = dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice");
+    void *(*make_surface)(const void *) = dlsym(RTLD_DEFAULT, "IOSurfaceCreate");
+    static void *device, *queue;
+    if (!objc_msgSend || !make_device || !make_surface)
+        return;
+    void *pool = objc_autoreleasePoolPush();
+    if (!device) {
+        device = make_device();
+        queue = ((void *(*)(void *, void *))objc_msgSend)(device, sel_getUid("newCommandQueue"));
+    }
+    typedef void *(*DescriptorMake)(void *, void *, unsigned long, unsigned long, unsigned long, char);
+    typedef void *(*TextureMake)(void *, void *, void *, void *, unsigned long);
+    void *descriptors = objc_getClass("MTLTextureDescriptor");
+    void *selector = sel_getUid("texture2DDescriptorWithPixelFormat:width:height:mipmapped:");
+    void *selector_texture = sel_getUid("newTextureWithDescriptor:iosurface:plane:");
+    // The bound one.
+    void *descriptor =
+        ((DescriptorMake)objc_msgSend)(descriptors, selector, 80, surface_width(surface), surface_height(surface), 0);
+    ((void (*)(void *, void *, unsigned long))objc_msgSend)(descriptor, sel_getUid("setUsage:"), 1);
+    void *texture = ((TextureMake)objc_msgSend)(device, selector_texture, descriptor, surface, 0);
+    // The one the size of which says.
+    int width = 512 + (int)(slot & 0xff), height = 512 + (int)(0xd0 | ((slot >> 8) & 0xf));
+    void *(*dictionary)(const void *, const void **, const void **, long, const void *, const void *) =
+        dlsym(RTLD_DEFAULT, "CFDictionaryCreate");
+    void *(*number)(const void *, long, const void *) = dlsym(RTLD_DEFAULT, "CFNumberCreate");
+    const void **key_callbacks = dlsym(RTLD_DEFAULT, "kCFTypeDictionaryKeyCallBacks");
+    const void **value_callbacks = dlsym(RTLD_DEFAULT, "kCFTypeDictionaryValueCallBacks");
+    const void **key_names[] = {dlsym(RTLD_DEFAULT, "kIOSurfaceWidth"), dlsym(RTLD_DEFAULT, "kIOSurfaceHeight"),
+                                dlsym(RTLD_DEFAULT, "kIOSurfaceBytesPerElement"),
+                                dlsym(RTLD_DEFAULT, "kIOSurfacePixelFormat")};
+    int32_t values[] = {width, height, 4, 0x42475241};
+    const void *keys[4], *numbers[4];
+    for (int i = 0; i < 4; i++) {
+        keys[i] = *key_names[i];
+        numbers[i] = number(NULL, 3 /* kCFNumberSInt32Type */, &values[i]);
+    }
+    void *properties = dictionary(NULL, keys, numbers, 4, key_callbacks, value_callbacks);
+    void *target_surface = make_surface(properties);
+    void *target_descriptor =
+        ((DescriptorMake)objc_msgSend)(descriptors, selector, 80, (unsigned long)width, (unsigned long)height, 0);
+    ((void (*)(void *, void *, unsigned long))objc_msgSend)(target_descriptor, sel_getUid("setUsage:"), 4);
+    void *target = target_surface
+                       ? ((TextureMake)objc_msgSend)(device, selector_texture, target_descriptor, target_surface, 0)
+                       : NULL;
+    if (texture && target) {
+        void *pass = ((void *(*)(void *, void *))objc_msgSend)(objc_getClass("MTLRenderPassDescriptor"),
+                                                               sel_getUid("renderPassDescriptor"));
+        void *attachments = ((void *(*)(void *, void *))objc_msgSend)(pass, sel_getUid("colorAttachments"));
+        void *first = ((void *(*)(void *, void *, unsigned long))objc_msgSend)(
+            attachments, sel_getUid("objectAtIndexedSubscript:"), 0);
+        ((void (*)(void *, void *, void *))objc_msgSend)(first, sel_getUid("setTexture:"), target);
+        ((void (*)(void *, void *, unsigned long))objc_msgSend)(first, sel_getUid("setLoadAction:"), 2);
+        ((void (*)(void *, void *, unsigned long))objc_msgSend)(first, sel_getUid("setStoreAction:"), 1);
+        void *commands = ((void *(*)(void *, void *))objc_msgSend)(queue, sel_getUid("commandBuffer"));
+        void *encoder = ((void *(*)(void *, void *, void *))objc_msgSend)(
+            commands, sel_getUid("renderCommandEncoderWithDescriptor:"), pass);
+        ((void (*)(void *, void *, void *, unsigned long))objc_msgSend)(
+            encoder, sel_getUid("setFragmentTexture:atIndex:"), texture, 0);
+        ((void (*)(void *, void *))objc_msgSend)(encoder, sel_getUid("endEncoding"));
+        ((void (*)(void *, void *))objc_msgSend)(commands, sel_getUid("commit"));
+    }
+    objc_autoreleasePoolPop(pool);
+}
+
 static void (*image_show_original)(void *, unsigned, unsigned);
 static void image_show_hook(void *image, unsigned a, unsigned b) {
     if (census_printing) {
@@ -669,6 +770,7 @@ static int gpu_prepare(void) {
     region_intersection = dlsym(RTLD_DEFAULT, "CGRegionCreateIntersectionWithRegion");
     region_union = dlsym(RTLD_DEFAULT, "CGRegionCreateUnionWithRegion");
     cf_release = dlsym(RTLD_DEFAULT, "CFRelease");
+    cf_retain = dlsym(RTLD_DEFAULT, "CFRetain");
     main_display_device = dlsym(RTLD_DEFAULT, "CGXMainDisplayDevice");
     regions_intersect = dlsym(RTLD_DEFAULT, "CGRegionIntersectsRegion");
     region_is_empty = dlsym(RTLD_DEFAULT, "CGRegionIsEmpty");
