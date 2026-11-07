@@ -68,6 +68,7 @@ typedef struct {
     uint64_t again_live, again_dead, reused, call_tails;
     uint64_t hash_refills, hash_forgets, cache_resets, cache_private_resets;
     uint64_t op_insns[128], op_words[128], exit_words; // cold code by x86 operation, the OP_ numbers in tr_internal.h; exit_words is what follows the last instruction
+    uint64_t i386_blocks, i386_again; // cold 32-bit user blocks, and those again_live or again_dead counted
     uint64_t shared_blocks, shared_found; // translated into a shared user domain; found there by a view that had not looked before
 } TrStats;
 TrStats tr_stats(void);

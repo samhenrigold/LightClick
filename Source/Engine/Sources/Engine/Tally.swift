@@ -370,6 +370,8 @@ public final class Tally: @unchecked Sendable {
         o +=
             "cold blocks a cache keyed by frame had: \(t.again_live) live in another view, \(t.again_dead) dead with the frame unchanged. Lower bounds\n\n"
         o +=
+            "cold 32-bit user blocks: \(t.i386_blocks), of which a cache keyed by frame had \(t.i386_again)\n"
+        o +=
             "shared user blocks: \(t.shared_blocks) translated, \(t.shared_found) found by another view, under \(c.shared_dir_count) directories\n"
         o +=
             "view lookup tables emptied: \(t.hash_refills) as full, \(t.hash_forgets) forgetting a shared directory. Code cache resets: \(t.cache_resets), and of its private part \(t.cache_private_resets)\n"
