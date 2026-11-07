@@ -705,6 +705,32 @@ def desktop(activation_only=False):
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
         subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-desktop-{window}.png')], capture_output=True)
+    # Each proxy's material views against what the guest sent: one view per kind, covering the window, in its input view,
+    # masked, and every region inside it. Only their existence and frames: how they look needs an awake display.
+    said_materials = []
+    command_file = results/f'{tag}-clicks.txt.command'
+    for name in ('TextEdit', 'Safari', 'Finder'):
+        pid = proxy_pid(name)
+        if not pid:
+            continue
+        materials_file = results/f'{tag}-clicks.txt.command.materials'
+        materials_file.unlink(missing_ok=True)
+        command_file.write_text('materials-report')
+        os.kill(pid, signal.SIGUSR2)
+        time.sleep(0.5)
+        for line in (materials_file.read_text().splitlines() if materials_file.exists() else []):
+            print(f'materials {name}: {line}', flush=True)
+            said_materials.append(line)
+    sent = [line for line in said_materials if 'rows 0' not in line]
+    def right(line):
+        kinds = int(re.search(r'kinds (\d+)', line).group(1))
+        views = re.search(r'views (.*)$', line).group(1)
+        parts = [part for part in views.split(',') if part]
+        return 'inside true' in line and len(parts) == kinds and all(part.endswith(':whole:in:mask') for part in parts)
+    if sent:
+        check('each material the guest sent has its view, over the whole window', all(right(line) for line in sent))
+    else:
+        print('no window had materials from the guest', flush=True)
     # What the surfaces hold, against what's just been read from the proxies.
     held = results/f'{tag}-surfaces'
     shutil.rmtree(held, ignore_errors=True)
