@@ -48,12 +48,13 @@ import Testing
 }
 
 @Suite struct EngineAvailabilityTests {
-    @Test func onlyGuestsWithA64BitKernelAreOffered() {
-        #expect(!EngineAvailability.isOffered(for: .tiger))
-        #expect(!EngineAvailability.isOffered(for: .leopard))
-        #expect(!EngineAvailability.isOffered(for: nil))
-        for guest in Guest.allCases where guest != .tiger && guest != .leopard {
-            #expect(EngineAvailability.isOffered(for: guest))
+    @Test func onlyGuestsWithRecordedBootsAreOffered() {
+        func reason(_ guest: Guest?) -> String? {
+            EngineAvailability.unavailableReason(guest: guest, runtimeHasEngine: true, processors: 4)
+        }
+        #expect(reason(nil) != nil)
+        for guest in Guest.allCases {
+            #expect((reason(guest) == nil) == (guest == .mavericks || guest == .mojave))
         }
     }
 
@@ -63,6 +64,7 @@ import Testing
                 fromPropertyList: ["RuntimeBuild": ["ConfigureArguments": arguments]], format: .xml, options: 0)
         }
         #expect(EngineAvailability.runtimeHasEngine(packaging: try receipt(["arm64": ["-Dhvdbt_engine=/Engine"]])))
+        #expect(EngineAvailability.runtimeHasEngine(packaging: try receipt(["arm64": ["-Dhvdbt_engine=${ENGINE}"]])))
         #expect(!EngineAvailability.runtimeHasEngine(packaging: try receipt(["arm64": ["--enable-tcg"]])))
         #expect(!EngineAvailability.runtimeHasEngine(packaging: try receipt(["x86_64": ["-Dhvdbt_engine=/Engine"]])))
         #expect(!EngineAvailability.runtimeHasEngine(packaging: Data("nonsense".utf8)))
@@ -70,9 +72,9 @@ import Testing
     }
 
     @Test func aReasonComesWithEveryRefusal() {
-        #expect(EngineAvailability.unavailableReason(runtimeHasEngine: true, processors: 8) == nil)
-        #expect(EngineAvailability.unavailableReason(runtimeHasEngine: true, processors: 9) != nil)
-        #expect(EngineAvailability.unavailableReason(runtimeHasEngine: false, processors: 4) != nil)
+        #expect(EngineAvailability.unavailableReason(guest: .mojave, runtimeHasEngine: true, processors: 8) == nil)
+        #expect(EngineAvailability.unavailableReason(guest: .mojave, runtimeHasEngine: true, processors: 9) != nil)
+        #expect(EngineAvailability.unavailableReason(guest: .mojave, runtimeHasEngine: false, processors: 4) != nil)
     }
 }
 

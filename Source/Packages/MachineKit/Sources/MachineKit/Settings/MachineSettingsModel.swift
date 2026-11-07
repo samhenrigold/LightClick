@@ -160,11 +160,8 @@ public enum EngineAvailability {
     /// hvdbt_want_engine stops QEMU past this many vCPUs, so a launch uses software instead.
     public static let maximumProcessors = 8
 
-    /// The engine takes over at a 64-bit kernel's entry. Tiger's and Leopard's kernels are 32-bit, so it would never run.
-    public static func isOffered(for guest: Guest?) -> Bool {
-        guard let guest else { return false }
-        return guest != .tiger && guest != .leopard
-    }
+    /// The guests with recorded engine boots. Add one here once boot-matrix covers it.
+    public static let bootedGuests: Set<Guest> = [.mavericks, .mojave]
 
     /// Whether the packaged runtime's QEMU for Apple silicon was configured with the engine, from Packaging.plist.
     public static func runtimeHasEngine(packaging: Data?) -> Bool {
@@ -177,8 +174,11 @@ public enum EngineAvailability {
     }
 
     /// Why the engine can't be chosen, or nil if it can.
-    public static func unavailableReason(runtimeHasEngine: Bool, processors: Int) -> String? {
+    public static func unavailableReason(guest: Guest?, runtimeHasEngine: Bool, processors: Int) -> String? {
         if !runtimeHasEngine { return "This copy of Light Click was built without the Hypervisor engine." }
+        guard let guest, bootedGuests.contains(guest) else {
+            return "Hypervisor hasn’t been tested with this version of macOS."
+        }
         if processors > maximumProcessors {
             return "Hypervisor runs up to \(maximumProcessors) processors, so this Mac uses Software."
         }

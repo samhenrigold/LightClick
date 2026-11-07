@@ -90,19 +90,21 @@ extension ConfigurationWindow {
             try? Data(contentsOf: $0)
         })
 
-    /// Nothing on Intel, where the engine doesn't exist, or for a guest it would never run.
+    /// Nothing on Intel, where the engine doesn't exist.
     private func engineRows() -> [[NSView]] {
         #if arch(arm64)
-            guard EngineAvailability.isOffered(for: (editable["Guest"] as? String).flatMap(Guest.init(rawValue:)))
-            else { return [] }
+            let processors = (editable["CPUCount"] as? NSNumber)?.intValue ?? 0
             let reason = EngineAvailability.unavailableReason(
-                runtimeHasEngine: Self.runtimeHasEngine,
-                processors: (editable["CPUCount"] as? NSNumber)?.intValue ?? 0)
-            let hypervisor = reason == nil && editable["ExecutionEngine"] as? String == "on"
+                guest: (editable["Guest"] as? String).flatMap(Guest.init(rawValue:)),
+                runtimeHasEngine: Self.runtimeHasEngine, processors: processors)
+            // A launch honours a saved "on" for any guest, so show that truthfully and let it be turned off.
+            let hypervisor =
+                editable["ExecutionEngine"] as? String == "on" && Self.runtimeHasEngine
+                && processors <= EngineAvailability.maximumProcessors
             let engine = NSPopUpButton()
             engine.addItems(withTitles: ["Software (TCG)", "Hypervisor"])
             engine.selectItem(at: hypervisor ? 1 : 0)
-            engine.isEnabled = reason == nil
+            engine.isEnabled = reason == nil || hypervisor
             engine.target = self
             engine.action = #selector(engineChanged)
             engine.toolTip =
