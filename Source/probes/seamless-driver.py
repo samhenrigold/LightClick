@@ -936,7 +936,8 @@ def hard_stop():
         if not request({'Action': 'seamless-state'}, 60).get('WindowVisible'):
             break
         time.sleep(1)
-    time.sleep(10)
+    # Long enough for anything the guest left to its own time to have reached its disk, as a user's would by then.
+    time.sleep(70)
     print('in Seamless', request({'Action': 'seamless-state'}, 60), flush=True)
     # Not asked first: the agent is the press's while windows are out, and nothing's flushed for the guest either.
     listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
