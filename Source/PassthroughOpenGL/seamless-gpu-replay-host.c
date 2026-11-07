@@ -5,6 +5,10 @@
  * glPassThrough tokens from probes/seamless-ws-hook.c: a no-op in GL, so neither the guest's GL client nor the wire
  * changes. Off unless LC_SEAMLESS_GPU_REPLAY is set.
  *
+ * An update of part of the display doesn't draw on the display's drawable: WindowServer gets a new one of just that
+ * part's bounds each time, whose origin the marker says. So everything of the right kind counts, by framebuffer, and a
+ * drawable smaller than the display is moved by that.
+ *
  * With the hook's gpu_mode on, a marker says the display is off: the display's own draws don't run, only the window's.
  *
  * shortcut: only what WindowServer draws arrives, so a covered part of a window stays stale until it's uncovered.
@@ -16,7 +20,7 @@
 #include <math.h>
 #include <servers/bootstrap.h>
 #define SG_LAYER_MAGIC 11184809.0f
-#define SG_LAYER_FIELDS 10
+#define SG_LAYER_FIELDS 12
 #define SG_MARGIN_POINTS 96 // As probes/seamless-viewer.m found: an active window's shadow fits in this.
 #define SG_BUFFERS 3
 #define SG_FRAME_MESSAGE 0x53474652
@@ -29,7 +33,7 @@ struct SGFrameMessage {
 };
 struct SGTreeEntry {
     uint32_t id;
-    int level, margin, whole;
+    int level, margin, whole, origin_x, origin_y;
     float x, y, width, height; // Pixels, on the primary drawable.
 };
 struct SGWindow {
@@ -45,7 +49,6 @@ struct SGWindow {
     struct SGWindow *next;
 };
 static struct DGHostContext *sg_display;
-static uint32_t sg_primary;
 static int64_t sg_primary_area;
 static struct SGTreeEntry sg_layer;
 static float sg_tokens[SG_LAYER_FIELDS], sg_scale = 1;
@@ -85,6 +88,8 @@ static void SGToken(float value) {
                                     (int)f[1] - 1,
                                     (int)(f[6] * sg_scale),
                                     f[9] != 0,
+                                    (int)((f[10] - 16384) * sg_scale),
+                                    (int)((f[11] - 16384) * sg_scale),
                                     (f[2] - 16384) * sg_scale,
                                     (f[3] - 16384) * sg_scale,
                                     f[4] * sg_scale,
@@ -253,7 +258,7 @@ struct SGSaved {
 static struct SGWindow *SGRedirect(struct DGHostContext *c, struct SGSaved *saved) {
     // WindowServer also draws to scratch drawables through this context, for window effects: only the display counts.
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING_EXT, &saved->draw);
-    if ((GLuint)saved->draw != c->framebuffer || !c->drawable || c->drawable->name != sg_primary)
+    if ((GLuint)saved->draw != c->framebuffer || !c->drawable || c->drawable->width <= 64 || c->drawable->height <= 64)
         return NULL;
     const struct SGTreeEntry *t = &sg_layer;
     if (!t->id) {
@@ -269,10 +274,14 @@ static struct SGWindow *SGRedirect(struct DGHostContext *c, struct SGSaved *save
     glGetIntegerv(GL_VIEWPORT, saved->viewport);
     saved->scissor_on = glIsEnabled(GL_SCISSOR_TEST);
     glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, w->framebuffer[w->back]);
-    glViewport(saved->viewport[0] - w->x, saved->viewport[1] - w->y, saved->viewport[2], saved->viewport[3]);
+    int partial = (int64_t)c->drawable->width * c->drawable->height < sg_primary_area;
+    int origin_x = partial ? t->origin_x : 0, origin_y = partial ? t->origin_y : 0;
+    glViewport(saved->viewport[0] + origin_x - w->x, saved->viewport[1] + origin_y - w->y, saved->viewport[2],
+               saved->viewport[3]);
     if (saved->scissor_on) {
         glGetIntegerv(GL_SCISSOR_BOX, saved->scissor);
-        glScissor(saved->scissor[0] - w->x, saved->scissor[1] - w->y, saved->scissor[2], saved->scissor[3]);
+        glScissor(saved->scissor[0] + origin_x - w->x, saved->scissor[1] + origin_y - w->y, saved->scissor[2],
+                  saved->scissor[3]);
     }
     // What's behind it on the display is drawn first, and here what's behind is the last frame, which a shadow would
     // build up on. So a window drawn whole starts clear, and one drawn in part has no shadow.
@@ -305,7 +314,8 @@ static void SGRestore(struct SGWindow *w, const struct SGSaved *saved) {
 
 // Whether a draw is the display's, and nobody's looking at the display. Called by DGHostDraw for its own draw.
 static int DGSeamlessDisplayOff(struct DGHostContext *c) {
-    if (!sg_replay_enabled || !sg_display_off || c != sg_display || !c->drawable || c->drawable->name != sg_primary)
+    if (!sg_replay_enabled || !sg_display_off || c != sg_display || !c->drawable || c->drawable->width <= 64 ||
+        c->drawable->height <= 64)
         return 0;
     GLint draw = 0;
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING_EXT, &draw);
@@ -459,10 +469,8 @@ static void DGSeamlessBefore(struct DGInterpreter *s, struct DGMessage *m) {
         ++sg_sealed;
         sg_display = c;
         // What's published is the display, though a smaller scratch drawable can be current when it happens.
-        if (c->drawable && (int64_t)c->drawable->width * c->drawable->height >= sg_primary_area) {
-            sg_primary = c->drawable->name;
+        if (c->drawable && (int64_t)c->drawable->width * c->drawable->height >= sg_primary_area)
             sg_primary_area = (int64_t)c->drawable->width * c->drawable->height;
-        }
         // The stream's own order keeps this context current or next to be, and it isn't inside a Begin here.
         if ((CGLGetCurrentContext() == c->cgl || !CGLSetCurrentContext(c->cgl)) && !c->inside_begin) {
             uint64_t began = mach_absolute_time();

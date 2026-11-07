@@ -189,9 +189,36 @@ static void seamless_note_sampled(id<MTLTexture> t)
     }
     os_unfair_lock_unlock(&lock);
 }
+/* For host layers: which host IOSurface a guest's surface is. The hook binds it in a pass on a small surface tagged 0xd0 with
+ * a slot, as nothing else says. Each goes to <dir>/identities.txt, with a sum of its pixels, for telling whether they got here. */
+static __thread int seamless_identify_slot = -1;
+static void seamless_identified(int slot, id<MTLTexture> texture)
+{
+    static FILE *file;
+    if (!file) file = fopen([NSString stringWithFormat:@"%s/identities.txt", seamless_pvg_dir].UTF8String, "w");
+    IOSurfaceRef surface = texture.iosurface;
+    uint64_t sum = 0;
+    size_t width = 0, height = 0;
+    if (surface && !IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL)) {
+        width = IOSurfaceGetWidth(surface);
+        height = IOSurfaceGetHeight(surface);
+        size_t row = IOSurfaceGetBytesPerRow(surface);
+        if (row < width * 4) row = (IOSurfaceGetAllocSize(surface) / height) & ~(size_t)63;
+        const uint8_t *base = IOSurfaceGetBaseAddress(surface);
+        for (size_t y = 0; y < height; y++)
+            for (size_t x = 0; x < width; x++) sum += base[y * row + x * 4 + 1];
+        IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+    }
+    if (file) {
+        fprintf(file, "slot %d texture %lux%lu surface %u %zux%zu sum %llu\n", slot, (unsigned long)texture.width,
+                (unsigned long)texture.height, surface ? IOSurfaceGetID(surface) : 0, width, height, sum);
+        fflush(file);
+    }
+}
 static void seamless_set_fragment_texture(id self, SEL cmd, id<MTLTexture> texture, NSUInteger index)
 {
-    seamless_note_sampled(texture);
+    if (seamless_identify_slot >= 0 && texture) seamless_identified(seamless_identify_slot, texture);
+    if (getenv("VIM_SEAMLESS_PVG_SAMPLED")) seamless_note_sampled(texture);
     ((void (*)(id, SEL, id, NSUInteger))original_set_fragment_texture)(self, cmd, texture, index);
 }
 static void seamless_set_fragment_textures(id self, SEL cmd, const id<MTLTexture> *textures, NSRange range)
@@ -263,6 +290,7 @@ static id preserving_render_encoder(id self, SEL cmd, MTLRenderPassDescriptor *p
                 adjusted = [pass copy];
                 adjusted.colorAttachments[0].loadAction = MTLLoadActionLoad;
             }
+            seamless_identify_slot = tag == 0xd0 ? (int)window : -1;
             if (tag == 0xa0) {
                 /* What the guest gave it, for telling whether a value set there can name a window. */
                 static uint32_t told[64];
@@ -294,7 +322,7 @@ static id preserving_render_encoder(id self, SEL cmd, MTLRenderPassDescriptor *p
     id result = ((id (*)(id, SEL, id))original_render_encoder)(
         self, cmd, adjusted ?: pass);
     [adjusted release];
-    if (seamless_pvg_dir && guest_render_depth && getenv("VIM_SEAMLESS_PVG_SAMPLED")) seamless_watch_sampling(result);
+    if (seamless_pvg_dir && guest_render_depth) seamless_watch_sampling(result);
     return result;
 }
 

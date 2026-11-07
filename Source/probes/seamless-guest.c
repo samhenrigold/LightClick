@@ -1139,6 +1139,12 @@ static CGWindowID open_app(const char *app) {
                        "clearTimeout(t);t=setTimeout(function(){d.style.display='block'},5000)}</script>\n"
                      : "Seamless window test.\n",
               file);
+        // For a test of a repaint with nothing else on the page moving.
+        if (safari && !access("/tmp/seamless-flip", F_OK))
+            fputs("<script>document.getElementById('d').style.display='none';var "
+                  "dark=0;setInterval(function(){dark=!dark;"
+                  "document.documentElement.style.background=dark?'#234':'#fff'},1000)</script>\n",
+                  file);
         fclose(file);
     }
     pid_t child = fork();
@@ -2717,8 +2723,13 @@ int main(int argc, char **argv) {
             t->gpu_census = atoi(option(argc, argv, "--census", "0"));
         if (option(argc, argv, "--no-shadow", NULL))
             t->gpu_no_shadow = (uint32_t)atoi(option(argc, argv, "--no-shadow", "0"));
-        if (option(argc, argv, "--mode", NULL))
+        if (option(argc, argv, "--mode", NULL)) {
             t->gpu_mode = (uint32_t)atoi(option(argc, argv, "--mode", "0"));
+            // Needs the session, which --skip-desktop joins. Without it, the windows wait for something to draw.
+            extern void seamless_poke_update(void);
+            if (in_session)
+                seamless_poke_update();
+        }
         printf("gpu mode %u scale %g generate %llu composites %llu whole %llu seconds %.3f\n", t->gpu_mode,
                t->gpu_scale, t->gpu_generate_calls, t->gpu_composites, t->gpu_whole_composites,
                (double)t->gpu_ticks * t->ticks_numer / t->ticks_denom / 1e9);
