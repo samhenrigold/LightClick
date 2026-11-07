@@ -473,11 +473,11 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                 }
                 let command = (try? String(contentsOfFile: self.testCommandPath, encoding: .utf8)) ?? ""
                 if command.hasPrefix("report") {
-                    let lines = self.surfaces.values.sorted { $0.order < $1.order }.map { surface -> String in
+                    let lines = self.surfaces.sorted { $0.value.order < $1.value.order }.map { id, surface -> String in
                         let frame = surface.window.frame
                         let top = (NSScreen.screens.first?.frame.height ?? 0) - frame.maxY
                         return
-                            "\(surface.window.title)\t\(frame.minX)\t\(top)\t\(surface.offset.x)\t\(surface.offset.y)\t\(surface.window.isMiniaturized ? 1 : 0)\t\(surface.window.isVisible ? 1 : 0)"
+                            "\(surface.window.title) [\(id)]\t\(frame.minX)\t\(top)\t\(surface.offset.x)\t\(surface.offset.y)\t\(surface.window.isMiniaturized ? 1 : 0)\t\(surface.window.isVisible ? 1 : 0)\t\(surface.window.alphaValue)\t\(surface.window.occlusionState.contains(.visible) ? 1 : 0)\t\(surface.window.frame.width)x\(surface.window.frame.height)"
                     }
                     try? (lines.joined(separator: "\n") + "\n").write(
                         toFile: self.testCommandPath + ".report", atomically: true, encoding: .utf8)

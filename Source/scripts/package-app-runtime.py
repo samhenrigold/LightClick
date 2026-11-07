@@ -12,12 +12,52 @@ import plistlib
 import re
 import runpy
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
 import build_freshness as freshness
 from signing_options import host_options
+
+
+def repair_donor_unwind(path):
+    """dsce gives images from a macOS 26 cache a header page before __TEXT's contents, but __unwind_info still counts
+    from the old start. Every function, LSDA and personality it names is then a page off: the first exception thrown
+    in the framework calls whatever is in the GOT slot beside the personality, and crashes."""
+    data = bytearray(path.read_bytes())
+    commands, offset, sections = struct.unpack_from('<I', data, 16)[0], 32, {}
+    for _ in range(commands):
+        command, size = struct.unpack_from('<II', data, offset)
+        if command == 0x19:  # LC_SEGMENT_64
+            for index in range(struct.unpack_from('<I', data, offset+64)[0]):
+                section = offset+72+index*80
+                name = bytes(data[section:section+16]).rstrip(b'\0').decode()
+                sections[name] = struct.unpack_from('<QQI', data, section+32)
+        offset += size
+    text_base = sections['__text'][0]-sections['__text'][2]
+    unwind = sections['__unwind_info'][2]
+    _, _, _, personalities, personality_count, index, index_count = struct.unpack_from('<7I', data, unwind)
+    entries = [struct.unpack_from('<3I', data, unwind+index+n*12) for n in range(index_count)]
+    lsda_start, lsda_end = entries[0][2], entries[-1][2]
+    first_lsda = struct.unpack_from('<I', data, unwind+lsda_start+4)[0]
+    shift = sections['__gcc_except_tab'][0]-text_base-first_lsda
+    if shift != 0x1000:
+        raise RuntimeError(f'donor __unwind_info is {shift:#x} off, not the page this repair expects')
+    def add(at):
+        struct.pack_into('<I', data, at, struct.unpack_from('<I', data, at)[0]+shift)
+    for n in range(personality_count):
+        add(unwind+personalities+n*4)
+    for n, (_, page, _) in enumerate(entries):
+        add(unwind+index+n*12)
+        if page and struct.unpack_from('<I', data, unwind+page)[0] == 2:  # regular: absolute function offsets; compressed count from the index
+            start, count = struct.unpack_from('<HH', data, unwind+page+4)
+            for entry in range(count):
+                add(unwind+page+start+entry*8)
+    for at in range(lsda_start, lsda_end, 8):
+        add(unwind+at)
+        add(unwind+at+4)
+    path.write_bytes(data)
 
 
 def extract_host_inputs(source, destination, archive_name='apple-silicon-host-inputs.tar.gz', manifest_name='apple-silicon-SHA256SUMS'):
@@ -191,6 +231,7 @@ def main():
     donor_root = Path(donor_stage.name)
     donor_hash = extract_host_inputs(source, donor_root)
     donor = donor_root/'System/Library/Frameworks/ParavirtualizedGraphics.framework'
+    repair_donor_unwind(donor/'Versions/A/ParavirtualizedGraphics')
     firmware_root = donor_root/'FirmwareInputs'
     firmware_root.mkdir()
     firmware_hash = extract_host_inputs(source, firmware_root, 'app-firmware-inputs.tar.gz', 'app-firmware-SHA256SUMS')

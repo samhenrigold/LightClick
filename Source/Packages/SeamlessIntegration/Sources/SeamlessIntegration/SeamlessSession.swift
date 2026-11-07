@@ -494,6 +494,7 @@ public final class SeamlessSession {
         if let existing = surfaces[window.id] {
             surface = existing
         } else {
+            note("# new window \(window.id) \"\(window.title)\" level \(window.level) \(window.width)x\(window.height) at \(window.x),\(window.y)")
             guard let made = makeSurface(window) else { return }
             surface = made
             surfaces[window.id] = made

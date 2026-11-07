@@ -382,6 +382,8 @@ def windowed(seconds):
             time.sleep(1)
         print('windowed_' + timing.communicate()[0].strip().replace('\n', '\nwindowed_'), flush=True)
         time.sleep(7)
+    print('windowed_', end='', flush=True)
+    cpu_percent()
     # And over the frames, what its window really shows, by that one window's ID.
     presenting = subprocess.Popen([meter, window, str(seconds)], stdout=subprocess.PIPE, text=True) if window else None
     first = request({'Action': 'display-frames'}, 60)
@@ -395,11 +397,93 @@ def windowed(seconds):
     print(f'windowed_distinct {(last.get("Distinct", 0) - first.get("Distinct", 0)) / spent:.1f} /s', flush=True)
 
 
+def monitor_dump(why):
+    # Where the agent's UART, COM2 at 0x2f8, and its interrupt are. IIR goes last, as reading it can clear what it says.
+    print('# from the monitor,', why, flush=True)
+    for command in ('info chardev', 'info pic', 'info ioapic', 'info lapic', 'i/b 0x2f9', 'i/b 0x2fb', 'i/b 0x2fc', 'i/b 0x2fd', 'i/b 0x2fe', 'i/b 0x2fa', 'i/b 0x2fd'):
+        print(f'## {command}', request({'Action': 'monitor', 'Command': command}, 30), flush=True)
+
+
+def cpu_seconds():
+    # All of this clone's: the app, QEMU, and any proxies, which are generated under its folder.
+    total = 0.0
+    rows = subprocess.run(['ps', '-axo', 'time=,command='], capture_output=True, text=True).stdout.splitlines()
+    for row in rows:
+        if f'Build/bench/{tag}/' not in row:
+            continue
+        clock = row.split()[0].split(':')
+        total += sum(float(part) * 60 ** index for index, part in enumerate(reversed(clock)))
+    return total
+
+
+def cpu_percent(seconds=16):
+    # The whole cost of showing the page moving, for the same number on windowed's side and seamless's.
+    start, at = cpu_seconds(), time.time()
+    time.sleep(seconds)
+    percent = (cpu_seconds() - start) / (time.time() - at) * 100
+    load = subprocess.run(['uptime'], capture_output=True, text=True).stdout.split('load average')[-1].strip()
+    print(f'cpu_percent {percent:.0f}, load {load}', flush=True)
+
+
+def watch_guest():
+    # What the guest's doing, sent by the guest over its own network: when its agent stops answering, there's no asking it.
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(('127.0.0.1', 0))
+    listener.listen(16)
+    port = listener.getsockname()[1]
+    target = results/f'{tag}-guest-watch.txt'
+    target.write_text('')
+
+    def receive():
+        while True:
+            client, _ = listener.accept()
+            with client, target.open('ab') as file:
+                while chunk := client.recv(65536):
+                    file.write(chunk)
+    threading.Thread(target=receive, daemon=True).start()
+    # In one shell, so $PPID is the agent. A sample of it now and then says where it's stuck, if it is.
+    script = r'''
+agent=$PPID
+comm=$(/bin/ps -o comm= -p $agent)
+report() { /usr/bin/nc -w 1 10.0.2.2 "$1"; }
+{ echo "agent pid $agent is $comm"; /bin/ls /Library/LaunchDaemons | /usr/bin/grep -iE "virtual|intel|agent|qemu"; /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"; } | report "$1"
+(
+n=0
+while :; do
+  n=$((n + 1))
+  {
+    /bin/date
+    /bin/ps -axo pid,ppid,stat,etime,pcpu,command | /usr/bin/grep -E "$comm|/tmp/sg|ws-inject|WindowServer|tccd" | /usr/bin/grep -v grep | /usr/bin/cut -c1-120
+    /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"
+    /bin/cat /var/tmp/seamless-ws-press 2>/dev/null
+    /usr/bin/tail -2 /var/log/system.log | /usr/bin/cut -c1-180
+    if [ $((n % 5)) = 0 ]; then
+      /usr/bin/sample $agent 1 -file /tmp/seamless-watch.sample >/dev/null 2>&1
+      /usr/bin/grep -A25 "Call graph" /tmp/seamless-watch.sample | /usr/bin/cut -c1-110
+      /usr/sbin/lsof -p $agent 2>/dev/null | /usr/bin/grep -E "serial|cu\\." | /usr/bin/cut -c1-110
+    fi
+    echo
+  } | report "$1"
+  /bin/sleep 2
+done
+) >/tmp/seamless-watch.err 2>&1 </dev/null &
+echo started
+'''
+    said = request({'Executable': '/bin/sh', 'Arguments': ['-c', script, 'sh', str(port)]}, 30)
+    print('the watcher:', said, flush=True)
+    if said.get('Error'):
+        monitor_dump('the agent not answering the first request')
+    print('watching the guest:', target, flush=True)
+
+
 def desktop(activation_only=False):
     # The Seamless button, on a running machine: press, the apps' windows appear and the machine's goes, a click reaches one, press,
     # and the machine's window is back.
     for old in results.glob(f'{tag}-*.png'):
         old.unlink()
+    # Before anything else asks the agent for anything: it has been seen to stop right after staging.
+    watch_guest()
     guest = stage(guest_tool)
     for app in ('Finder', 'TextEdit', 'Safari') if version_is_mojave() else ('TextEdit', 'Safari'):
         run(guest, ['open-app', '--app', app])
@@ -447,10 +531,15 @@ def desktop(activation_only=False):
     request({'Action': 'seamless-toggle'}, 60)
     windows = []
     first = None
+    dumped = 0
     while time.time() - pressed < 180 and (len(windows) < 2 or machine_window()):
         windows = proxy_windows()
         if windows and first is None:
             first = time.time() - pressed
+        # While the agent's silent, not after: it has been seen to come back.
+        if first is None and time.time() - pressed > 12 + dumped * 25 and dumped < 3:
+            dumped += 1
+            monitor_dump(f'{time.time() - pressed:.0f} s after a press with no windows yet')
         time.sleep(0.1)
     print(f'first window after {first} s, machine window gone after {time.time() - pressed:.1f} s', flush=True)
     for row in windows:
@@ -458,6 +547,7 @@ def desktop(activation_only=False):
     check('windows appear for each app', len(windows) >= 2)
     if not windows:
         print('guest frame', capture(f'{tag}-no-windows.png'), flush=True)
+        monitor_dump('no windows came')
         print('the agent after no windows:', request({'Executable': '/bin/sh', 'Arguments': ['-c', '/bin/cat /var/tmp/seamless-ws-press; /bin/ls -l /var/tmp /usr/lib/seamless-ws-hook.dylib; /usr/bin/pgrep -x WindowServer; /bin/ps -axo pid,etime,command | /usr/bin/grep -E "/tmp/sg|agent" | /usr/bin/head -20; /usr/bin/tail -30 /var/log/system.log']}, 120), flush=True)
     for _ in range(3):
         print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
@@ -508,7 +598,7 @@ def desktop(activation_only=False):
             report_file.unlink(missing_ok=True)
             tell('report', 0.5)
             rows_said = [row.split('\t') for row in report_file.read_text().splitlines()]
-            return [(row[0], *map(float, row[1:])) for row in rows_said]
+            return [(row[0], *map(float, row[1:5])) for row in rows_said]
 
         # The windows overlap in the guest: the same place on the lower one gets the upper one, without the raise.
         tell('click-title seamless-second')
@@ -564,6 +654,7 @@ def desktop(activation_only=False):
     for _ in range(4):
         print('bounds', time.time() - pressed, next((row[-40:] for row in rows() if f'id={window} ' in row), ''), flush=True)
         time.sleep(2)
+    cpu_percent()
     framed = request({'Action': 'seamless-state'}, 60).get('SurfaceFrames', 0)
     moving = subprocess.run([meter, window or '0', '8'], capture_output=True, text=True).stdout
     print('moving', moving, 'frames from QEMU/s', (request({'Action': 'seamless-state'}, 60).get('SurfaceFrames', 0) - framed) / 8, flush=True)
@@ -669,6 +760,12 @@ def desktop(activation_only=False):
         os.kill(safari, signal.SIGUSR2)
         time.sleep(8)
         print('in full screen', [row[-50:] for row in proxy_windows()], flush=True)
+        full_report = results/f'{tag}-clicks.txt.command.report'
+        full_report.unlink(missing_ok=True)
+        command.write_text('report')
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(0.5)
+        print('in full screen its proxy says', full_report.read_text() if full_report.exists() else 'nothing', flush=True)
         print('in full screen moving', subprocess.run([meter, window, '3'], capture_output=True, text=True).stdout, flush=True)
         subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-full-screen.png')], capture_output=True)
         os.kill(safari, signal.SIGUSR2)
@@ -703,6 +800,8 @@ def desktop(activation_only=False):
     said = request({'Executable': '/bin/sh', 'Arguments': ['-c', 'cat /tmp/seamless-leap-restore.log; /bin/ps -axo pid,ppid,pgid,command | /usr/bin/grep -E "/tmp/sg/" | /usr/bin/cut -c1-100']}, 60)
     print('restore log:', said.get('Stdout'), said.get('Error'), flush=True)
     check('the guest\'s Dock and shadows are put back', 'dock: 0' in (said.get('Stdout') or ''))
+    said = request({'Executable': '/bin/sh', 'Arguments': ['-c', '/bin/ls -la /tmp/sg | /usr/bin/head -20; /usr/bin/grep -hE "placed window|raised window|is now|back from" /tmp/sg/leap-*.log /tmp/sg/*.log | /usr/bin/tail -40; true']}, 60)
+    print('the tools saw:', said.get('Stdout'), said.get('Error'), flush=True)
     # Generated apps shouldn't stay known to the Mac after a clone's gone.
     for bundle in (source/'Build/bench'/tag).glob('**/Seamless Apps/*/*/*.app'):
         subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', str(bundle)])

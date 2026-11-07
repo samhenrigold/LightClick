@@ -82,9 +82,17 @@ public actor QMPConnection {
             }
             isReady = true
         } catch {
+            Self.trace("connecting to \(path): \(error)")
             discardDescriptor()
             throw error
         }
+    }
+
+    private static let tracing = ProcessInfo.processInfo.environment["LC_SEAMLESS_CLICK_LOG"] != nil
+
+    private static func trace(_ what: String) {
+        guard tracing else { return }
+        FileHandle.standardError.write(Data("[\(Date())] agent connection, \(what)\n".utf8))
     }
 
     private func openSocket() throws(QMPError) {
@@ -166,6 +174,7 @@ public actor QMPConnection {
                     usleep(10_000)
                     continue
                 }
+                Self.trace("\(command): \(error)")
                 // A timed-out QGA stream must synchronize again before reuse.
                 if mode == .guestAgent { discardDescriptor() }
                 throw error
@@ -270,6 +279,8 @@ public actor QMPConnection {
             repeat {
                 count = read(descriptor, &chunk, chunk.count)
             } while count < 0 && errno == EINTR
+            // A guest that's slow to answer, as when the host's busy, is a different story from one that's gone.
+            if count < 0 && errno == EAGAIN { throw .timedOut }
             guard count > 0 else { throw .connectionEnded }
             buffer.append(contentsOf: chunk[..<count])
         }

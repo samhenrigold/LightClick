@@ -1659,6 +1659,15 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         return;
     // Asked many times a second by a test, and none need the agent. Going through what follows would start clipboard setup on it
     // each time, which ended the connection under whatever was using the agent.
+    // For a test whose guest has stopped answering: none of this goes through the guest.
+    if ([command[@"Action"] isEqual:@"monitor"]) {
+        [self.control execute:@"human-monitor-command"
+                    arguments:@{@"command-line" : command[@"Command"] ?: @""}
+                   completion:^(id result, NSError *error) {
+                     [self.diagnostics writeResult:@{@"Output" : result ?: @"", @"Error" : error.localizedDescription ?: @""}];
+                   }];
+        return;
+    }
     if ([command[@"Action"] isEqual:@"seamless-save-surfaces"]) {
         [VIMSeamlessHost saveSurfacesFor:self to:command[@"Directory"]];
         [self.diagnostics writeResult:@{}];
