@@ -257,7 +257,8 @@ public final class SeamlessSession {
         return
             "mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp \"$1\" /tmp/sg/g; cp \"$2\" /tmp/sg/ig; chmod 755 /tmp/sg/g /tmp/sg/ig; "
             + "/usr/bin/sqlite3 \"/Library/Application Support/com.apple.TCC/TCC.db\" \"\(rows.joined())\(agentRow)\" 2>&1; "
-            + "/bin/ps -o comm= -p $PPID; /usr/bin/killall tccd; sleep 2"
+            // After this script has answered, since the agent has been seen to stop answering for minutes if tccd goes under it.
+            + "/bin/ps -o comm= -p $PPID; (sleep 1; /usr/bin/killall tccd) </dev/null >/dev/null 2>&1 &"
     }
 
     private func listenForGuest() -> Bool {
