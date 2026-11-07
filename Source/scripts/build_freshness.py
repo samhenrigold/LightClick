@@ -81,6 +81,8 @@ def toolchain(component):
     keys = ('CFLAGS', 'CXXFLAGS', 'OBJCFLAGS', 'CPPFLAGS', 'LDFLAGS', 'CC', 'CXX',
             'SDKROOT', 'DEVELOPER_DIR', 'MACOSX_DEPLOYMENT_TARGET', 'PKG_CONFIG',
             'PVG_OOP_SHADOW_SOURCE', 'PVG_DEVELOPER_DIR')
+    if component == 'runtime':
+        keys += ('LC_HVDBT_ENGINE',)
     result['BuildEnvironmentSHA256'] = identity({key: os.environ.get(key, '') for key in keys})
     return result
 
@@ -104,6 +106,15 @@ def snapshot(source, component, qemu=None):
             groups.append(('qemu', Path(qemu or source/'vendor/qemu')))
             if os.environ.get('PVG_OOP_SHADOW_SOURCE'):
                 groups.append(('HelperShadowOverride', Path(os.environ['PVG_OOP_SHADOW_SOURCE'])))
+            if os.environ.get('LC_HVDBT_ENGINE'):
+                engine = Path(os.environ['LC_HVDBT_ENGINE'])
+                # Meson's archive path and its include/link arguments need one unambiguous root.
+                if not engine.is_absolute():
+                    raise ValueError('LC_HVDBT_ENGINE must be an absolute Engine directory')
+                groups += [('Engine/' + name, engine / name)
+                           for name in ('Sources', 'Monitor', 'Package.swift', 'build.sh')]
+                # The linked archive is ignored by git: enumerate this exact file, not its .build directory.
+                groups.append(('EngineArchive', engine / '.build/release/libEngine.a'))
     elif component == 'firmware':
         paths = ['scripts/' + p for p in FIRMWARE_RECIPES]
         paths += ['vendor/edk2-source.tar.gz', 'vendor/edk2-source.sha256']
