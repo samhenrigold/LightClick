@@ -37,66 +37,11 @@ static BOOL NonemptyFile(NSURL *URL) {
     return RegularFile(URL) && [URL getResourceValue:&size forKey:NSURLFileSizeKey error:nil] &&
            size.unsignedLongLongValue > 0;
 }
-// Only for newly generated output, never an original installer or VM disk.
-// A successful image-tool exit and mounted readback can both see cached data.
-// Commit the output before retiring its working files, and use a fresh POSIX
-// size rather than an NSURL resource-value cache for the completion receipt.
 static NSNumber *FlushGeneratedImage(NSURL *URL, NSError **error) {
-    // Read-write only to flush: writes no bytes. Refuses a symlink, a hard link or a file replaced meanwhile.
-    int fd = open(URL.fileSystemRepresentation, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
-    struct stat before, after, path;
-    BOOL valid =
-        fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_nlink == 1 && before.st_size > 0;
-    int result = -1;
-    if (valid) {
-        do {
-            result = fsync(fd);
-        } while (result < 0 && errno == EINTR);
-    }
-    if (valid && result == 0) {
-        do {
-            result = fcntl(fd, F_FULLFSYNC);
-        } while (result < 0 && errno == EINTR);
-        // Some external filesystems do not implement the stronger drive-cache
-        // operation. Their successful fsync is still required, not ignored.
-        if (result < 0 && (errno == EINVAL || errno == ENOTSUP))
-            result = 0;
-    }
-    valid = valid && result == 0 && !fstat(fd, &after) && after.st_size == before.st_size &&
-            !lstat(URL.fileSystemRepresentation, &path) && S_ISREG(path.st_mode) && path.st_dev == after.st_dev &&
-            path.st_ino == after.st_ino && path.st_size == after.st_size;
-    if (fd >= 0 && close(fd))
-        valid = NO;
-    if (!valid) {
-        AssemblyError(error, VIMAssemblyFailureImageNotSavedReliably);
-        return nil;
-    }
-    return @(after.st_size);
+    return [VIMInstallerFiles flushGeneratedImage:URL error:error];
 }
-// WRITES a file on the generated working copy, never a source installer. Keeps
-// its inode and catalog owner, and adds write permission only while saving.
 static BOOL RewriteGeneratedFile(NSURL *file, NSData *bytes, NSError **error) {
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSNumber *mode = [fm attributesOfItemAtPath:file.path error:error][NSFilePosixPermissions];
-    if (!mode)
-        return NO;
-    BOOL saved = [fm setAttributes:@{
-                     NSFilePosixPermissions : @(mode.unsignedIntValue | 0200)
-                 }
-                      ofItemAtPath:file.path
-                             error:error] &&
-                 bytes && [bytes writeToURL:file options:0 error:error];
-    NSError *restore = nil;
-    if (![fm setAttributes:@{NSFilePosixPermissions : mode} ofItemAtPath:file.path error:&restore]) {
-        if (error)
-            *error = restore;
-        return NO;
-    }
-    return saved;
-}
-static BOOL UnlinkedDirectory(NSURL *URL) {
-    struct stat st;
-    return !lstat(URL.fileSystemRepresentation, &st) && S_ISDIR(st.st_mode);
+    return [VIMInstallerFiles rewriteGeneratedFile:file bytes:bytes error:error];
 }
 static BOOL LeopardRestoreProfile(NSURL *mount, NSString *guest, NSError **error) {
     return [VIMInstallerInspection restoreDiscIsCompleteAtMount:mount guest:guest] ||
@@ -254,76 +199,14 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
     return [VIMInstallerInspection validatePreparedMedia:URL guest:guest error:error];
 }
 + (void)retireCompletedDownloads:(NSDictionary<NSString *, NSURL *> *)files {
-    NSFileManager *fm = NSFileManager.defaultManager;
-    for (NSURL *file in files.allValues) {
-        NSURL *directory = file.URLByDeletingLastPathComponent;
-        // Do not follow symlinks or remove arbitrary caller-provided sources.
-        if (![VIMDownloadRetirement isOwnedPayload:file] || !UnlinkedDirectory(directory))
-            continue;
-        int fd = open([directory URLByAppendingPathComponent:@"Download.lock"].fileSystemRepresentation,
-                      O_RDWR | O_NOFOLLOW | O_CLOEXEC);
-        struct stat st;
-        if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 || flock(fd, LOCK_EX | LOCK_NB)) {
-            if (fd >= 0)
-                close(fd);
-            continue;
-        }
-        NSDictionary *record =
-            [NSDictionary dictionaryWithContentsOfURL:[directory URLByAppendingPathComponent:@"Download.plist"]];
-        if (!lstat(file.fileSystemRepresentation, &st) && S_ISREG(st.st_mode) && st.st_nlink == 1 &&
-            [VIMDownloadRetirement record:record allowsRemovalOfPayloadWithSize:st.st_size]) {
-            // Payload first, then the completion record: interruption leaves a
-            // stale record, which beginTransfer can safely restart below.
-            // ERASES a completed download: only an owned payload path, holding its lock, a plain single-link file of
-            // the recorded length, from an approved source.
-            if ([fm removeItemAtURL:file error:nil])
-                [fm removeItemAtURL:[directory URLByAppendingPathComponent:@"Download.plist"] error:nil];
-        }
-        close(fd);
-    }
+    [VIMInstallerFiles retireCompletedDownloads:files.allValues];
 }
 + (NSDictionary<NSString *, NSURL *> *)retainedInstallerForGuest:(NSString *)guest library:(NSURL *)library {
     if (![NSUserDefaults.standardUserDefaults boolForKey:@"VIMKeepInstallers"])
         return @{};
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSURL *root = [VIMLibraryLocation installersURLForMachines:library].URLByResolvingSymlinksInPath;
-    NSArray *attempts =
-        [[fm contentsOfDirectoryAtURL:root includingPropertiesForKeys:nil options:0
-                                 error:nil] sortedArrayUsingComparator:^NSComparisonResult(NSURL *a, NSURL *b) {
-          NSDate *ad = nil, *bd = nil;
-          [a getResourceValue:&ad forKey:NSURLContentModificationDateKey error:nil];
-          [b getResourceValue:&bd forKey:NSURLContentModificationDateKey error:nil];
-          return [bd compare:ad];
-        }];
-    NSMutableDictionary *found = [NSMutableDictionary new];
-    for (NSURL *attempt in attempts) {
-        if (![[NSUUID alloc] initWithUUIDString:attempt.lastPathComponent] || !UnlinkedDirectory(attempt))
-            continue;
-        NSURL *mediaDir = [attempt URLByAppendingPathComponent:@"Media"];
-        NSDictionary *media =
-            [NSDictionary dictionaryWithContentsOfURL:[mediaDir URLByAppendingPathComponent:@"Media.plist"]];
-        NSString *mediaName = [VIMPreparationRecords retainedImageNameInRecord:media guest:guest];
-        if (!found[@"Media"] && mediaName) {
-            NSURL *url = [mediaDir URLByAppendingPathComponent:mediaName];
-            struct stat st;
-            if (UnlinkedDirectory(mediaDir) && !lstat(url.fileSystemRepresentation, &st) && S_ISREG(st.st_mode) &&
-                st.st_size > 0 && st.st_size == [media[@"Size"] longLongValue])
-                found[@"Media"] = url;
-        }
-        NSURL *assembly = [attempt URLByAppendingPathComponent:@"Assembly"];
-        NSDictionary *record =
-            [NSDictionary dictionaryWithContentsOfURL:[assembly URLByAppendingPathComponent:@"Assembly.plist"]];
-        NSString *name = [VIMPreparationRecords installerNameInRecord:record guest:guest];
-        if (!found[@"SourceInstaller"] && name) {
-            NSURL *url = [assembly URLByAppendingPathComponent:name];
-            if (UnlinkedDirectory(assembly) && UnlinkedDirectory(url) &&
-                [self validateInstallerApplication:url guest:guest error:nil])
-                found[@"SourceInstaller"] = url;
-        }
-        if (found.count == 2)
-            break;
-    }
-    return found;
+    return [VIMInstallerFiles
+        retainedInstallerIn:[VIMLibraryLocation installersURLForMachines:library].URLByResolvingSymlinksInPath
+                      guest:guest];
 }
 + (NSString *)guestForInstallerApplication:(NSURL *)URL error:(NSError **)error {
     if (RegularFile(URL) && ![URL.pathExtension.lowercaseString isEqual:@"app"]) {
@@ -538,104 +421,33 @@ static bool HFSExtractionProgress(uint64_t completed, uint64_t total, void *cont
                    error:error] &&
            [self perform:[VIMToolInvocation verifySignatureOfApplication:automatic.path] error:error];
 }
-// No shell, package scripts, privileged installer invocation, or output pipes.
-// Logs stay in the job; a child producing much output cannot deadlock its parent.
 - (BOOL)perform:(VIMToolInvocation *)command error:(NSError **)error {
-    NSString *path = command.path;
-    BOOL cleanup = command.isCleanup;
-    if (self.cancelled && !cleanup)
+    if (self.cancelled && !command.isCleanup)
         return AssemblyError(error, VIMAssemblyFailureCancelledWithDownloadsRetained);
-    NSURL *log = [self.job
-        URLByAppendingPathComponent:[NSString stringWithFormat:@"%02lu-%@.log", ++self.step, path.lastPathComponent]];
+    NSURL *log = [self.job URLByAppendingPathComponent:[NSString stringWithFormat:@"%02lu-%@.log", ++self.step,
+                                                                                  command.path.lastPathComponent]];
     self.lastLog = log;
-    int fd = open(log.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
-    if (fd < 0)
-        return AssemblyError(error, VIMAssemblyFailureCannotCreateLog);
-    NSFileHandle *output = [[NSFileHandle alloc] initWithFileDescriptor:fd closeOnDealloc:YES];
-    NSTask *task = [NSTask new];
-    task.executableURL = [NSURL fileURLWithPath:path];
-    if (command.workingDirectory)
-        task.currentDirectoryURL = [NSURL fileURLWithPath:command.workingDirectory];
-    task.arguments = command.launchArguments;
-    BOOL percentOutput = command.reportsPercent;
-    NSMutableDictionary *environment = [NSProcessInfo.processInfo.environment mutableCopy];
-    environment[@"LC_ALL"] = @"C";
-    environment[@"LANG"] = @"C";
-    task.environment = environment;
-    task.standardOutput = output;
-    task.standardError = output;
-    task.standardInput = NSFileHandle.fileHandleWithNullDevice;
-    dispatch_semaphore_t ended = dispatch_semaphore_create(0);
-    task.terminationHandler = ^(NSTask *finished) {
-      dispatch_semaphore_signal(ended);
-    };
-    if (![task launchAndReturnError:error])
-        return NO;
-    NSTimeInterval start = NSProcessInfo.processInfo.systemUptime;
-    double begin = self.workFraction, end = MAX(begin, self.workEnd);
-    NSString *timingKey = [VIMToolProgress timingKeyForGuest:self.progressGuest stage:self.stage invocation:command];
-    double learned = [NSUserDefaults.standardUserDefaults doubleForKey:timingKey];
-    double estimate = learned > 0 ? learned : MAX(1, self.workEstimate);
-    NSFileHandle *reader = percentOutput ? [NSFileHandle fileHandleForReadingFromURL:log error:nil] : nil;
-    NSMutableData *pending = [NSMutableData data];
-    double toolFraction = -1;
-    NSTimeInterval lastUpdate = 0;
-    BOOL interrupted = NO;
-    while (dispatch_semaphore_wait(ended, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC))) {
-        NSTimeInterval elapsed = NSProcessInfo.processInfo.systemUptime - start;
-        if (end > begin && elapsed - lastUpdate >= .5) {
-            lastUpdate = elapsed;
-            if (reader) {
-                [pending appendData:[reader readDataOfLength:65536]];
-                NSString *lines = [[NSString alloc] initWithData:pending encoding:NSUTF8StringEncoding];
-                NSRange newline = [lines rangeOfString:@"\n" options:NSBackwardsSearch];
-                if (newline.location != NSNotFound) {
-                    NSString *complete = [lines substringToIndex:newline.location + 1];
-                    toolFraction = [VIMToolProgress reportedFractionInLines:complete after:toolFraction];
-                    NSUInteger consumed = [complete lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-                    [pending replaceBytesInRange:NSMakeRange(0, consumed) withBytes:NULL length:0];
-                }
-            }
-            double fraction = [VIMToolProgress fractionWithReported:toolFraction elapsed:elapsed estimate:estimate];
-            [self completedWork:begin + (end - begin) * fraction];
-            double operationRemaining = [VIMToolProgress secondsRemainingWithReported:toolFraction
-                                                                              elapsed:elapsed
-                                                                             estimate:estimate];
-            double seconds = operationRemaining + (1 - end) * 240;
-            if (self.timeRemaining)
-                dispatch_async(dispatch_get_main_queue(), ^{
-                  if (self.timeRemaining)
-                      self.timeRemaining(seconds);
-                });
+    double begin = self.workFraction;
+    return [VIMToolRun runInvocation:command
+        log:log
+        begin:begin
+        end:MAX(begin, self.workEnd)
+        estimate:self.workEstimate
+        timingKey:[VIMToolProgress timingKeyForGuest:self.progressGuest stage:self.stage invocation:command]
+        isCancelled:^BOOL {
+          return self.cancelled;
         }
-        if ((self.cancelled && !cleanup) || NSProcessInfo.processInfo.systemUptime - start > command.timeout) {
-            interrupted = YES;
-            [task terminate];
-            if (dispatch_semaphore_wait(ended, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC))) {
-                if (task.running)
-                    kill(task.processIdentifier, SIGKILL);
-                [task waitUntilExit];
-            }
-            break;
+        completedWork:^(double fraction) {
+          [self completedWork:fraction];
         }
-    }
-    [reader closeFile];
-    [output closeFile];
-    if (interrupted)
-        return AssemblyError(error, VIMAssemblyFailureTimedOutOrCancelled);
-    if (task.terminationStatus == 0) {
-        if (end > begin) {
-            double duration = NSProcessInfo.processInfo.systemUptime - start;
-            [NSUserDefaults.standardUserDefaults setDouble:[VIMToolProgress learnedDurationAfter:learned
-                                                                                        measured:duration]
-                                                    forKey:timingKey];
-            [self completedWork:end];
+        timeRemaining:^(NSTimeInterval seconds) {
+          if (self.timeRemaining)
+              dispatch_async(dispatch_get_main_queue(), ^{
+                if (self.timeRemaining)
+                    self.timeRemaining(seconds);
+              });
         }
-        return YES;
-    }
-    if (error)
-        *error = [VIMToolProgress toolFailureWithStatus:task.terminationStatus log:log.path];
-    return NO;
+        error:error];
 }
 - (NSURL *)assembleClassicDiskImage:(NSURL *)image
                               guest:(NSString *)guest

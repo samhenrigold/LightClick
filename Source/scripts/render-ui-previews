@@ -9,14 +9,11 @@ mkdir -p "$source_dir/Build/UIReview"
   -fobjc-arc -fmodules -Wno-incomplete-implementation -mmacosx-version-min=15.0 \
   -I "$source_dir/VirtualIntelMac" \
   "$source_dir/tools/ui-previews.m" \
-  "$source_dir/VirtualIntelMac/AppDelegate.m" \
   "$source_dir/VirtualIntelMac/VIMUpdateChecker.m" \
-  "$source_dir/VirtualIntelMac/VIMLibraryViewController.m" \
   "$source_dir/VirtualIntelMac/VIMSettingsIcon.m" \
   "$source_dir/VirtualIntelMac/VIMDiscImage.m" \
   "$source_dir/VirtualIntelMac/VIMMachine.m" \
   "$source_dir/VirtualIntelMac/VIMFirmwareBoot.m" \
-  "$source_dir/VirtualIntelMac/VIMLibraryLocation.m" \
   "$source_dir/VirtualIntelMac/VIMNetworkDefaults.m" \
   "$source_dir/VirtualIntelMac/VIMInstallerAssembly.m" \
   "$source_dir/VirtualIntelMac/VIMHostSupport.m" \
@@ -26,9 +23,6 @@ mkdir -p "$source_dir/Build/UIReview"
   "$source_dir/VirtualIntelMac/VIMPlayButton.m" \
   "$source_dir/VirtualIntelMac/VIMMetalView.m" \
   "$source_dir/VirtualIntelMac/VIMDisplayConnection.m" \
-  "$source_dir/VirtualIntelMac/VIMGuestPreparation.m" \
-  "$source_dir/VirtualIntelMac/VIMGuestInstallation.m" \
-  "$source_dir/VirtualIntelMac/VIMGuestProgress.m" \
   -framework Cocoa -framework AVFoundation -framework UniformTypeIdentifiers \
   -framework Metal -framework QuartzCore -o "$source_dir/Build/ui-previews"
 "$source_dir/Build/ui-previews" "$source_dir" "$source_dir/Build/UIReview"

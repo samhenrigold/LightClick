@@ -52,9 +52,17 @@ public final class SeamlessDesktop {
     private let logHandle: FileHandle?
     private let began = CFAbsoluteTimeGetCurrent()
     private var saidFirstWindow = false
+    private var saidReplaced = false
+    private var prearming = false
+    private var prearmStopped = false
+    private static var prearmers: [String: (desktop: SeamlessDesktop, work: Task<Void, Never>)] = [:]
     private let environment = ProcessInfo.processInfo.environment
     private static var staged: Set<String> = []
+    private static var hooked: Set<String> = []
     private static var described: [String: GuestApp] = [:]
+    private lazy var savedDescriptions: [String: GuestApp] =
+        (try? JSONDecoder().decode([String: GuestApp].self, from: Data(contentsOf: descriptionsFile))) ?? [:]
+    private var descriptionsFile: URL { configuration.bundles.appending(path: "apps.json") }
     private static var preparing: [String: Task<Bool, Never>] = [:]
 
     public static let leaveTitle = "Show in Light Click Window"
@@ -82,9 +90,22 @@ public final class SeamlessDesktop {
 
     public func windowPixelsChanged(_ id: UInt32) {
         for session in sessions.values { session.windowPixelsChanged(id) }
+        if !saidReplaced, hasReplacedDisplay {
+            saidReplaced = true
+            note("# every window has its pixels")
+            windowsChanged?(windowCount)
+        }
     }
 
     public var windowCount: Int { sessions.values.reduce(0) { $0 + $1.windowCount } }
+    private var appsInFirstList: Set<String>?
+
+    /// Whether every app with windows when this started has them on the host with their own pixels, so the machine's window can go
+    /// with nothing lost. Asked each time something arrives.
+    public var hasReplacedDisplay: Bool {
+        guard let appsInFirstList, !appsInFirstList.isEmpty else { return false }
+        return appsInFirstList.allSatisfy { sessions[$0].map { $0.windowCount > 0 && $0.allWindowsHavePixels } ?? false }
+    }
 
     public func start() {
         signal(SIGPIPE, SIG_IGN)
@@ -114,11 +135,17 @@ public final class SeamlessDesktop {
         for session in sessions.values {
             session.frameArrived(surface: current, bytes: nil, width: width, height: height, stride: stride)
         }
+        if !saidReplaced, hasReplacedDisplay {
+            saidReplaced = true
+            note("# every window has its pixels")
+            windowsChanged?(windowCount)
+        }
     }
 
     // MARK: The guest's side
 
     private func runInGuest() async {
+        await Self.stopPrearming(machine: configuration.machine.path)
         let ready = await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path)
         note("# tools in the guest")
         if stopped { return }
@@ -126,26 +153,71 @@ public final class SeamlessDesktop {
             finish("This Mac isn’t ready yet. Wait for it to finish starting, then try again.")
             return
         }
-        var ownSurfaces = false
-        if pixelSource != nil {
-            let injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
-            note("# hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)\(injected.failure ?? "")")
-            ownSurfaces = injected.exitCode == 0
-            if stopped { return }
-        }
         var ran = SeamlessGuestRun(exitCode: nil, output: "", failure: nil)
-        // On Mavericks the agent's connection can drop just after setup, under whatever runs next. Nothing's reached the user yet.
-        for attempt in 1...4 {
-            ran = await guest.run(
-                "/usr/bin/env",
-                ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--port", String(port), "--menu-tool", "/tmp/sg/ig"]
-                    + (ownSurfaces ? ["--own-surfaces"] : []))
-            if stopped || ran.exitCode != nil || control >= 0 || attempt == 4 { break }
-            note("# trying again: \(ran.failure ?? "")")
-            try? await Task.sleep(for: .seconds(3))
+        // In one request, as each costs about a second on Mavericks. Dropping just after setup, on Mavericks, means asking again:
+        // the script never tries the hook twice in a guest's start, and nothing's reached the user yet.
+        for attempt in 1...8 {
+            ran = await guest.run("/bin/sh", ["-c", Self.pressScript, "sh", String(port)])
+            if stopped || control >= 0 || attempt == 8 { break }
+            if ran.exitCode == Self.noTools {
+                // The guest has restarted since they went in.
+                Self.staged.remove(configuration.machine.path)
+                Self.hooked.remove(configuration.machine.path)
+                guard await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path) else { break }
+            } else if ran.exitCode != nil {
+                break
+            } else {
+                note("# trying again: \(ran.failure ?? "")")
+                try? await Task.sleep(for: .seconds(3))
+            }
         }
         note("# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")")
         finish(ran.exitCode == 3 ? "This Mac couldn’t reach Light Click. Seamless needs its networking on." : nil, why: "the guest's side ended")
+    }
+
+    public static func isPrepared(machine: String) -> Bool { staged.contains(machine) }
+
+    /// Everything a press would otherwise wait for, while the machine's just running: the programs and the hook in the guest, and a
+    /// proxy for each app with windows. Nothing shows, and nothing's changed until a press turns it on.
+    public func prearm() async {
+        let machine = configuration.machine.path
+        let work = Task { await prearmWork() }
+        Self.prearmers[machine] = (self, work)
+        await work.value
+        if Self.prearmers[machine]?.desktop === self { Self.prearmers[machine] = nil }
+    }
+
+    /// The guest's agent serves one connection, and pre-arming's stays open for up to a minute: a press in that time had each of its
+    /// tries ended. So a press stops it and waits.
+    private static func stopPrearming(machine: String) async {
+        guard let running = prearmers[machine] else { return }
+        running.desktop.prearmStopped = true
+        running.desktop.endPrearming()
+        await running.work.value
+    }
+
+    private func prearmWork() async {
+        guard await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path) else { return }
+        if !Self.hooked.contains(configuration.machine.path) {
+            let injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
+            note("# pre-armed: hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)")
+            // Exits but for a dropped connection are answers, and it never tries twice in a guest's start.
+            if injected.exitCode != nil { Self.hooked.insert(configuration.machine.path) }
+        }
+        // Over the same connection as a press, as an icon's megabytes through the agent stop it answering for minutes.
+        guard !prearmStopped, listen() else { return }
+        prearming = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(60))
+            self?.endPrearming()
+        }
+        _ = await guest.run(
+            "/usr/bin/env",
+            ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--list-only", "--port", String(port), "--menu-tool", "/tmp/sg/ig"])
+    }
+
+    private func endPrearming() {
+        if control >= 0 { shutdown(control, SHUT_RDWR) }
     }
 
     /// Puts the programs in the guest, once for each of its starts, and sooner than a press if the app wants that to be quick.
@@ -153,16 +225,16 @@ public final class SeamlessDesktop {
         if let running = preparing[machine] { return await running.value }
         let task = Task<Bool, Never> { @MainActor in
             defer { preparing[machine] = nil }
-            // The folder goes with the guest's next start, and the tools with this app's next build.
-            let present = await guest.run("/bin/sh", ["-c", "test -x /tmp/sg/g && test -x /tmp/sg/ig"]).exitCode == 0
-            if present, staged.contains(machine) { return true }
+            // A guest that's restarted since says so when they're run.
+            if staged.contains(machine) { return true }
             guard let tool = await guest.stage(tools.appending(path: "seamless-guest")),
                 let menuTool = await guest.stage(tools.appending(path: "seamless-integration-guest"))
             else { return false }
             // Mavericks has been seen to drop the agent's connection during this and be set up regardless. Without Accessibility there are only no menus.
             _ = await guest.run("/bin/sh", ["-c", SeamlessSession.setupScript, "sh", tool, menuTool])
             // On Mojave, ready for a press to load into WindowServer.
-            if await guest.run("/usr/bin/uname", ["-r"]).output.hasPrefix("18."),
+            let release = await guest.run("/usr/bin/uname", ["-r"]).output
+            if release.hasPrefix("18.") || release.hasPrefix("13."),
                 let hook = await guest.stage(tools.appending(path: "seamless-ws-hook.dylib")),
                 let injector = await guest.stage(tools.appending(path: "seamless-ws-inject"))
             {
@@ -176,16 +248,24 @@ public final class SeamlessDesktop {
         return await task.value
     }
 
+    private static let noTools = 126
+
     /// Loads the hook into the running WindowServer, so each window comes on a surface of its own. If this goes wrong WindowServer
     /// dies and logs the user out, so it's only for the one build it's been run on, is tried once per guest start and is never
     /// retried, whatever happened. Exit 0 means the hook's in this WindowServer; anything else leaves the display's frames.
     private static let injectScript = """
-        [ "$(/usr/bin/uname -r | /usr/bin/cut -d. -f1)" = 18 ] || exit 3
-        [ "$(/usr/bin/sw_vers -buildVersion)" = 18G103 ] || exit 3
+        case "$(/usr/bin/sw_vers -buildVersion)" in 18G103|13F34) ;; *) exit 3;; esac
         [ -x /tmp/sg/ws-inject ] && [ -f /tmp/sg/hook.dylib ] || exit 3
-        /usr/bin/grep -q seamless-ws-hook /System/Library/LaunchDaemons/com.apple.WindowServer.plist && exit 3
-        pid=$(/usr/bin/pgrep -x WindowServer); [ -n "$pid" ] || exit 3
+        # Earlier builds loaded it through WindowServer's launchd job. That one's in this WindowServer, and patching twice isn't safe, so
+        # the entry goes now and windows have their surfaces from the guest's next start.
         boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed 's/.*sec = \\([0-9]*\\).*/\\1/')
+        plist=/System/Library/LaunchDaemons/com.apple.WindowServer.plist
+        if /usr/bin/grep -q seamless-ws-hook $plist; then
+            /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables:DYLD_INSERT_LIBRARIES" $plist
+            echo "$boot" > /var/tmp/seamless-ws-plist-removed
+        fi
+        [ "$(/bin/cat /var/tmp/seamless-ws-plist-removed 2>/dev/null)" = "$boot" ] && exit 3
+        pid=$(/usr/bin/pgrep -x WindowServer); [ -n "$pid" ] || exit 3
         marker=/var/tmp/seamless-ws-press
         said=$(/bin/cat $marker 2>/dev/null)
         [ "$said" = "$boot $pid ok" ] && exit 0
@@ -197,6 +277,16 @@ public final class SeamlessDesktop {
         /tmp/sg/ws-inject /usr/lib/seamless-ws-hook.dylib 2>&1 || exit 6
         [ "$(/usr/bin/pgrep -x WindowServer)" = "$pid" ] || exit 7
         echo "$boot $pid ok" > $marker
+        """
+
+    private static let pressScript = """
+        [ -x /tmp/sg/g ] && [ -x /tmp/sg/ig ] || exit \(noTools)
+        ( \(injectScript)
+        )
+        hooked=$?
+        echo "# hook into WindowServer: exit $hooked"
+        own=; [ $hooked = 0 ] && own=--own-surfaces
+        exec /usr/bin/env SEAMLESS_RUN_IN_PLACE=1 /tmp/sg/g leap --port "$1" --menu-tool /tmp/sg/ig $own
         """
 
     private func listen() -> Bool {
@@ -221,6 +311,8 @@ public final class SeamlessDesktop {
             DispatchQueue.main.sync {
                 MainActor.assumeIsolated {
                     self?.control = client
+                    if self?.prearmStopped == true { shutdown(client, SHUT_RDWR) }
+                    self?.note("# the guest's program connected")
                     if self?.stopped ?? true { shutdown(client, SHUT_RDWR) }
                 }
             }
@@ -257,12 +349,22 @@ public final class SeamlessDesktop {
         case "apps":
             // Each after that is a name and its bundle, front first.
             let apps = stride(from: 1, to: fields.count - 1, by: 2).map { (name: fields[$0], path: fields[$0 + 1]) }
+            if prearming {
+                let unknown = apps.filter { savedDescriptions[$0.path] == nil }
+                if unknown.isEmpty, describing.isEmpty { endPrearming() }
+                for app in unknown where !describing.contains(app.path) {
+                    describing.insert(app.path)
+                    tell("describe\t\(app.path)")
+                }
+                return
+            }
+            if appsInFirstList == nil { appsInFirstList = Set(apps.map(\.path)) }
             for app in apps where sessions[app.path] == nil && !describing.contains(app.path) {
                 note("# apps says \(app.name)")
                 describing.insert(app.path)
                 names[app.path] = app.name
                 // Reading an app starts programs in the guest, which is slow. It's the same app next time.
-                if let known = Self.described[app.path] {
+                if let known = Self.described[app.path] ?? savedDescriptions[app.path] {
                     Task { await open(known, icon: nil) }
                 } else {
                     tell("describe\t\(app.path)")
@@ -294,6 +396,16 @@ public final class SeamlessDesktop {
             }
             note("# described \(path)")
             Self.described[path] = app
+            savedDescriptions[path] = app
+            try? JSONEncoder().encode(savedDescriptions).write(to: descriptionsFile)
+            if prearming {
+                Task {
+                    _ = await proxyFor(app, icon: icon)
+                    describing.remove(path)
+                    note("# pre-armed \(path)")
+                }
+                return
+            }
             Task { await open(app, icon: icon) }
         default:
             break
@@ -307,7 +419,8 @@ public final class SeamlessDesktop {
 
     // MARK: One guest app
 
-    private func open(_ app: GuestApp, icon: Data?) async {
+    /// The proxy for an app, made if need be, and the socket it looks for its session on.
+    private func proxyFor(_ app: GuestApp, icon: Data?) async -> (bundle: URL?, socket: String) {
         let proxy = ProxyBundle(
             app: app,
             machine: .init(identifier: configuration.machine.identifier, name: configuration.machine.name, path: ""))
@@ -325,8 +438,10 @@ public final class SeamlessDesktop {
             let built = (try? configuration.proxyExecutable.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate?.timeIntervalSince1970 ?? 0
             let folder = configuration.bundles.appending(path: String(Int(built)))
-            if !FileManager.default.fileExists(atPath: folder.path) {
-                try? FileManager.default.removeItem(at: configuration.bundles)
+            if !FileManager.default.fileExists(atPath: folder.path),
+                let old = try? FileManager.default.contentsOfDirectory(at: configuration.bundles, includingPropertiesForKeys: nil)
+            {
+                for item in old where item != descriptionsFile { try? FileManager.default.removeItem(at: item) }
             }
             let existing = folder.appending(path: proxy.bundleName)
             if FileManager.default.fileExists(atPath: existing.appending(path: "Contents/Info.plist").path) {
@@ -344,6 +459,11 @@ public final class SeamlessDesktop {
                 }.value
             }
         }
+        return (bundle, socketPath)
+    }
+
+    private func open(_ app: GuestApp, icon: Data?) async {
+        let (bundle, socketPath) = await proxyFor(app, icon: icon)
         describing.remove(app.guestPath)
         guard !stopped, let bundle, sessions[app.guestPath] == nil else {
             if bundle == nil { note("# couldn't make a proxy for \(app.name)") }

@@ -33,6 +33,10 @@ public protocol SeamlessPixelSource: AnyObject {
     /// `window` is the guest's window number. The surface holds it with real alpha, from `surfaceOrigin` on the guest's display,
     /// and can be bigger than it.
     func surface(forWindow window: UInt32) -> IOSurfaceRef?
+    /// Where it starts on the guest's display, in its pixels, if the surface itself says. Otherwise the guest's tool does, in points.
+    func surfaceOrigin(forWindow window: UInt32) -> (x: Int32, y: Int32)?
+    /// Whether windows are coming this way now, which leaves the display's frames with nothing current in them.
+    var hasSurfaces: Bool { get }
 }
 
 /// One guest app as a host app. Listens for its proxy and for the tool it starts in the guest, shows each of the guest's
@@ -66,10 +70,14 @@ public final class SeamlessSession {
         var pieces: [CALayer] = []
         /// Where the user dragged it to, relative to the guest's window, once they have. The guest's window stays put.
         var hostOffset: NSPoint?
+        /// Where the guest was asked to put this window after a move on the host, until it says. The proxy stays still through that.
+        var placing: (host: NSPoint, until: CFAbsoluteTime)?
+        var placeTask: Task<Void, Never>?
         /// Where its own surface starts on the guest's display, with its shadow, once the guest has said.
         var surfaceOrigin: (x: Int32, y: Int32)?
         var ownSurfaceLayer: CALayer?
         var guestCovers: [CGRect]?
+        var materials: [GuestMaterial] = []
         init(window: SessionWire.Window, context: NSObject, layer: CALayer) {
             self.window = window
             self.context = context
@@ -92,6 +100,13 @@ public final class SeamlessSession {
     public var drivesGuest = true
     public var guestPort: UInt16 { port }
     public var windowCount: Int { surfaces.count }
+    /// Whether each window has what it'll show: its own surface when those are coming, or else a display frame.
+    public var allWindowsHavePixels: Bool {
+        surfaces.values.allSatisfy { surface in
+            if pixelSource?.hasSurfaces ?? false { return pixelSource?.surface(forWindow: surface.window.id) != nil }
+            return frame != nil && surface.cropped
+        }
+    }
     /// A menu item and Dock menu item with this title calls `onLeave`, rather than going to the guest, and so does asking the proxy to quit.
     public var leaveTitle: String?
     public var onLeave: (() -> Void)?
@@ -102,6 +117,8 @@ public final class SeamlessSession {
     private var appGone = false
     private var stopped = false
     private var activateWhenConnected = false
+    private var fullScreenOffset: NSPoint?
+    /// Where windows that have gone were dragged to, by title: a window comes back from full screen with a new number.
     private var lastMenu: [GuestMenuItem]?
     private var nextDocument: UInt32 = 0
     private var documentPaths: [UInt32: String] = [:]
@@ -122,7 +139,8 @@ public final class SeamlessSession {
     public var distinctFrames: (() -> Int)?
     private var testStarted = false
     private let placeholderFrame: (surface: IOSurfaceRef, width: Int, height: Int)? = IOSurfaceCreate(
-        [kIOSurfaceWidth: 1, kIOSurfaceHeight: 1, kIOSurfaceBytesPerElement: 4, kIOSurfacePixelFormat: 0x4247_5241] as CFDictionary
+        [kIOSurfaceWidth: 1, kIOSurfaceHeight: 1, kIOSurfaceBytesPerElement: 4, kIOSurfacePixelFormat: 0x4247_5241]
+            as CFDictionary
     ).map { ($0, 1, 1) }
 
     public init(configuration: Configuration, guest: any SeamlessGuest, finished: @escaping () -> Void) {
@@ -133,9 +151,14 @@ public final class SeamlessSession {
 
     public func start() {
         signal(SIGPIPE, SIG_IGN)
-        FileManager.default.createFile(
-            atPath: configuration.log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        // A desktop's session for an app can start many times, and each keeps what the one before said.
+        if !drivesGuest, FileManager.default.fileExists(atPath: configuration.log.path) {
+        } else {
+            FileManager.default.createFile(
+                atPath: configuration.log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
         logHandle = try? FileHandle(forWritingTo: configuration.log)
+        _ = try? logHandle?.seekToEnd()
         guard listenForGuest(), listenForProxy() else {
             note("ERROR couldn't listen")
             finished()
@@ -247,7 +270,8 @@ public final class SeamlessSession {
         return
             "mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp \"$1\" /tmp/sg/g; cp \"$2\" /tmp/sg/ig; chmod 755 /tmp/sg/g /tmp/sg/ig; "
             + "/usr/bin/sqlite3 \"/Library/Application Support/com.apple.TCC/TCC.db\" \"\(rows.joined())\(agentRow)\" 2>&1; "
-            + "/bin/ps -o comm= -p $PPID; /usr/bin/killall tccd; sleep 2"
+            // After this script has answered, since the agent has been seen to stop answering for minutes if tccd goes under it.
+            + "/bin/ps -o comm= -p $PPID; (sleep 1; /usr/bin/killall tccd) </dev/null >/dev/null 2>&1 &"
     }
 
     private func listenForGuest() -> Bool {
@@ -402,10 +426,32 @@ public final class SeamlessSession {
         case .covers(let id, let rects):
             surfaces[id]?.guestCovers = rects
             if let surface = surfaces[id] { showCrops(of: [surface]) }
+        case .successor(let id, let next):
+            note("# window \(id) is now \(next)")
+            guard let surface = surfaces.removeValue(forKey: id) else { return }
+            // Told after a new window's first tick, whose proxy goes in favour of this one.
+            if let arrived = surfaces[next] {
+                surface.window = arrived.window
+                proxy?.send(SessionCommand.removeSurface(id: Int(next)))
+            }
+            surfaces[next] = surface
+            proxy?.send(SessionCommand.renameSurface(id: Int(id), to: Int(next)))
+            if surface.window.id == next { tellProxy(surface) }
+        case .fullScreen(let id, let on):
+            note("# window \(id) \(on ? "in" : "out of") full screen")
+            setFullScreen(on, window: surfaces[id]?.window)
+            proxy?.send(SessionCommand.fullScreenSurface(id: Int(id), fullScreen: on))
+        case .materials(let id, let rows):
+            surfaces[id]?.materials = rows
+            proxy?.send(SessionCommand.setMaterials(id: Int(id), rows))
+        case .minimized(let id, let minimized):
+            note("# window \(id) \(minimized ? "minimized" : "back")")
+            proxy?.send(SessionCommand.minimizeSurface(id: Int(id), minimized: minimized))
         case .surfaceOrigin(let id, let x, let y):
             surfaces[id]?.surfaceOrigin = (x, y)
             if let surface = surfaces[id] { showCrops(of: [surface]) }
         case .gone(let id):
+            note("# window \(id) gone")
             surfaces[id] = nil
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
             onWindowsChanged?()
@@ -451,6 +497,12 @@ public final class SeamlessSession {
             guard let made = makeSurface(window) else { return }
             surface = made
             surfaces[window.id] = made
+        }
+        if let placing = surface.placing, window.x != surface.window.x || window.y != surface.window.y {
+            surface.placing = nil
+            if CFAbsoluteTimeGetCurrent() < placing.until {
+                surface.hostOffset = NSPoint(x: placing.host.x - Double(window.x), y: placing.host.y - Double(window.y))
+            }
         }
         surface.window = window
         tellProxy(surface)
@@ -511,22 +563,60 @@ public final class SeamlessSession {
         return Surface(window: window, context: context, layer: layer)
     }
 
+    /// All of this app's windows centred on the host's screen, as the guest's display is, the guest's size being what it is.
+    /// shortcut: not growing the guest's display to the host's, which Mavericks' can't go past 2560x1600 for, until there's a way to do
+    /// that for one window with the others where they were. So a host screen shows it at the guest's size, with black around.
+    private func setFullScreen(_ on: Bool, window: SessionWire.Window?) {
+        if on, let window, let screen = NSScreen.main?.frame {
+            fullScreenOffset = NSPoint(
+                x: (screen.width - Double(window.width)) / 2 - Double(window.x),
+                y: (screen.height - Double(window.y) - Double(window.height)) / 2)
+        } else {
+            fullScreenOffset = nil
+        }
+        for surface in surfaces.values { tellProxy(surface) }
+    }
+
+    /// Where the guest's display's corner is on the host, top down: the main screen's, with its menu bar taking the place of the guest's.
+    private static var guestDisplayOrigin: NSPoint {
+        guard let main = NSScreen.main else { return .zero }
+        let primary = NSScreen.screens.first?.frame.height ?? main.frame.height
+        return NSPoint(
+            x: main.frame.minX, y: primary - main.frame.maxY + max(0, main.frame.maxY - main.visibleFrame.maxY - 22))
+    }
+
+    /// So what depends on the guest's idea of its place comes out right: where a menu flips, zoom, and clipping at its display's edges.
+    /// Waits for the drag to stop. The guest's side keeps it on its display whole.
+    private func placeInGuest(_ surface: Surface, host: NSPoint) {
+        surface.placeTask?.cancel()
+        surface.placeTask = Task { [weak self, weak surface] in
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled, let self, let surface, surface.window.level == 0, self.fullScreenOffset == nil
+            else { return }
+            let origin = Self.guestDisplayOrigin
+            let window = surface.window
+            let x = host.x - origin.x
+            let y = host.y - origin.y
+            guard Int32(x) != window.x || Int32(y) != window.y else { return }
+            surface.placing = (host, CFAbsoluteTimeGetCurrent() + 1)
+            self.sendToGuest(SessionWire.setPlace(window: window.id, x: Int32(x), y: Int32(y)))
+        }
+    }
+
     private func tellProxy(_ surface: Surface) {
         let window = surface.window
         let primary = NSScreen.screens.first?.frame.height ?? 0
         if guestOffset == nil {
-            // Keeps this first window's guest position on the host's screen, near the middle.
-            let screen = NSScreen.main?.visibleFrame ?? .zero
-            guestOffset = NSPoint(
-                x: screen.midX - (Double(window.x) + Double(window.width) / 2),
-                y: primary - screen.midY - (Double(window.y) + Double(window.height) / 2))
+            guestOffset = Self.guestDisplayOrigin
         }
         // What pops up from a window goes where that window has been dragged.
         let parent = surfaces.values.filter { $0.hostOffset != nil && $0.window.group == window.group }
             .min { $0.window.order < $1.window.order }
         let front = surfaces.values.filter { $0.hostOffset != nil && !$0.overlay && !$0.window.title.isEmpty }
             .min { $0.window.order < $1.window.order }
-        let offset = surface.hostOffset ?? parent?.hostOffset ?? (surface.overlay ? front?.hostOffset : nil) ?? guestOffset ?? .zero
+        let offset =
+            fullScreenOffset ?? surface.hostOffset ?? parent?.hostOffset ?? (surface.overlay ? front?.hostOffset : nil)
+            ?? guestOffset ?? .zero
         let side = Double(window.margin)
         let width = Double(window.width) + 2 * side
         let height = Double(window.height) + 2 * side
@@ -552,7 +642,8 @@ public final class SeamlessSession {
     /// One frame of the guest's display, as windowed mode gets it. Everything shows the same surface, each through its own crop.
     public func frameArrived(surface: IOSurfaceRef?, bytes: UnsafeRawPointer?, width: Int, height: Int, stride: Int) {
         arrived += 1
-        guard usesDisplayFrames, let current = surface ?? copies.copy(bytes, width: width, height: height, stride: stride)
+        guard usesDisplayFrames,
+            let current = surface ?? copies.copy(bytes, width: width, height: height, stride: stride)
         else { return }
         frame = (current, width, height)
         guard !surfaces.isEmpty else { return }
@@ -596,7 +687,12 @@ public final class SeamlessSession {
         let layer = surface.layer
         if let own = pixelSource?.surface(forWindow: window.id) {
             // Until the guest says, at its window's place, which is right but for any shadow: with the display off, this is all there is.
-            let origin = surface.surfaceOrigin ?? (window.x, window.y)
+            var originX = Double(surface.surfaceOrigin?.x ?? window.x)
+            var originY = Double(surface.surfaceOrigin?.y ?? window.y)
+            if let pixels = pixelSource?.surfaceOrigin(forWindow: window.id) {
+                originX = Double(pixels.x) / scale
+                originY = Double(pixels.y) / scale
+            }
             setPieces(of: surface, to: [], from: own, place: place, height: whole.height)
             layer.mask = nil
             layer.contents = nil
@@ -610,27 +706,42 @@ public final class SeamlessSession {
                 layer.addSublayer(sublayer)
                 surface.ownSurfaceLayer = sublayer
             }
-            let size = CGSize(width: Double(IOSurfaceGetWidth(own)) / scale, height: Double(IOSurfaceGetHeight(own)) / scale)
-            let top = Double(origin.y) - (Double(window.y) - side)
+            let size = CGSize(
+                width: Double(IOSurfaceGetWidth(own)) / scale, height: Double(IOSurfaceGetHeight(own)) / scale)
+            let top = originY - (Double(window.y) - side)
             sublayer.frame = CGRect(
-                x: Double(origin.x) - (Double(window.x) - side), y: whole.height - top - size.height,
+                x: originX - (Double(window.x) - side), y: whole.height - top - size.height,
                 width: size.width, height: size.height)
             sublayer.contents = own
             sublayer.perform(NSSelectorFromString("setContentsChanged"))
             return
         }
-        surface.ownSurfaceLayer?.removeFromSuperlayer()
-        surface.ownSurfaceLayer = nil
+        if !(pixelSource?.hasSurfaces ?? false) {
+            surface.ownSurfaceLayer?.removeFromSuperlayer()
+            surface.ownSurfaceLayer = nil
+        }
+        // Until its first one comes, this window has nothing of its own. What's in the frame could be anyone's.
+        if pixelSource?.hasSurfaces ?? false {
+            setPieces(of: surface, to: [], from: frame.surface, place: place, height: whole.height)
+            layer.contents = nil
+            layer.mask = nil
+            return
+        }
         // One guest pixel to one host pixel takes none of its neighbours' at the edges.
         let filter: CALayerContentsFilter = scale == (NSScreen.main?.backingScaleFactor ?? 0) ? .nearest : .linear
         layer.magnificationFilter = filter
         layer.minificationFilter = filter
         // In this window's terms. When the guest says, it's every app's; otherwise a session only knows its own app's windows.
-        let covers = (surface.guestCovers ?? surfaces.values.filter {
-            $0.window.order < window.order && $0.window.level == 0 && !$0.window.title.isEmpty && $0.window.group != window.group
-        }.map {
-            CGRect(x: Double($0.window.x), y: Double($0.window.y), width: Double($0.window.width), height: Double($0.window.height))
-        }).map { $0.offsetBy(dx: side - Double(window.x), dy: side - Double(window.y)) }
+        let covers =
+            (surface.guestCovers
+            ?? surfaces.values.filter {
+                $0.window.order < window.order && $0.window.level == 0 && !$0.window.title.isEmpty
+                    && $0.window.group != window.group
+            }.map {
+                CGRect(
+                    x: Double($0.window.x), y: Double($0.window.y), width: Double($0.window.width),
+                    height: Double($0.window.height))
+            }).map { $0.offsetBy(dx: side - Double(window.x), dy: side - Double(window.y)) }
         let visible = surface.overlay ? [whole] : SeamlessSession.uncovered(whole, by: covers)
         if visible == [whole] {
             layer.contents = frame.surface
@@ -694,7 +805,6 @@ public final class SeamlessSession {
         }
     }
 
-
     // MARK: The proxy's side
 
     private func listenForProxy() -> Bool {
@@ -738,7 +848,12 @@ public final class SeamlessSession {
         }
         socket.start()
         proxy = socket
-        for surface in surfaces.values { tellProxy(surface) }
+        for surface in surfaces.values {
+            tellProxy(surface)
+            if !surface.materials.isEmpty {
+                socket.send(SessionCommand.setMaterials(id: Int(surface.window.id), surface.materials))
+            }
+        }
         if let lastMenu { socket.send(SessionCommand.setMenuBar(lastMenu)) }
         if let leaveTitle { socket.send(SessionCommand.setDockMenu([GuestMenuItem(title: leaveTitle)])) }
         if activateWhenConnected {
@@ -758,11 +873,17 @@ public final class SeamlessSession {
             if let id = surfaces.values.min(by: { $0.window.order < $1.window.order })?.window.id {
                 sendToGuest(SessionWire.value(.focus, id))
             }
+        case .surfaceLeftFullScreen(let id):
+            setFullScreen(false, window: nil)
+            sendToGuest(SessionWire.setFullScreen(window: UInt32(clamping: id), false))
+        case .surfaceMinimized(let id, let minimized):
+            sendToGuest(SessionWire.setMinimized(window: UInt32(clamping: id), minimized))
         case .surfaceMoved(let id, let x, let y):
             guard let surface = surfaces[UInt32(clamping: id)] else { return }
             let side = Double(surface.window.margin)
             surface.hostOffset = NSPoint(x: x + side - Double(surface.window.x), y: y + side - Double(surface.window.y))
             tellProxy(surface)
+            placeInGuest(surface, host: NSPoint(x: x + side, y: y + side))
         case .menuChosen(let path, _) where path.last == leaveTitle && leaveTitle != nil: onLeave?()
         case .menuChosen(let path, _): sendToGuest(SessionWire.text(.menuPress, path.joined(separator: "/")))
         case .openDocuments(let paths): for path in paths { sendDocument(path, flags: 0) }

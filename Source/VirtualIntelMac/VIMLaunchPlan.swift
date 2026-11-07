@@ -151,6 +151,7 @@ public final class LaunchPlan: NSObject {
             network += ",hostfwd=tcp:127.0.0.1:\((config["ScreenSharingPort"] as? NSNumber)?.intValue ?? 0)-:5900"
         }
         if input.networkMode != "shared" { network = "socket,id=net0,fd=0" }
+        else if ProcessInfo.processInfo.environment["LC_NETWORK_OFF"] == "1" { network += ",restrict=on" } // test boots on a metered connection
 
         var cpu = "Penryn,vendor=GenuineIntel,+sse4.2,+popcnt,+aes,+pclmulqdq,+pcid"
         // Use one virtual timestamp rate on ARM. At the default 1 GHz, early
@@ -464,7 +465,10 @@ public final class LaunchPlan: NSObject {
 
     private static func environment(_ input: LaunchInput, _ guest: Guest) -> [String: String] {
         var options = MachineOptions(configuration: input.configuration)
-        if !input.appleSilicon { options.engine = nil }
+        // hvdbt_want_engine stops QEMU past 8 vCPUs, which Settings says means Software.
+        let cpuCount = (input.configuration["CPUCount"] as? NSNumber)?.intValue ?? 0
+        if !input.appleSilicon || cpuCount > 8 { options.engine = nil }
+        if !input.appleSilicon { options.meltdownProtection = nil }
         if let library = input.inprocessOpenGLLibrary {
             options.passthroughOpenGLInprocessLibrary = library
             options.passthroughOpenGLInline = true

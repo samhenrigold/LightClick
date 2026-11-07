@@ -359,7 +359,7 @@ Launches gain less than that: summed over Mojave's apps, 20.2 s cold before and 
 
 ### A long session
 
-`probes/soak.sh`, 4 vCPUs on a clone: 3 to 6 applications at a time opened and closed, i386 included, Safari's JIT at work, memory past the guest's 8 GB every eighth cycle, and arithmetic, file and memory contents checked throughout.
+`probes/long-run.sh`, 4 vCPUs on a clone: 3 to 6 applications at a time opened and closed, i386 included, Safari's JIT at work, memory past the guest's 8 GB every eighth cycle, and arithmetic, file and memory contents checked throughout.
 
 Boots with the `sti` shadow fixed, except where noted:
 
@@ -374,9 +374,15 @@ Boots with the `sti` shadow fixed, except where noted:
 | Mojave, 2000 s | control connection ended at 1149 s, guest still running | no output | not read |
 | Mojave, 2000 s | ran out | 7288, 0 | 2822, 56, 101 |
 
-Three of six long Mojave boots ended early. The user stopped some of the long soaks themselves, because of the load on their laptop, so these can't be read as engine failures: the QEMU exit and the lost connection probably, the reset possibly. Before the `sti` fix, 5 of 8 Mojave boots wedged within minutes, which is an engine failure, seen in the event ring.
+Three of six long Mojave boots ended early. The user stopped some of the long runs themselves, because of the load on their laptop, so these can't be read as engine failures: the QEMU exit and the lost connection probably, the reset possibly. Before the `sti` fix, 5 of 8 Mojave boots wedged within minutes, which is an engine failure, seen in the event ring.
 
-A guest reset did happen in a normal short boot, 15.7 s after hand-off, with one vCPU parked in `cpu_signal_handler`. QEMU's log of it gave a reset on vCPU 2, but its register dump is the last fallback's, not the moment's, and NVRAM has no panic text. QEMU now looks for panic text in RAM at a reset. Cause unknown.
+A guest reset did happen in a normal short boot, 15.7 s after hand-off, with one vCPU parked in `cpu_signal_handler`. QEMU's log of it gave a reset on vCPU 2, but its register dump is the last fallback's, not the moment's, and NVRAM has no panic text. QEMU now looks for panic text in RAM at a reset. That boot's cause is unknown.
+
+**The GPU helper's death.** A loop of killing a GPU client and opening it again on Mojave kills `apple-gfx-helper` about once a boot under the engine, and didn't in 18 launches in one TCG boot, whose launches are three times slower. The framework throws on something a command or a display update refers to: a render pipeline, a texture, a page, or a bad command header. The throw itself then crashes under Rosetta: the unwinder calls a personality that isn't one, as the donor framework was taken from another system's dyld cache. Why a command refers to something missing isn't known. A guest stream gone wrong and a dying client's half-written work both fit.
+
+The helper's death then panicked the guest about one boot in six: QEMU's reads returned all ones, which the driver read as every display pending. Those reads now return 0, and QEMU sends `PVG_HELPER_LOST`, on which the app offers a restart. In the loop before: 1 panic in about 6 boots, of which 3 with 0. After: 0 in 5, the event in the 3 boots that could send it, and the guest alive but with a frozen display, so `open` and window lists hang. This protects the guest. It doesn't save the GPU.
+
+Tried in the helper and dropped: answering a failed lookup with nil moves the throw to the decoder a little later. Repairing the personalities in `__unwind_info` didn't reach the crash, and one boot on that build never got to its desktop.
 
 **Memory.** RSS and `phys_footprint` of 17 to 18 GB with an 8 GB guest are mostly counting: a test VM touching 2 GB the host had touched raised both, in step, and left host free memory alone. vmmap's regions came to 8.6 to 9.4 GB from 300 s to 1300 s, of which guest RAM is 7.7 GB, in a boot where only about 170 MB was malloc. TCG, with no stage 2, shows 9.1 GB in both counts. No memory kill was in the host's log.
 
@@ -414,7 +420,21 @@ Those hot rows above 1 were noise: 0.2 s slices, one run, with Rosetta not niced
 
 So about 5% behind Rosetta on Mavericks and up to 10% on Mojave, whose first rounds, at 1 vCPU, also carry what's left of its boot. The guest's clock isn't slow: its 110.6 s total against the host's 106.5 s between the first and last 2 s timeline rows in those loops, which can miss 4 s. `alu`'s loop is 29 ARM words for 29 x86 instructions with no flags kept, and `branchy` keeps flags only for the `andl` before its indirect call, as a call makes all of them live. Rosetta's code wasn't read: `/var/db/oah` isn't readable.
 
-Hot code is close to parity, so code generation isn't where a launch goes. What's slow is crossing into the kernel, faults, and code seen for the first time. Rosetta's kernel is the host's, so those rows also compare kernels. Mojave's crossings cost about twice Mavericks' or more: it changes page tables at each. Its kernel reads `IA32_ARCH_CAPABILITIES` only in what look like its MDS paths, so this search found no way to tell it not to.
+Hot code is close to parity, so code generation isn't where a launch goes. What's slow is crossing into the kernel, faults, and code seen for the first time. Rosetta's kernel is the host's, so those rows also compare kernels. Mojave's crossings cost about twice Mavericks' or more: it changes page tables at each. Its kernel reads `IA32_ARCH_CAPABILITIES` only in what look like its MDS paths, and `-no_shared_cr3` only asks for more isolation, so no CPUID bit or boot argument was found to turn this off.
+
+**Skipping XNU's Meltdown switch.** Every way out of the kernel does `mov %gs:0x138, %rax; mov %rax, %cr3`, and every way in does the same from `%gs:0x140`: small tables for the process, full ones for the kernel. A process can't read kernel pages on either, as they aren't user pages, so the translator emits nothing for the first and, for the second, a `cr3` write only if the tables differ, which TCG can bring about. These exact sequences at CPL 0 are the only match, so another kernel simply doesn't get the benefit. `LC_HVDBT_KEEP_KPTI=1` turns it off. It takes Meltdown protection away from the guest, which has no secrets from itself here and runs on hardware without the bug.
+
+The best of 40 s of short slices, Mojave, 2 vCPUs, on a busy host, so read the pair with like `alu`:
+
+| ns | keeping, three boots | skipping, two boots | best keeping | best skipping |
+|---|---|---|---|---|
+| alu | 3.3, 3.1, 2.2 | 2.6, 2.1 | 2.2 | 2.1 |
+| syscall | 694, 670, 458 | 260, 198 | 458 | 198 |
+| page fault | 4843, 6452, 3086 | 3398, 2921 | 3086 | 2921 |
+| pipe round trip | 19,178, 24,624, 11,883 | 16,422, 10,119 | 11,883 | 10,119 |
+| fork and wait, ms | 4.0, 5.6, 1.48 | 1.69, 1.56 | 1.48 | 1.56 |
+
+`cr3` writes in a boot go from 2.4M to 10M down to about 170,000. Rosetta in the same test, niced, on a host as busy: `alu` 3.1, syscall 278, page fault 1352, pipe 6862.
 
 Making every flag live, `LC_HVDBT_ALL_FLAGS=1`, costs `alu` 5%, `branchy` 2%, and adds 4% to the code, with no visible effect on launches in one boot of each. In a launch profile no hot function stands out: `cache_fill` is 75 of 916 user samples. So no code generation work was done.
 
@@ -437,7 +457,9 @@ What's left at N=4 is mostly still the monitor lock: about 1.1 cores waiting on 
 
 Tried and dropped: doing a table store's TLB invalidates after letting go of the lock. The time held for table stores stayed at 14 to 16 s and rates didn't move, so it's the number of stores, at about a microsecond each, and not the invalidates. A second kernel pin for the crossing between a process's tables and the kernel's is in, with no clean measurement.
 
-Not tried, and the next things to try: not taking the lock for a store to a slot no shadow holds, which needs fills to look again; or filling the shadow at the store, so that a new page costs one trip rather than two.
+Filling the shadow at the store, for the page the process last faulted on, so that a new page costs one trip rather than two, was tried and dropped. It fired 20,000 times a second on the first vCPU, and page faults, best of 40 s, alternating, 2 vCPUs: Mojave 2649, 2563, 3045 ns without it, 3016, 3101, 2876 ns with it; Mavericks 1460, 1695 without, 1377, 1593 with. A retried fault is evidently not what a page costs. Mavericks' page fault at 1377 to 1695 is near Rosetta's 1352, so most of Mojave's gap is something else: its kernel's own path, more mirrors, or both.
+
+Not tried: not taking the lock for a store to a slot no shadow holds, which needs fills to look again.
 
 ### mmap_touch again
 

@@ -68,6 +68,9 @@ import Testing
         for engine: PropertyListValue in ["off", "on"] { #expect(valid(.executionEngine, engine)) }
         #expect(!valid(.executionEngine, "On"))
         #expect(!valid(.executionEngine, 1))
+        for protection: PropertyListValue in ["off", "on"] { #expect(valid(.meltdownProtection, protection)) }
+        #expect(!valid(.meltdownProtection, "On"))
+        #expect(!valid(.meltdownProtection, 1))
     }
 
     @Test func textIsBoundedInUTF16Units() {
@@ -433,15 +436,20 @@ import Testing
                 "AudioEnabled",
                 "Description", "RetinaEnabled", "OpticalMedia", "NetworkConnected", "MACAddress", "DisplayMode",
                 "AudioOutputDevice", "AudioInputDevice", "ClipboardEnabled", "NetworkMode", "BridgeInterface",
-                "DisplayScalingFilter", "AdditionalMedia", "ScreenSharingEnabled", "ScreenSharingPort"
+                "DisplayScalingFilter", "AdditionalMedia", "ScreenSharingEnabled", "ScreenSharingPort",
+                "ExecutionEngine", "MeltdownProtection"
             ])
     }
 
-    @Test func theEngineCanOnlyBeSetInTheFileItself() throws {
+    @Test func theEngineChoicesWaitLikeOtherSettings() throws {
         let base = Fixture.configuration
-        #expect(pending(["ExecutionEngine": "on"]).editable(from: base).executionEngine == base.executionEngine)
-        #expect(throws: MachineConfigurationError.queuedUnsupportedSetting) {
-            try pending(["ExecutionEngine": "on"]).applied(to: base)
+        let edit = pending(["ExecutionEngine": "on", "MeltdownProtection": "on"])
+        #expect(edit.editable(from: base).executionEngine == .on)
+        let applied = try edit.applied(to: base)
+        #expect(applied.executionEngine == .on)
+        #expect(applied.meltdownProtection == .on)
+        #expect(throws: MachineConfigurationError.invalidSettings) {
+            try pending(["MeltdownProtection": "maybe"]).applied(to: base)
         }
     }
 

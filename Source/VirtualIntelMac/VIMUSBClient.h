@@ -1,5 +1,5 @@
 #import <Foundation/Foundation.h>
-@class VIMQMPConnection;
+// `control` is a VIMQMPConnection, which Swift knows under another name.
 @interface VIMUSBClient : NSObject
 @property BOOL useUSB2Storage;
 + (void)authorizeUsingTerminalWithCompletion:(void (^)(NSError *error))completion;
@@ -10,11 +10,9 @@
 - (void)connectDevice:(NSDictionary *)device
             processID:(pid_t)pid
             directory:(NSString *)directory
-              control:(VIMQMPConnection *)control
+              control:(id)control
            completion:(void (^)(NSError *error))completion;
-- (void)disconnectDevice:(NSString *)identifier
-                 control:(VIMQMPConnection *)control
-              completion:(void (^)(NSError *error))completion;
-- (void)deviceWasDeleted:(NSString *)identifier control:(VIMQMPConnection *)control;
+- (void)disconnectDevice:(NSString *)identifier control:(id)control completion:(void (^)(NSError *error))completion;
+- (void)deviceWasDeleted:(NSString *)identifier control:(id)control;
 - (void)stop;
 @end

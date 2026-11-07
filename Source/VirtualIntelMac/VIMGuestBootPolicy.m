@@ -1,6 +1,7 @@
 #import "VIMGuestBootPolicy.h"
 #import "VIMGuestProfile.h"
 #import "VIMGuestAgent.h"
+#import "MachineKit-Swift.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -44,31 +45,8 @@ static BOOL SavePolicy(NSDictionary *record, NSURL *file, NSError **error) {
 @property(copy) void (^completion)(BOOL, NSError *);
 @end
 @implementation VIMGuestBootPolicy
-+ (NSString *)verifierAtURL:(NSURL *)journal
-                      guest:(NSString *)guest
-                 identifier:(NSString *)identifier
-                     volume:(NSString *)volume {
-    NSDictionary *state = [NSDictionary dictionaryWithContentsOfURL:journal];
-    if (![self readyAtURL:journal guest:guest identifier:identifier] || ![state[@"VolumeUUID"] isEqual:volume])
-        return nil;
-    return [state[@"GuestDirectory"] stringByAppendingPathComponent:@"guest-install"];
-}
 + (BOOL)readyAtURL:(NSURL *)journal guest:(NSString *)guest identifier:(NSString *)identifier {
-    NSDictionary *state = [NSDictionary dictionaryWithContentsOfURL:journal], *result = state[@"Result"];
-    NSDictionary *observed =
-        [NSDictionary dictionaryWithContentsOfURL:[journal.URLByDeletingLastPathComponent
-                                                      URLByAppendingPathComponent:@"GuestStatus.plist"]][@"Report"];
-    if (![state isKindOfClass:NSDictionary.class] || ![result isKindOfClass:NSDictionary.class] ||
-        ![observed isKindOfClass:NSDictionary.class])
-        return NO;
-    return [state[@"FormatVersion"] isEqual:@1] && [state[@"MachineIdentifier"] isEqual:identifier] &&
-           [state[@"Guest"] isEqual:guest] && [state[@"Phase"] isEqual:@"ready"] &&
-           [state[@"DispatchAttempted"] isEqual:@YES] && GuestDirectory(state[@"GuestDirectory"]) &&
-           [observed[@"Guest"] isEqual:guest] && [observed[@"VolumeUUID"] isEqual:state[@"VolumeUUID"]] &&
-           [result[@"PreferenceVerified"] isEqual:@YES] && [result[@"TaskForPIDRestrictionDisabled"] isEqual:@YES] &&
-           [result[@"VolumeUUID"] isEqual:state[@"VolumeUUID"]] &&
-           [state[@"VolumeUUID"] isKindOfClass:NSString.class] && [state[@"VolumeUUID"] length] > 0 &&
-           [result[@"Guest"] isEqual:guest] && [result[@"ProtocolVersion"] isEqual:@1];
+    return [VIMMachineModel bootPolicyReadyAtURL:journal guest:guest identifier:identifier];
 }
 + (void)prepareWithAgent:(VIMGuestAgent *)agent
                   report:(NSDictionary *)report

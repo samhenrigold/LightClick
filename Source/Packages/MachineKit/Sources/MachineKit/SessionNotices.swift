@@ -11,6 +11,8 @@ public enum QMPEventKind: Int, Sendable {
     /// The guest opened a drive's tray, which ejects what's in it.
     case trayOpened
     case deviceDeleted
+    /// The process doing the paravirtual GPU's work has gone. The guest runs on with no display updates.
+    case graphicsLost
 }
 
 @objc(VIMQMPEvent)
@@ -34,6 +36,7 @@ public final class QMPEvent: NSObject {
         case "SHUTDOWN": kind = .shutdown
         case "WAKEUP": kind = .wakeup
         case "DEVICE_DELETED": kind = .deviceDeleted
+        case "PVG_HELPER_LOST": kind = .graphicsLost
         case "DEVICE_TRAY_MOVED": kind = data?["tray-open"] as? NSNumber == true as NSNumber ? .trayOpened : .other
         default: kind = .other
         }

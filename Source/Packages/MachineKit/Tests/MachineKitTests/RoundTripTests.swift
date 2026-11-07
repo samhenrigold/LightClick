@@ -98,6 +98,7 @@ import Testing
         #expect(c.legacyDisplayAdapter == .vmware)
         #expect(c.legacyGDBPort == 1234)
         #expect(c.executionEngine == .on)
+        #expect(c.meltdownProtection == .on)
         #expect(!c.passthroughOpenGLEnabled)
     }
 

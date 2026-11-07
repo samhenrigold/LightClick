@@ -560,6 +560,10 @@ symbol and branch validation, and `PVGMetalCompat` runs inside WindowServer [rea
 4. **Hand that surface to the host** without a CPU copy (below).
 5. **Headless:** skip the framebuffer composite with `WSDisplayUpdatesAreDisabled` or by returning early once all windows are delivered.
 
+### Moving windows with the Dock's transform: for guests with no hook
+
+`probes/seamless-atlas/` (a library for the Dock, what injects it, and a control tool; a Mojave experiment, kept as the only hook-free option) calls `SLSSetWindowTransform` from inside the Dock. It moves windows whole and live: 60 frames/s at 7680x4320, no visible CPU cost, and hit testing follows each window to its tile. **But alpha fails:** a display can't erase damage without an opaque desktop, so shadow alpha builds up to near-opaque. So it could only replace cropping, as opaque windows with host shadows. Menus and sheets have to stay at their logical place, with the pointer mapped per window, and `mouseLocation` stays wrong for a tiled window with no fix. A black band once showed after a mode switch: set the mode first, then the transforms. Its first check is Mavericks, and whichever later guests lack a hook.
+
 ### A CA plug-in layer may need no hook
 
 `com.apple.WindowServer.CGSWindow` is a CA plug-in type [read]. A client layer of that type shows a live window, wherever it's placed, whether covered or not; WindowServer composites it

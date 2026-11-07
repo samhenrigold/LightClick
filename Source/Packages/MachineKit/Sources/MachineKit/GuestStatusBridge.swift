@@ -235,19 +235,9 @@ public final class GuestStatusPolicyBridge: NSObject {
     public var needsUpdateRepairCheck: Bool { policy.needsUpdateRepairCheck }
     public var mayClaimUpdateRepair: Bool { policy.mayClaimUpdateRepair }
     public var mayBeginRepair: Bool { policy.mayBeginRepair }
-    public var nextReconciliationAttempt: Int { policy.nextReconciliationAttempt }
     public var mayBeginPreparation: Bool { policy.mayBeginPreparation }
     public var needsDesktopServices: Bool { policy.needsDesktopServices }
     public var refreshInterval: TimeInterval { policy.refreshInterval }
-
-    @objc(followUpAfterInstallation:requiresInstallerDisplay:)
-    public func followUpAfterInstallation(outcome: Any?, requiresInstallerDisplay: Bool) -> InstallationFollowUp {
-        let values = outcome as? [String: Any]
-        return policy.followUpAfterInstallation(
-            outcomePhase: values?["Phase"] as? String,
-            rebootRequired: values?["RebootRequired"] as? Bool ?? false,
-            requiresInstallerDisplay: requiresInstallerDisplay)
-    }
 
     @objc(guestAddressesReplacing:macAddress:isUsable:)
     public func guestAddresses(

@@ -1,10 +1,10 @@
 #!/bin/sh
 # A long session: applications opened and closed in numbers, i386 ones too, a JIT at work, memory pressure, and checks for wrong results and stalls throughout.
-# For boot-matrix's program=, with limit= past SOAK_SECONDS. Exits nonzero on a wrong result or an application that never got a window.
-SOAK_SECONDS=2400
+# For boot-matrix's program=, with limit= past LONG_RUN_SECONDS. Exits nonzero on a wrong result or an application that never got a window.
+LONG_RUN_SECONDS=2400
 sleep 10
 u=$(stat -f%Su /dev/console); id=$(id -u "$u")
-cat > /tmp/soak-check.py <<'EOF'
+cat > /tmp/long-run-check.py <<'EOF'
 # The same answer every time, on either architecture, from arithmetic, hashing and compression.
 import hashlib, struct, sys, zlib
 out, h, x = [], hashlib.sha256(), 0x123456789
@@ -17,8 +17,8 @@ for i in range(8):
     h.update(data)
 print(h.hexdigest() + " %.6f" % sum(float(j) ** 0.5 for j in range(2000)))
 EOF
-cat > /tmp/soak.html <<'EOF'
-<title>soak</title><canvas id=c width=600 height=400></canvas><script>
+cat > /tmp/long-run.html <<'EOF'
+<title>long run</title><canvas id=c width=600 height=400></canvas><script>
 // Keeps the JIT compiling and discarding: new functions all the time, each hot for a moment.
 var g = document.getElementById("c").getContext("2d"), n = 0;
 function step() {
@@ -31,10 +31,10 @@ function step() {
 step();
 </script>
 EOF
-cat > /tmp/soak.py <<EOF
+cat > /tmp/long-run.py <<EOF
 import mmap, os, random, subprocess, sys, threading, time
 import Quartz
-SOAK = $SOAK_SECONDS
+LONG_RUN = $LONG_RUN_SECONDS
 PLACES = {"Keynote": "/Applications/iWork '09/Keynote.app", "QuickTime Player": "/Applications/QuickTime Player.app"}
 CANDIDATES = ["Calculator", "TextEdit", "Notes", "Maps", "Safari", "System Preferences", "Keynote", "Contacts", "Calendar", "Dictionary", "Chess", "Stickies", "Font Book"]
 DEVNULL = open(os.devnull, "w")
@@ -49,7 +49,7 @@ def say(text):
 def path_of(app):
     return PLACES.get(app, "/Applications/%s.app" % app)
 def done():
-    return time.time() - start > SOAK
+    return time.time() - start > LONG_RUN
 
 def heartbeat():
     last = time.time()
@@ -63,7 +63,7 @@ def heartbeat():
 def checker(arch):
     expected, runs = None, 0
     while not done():
-        p = subprocess.Popen(["/usr/bin/arch", "-" + arch, "/usr/bin/python", "/tmp/soak-check.py"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        p = subprocess.Popen(["/usr/bin/arch", "-" + arch, "/usr/bin/python", "/tmp/long-run-check.py"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         got = p.communicate()[0].strip()
         runs += 1
         if p.returncode:
@@ -83,13 +83,13 @@ def checker(arch):
 def file_check():
     block, runs = os.urandom(1 << 20), 0
     while not done():
-        with open("/tmp/soak.data", "wb") as f:
+        with open("/tmp/long-run.data", "wb") as f:
             for i in range(128):
                 f.write(block)
             f.flush()
             os.fsync(f.fileno())
         time.sleep(60)
-        with open("/tmp/soak.data", "rb") as f:
+        with open("/tmp/long-run.data", "rb") as f:
             for i in range(128):
                 if f.read(1 << 20) != block:
                     wrong.append("file")
@@ -136,7 +136,14 @@ def has_window(app):
     return False
 def launch(app):
     t = time.time()
-    subprocess.call(["/usr/bin/open", "-a", path_of(app)])
+    for attempt in (1, 2):
+        p = subprocess.Popen(["/usr/bin/open", "-a", path_of(app)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = p.communicate()[0]
+        # -600: the application just killed is still going away. Only open's own failure gets a second try, never a missing window.
+        if not p.returncode or "-600" not in out or attempt == 2:
+            break
+        say("RETRY %s after open failed with -600" % app)
+        time.sleep(3)
     while time.time() - t < 60:
         if has_window(app):
             return time.time() - t
@@ -180,7 +187,7 @@ while not done():
             if took > 15:
                 say("SLOW %s %.1f s%s" % (app, took, " under pressure" if press and press.is_alive() else ""))
     if "Safari" in chosen:
-        subprocess.call(["/usr/bin/open", "-a", path_of("Safari"), "/tmp/soak.html"])
+        subprocess.call(["/usr/bin/open", "-a", path_of("Safari"), "/tmp/long-run.html"])
     time.sleep(random.uniform(1, 20))
     for app in chosen:
         if not quit_app(app):
@@ -197,7 +204,7 @@ for app in sorted(times):
 say("SUMMARY cycles %d, no window %d, killed %d, wrong %d" % (cycle, len(nowindow), stuck, len(wrong)))
 sys.exit(1 if wrong or nowindow else 0)
 EOF
-chmod 644 /tmp/soak.py /tmp/soak-check.py /tmp/soak.html
+chmod 644 /tmp/long-run.py /tmp/long-run-check.py /tmp/long-run.html
 case "$(sw_vers -productVersion)" in
   10.9*|10.8*|10.7*|10.6*)
     cat > /tmp/join-session.py <<'EOF'
@@ -215,7 +222,7 @@ if libc.audit_session_port(token[6], ctypes.byref(session)) == -1 or libc.audit_
 libc.task_set_special_port(me, TASK_BOOTSTRAP_PORT, bootstrap)
 os.execv(sys.argv[1], sys.argv[1:])
 EOF
-    /usr/bin/python /tmp/join-session.py /usr/bin/sudo -u "$u" /usr/bin/python /tmp/soak.py </dev/null 2>&1
+    /usr/bin/python /tmp/join-session.py /usr/bin/sudo -u "$u" /usr/bin/python /tmp/long-run.py </dev/null 2>&1
     ;;
-  *) /bin/launchctl asuser "$id" /usr/bin/sudo -u "$u" /usr/bin/python /tmp/soak.py </dev/null 2>&1 ;;
+  *) /bin/launchctl asuser "$id" /usr/bin/sudo -u "$u" /usr/bin/python /tmp/long-run.py </dev/null 2>&1 ;;
 esac

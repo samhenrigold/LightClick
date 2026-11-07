@@ -395,11 +395,13 @@ def windowed(seconds):
     print(f'windowed_distinct {(last.get("Distinct", 0) - first.get("Distinct", 0)) / spent:.1f} /s', flush=True)
 
 
-def desktop():
+def desktop(activation_only=False):
     # The Seamless button, on a running machine: press, the apps' windows appear and the machine's goes, a click reaches one, press,
     # and the machine's window is back.
+    for old in results.glob(f'{tag}-*.png'):
+        old.unlink()
     guest = stage(guest_tool)
-    for app in ('TextEdit', 'Safari'):
+    for app in ('Finder', 'TextEdit', 'Safari') if version_is_mojave() else ('TextEdit', 'Safari'):
         run(guest, ['open-app', '--app', app])
     time.sleep(12)
     listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
@@ -429,8 +431,17 @@ def desktop():
         match = re.search(r'pid=(\d+)', found)
         return int(match.group(1)) if match else 0
 
-    mojave = version_is_mojave()
+    for _ in range(240):
+        state = request({'Action': 'seamless-state'}, 60)
+        if state.get('Prepared') or 'Prepared' not in state:
+            break
+        time.sleep(1)
+    # A second TextEdit window, in front of the first, for a press that only the host can tell apart.
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', 'echo second > /tmp/seamless-second.txt; chmod 644 /tmp/seamless-second.txt; '
+                                                    '/tmp/sg/ig open-file --session --path /tmp/seamless-second.txt --with TextEdit']}, 120)
+    time.sleep(70)
     print('before the press', request({'Action': 'seamless-state'}, 60), flush=True)
+    print('the agent before the press:', request({'Executable': '/usr/bin/uname', 'Arguments': ['-r']}, 60), flush=True)
     print(next(iter(rows()), ''), flush=True)
     pressed = time.time()
     request({'Action': 'seamless-toggle'}, 60)
@@ -445,15 +456,93 @@ def desktop():
     for row in windows:
         print(row[:150], flush=True)
     check('windows appear for each app', len(windows) >= 2)
+    if not windows:
+        print('guest frame', capture(f'{tag}-no-windows.png'), flush=True)
+        print('the agent after no windows:', request({'Executable': '/bin/sh', 'Arguments': ['-c', '/bin/cat /var/tmp/seamless-ws-press; /bin/ls -l /var/tmp /usr/lib/seamless-ws-hook.dylib; /usr/bin/pgrep -x WindowServer; /bin/ps -axo pid,etime,command | /usr/bin/grep -E "/tmp/sg|agent" | /usr/bin/head -20; /usr/bin/tail -30 /var/log/system.log']}, 120), flush=True)
     for _ in range(3):
         print('settling', time.time() - pressed, [row[-30:] for row in proxy_windows()], flush=True)
         time.sleep(1)
+    windows = proxy_windows()
     check('the machine window hides', not machine_window())
-    if mojave:
-        check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
+    check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
+    if activation_only:
+        # Using only what any build has: another app's window clicked, then whether the animating page keeps moving.
+        page = next((re.search(r'id=(\d+)', row).group(1) for row in proxy_windows() if 'Seamless page' in row), None)
+
+        def page_moving(when):
+            said = subprocess.run([meter, page or '0', '5'], capture_output=True, text=True).stdout.strip()
+            print(when, said, flush=True)
+            found = re.search(r'presented ([0-9.]+)', said)
+            return float(found.group(1)) if found else 0
+        if not proxy_pid('TextEdit') or not proxy_pid('Safari'):
+            print('guest frame', capture(f'{tag}-no-windows.png'), flush=True)
+            check('there are windows to test', False)
+            return
+        before = page_moving('before')
+        time.sleep(1)
+        os.kill(proxy_pid('TextEdit'), signal.SIGUSR1)
+        time.sleep(3)
+        after = page_moving('with the other app active')
+        os.kill(proxy_pid('Safari'), signal.SIGUSR1)
+        time.sleep(7)
+        back = page_moving('with the page clicked again')
+        print('OwnSurfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'), flush=True)
+        check('the page moves before another app activates', before >= 30)
+        check('and while it is active', after >= 30)
+        check('and when it comes back', back >= 30)
+        return
+    # Two windows of one app overlapping in the guest and apart on the host: a press on the lower one is for it, not what's over it.
+    lower = next((re.search(r'id=(\d+)', row).group(1) for row in proxy_windows() if 'seamless-note' in row), None)
+    textedit_pid = next((int(re.search(r'pid=(\d+)', row).group(1)) for row in proxy_windows() if 'seamless-note' in row), 0)
+    if lower and textedit_pid:
+        command = results/f'{tag}-clicks.txt.command'
+        report_file = results/f'{tag}-clicks.txt.command.report'
+
+        def tell(what, wait=1.5):
+            command.write_text(what)
+            os.kill(textedit_pid, signal.SIGUSR2)
+            time.sleep(wait)
+
+        def report():
+            # Front first: title, the proxy's place on the host, and what's added to the guest's place to get it.
+            report_file.unlink(missing_ok=True)
+            tell('report', 0.5)
+            rows_said = [row.split('\t') for row in report_file.read_text().splitlines()]
+            return [(row[0], *map(float, row[1:])) for row in rows_said]
+
+        # The windows overlap in the guest: the same place on the lower one gets the upper one, without the raise.
+        tell('click-title seamless-second')
+        tell('click-no-raise-title seamless-note')
+        without = report()[0][0]
+        tell('click-title seamless-note')
+        raised = report()[0][0]
+        print('front after a press on the covered window: without raising', without, 'and with', raised, flush=True)
+        check('without the raise, that press goes to what covers it in the guest', without.startswith('seamless-second'))
+        check('a press on a window that\'s covered in the guest reaches it', raised.startswith('seamless-note'))
+        # Moved on the host, the guest's own idea follows, and nothing shows that on the host.
+        tell('click-title seamless-second')
+        start = next(row for row in report() if row[0].startswith('seamless-note'))
+        tell('move-title seamless-note', 0)
+        moved = None
+        for _ in range(2):
+            time.sleep(1)
+            after = next(row for row in report() if row[0].startswith('seamless-note'))
+            moved = moved or after
+        guest_at = lambda row: (row[1] - row[3], row[2] - row[4])
+        print('placed in the guest: from', guest_at(start), 'to', guest_at(after), 'on the host', after[1:3], flush=True)
+        check('moved on the host, it stays where it was put', moved[1:3] == after[1:3] and after[1:3] != start[1:3])
+        check('and the guest moves it too', guest_at(after) != guest_at(start))
+    else:
+        check('a press on a window that\'s covered in the guest reaches it', False)
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
-        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-{window}.png')])
+        subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-desktop-{window}.png')], capture_output=True)
+    # What the surfaces hold, against what's just been read from the proxies.
+    held = results/f'{tag}-surfaces'
+    shutil.rmtree(held, ignore_errors=True)
+    held.mkdir()
+    request({'Action': 'seamless-save-surfaces', 'Directory': str(held)}, 60)
+    print('surfaces saved', sorted(path.name for path in held.iterdir()), flush=True)
     clicks = results/f'{tag}-clicks.txt'
     safari = proxy_pid('Safari')
     window = next((re.search(r'id=(\d+)', row).group(1) for row in windows if 'Safari' in row), None)
@@ -475,8 +564,9 @@ def desktop():
     for _ in range(4):
         print('bounds', time.time() - pressed, next((row[-40:] for row in rows() if f'id={window} ' in row), ''), flush=True)
         time.sleep(2)
+    framed = request({'Action': 'seamless-state'}, 60).get('SurfaceFrames', 0)
     moving = subprocess.run([meter, window or '0', '8'], capture_output=True, text=True).stdout
-    print('moving', moving, flush=True)
+    print('moving', moving, 'frames from QEMU/s', (request({'Action': 'seamless-state'}, 60).get('SurfaceFrames', 0) - framed) / 8, flush=True)
     rate = re.search(r'presented ([0-9.]+)', moving)
     check('the window shows its page moving', rate is not None and float(rate.group(1)) >= 30)
     # Moved on the host, past where the machine's window was: the guest's doesn't follow, it still moves, and a click still lands.
@@ -493,7 +583,7 @@ def desktop():
         after = place(window)
         print('moved from', before, 'to', after, flush=True)
         check('a window moves on the host', before is not None and after is not None and before != after)
-        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-desktop-moved.png')])
+        subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-desktop-moved.png')], capture_output=True)
         clicks.write_text('')
         timing = subprocess.Popen([meter, window, '5', '--clicks', str(clicks)], stdout=subprocess.PIPE, text=True)
         for _ in range(4):
@@ -518,16 +608,76 @@ def desktop():
         time.sleep(1.5)
         for name, wanted in (('safari', window), ('textedit', other)):
             if wanted:
-                subprocess.run(['screencapture', '-x', '-o', '-l', wanted, str(results/f'{tag}-apart-{name}.png')])
+                subprocess.run([str(results/'seamless-present-meter'), wanted, '0.2', '--save', str(results/f'{tag}-apart-{name}.png')], capture_output=True)
         command.write_text('resize')
         os.kill(safari, signal.SIGUSR2)
         time.sleep(1)
         during = subprocess.run([meter, window, '1'], capture_output=True, text=True).stdout
-        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-resizing.png')])
+        subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-resizing.png')], capture_output=True)
         time.sleep(4)
         print('during a resize', during, flush=True)
         print('after resize', next((row[-40:] for row in proxy_windows() if f'id={window} ' in row), ''), flush=True)
-        subprocess.run(['screencapture', '-x', '-o', '-l', window, str(results/f'{tag}-resized.png')])
+        subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-resized.png')], capture_output=True)
+        # Minimized in the guest, it's in the host's Dock, and back from there it's back in both.
+        def on_screen():
+            return any(f'id={window} ' in row for row in rows())
+        def page_rate():
+            said = subprocess.run([meter, window, '3'], capture_output=True, text=True)
+            print('page rate read', said.stdout.strip(), said.stderr.strip()[:200], [row[-50:] for row in proxy_windows()], flush=True)
+            found = re.search(r'presented ([0-9.]+)', said.stdout)
+            return float(found.group(1)) if found else 0
+        command.write_text('guest-minimize')
+        os.kill(safari, signal.SIGUSR2)
+        for _ in range(16):
+            time.sleep(0.5)
+            if not on_screen():
+                break
+        check('minimized in the guest, its window leaves the screen', not on_screen())
+        time.sleep(1)
+        command.write_text('host-restore')
+        os.kill(safari, signal.SIGUSR2)
+        for _ in range(16):
+            time.sleep(0.5)
+            if on_screen():
+                break
+        check('brought back on the host, its window returns', on_screen())
+        time.sleep(7)
+        rate = page_rate()
+        print('after coming back', rate, flush=True)
+        report_said = results/f'{tag}-clicks.txt.command.report'
+        report_said.unlink(missing_ok=True)
+        command.write_text('report')
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(0.5)
+        print('its proxy says', report_said.read_text() if report_said.exists() else 'nothing', flush=True)
+        check('and the guest has it back too', rate >= 30)
+        command.write_text('host-minimize')
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(2)
+        check('minimized on the host, its window leaves the screen', not on_screen())
+        command.write_text('host-restore')
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(3)
+        check('and returns', on_screen())
+        for row in proxy_windows():
+            if 'Finder' in row:
+                subprocess.run([str(results/'seamless-present-meter'), re.search(r'id=(\d+)', row).group(1), '0.2', '--save', str(results/f'{tag}-materials.png')], capture_output=True)
+        # Not a pass or a fail yet: what a real guest full screen does to this window, and to the others.
+        command.write_text('guest-full-screen')
+        print('before full screen', [row[-50:] for row in proxy_windows()], flush=True)
+        (results/f'{tag}-clicks.txt.full-screen').unlink(missing_ok=True)
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(8)
+        print('in full screen', [row[-50:] for row in proxy_windows()], flush=True)
+        print('in full screen moving', subprocess.run([meter, window, '3'], capture_output=True, text=True).stdout, flush=True)
+        subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-full-screen.png')], capture_output=True)
+        os.kill(safari, signal.SIGUSR2)
+        time.sleep(8)
+        print('after full screen', [row[-50:] for row in proxy_windows()], flush=True)
+        back_after_full_screen = any(f'id={window} ' in row and 'Seamless page' in row for row in rows())
+        check('the same proxy window is there after full screen', back_after_full_screen)
+        said = (results/f'{tag}-clicks.txt.full-screen')
+        print('proxy says', said.read_text() if said.exists() else 'nothing (or the display was asleep, and it really did)', flush=True)
         frame = capture(f'{tag}-desktop-frame.png')
         print('guest frame', frame, flush=True)
     pressed = time.time()
@@ -557,6 +707,43 @@ def desktop():
     for bundle in (source/'Build/bench'/tag).glob('**/Seamless Apps/*/*/*.app'):
         subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-u', str(bundle)])
     print('PASS seamless button' if all(checks) and machine_window() else 'FAIL seamless button', flush=True)
+
+
+def desktop_with_old_hook():
+    # A guest an earlier build left with the hook in WindowServer's job: a press takes the entry out and stays on the display's frames
+    # for this start. Done without restarting the guest: a press from the next start is the ordinary one.
+    plist = '/System/Library/LaunchDaemons/com.apple.WindowServer.plist'
+    guest = stage(guest_tool)
+    run(guest, ['open-app', '--app', 'TextEdit'])
+    # Before pre-arming can inject: it starts about 20 s in, and this is what a guest with the old entry has at its start anyway.
+    add = (f'/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" {plist} || true; '
+           f'/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string /var/tmp/seamless-ws-hook.dylib" {plist}')
+    request({'Executable': '/bin/sh', 'Arguments': ['-c', add]}, 60)
+
+    def lines():
+        result = request({'Executable': '/bin/sh', 'Arguments': ['-c', f'/usr/bin/grep -c seamless-ws-hook {plist}; true']}, 60)
+        said = result.get('Stdout', '').strip()
+        print('hook lines in the plist:', said if said else result, flush=True)
+        return said
+
+    print('PASS' if lines() == '1' else 'FAIL', 'the entry is there to start with', flush=True)
+    for _ in range(240):
+        if request({'Action': 'seamless-state'}, 60).get('Prepared'):
+            break
+        time.sleep(1)
+    request({'Action': 'seamless-toggle'}, 60)
+    pressed = time.time()
+    while time.time() - pressed < 60 and request({'Action': 'seamless-state'}, 60).get('WindowVisible'):
+        time.sleep(1)
+    now = request({'Action': 'seamless-state'}, 60)
+    print('in Seamless', now, 'after', time.time() - pressed, flush=True)
+    # The agent is the press's while windows are out, so this waits for it back, as the Dock's restore does.
+    request({'Action': 'seamless-toggle'}, 60)
+    time.sleep(30)
+    removed = lines() == '0'
+    print('PASS' if removed else 'FAIL', 'a press removes the entry', flush=True)
+    print('PASS' if now.get('Active') and not now.get('OwnSurfaces') else 'FAIL', 'and shows windows from the display this start', flush=True)
+    print('PASS old hook' if removed and now.get('Active') and not now.get('OwnSurfaces') else 'FAIL old hook', flush=True)
 
 
 def capture_bench():
@@ -649,6 +836,10 @@ if arguments[0] == 'capture-bench':
     capture_bench()
 elif arguments[0] == 'placement':
     placement()
+elif arguments[0] == 'desktop' and 'activation' in arguments:
+    desktop(activation_only=True)
+elif arguments[0] == 'desktop' and 'old-hook' in arguments:
+    desktop_with_old_hook()
 elif arguments[0] == 'desktop':
     desktop()
 elif arguments[0] == 'windowed':

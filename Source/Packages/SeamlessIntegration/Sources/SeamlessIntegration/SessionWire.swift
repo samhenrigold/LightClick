@@ -15,7 +15,9 @@ public enum SessionWire {
         case hello = 1, window = 2, frame = 3, gone = 4
         case pointer = 16, key = 17, focus = 18
         case menu = 48, menuPress = 49, document = 50, quitApp = 51, appGone = 52
-        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58, overlay = 59, surfaceOrigin = 60, covers = 61
+        case dragCancel = 53, dragQuery = 54, dragState = 55, dragSend = 56, appState = 57, crop = 58, overlay = 59,
+            surfaceOrigin = 60, setPlace = 68, successor = 69, covers = 61, minimized = 62, setMinimized = 63,
+            materials = 64, fullScreen = 65, setFullScreen = 66
     }
 
     public struct Window: Equatable, Sendable {
@@ -54,6 +56,10 @@ public enum SessionWire {
         case overlay(UInt32)
         case surfaceOrigin(UInt32, x: Int32, y: Int32)
         case covers(UInt32, [CGRect])
+        case minimized(UInt32, Bool)
+        case successor(UInt32, UInt32)
+        case fullScreen(UInt32, Bool)
+        case materials(UInt32, [GuestMaterial])
     }
 
     public enum Parsed: Equatable, Sendable {
@@ -64,6 +70,28 @@ public enum SessionWire {
     }
 
     /// `bytes` comes from a guest, so everything here is checked against it, and nothing is trusted to fit.
+    public static func setFullScreen(window: UInt32, _ fullScreen: Bool) -> Data {
+        var out = header(.setFullScreen, length: 8)
+        put32(&out, window)
+        put32(&out, fullScreen ? 1 : 0)
+        return out
+    }
+
+    public static func setPlace(window: UInt32, x: Int32, y: Int32) -> Data {
+        var out = header(.setPlace, length: 12)
+        put32(&out, window)
+        put32(&out, UInt32(bitPattern: x))
+        put32(&out, UInt32(bitPattern: y))
+        return out
+    }
+
+    public static func setMinimized(window: UInt32, _ minimized: Bool) -> Data {
+        var out = header(.setMinimized, length: 8)
+        put32(&out, window)
+        put32(&out, minimized ? 1 : 0)
+        return out
+    }
+
     public static func parse(_ bytes: UnsafeRawBufferPointer) -> Parsed {
         guard bytes.count >= headerSize else {
             if bytes.count >= 4, u32(bytes, 0) != magic { return .bad }
@@ -80,6 +108,12 @@ public enum SessionWire {
             guard length == 4 else { return .bad }
         case .surfaceOrigin:
             guard length == 12 else { return .bad }
+        case .minimized, .fullScreen, .successor:
+            guard length == 8 else { return .bad }
+        case .materials:
+            guard length >= 8, length <= 8 + 32 * 24, (length - 8) % 24 == 0 else { return .bad }
+        case .setMinimized, .setFullScreen, .setPlace:
+            return .bad
         case .covers:
             guard length >= 8, length <= 8 + 32 * 16, (length - 8) % 16 == 0 else { return .bad }
         case .window:
@@ -96,6 +130,23 @@ public enum SessionWire {
         case .gone: return .message(.gone(u32(bytes, body)), used: used)
         case .crop: return .message(.crop(u32(bytes, body)), used: used)
         case .overlay: return .message(.overlay(u32(bytes, body)), used: used)
+        case .materials:
+            let rows = (0..<(length - 8) / 24).map { index -> GuestMaterial in
+                func value(_ field: Int) -> Int32 { Int32(bitPattern: u32(bytes, body + 8 + index * 24 + field * 4)) }
+                return GuestMaterial(
+                    material: Int(value(0)), active: value(1) != 0, x: Double(value(2)), y: Double(value(3)),
+                    width: Double(value(4)), height: Double(value(5)))
+            }
+            guard Int(u32(bytes, body + 4)) == rows.count else { return .bad }
+            return .message(.materials(u32(bytes, body), rows), used: used)
+        case .minimized:
+            return .message(.minimized(u32(bytes, body), u32(bytes, body + 4) != 0), used: used)
+        case .setMinimized, .setFullScreen, .setPlace:
+            return .bad
+        case .successor:
+            return .message(.successor(u32(bytes, body), u32(bytes, body + 4)), used: used)
+        case .fullScreen:
+            return .message(.fullScreen(u32(bytes, body), u32(bytes, body + 4) != 0), used: used)
         case .covers:
             let rects = (0..<(length - 8) / 16).map { index -> CGRect in
                 func value(_ field: Int) -> Double {
@@ -108,7 +159,8 @@ public enum SessionWire {
         case .surfaceOrigin:
             return .message(
                 .surfaceOrigin(
-                    u32(bytes, body), x: Int32(bitPattern: u32(bytes, body + 4)), y: Int32(bitPattern: u32(bytes, body + 8))),
+                    u32(bytes, body), x: Int32(bitPattern: u32(bytes, body + 4)),
+                    y: Int32(bitPattern: u32(bytes, body + 8))),
                 used: used)
         case .appGone: return .message(.appGone, used: used)
         case .menu: return .message(.menu(data(bytes, body, length)), used: used)
