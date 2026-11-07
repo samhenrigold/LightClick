@@ -465,6 +465,8 @@ agent=$PPID
 comm=$(/bin/ps -o comm= -p $agent)
 report() { /usr/bin/nc -w 1 10.0.2.2 "$1"; }
 { echo "agent pid $agent is $comm"; /bin/ls /Library/LaunchDaemons | /usr/bin/grep -iE "virtual|intel|agent|qemu"; /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"; } | report "$1"
+# Late timers or wakeups show as a 0.1 s sleep taking over a second, logged with the guest's own clock.
+/usr/bin/perl -MTime::HiRes=usleep,time -e '$| = 1; while (1) { $t = time; usleep(100000); $d = time - $t; printf "oversleep %.3f s at %.3f\n", $d, $t if $d > 1 }' >/tmp/seamless-oversleep.log 2>&1 </dev/null &
 (
 n=0
 while :; do
@@ -474,6 +476,7 @@ while :; do
     /bin/ps -axo pid,ppid,stat,etime,pcpu,command | /usr/bin/grep -E "$comm|/tmp/sg|ws-inject|WindowServer|tccd" | /usr/bin/grep -v grep | /usr/bin/cut -c1-120
     /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"
     /bin/cat /var/tmp/seamless-ws-press 2>/dev/null
+    /usr/bin/tail -3 /tmp/seamless-oversleep.log
     /usr/bin/tail -2 /var/log/system.log | /usr/bin/cut -c1-180
     if [ $((n % 5)) = 0 ]; then
       /usr/bin/sample $agent 1 -file /tmp/seamless-watch.sample >/dev/null 2>&1
