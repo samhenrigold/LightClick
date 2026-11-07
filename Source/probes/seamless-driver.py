@@ -1,6 +1,7 @@
 # Host side of scripts/seamless-try. Runs inside scripts/guest-bench, which supplies arguments, channel, request, source,
 # stage and tag, and has already booted the clone.
 import base64
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -511,6 +512,221 @@ def windowed(seconds):
     if presenting:
         print('windowed_' + presenting.communicate()[0].strip(), flush=True)
     print(f'windowed_distinct {(last.get("Distinct", 0) - first.get("Distinct", 0)) / spent:.1f} /s', flush=True)
+
+
+def fps_owned_processes(work, text):
+    """Process discovery only; never signals. Require argv to begin inside this exact clone directory."""
+    found = {}
+    for row in text.splitlines():
+        fields = row.strip().split(None, 2)
+        if len(fields) != 3 or not fields[0].isdigit() or not fields[2].startswith(str(work) + '/'):
+            continue
+        clock = fields[1].split(':')
+        seconds = sum(float(part) * 60 ** index for index, part in enumerate(reversed(clock)))
+        found[int(fields[0])] = {'command': fields[2], 'cpu_seconds': seconds}
+    return found
+
+
+def fps_window_rows(text):
+    windows = []
+    for row in text.splitlines():
+        match = re.fullmatch(r'id=(\d+) pid=(\d+) layer=(-?\d+) alpha=([0-9.e+-]+) owner="([^"]*)" title="([^"]*)" bounds=[^ ]+ ([0-9.e+-]+)x([0-9.e+-]+)', row)
+        if match and int(match[3]) == 0 and float(match[4]) > 0 and float(match[7]) > 0 and float(match[8]) > 0:
+            windows.append(dict(id=match[1], pid=int(match[2]), owner=match[5], title=match[6], row=row))
+    return windows
+
+
+def fps_result(windowed, seamless):
+    if windowed['reads'] < 60 or seamless['reads'] < 60 or windowed['presented'] < 55:
+        return 'INCONCLUSIVE'
+    return 'PASS' if seamless['presented'] >= 55 and seamless['presented'] >= windowed['presented'] * 0.9 else 'FAIL'
+
+
+def fps():
+    """One boot, one Safari page, no clicks: warm, windowed20s, own-surface20s, restore."""
+    if not re.fullmatch(r'[A-Za-z0-9._-]+', tag) or tag in ('.', '..'):
+        raise RuntimeError('fps requires a simple bench tag')
+    work = source/'Build/bench'/tag
+    prefix = results/f'{tag}-fps'
+    evidence = {'result': 'INCONCLUSIVE', 'qualification': 'FPS regression guard', 'seconds_per_sample': 20,
+                'thresholds': {'minimum_presented_fps': 55, 'minimum_windowed_ratio': 0.9, 'minimum_meter_reads_per_second': 60},
+                'states': [], 'samples': {},
+                'note': 'Regression diagnostic only; does not qualify the strict 60fps or CPU product requirements.',
+                'cpu_exclusions': ['WindowServer', 'meter', 'processes outside this clone'],
+                'cpu_note': 'Owned clone process CPU only; excludes WindowServer and meter. No CPU acceptance budget.'}
+    channel_safe = True
+    interrupted = False
+    guest = None
+
+    def save():
+        Path(str(prefix)+'.json').write_text(json.dumps(evidence, indent=2)+'\n')
+
+    def ask(command, timeout=5):
+        nonlocal channel_safe
+        try:
+            reply = request(command, timeout)
+        except BaseException:
+            channel_safe = False
+            raise
+        if not isinstance(reply, dict) or 'Error' in reply:
+            raise RuntimeError(f'fps diagnostic failed: {reply!r}')
+        return reply
+
+    def state():
+        reply = ask({'Action': 'seamless-state'})
+        evidence['states'].append(dict(at=time.monotonic(), response=reply))
+        save()
+        return reply
+
+    def processes():
+        reply = subprocess.run(['ps', '-ww', '-axo', 'pid=,time=,command='], capture_output=True, text=True, timeout=5)
+        if reply.returncode:
+            raise RuntimeError('fps could not inspect owned processes')
+        return fps_owned_processes(work, reply.stdout)
+
+    def window_id(seamless):
+        owned = processes()
+        app_pattern = re.compile(re.escape(str(work)) + r'/[^/]+\.app/Contents/MacOS/Light Click(?: |$)')
+        pids = set()
+        if seamless:
+            proxy_pattern = re.compile(re.escape(str(work/'home')) + r'/(.*?/Seamless Apps/.*?\.app)/Contents/MacOS/SeamlessProxy(?: |$)')
+            for pid, item in owned.items():
+                match = proxy_pattern.match(item['command'])
+                if match:
+                    try:
+                        with (work/'home'/match[1]/'Contents/Info.plist').open('rb') as file:
+                            info = plistlib.load(file)
+                        if info.get('LCGuestBundleIdentifier') == 'com.apple.Safari':
+                            pids.add(pid)
+                    except (OSError, ValueError, plistlib.InvalidFileException):
+                        pass
+        if not seamless:
+            pids = {pid for pid, item in owned.items() if app_pattern.match(item['command'])}
+            if len(pids) != 1:
+                raise RuntimeError('fps needs exactly one owned VM app process')
+        reply = subprocess.run([str(guest_tool), 'list'], capture_output=True, text=True, timeout=5)
+        if reply.returncode:
+            raise RuntimeError('fps could not enumerate host windows')
+        selected = [window for window in fps_window_rows(reply.stdout) if window['pid'] in pids]
+        if len(selected) != 1:
+            raise RuntimeError(f'fps needs exactly one owned {"Safari page" if seamless else "VM"} window: {selected!r}')
+        window = selected[0]
+        if window['title'] and not (window['title'] == 'Seamless page' if seamless else window['title'].startswith('Clone of ')):
+            raise RuntimeError(f'fps owned window has an unexpected nonempty title: {window!r}')
+        evidence.setdefault('window_selections', []).append(dict(
+            kind='Safari proxy' if seamless else 'VM', window=window,
+            provenance='owned PID and unique main window; title withheld' if not window['title'] else 'owned PID and unique main window; title matched',
+            safari_bundle_identifier='com.apple.Safari' if seamless else None))
+        save()
+        return window['id'], window['row']
+
+    def restore():
+        if not channel_safe:
+            raise RuntimeError('fps cannot safely restore through an ambiguous diagnostics channel; clone cleanup required')
+        deadline = time.monotonic() + 45
+        if state().get('Active'):
+            ask({'Action': 'seamless-toggle'})
+        while time.monotonic() < deadline:
+            current = state()
+            if current.get('Active') is False and current.get('WindowVisible') is True:
+                reply = ask({'Executable': guest, 'Arguments': ['gpu', '--rows']},
+                            max(0.1, min(10, deadline-time.monotonic())))
+                raw = reply.get('Stdout') or ''
+                evidence['restore_gpu'] = raw
+                if reply.get('ExitCode') == 0 and re.search(r'^gpu mode 0 ', raw, re.M):
+                    return
+            time.sleep(0.25)
+        raise RuntimeError('fps restore did not confirm visible VM and gpu mode 0 within45s')
+
+    def activate():
+        if state().get('Active'):
+            raise RuntimeError('fps expected windowed state before activation')
+        ask({'Action': 'seamless-toggle'})
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            current = state()
+            if current.get('OwnSurfaces') is True and current.get('WindowVisible') is False:
+                try:
+                    return window_id(True)
+                except RuntimeError:
+                    pass
+            time.sleep(0.5)
+        raise RuntimeError('fps own-surface Safari proxy did not become ready within120s')
+
+    def measure(label, selected):
+        before = processes()
+        at = time.monotonic()
+        response = subprocess.run([str(results/'seamless-present-meter'), selected[0], '20'],
+                                  capture_output=True, text=True, timeout=25)
+        elapsed = time.monotonic()-at
+        after = processes()
+        Path(str(prefix)+f'-{label}.meter.txt').write_text(response.stdout+'\nSTDERR\n'+response.stderr)
+        current = state()
+        if ((label == 'seamless' and (current.get('OwnSurfaces') is not True or current.get('WindowVisible') is not False))
+                or (label == 'windowed' and (current.get('Active') is not False or current.get('WindowVisible') is not True))
+                or window_id(label == 'seamless')[0] != selected[0]):
+            raise RuntimeError('fps window or display mode changed during measurement')
+        parsed = re.search(r'presented ([0-9.]+) distinct/s, from ([0-9.]+) reads/s, over ([0-9.]+) s', response.stdout)
+        if response.returncode or not parsed or float(parsed[3]) < 19 or elapsed < 19:
+            raise RuntimeError(f'fps {label} meter failed or returned an incomplete sample')
+        sample = dict(window=selected[1], presented=float(parsed[1]), reads=float(parsed[2]), elapsed_seconds=elapsed,
+                      cpu_before=before, cpu_after=after)
+        delta = sum(item['cpu_seconds'] for item in after.values())-sum(item['cpu_seconds'] for item in before.values())
+        stable_processes = set(before) == set(after) and all(
+            before[pid]['command'] == after[pid]['command'] for pid in before)
+        sample.update(cpu_delta_seconds=delta, cpu_process_set_stable=stable_processes,
+                      cpu_percent=delta/elapsed*100 if delta >= 0 and stable_processes else None)
+        evidence['samples'][label] = sample
+        save()
+        return sample
+
+    try:
+        save()
+        guest = stage(guest_tool)
+        opened = ask({'Executable': guest, 'Arguments': ['open-app', '--app', 'Safari']}, 60)
+        if opened.get('ExitCode') != 0:
+            raise RuntimeError('fps Safari fixture did not open')
+        listing = ask({'Executable': guest, 'Arguments': ['list']}, 15)
+        raw = listing.get('Stdout') or ''
+        Path(str(prefix)+'-guest-windows.txt').write_text(raw)
+        guest_windows = [window for window in fps_window_rows(raw)
+                         if window['owner'] == 'Safari' and window['title'] == 'Seamless page']
+        if listing.get('ExitCode') != 0 or len(guest_windows) != 1:
+            raise RuntimeError('fps requires exactly one guest Safari main window titled Seamless page before warmup')
+        evidence['guest_fixture'] = guest_windows[0]
+        save()
+        activate()  # Warm injection and proxies before either steady-state measurement.
+        restore()
+        time.sleep(6)
+        baseline = measure('windowed', window_id(False))
+        selected = activate()
+        time.sleep(6)
+        seamless = measure('seamless', selected)
+        evidence['result'] = fps_result(baseline, seamless)
+        if baseline['cpu_percent'] and seamless['cpu_percent'] is not None:
+            evidence['owned_cpu_ratio'] = seamless['cpu_percent']/baseline['cpu_percent']
+    except (SystemExit, KeyboardInterrupt) as error:
+        interrupted = True
+        evidence.update(result='INCONCLUSIVE', error=repr(error), restored=False,
+                        restoration_skipped='Interrupted; outer guest-bench owns immediate clone cleanup.')
+        raise
+    except Exception as error:
+        evidence['error'] = repr(error)
+    finally:
+        if guest is not None and not interrupted:
+            try:
+                restore()
+                evidence['restored'] = True
+            except (SystemExit, KeyboardInterrupt) as error:
+                evidence.update(result='INCONCLUSIVE', restoration_error=repr(error), restored=False)
+                save()
+                raise
+            except Exception as error:
+                evidence.update(result='INCONCLUSIVE', restoration_error=repr(error), restored=False)
+        save()
+    print(f'{evidence["result"]} FPS regression guard; evidence {prefix}.json', flush=True)
+    if evidence['result'] != 'PASS':
+        raise SystemExit(1)
 
 
 def monitor_dump(why):
@@ -1228,7 +1444,9 @@ def proxy(seconds):
     print(subprocess.run([str(results/'SeamlessMakeProxy'), 'remove', bundle], capture_output=True, text=True).stdout)
 
 
-if arguments[0] == 'capture-bench':
+if arguments[0] == 'fps':
+    fps()
+elif arguments[0] == 'capture-bench':
     capture_bench()
 elif arguments[0] == 'placement':
     placement()

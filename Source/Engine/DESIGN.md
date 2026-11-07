@@ -530,8 +530,8 @@ tables and discovery of VideoToolbox decoder services found a concrete target in
 388 samples hit instruction offset `0xd9037`. Its mapped image was
 `/System/Library/Video/Plug-Ins/VCPHEVC.bundle/Contents/MacOS/VCPHEVC`, text base `0x106c18000` in that run.
 These are discovery samples under observer load, not exclusive attribution of every decoder-service sample or a
-code-generation benchmark. Evidence: `Build/bench/loop3-startup-hevc-r2.hevc-profile.json`. No replay fixture or
-translator optimization has yet been made from that function.
+code-generation benchmark. Evidence: `Build/bench/loop3-startup-hevc-r2.hevc-profile.json`. Those samples alone did
+not supply a closed replay fixture; the smaller instruction-neighborhood experiment follows below.
 
 ### A measured narrow-shift helper cost
 
