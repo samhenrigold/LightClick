@@ -652,11 +652,14 @@ public final class Engine {
             if options.hybrid {
                 // QEMU's APIC keeps a vector until it is taken, so take one only when it can go in at once. The monitor comes back here when IF opens.
                 c.pointee.req_r.0 = ~0
+                // Lower the line before asking, so a device's kick in between either sets it again or is seen by the question.
+                engine_ctx_set_irq_line(c, false)
                 let line = machine?.hasInterruptWaiting() ?? false
-                engine_ctx_set_irq_line(c, line)
+                if line { engine_ctx_set_irq_line(c, true) }
                 if line && c.pointee.irq_pending == 0 && c.pointee.rflags_sys & 0x200 != 0 {
                     if let vector = machine?.acknowledgeInterrupt() { c.pointee.req_r.0 = UInt64(vector) }
-                    engine_ctx_set_irq_line(c, machine?.hasInterruptWaiting() ?? false)
+                    engine_ctx_set_irq_line(c, false)
+                    if machine?.hasInterruptWaiting() ?? false { engine_ctx_set_irq_line(c, true) }
                 }
             } else if let vector = machine?.acknowledgeInterrupt() {
                 c.pointee.req_r.0 = UInt64(vector)

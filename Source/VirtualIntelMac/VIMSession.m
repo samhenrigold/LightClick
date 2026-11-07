@@ -2887,6 +2887,24 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
                      VIMFailCreateGuest(session.status.stringValue);
                }];
 }
+- (void)offerRestartAfterGraphicsLoss {
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = @"Graphics stopped working";
+    alert.informativeText = @"The virtual Mac is still running and your apps are open, but its display won’t update. "
+                            @"Restart it to get graphics back.";
+    [alert addButtonWithTitle:@"Restart"];
+    [alert addButtonWithTitle:@"Not Now"];
+    __weak VIMSession *weakSelf = self;
+    VIMPresentAlert(alert, self.window, ^(NSModalResponse response) {
+      if (response != NSAlertFirstButtonReturn)
+          return;
+      [weakSelf.guestAgent requestRestartWithCompletion:^(NSError *issue) {
+        if (issue)
+            VIMPresentError(issue, weakSelf.window);
+      }];
+    });
+}
+
 - (void)offerGraphicsRestart {
     if (self.guestProgress) {
         __weak VIMSession *weakSelf = self;
