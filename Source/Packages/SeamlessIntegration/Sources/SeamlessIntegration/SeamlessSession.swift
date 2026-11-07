@@ -3,23 +3,37 @@ import Darwin
 import IOSurface
 import QuartzCore
 
-/// Material messages precede the first window record on the guest stream. Keep only a bounded amount until its
-/// surface can be created; after that, Surface owns the rows for proxy reconnects. New unknown IDs cannot grow this
-/// map beyond the guest hook's window census, and one ID cannot exceed the wire's material-row limit.
-struct PendingWindowMaterials {
+/// Metadata can precede the first window record. Retain it until a surface can be created, then Surface owns it.
+/// Materials and origins share one window-ID budget; each material update also has the wire's row limit.
+struct PendingWindowMetadata {
     static let maximumWindows = 256
     static let maximumRows = 32
-    private var rows: [UInt32: [GuestMaterial]] = [:]
 
-    mutating func receive(_ materials: [GuestMaterial], for window: UInt32) {
-        guard rows[window] != nil || rows.count < Self.maximumWindows else { return }
-        // An empty update is meaningful when a successor reuses an older window's surface.
-        rows[window] = Array(materials.prefix(Self.maximumRows))
+    struct Entry {
+        var materials: [GuestMaterial]?
+        var surfaceOrigin: (x: Int32, y: Int32)?
     }
 
-    mutating func take(_ window: UInt32) -> [GuestMaterial]? { rows.removeValue(forKey: window) }
-    mutating func remove(_ window: UInt32) { rows[window] = nil }
-    mutating func reset() { rows.removeAll() }
+    private var entries: [UInt32: Entry] = [:]
+
+    mutating func receive(_ materials: [GuestMaterial], for window: UInt32) {
+        guard entries[window] != nil || entries.count < Self.maximumWindows else { return }
+        var entry = entries[window] ?? Entry()
+        // An empty update is meaningful when a successor reuses an older window's surface.
+        entry.materials = Array(materials.prefix(Self.maximumRows))
+        entries[window] = entry
+    }
+
+    mutating func receiveOrigin(x: Int32, y: Int32, for window: UInt32) {
+        guard entries[window] != nil || entries.count < Self.maximumWindows else { return }
+        var entry = entries[window] ?? Entry()
+        entry.surfaceOrigin = (x, y)
+        entries[window] = entry
+    }
+
+    mutating func take(_ window: UInt32) -> Entry? { entries.removeValue(forKey: window) }
+    mutating func remove(_ window: UInt32) { entries[window] = nil }
+    mutating func reset() { entries.removeAll() }
 }
 
 /// What a session needs of the machine it runs on: the guest agent the app already holds.
@@ -108,7 +122,7 @@ public final class SeamlessSession {
     private let guest: any SeamlessGuest
     private let finished: () -> Void
     private var surfaces: [UInt32: Surface] = [:]
-    private var pendingMaterials = PendingWindowMaterials()
+    private var pendingMetadata = PendingWindowMetadata()
     private var proxy: LineSocket?
     private var proxyPID: Int32 = 0
     private var guestDescriptor: Int32 = -1
@@ -197,7 +211,7 @@ public final class SeamlessSession {
         proxy?.send(SessionCommand.terminate)
         if guestDescriptor >= 0 { shutdown(guestDescriptor, SHUT_RDWR) }
         surfaces = [:]
-        pendingMaterials.reset()
+        pendingMetadata.reset()
     }
 
     public func activateProxy() {
@@ -351,7 +365,7 @@ public final class SeamlessSession {
         guestDescriptor = -1
         for id in surfaces.keys { proxy?.send(SessionCommand.removeSurface(id: Int(id))) }
         surfaces = [:]
-        pendingMaterials.reset()
+        pendingMetadata.reset()
         if !stopped {
             onWindowsChanged?()
             onGuestGone?()
@@ -454,12 +468,13 @@ public final class SeamlessSession {
             if let surface = surfaces[id] { showCrops(of: [surface]) }
         case .successor(let id, let next):
             note("# window \(id) is now \(next)")
-            pendingMaterials.remove(id)
+            pendingMetadata.remove(id)
             guard let surface = surfaces.removeValue(forKey: id) else { return }
             // Told after a new window's first tick, whose proxy goes in favour of this one.
             if let arrived = surfaces[next] {
                 surface.window = arrived.window
                 surface.materials = arrived.materials
+                surface.surfaceOrigin = arrived.surfaceOrigin
                 proxy?.send(SessionCommand.removeSurface(id: Int(next)))
             }
             surfaces[next] = surface
@@ -481,17 +496,21 @@ public final class SeamlessSession {
                 surface.materials = rows
                 proxy?.send(SessionCommand.setMaterials(id: Int(id), rows))
             } else {
-                pendingMaterials.receive(rows, for: id)
+                pendingMetadata.receive(rows, for: id)
             }
         case .minimized(let id, let minimized):
             note("# window \(id) \(minimized ? "minimized" : "back")")
             proxy?.send(SessionCommand.minimizeSurface(id: Int(id), minimized: minimized))
         case .surfaceOrigin(let id, let x, let y):
-            surfaces[id]?.surfaceOrigin = (x, y)
-            if let surface = surfaces[id] { showCrops(of: [surface]) }
+            if let surface = surfaces[id] {
+                surface.surfaceOrigin = (x, y)
+                showCrops(of: [surface])
+            } else {
+                pendingMetadata.receiveOrigin(x: x, y: y, for: id)
+            }
         case .gone(let id):
             note("# window \(id) gone")
-            pendingMaterials.remove(id)
+            pendingMetadata.remove(id)
             surfaces[id] = nil
             if shownWindows.remove(id) != nil { onShownWindowsChanged?() }
             proxy?.send(SessionCommand.removeSurface(id: Int(id)))
@@ -549,11 +568,13 @@ public final class SeamlessSession {
             }
         }
         let changedID = surface.window.id != window.id
-        let initialMaterials = pendingMaterials.take(window.id)
-        if let initialMaterials { surface.materials = initialMaterials }
+        // Consume only after successful surface creation, before tellProxy places its first pixels.
+        let initialMetadata = pendingMetadata.take(window.id)
+        if let materials = initialMetadata?.materials { surface.materials = materials }
+        if let origin = initialMetadata?.surfaceOrigin { surface.surfaceOrigin = origin }
         surface.window = window
         tellProxy(surface)
-        if initialMaterials != nil || changedID {
+        if initialMetadata?.materials != nil || changedID {
             proxy?.send(SessionCommand.setMaterials(id: Int(window.id), surface.materials))
         }
         onWindowsChanged?()
