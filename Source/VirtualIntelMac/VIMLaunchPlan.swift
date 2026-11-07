@@ -151,6 +151,7 @@ public final class LaunchPlan: NSObject {
             network += ",hostfwd=tcp:127.0.0.1:\((config["ScreenSharingPort"] as? NSNumber)?.intValue ?? 0)-:5900"
         }
         if input.networkMode != "shared" { network = "socket,id=net0,fd=0" }
+        else if ProcessInfo.processInfo.environment["LC_NETWORK_OFF"] == "1" { network += ",restrict=on" } // test boots on a metered connection
 
         var cpu = "Penryn,vendor=GenuineIntel,+sse4.2,+popcnt,+aes,+pclmulqdq,+pcid"
         // Use one virtual timestamp rate on ARM. At the default 1 GHz, early

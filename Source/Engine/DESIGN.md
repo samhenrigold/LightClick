@@ -414,7 +414,21 @@ Those hot rows above 1 were noise: 0.2 s slices, one run, with Rosetta not niced
 
 So about 5% behind Rosetta on Mavericks and up to 10% on Mojave, whose first rounds, at 1 vCPU, also carry what's left of its boot. The guest's clock isn't slow: its 110.6 s total against the host's 106.5 s between the first and last 2 s timeline rows in those loops, which can miss 4 s. `alu`'s loop is 29 ARM words for 29 x86 instructions with no flags kept, and `branchy` keeps flags only for the `andl` before its indirect call, as a call makes all of them live. Rosetta's code wasn't read: `/var/db/oah` isn't readable.
 
-Hot code is close to parity, so code generation isn't where a launch goes. What's slow is crossing into the kernel, faults, and code seen for the first time. Rosetta's kernel is the host's, so those rows also compare kernels. Mojave's crossings cost about twice Mavericks' or more: it changes page tables at each. Its kernel reads `IA32_ARCH_CAPABILITIES` only in what look like its MDS paths, so this search found no way to tell it not to.
+Hot code is close to parity, so code generation isn't where a launch goes. What's slow is crossing into the kernel, faults, and code seen for the first time. Rosetta's kernel is the host's, so those rows also compare kernels. Mojave's crossings cost about twice Mavericks' or more: it changes page tables at each. Its kernel reads `IA32_ARCH_CAPABILITIES` only in what look like its MDS paths, and `-no_shared_cr3` only asks for more isolation, so no CPUID bit or boot argument was found to turn this off.
+
+**Skipping XNU's Meltdown switch.** Every way out of the kernel does `mov %gs:0x138, %rax; mov %rax, %cr3`, and every way in does the same from `%gs:0x140`: small tables for the process, full ones for the kernel. A process can't read kernel pages on either, as they aren't user pages, so the translator emits nothing for the first and, for the second, a `cr3` write only if the tables differ, which TCG can bring about. These exact sequences at CPL 0 are the only match, so another kernel simply doesn't get the benefit. `LC_HVDBT_KEEP_KPTI=1` turns it off. It takes Meltdown protection away from the guest, which has no secrets from itself here and runs on hardware without the bug.
+
+The best of 40 s of short slices, Mojave, 2 vCPUs, on a busy host, so read the pair with like `alu`:
+
+| ns | keeping, three boots | skipping, two boots | best keeping | best skipping |
+|---|---|---|---|---|
+| alu | 3.3, 3.1, 2.2 | 2.6, 2.1 | 2.2 | 2.1 |
+| syscall | 694, 670, 458 | 260, 198 | 458 | 198 |
+| page fault | 4843, 6452, 3086 | 3398, 2921 | 3086 | 2921 |
+| pipe round trip | 19,178, 24,624, 11,883 | 16,422, 10,119 | 11,883 | 10,119 |
+| fork and wait, ms | 4.0, 5.6, 1.48 | 1.69, 1.56 | 1.48 | 1.56 |
+
+`cr3` writes in a boot go from 2.4M to 10M down to about 170,000. Rosetta in the same test, niced, on a host as busy: `alu` 3.1, syscall 278, page fault 1352, pipe 6862.
 
 Making every flag live, `LC_HVDBT_ALL_FLAGS=1`, costs `alu` 5%, `branchy` 2%, and adds 4% to the code, with no visible effect on launches in one boot of each. In a launch profile no hot function stands out: `cache_fill` is 75 of 916 user samples. So no code generation work was done.
 
