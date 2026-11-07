@@ -656,6 +656,28 @@ Honest order of risk, none of it started except as noted.
 7. **Unknown rates.** Page-table write rate in a real macOS guest. At these costs even 1M writes/s would be 60-300 ms of 4000. Cold translation during boot: 2.4 us per function, and how much code a boot touches is unmeasured.
 8. **Platform durability.** `ACTLR_EL1.EnTSO` from HVF is undocumented as far as I know, and hardware TSO could go when Rosetta does.
 
+## Turning it on by default
+
+Where each thing that would make `LC_HVDBT` on by default wrong for a user stands, with its evidence.
+
+| | Evidence | Status |
+|---|---|---|
+| Guests | The settings offer it for Mavericks and Mojave only (`bootedGuests`), up to 8 vCPUs. Every boot in this document is one of those two. 32-bit user code runs on the engine, Keynote '09 included. | Others untested, and stay on TCG |
+| Correctness | Fuzz, QEMU's test-i386, a compiled corpus, the SMP stress tests and lc-bench arithmetic match. Long runs check arithmetic, hashing, files and memory throughout: 0 wrong results, on both guests, including a 20-minute Mojave run and a 10-minute Mavericks one after the latest monitor changes. | Done for what is checked |
+| Guest panic when a GPU client dies | Chess killed under load panicked Mojave in about half of boots: Apple's driver walks a freed IOSurface backing on an orphaned map. The `PVGIOSurfaceABI` 1.6.4 route fixes it: 0 panics in 5 boots of 40 kills. It reaches a guest only through Repair Graphics Support, or the update sheet now offered when a newer app starts a machine. Mavericks has no PVG and none of this. | Fixed in source; a Mojave guest needs the update |
+| GPU helper crash | Every exception in the donor framework crashed the helper, its unwind tables a page off. Repaired at packaging, and a throw from a command buffer is caught. Not seen since in 9 kill boots, and when the helper does die the guest stays up and the app offers a restart. | Fixed; the catch untested in a real boot |
+| Other resets | One 15.7 s reset in a short Mojave boot, cause unknown, not seen again. QEMU now logs who asks for a reset and scans RAM for panic text, so the next one has evidence. | Open, rare |
+| Mavericks agent silence | The guest agent went quiet for 6 s to minutes in 6 of 8 engine boots and none of 2 on TCG; with 4 vCPUs in 3 of 3, for about 50 s, and not in one 1-vCPU boot. The host's bytes reach the UART and the guest reads them; timers, interrupts and IPIs keep arriving on every vCPU throughout, and no engine path that drops a wakeup was found by reading. What the agent is blocked in isn't known yet. | Open; blocks Mavericks at 4 vCPUs |
+| Performance against TCG | Application launches 3 to 4.5 times faster on Mojave and 2 to 4.6 times on Mavericks, cold and warm (the table under "How long an application takes to start"). Boots reach the desktop in about 26 to 50 s against 60 to 130 on TCG in the same tests. Mojave's page faults cost 2.6 to 3.0 µs against Rosetta's 1.35 and Mavericks' 1.4 to 1.7. | Much faster everywhere measured |
+| Exceptions and long sessions | A 20-minute Mojave and a 10-minute Mavericks long run with application churn, memory past the guest's RAM and a JIT: no reset, no stall over about 11 s, all under memory pressure. | Good, few runs |
+| Platform | `ACTLR_EL1.EnTSO` from HVF is undocumented and could go with Rosetta. macOS 28 is deferred. | A risk outside our control |
+| What users lose | Nothing known in what the two guests use: the engine falls back to TCG for what it doesn't do (`hlt`, some MSRs, CR0.WP clear), measured as under a second of TCG time a boot outside `hlt`. Machines over 8 vCPUs stay on TCG. | |
+
+Recommendation:
+- **Mojave**: on by default once the app that ships `PVGIOSurfaceABI` 1.6.4 is out, since an un-updated guest can still panic when a GPU application crashes or is force-quit. Until then, keep it opt-in.
+- **Mavericks**: not by default yet. The agent silence leaves the app unable to reach the guest for up to a minute at a time; it hasn't shown at 1 vCPU, in one boot, and 2 vCPUs haven't been reported separately. Once it is explained or 2-vCPU boots are clean, on by default for the counts shown clean.
+- **Every other guest**: off, as now, until each has its own boots.
+
 ## Go or no-go
 
 Go for the next phase. Translated code matches Rosetta in steady state and passes every differential check available, and in-VM kernel paths cost about 2% of four vCPUs at real-guest rates with the x86 kernel model proven only on a test kernel of our own. That is not evidence about a booting Mac: nothing here has run XNU, one vCPU, 64-bit only.
