@@ -927,6 +927,13 @@ def hard_stop():
     copy = Path(arguments[arguments.index('hard-stop') + 1])
     guest = stage(guest_tool)
     run(guest, ['open-app', '--app', 'TextEdit'])
+    if 'crop' in arguments:
+        # As a guest an earlier build left with the hook in WindowServer's job: this start's press then crops, which hides the
+        # Dock, the case a hard stop could leave behind.
+        plist = '/System/Library/LaunchDaemons/com.apple.WindowServer.plist'
+        add = (f'/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" {plist} || true; '
+               f'/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DYLD_INSERT_LIBRARIES string /var/tmp/seamless-ws-hook.dylib" {plist}')
+        request({'Executable': '/bin/sh', 'Arguments': ['-c', add]}, 60)
     for _ in range(240):
         if request({'Action': 'seamless-state'}, 60).get('Prepared'):
             break
@@ -961,6 +968,9 @@ def hard_stop_check():
     said = request({'Executable': '/bin/sh', 'Arguments': ['-c', DOCK_STATE]}, 60).get('Stdout') or ''
     print('after the next boot:', said, flush=True)
     back = 'autohide 1' not in said and 'seamless-restore.plist' in said and 'No such file' in said
+    if 'crop' in arguments:
+        # Here the Dock was hidden, so what put it back must have run.
+        back = back and 'login item ran: ' in said and 'login item ran: cat:' not in said
     print('PASS the Dock is back after a hard stop' if back else 'FAIL the Dock is back after a hard stop', flush=True)
 
 
