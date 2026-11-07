@@ -170,9 +170,10 @@ public final class SeamlessDesktop {
         // A guest that's slow to answer, on a busy Mac, gets as long as a press gets to show anything: each request's own limit is short.
         let started = CFAbsoluteTimeGetCurrent()
         while true {
-            ran = await guest.run("/bin/sh", ["-c", Self.pressScript, "sh", String(port)])
+            ran = await guest.run("/bin/sh", ["/tmp/sg/press.sh", String(port)])
             if stopped || control >= 0 || CFAbsoluteTimeGetCurrent() - started > 120 { break }
-            if ran.exitCode == Self.noTools {
+            // 127 is the shell's for a script that isn't there, as after the guest restarted.
+            if ran.exitCode == Self.noTools || ran.exitCode == 127 {
                 // The guest has restarted since they went in.
                 Self.staged.remove(configuration.machine.path)
                 Self.hooked.remove(configuration.machine.path)
@@ -225,12 +226,12 @@ public final class SeamlessDesktop {
             return
         }
         if !Self.hooked.contains(configuration.machine.path) {
-            let injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
+            let injected = await guest.run("/bin/sh", ["/tmp/sg/inject.sh"])
             note(
                 "# pre-armed: hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)"
             )
             // Exits but for a dropped connection are answers, and it never tries twice in a guest's start.
-            if injected.exitCode != nil { Self.hooked.insert(configuration.machine.path) }
+            if injected.exitCode != nil, injected.exitCode != 127 { Self.hooked.insert(configuration.machine.path) }
         }
         // Over the same connection as a press, as an icon's megabytes through the agent stop it answering for minutes.
         guard !prearmStopped, listen() else { return }
@@ -258,11 +259,16 @@ public final class SeamlessDesktop {
             defer { preparing[machine] = nil }
             // A guest that's restarted since says so when they're run.
             if staged.contains(machine) { return true }
+            // The scripts go as files, in the agent's small acknowledged chunks, and run by name. A request line of a couple of
+            // kilobytes through Mavericks' serial port went unanswered, sometimes for minutes, where short ones were answered.
             guard let tool = await guest.stage(tools.appending(path: "seamless-guest")),
-                let menuTool = await guest.stage(tools.appending(path: "seamless-integration-guest"))
+                let menuTool = await guest.stage(tools.appending(path: "seamless-integration-guest")),
+                let setup = await guest.stage(scriptFile("setup", SeamlessSession.setupScript)),
+                let press = await guest.stage(scriptFile("press", pressScript)),
+                let inject = await guest.stage(scriptFile("inject", injectScript))
             else { return false }
             // Mavericks has been seen to drop the agent's connection during this and be set up regardless. Without Accessibility there are only no menus.
-            _ = await guest.run("/bin/sh", ["-c", SeamlessSession.setupScript, "sh", tool, menuTool])
+            _ = await guest.run("/bin/sh", [setup, tool, menuTool, press, inject])
             // On Mojave, ready for a press to load into WindowServer.
             let release = await guest.run("/usr/bin/uname", ["-r"]).output
             if release.hasPrefix("18.") || release.hasPrefix("13."),
@@ -280,6 +286,13 @@ public final class SeamlessDesktop {
     }
 
     private static let noTools = 126
+
+    /// A script's text in a file of its own, for staging.
+    private static func scriptFile(_ name: String, _ text: String) -> URL {
+        let file = FileManager.default.temporaryDirectory.appending(path: "lc-seamless-\(name).sh")
+        try? text.write(to: file, atomically: true, encoding: .utf8)
+        return file
+    }
 
     /// Loads the hook into the running WindowServer, so each window comes on a surface of its own. If this goes wrong WindowServer
     /// dies and logs the user out, so it's only for the one build it's been run on, is tried once per guest start and is never

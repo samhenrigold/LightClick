@@ -272,6 +272,7 @@ public final class SeamlessSession {
             + "('kTCCServiceAccessibility','$(/bin/ps -o comm= -p $PPID)',1,1,1);"
         return
             "mkdir -p /tmp/sg; chmod 755 /tmp/sg; cp \"$1\" /tmp/sg/g; cp \"$2\" /tmp/sg/ig; chmod 755 /tmp/sg/g /tmp/sg/ig; "
+            + "[ -n \"$3\" ] && cp \"$3\" /tmp/sg/press.sh; [ -n \"$4\" ] && cp \"$4\" /tmp/sg/inject.sh; "
             + "/usr/bin/sqlite3 \"/Library/Application Support/com.apple.TCC/TCC.db\" \"\(rows.joined())\(agentRow)\" 2>&1; "
             // After this script has answered, since the agent has been seen to stop answering for minutes if tccd goes under it.
             + "/bin/ps -o comm= -p $PPID; (sleep 1; /usr/bin/killall tccd) </dev/null >/dev/null 2>&1 &"
