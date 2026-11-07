@@ -387,6 +387,27 @@ static void test_ts(void) {
     __asm__ volatile("rep stosq" : "+D"(d), "+c"(count) : "a"(5ULL) : "memory");
     CHECK(to[63] == 5);
     CHECK(nm_count == 1);
+    // Every width with TS set, as a kernel's bzero and memset run: the pattern goes out whole, 32 bytes a turn, then the tail.
+    static const u64 widths[] = {1, 2, 4, 8};
+    for (int w = 0; w < 4; w++) {
+        u8 *bytes = (u8 *)to;
+        for (int i = 0; i < 512; i++)
+            bytes[i] = 0xEE;
+        u64 n = (300 + 7) / widths[w], pattern = 0x8877665544332211ULL;
+        u8 *at = bytes + 3;
+        switch (widths[w]) {
+            case 1: __asm__ volatile("rep stosb" : "+D"(at), "+c"(n) : "a"(pattern) : "memory"); break;
+            case 2: __asm__ volatile("rep stosw" : "+D"(at), "+c"(n) : "a"(pattern) : "memory"); break;
+            case 4: __asm__ volatile("rep stosl" : "+D"(at), "+c"(n) : "a"(pattern) : "memory"); break;
+            default: __asm__ volatile("rep stosq" : "+D"(at), "+c"(n) : "a"(pattern) : "memory"); break;
+        }
+        u64 len = (300 + 7) / widths[w] * widths[w];
+        CHECK(n == 0 && at == bytes + 3 + len);
+        CHECK(bytes[2] == 0xEE && bytes[3 + len] == 0xEE);
+        for (u64 i = 0; i < len; i++)
+            CHECK(bytes[3 + i] == (u8)(pattern >> (8 * (i % widths[w]))));
+    }
+    CHECK(nm_count == 1);
     u32 m;
     __asm__ volatile("stmxcsr %0" : "=m"(m));
     CHECK(nm_count == 2);
