@@ -359,7 +359,7 @@ Launches gain less than that: summed over Mojave's apps, 20.2 s cold before and 
 
 ### A long session
 
-`probes/soak.sh`, 4 vCPUs on a clone: 3 to 6 applications at a time opened and closed, i386 included, Safari's JIT at work, memory past the guest's 8 GB every eighth cycle, and arithmetic, file and memory contents checked throughout.
+`probes/long-run.sh`, 4 vCPUs on a clone: 3 to 6 applications at a time opened and closed, i386 included, Safari's JIT at work, memory past the guest's 8 GB every eighth cycle, and arithmetic, file and memory contents checked throughout.
 
 Boots with the `sti` shadow fixed, except where noted:
 
@@ -374,7 +374,7 @@ Boots with the `sti` shadow fixed, except where noted:
 | Mojave, 2000 s | control connection ended at 1149 s, guest still running | no output | not read |
 | Mojave, 2000 s | ran out | 7288, 0 | 2822, 56, 101 |
 
-Three of six long Mojave boots ended early. The user stopped some of the long soaks themselves, because of the load on their laptop, so these can't be read as engine failures: the QEMU exit and the lost connection probably, the reset possibly. Before the `sti` fix, 5 of 8 Mojave boots wedged within minutes, which is an engine failure, seen in the event ring.
+Three of six long Mojave boots ended early. The user stopped some of the long runs themselves, because of the load on their laptop, so these can't be read as engine failures: the QEMU exit and the lost connection probably, the reset possibly. Before the `sti` fix, 5 of 8 Mojave boots wedged within minutes, which is an engine failure, seen in the event ring.
 
 A guest reset did happen in a normal short boot, 15.7 s after hand-off, with one vCPU parked in `cpu_signal_handler`. QEMU's log of it gave a reset on vCPU 2, but its register dump is the last fallback's, not the moment's, and NVRAM has no panic text. QEMU now looks for panic text in RAM at a reset. Cause unknown.
 
@@ -451,7 +451,9 @@ What's left at N=4 is mostly still the monitor lock: about 1.1 cores waiting on 
 
 Tried and dropped: doing a table store's TLB invalidates after letting go of the lock. The time held for table stores stayed at 14 to 16 s and rates didn't move, so it's the number of stores, at about a microsecond each, and not the invalidates. A second kernel pin for the crossing between a process's tables and the kernel's is in, with no clean measurement.
 
-Not tried, and the next things to try: not taking the lock for a store to a slot no shadow holds, which needs fills to look again; or filling the shadow at the store, so that a new page costs one trip rather than two.
+Filling the shadow at the store, for the page the process last faulted on, so that a new page costs one trip rather than two, was tried and dropped. It fired 20,000 times a second on the first vCPU, and page faults, best of 40 s, alternating, 2 vCPUs: Mojave 2649, 2563, 3045 ns without it, 3016, 3101, 2876 ns with it; Mavericks 1460, 1695 without, 1377, 1593 with. A retried fault is evidently not what a page costs. Mavericks' page fault at 1377 to 1695 is near Rosetta's 1352, so most of Mojave's gap is something else: its kernel's own path, more mirrors, or both.
+
+Not tried: not taking the lock for a store to a slot no shadow holds, which needs fills to look again.
 
 ### mmap_touch again
 
