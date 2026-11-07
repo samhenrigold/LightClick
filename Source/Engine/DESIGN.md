@@ -469,6 +469,21 @@ Filling the shadow at the store, for the page the process last faulted on, so th
 
 Not tried: not taking the lock for a store to a slot no shadow holds, which needs fills to look again.
 
+### Where real work goes: copies, pmap, a decoder
+
+Mojave picks `_platform_memmove` by the commpage's CPU family, not by ERMS or AVX, so a Penryn guest runs the Base variant. Copied byte for byte into a flat image, MB/s best of five: Base 17,670 at 256 B and 27,291 at 4 KB under the engine against Rosetta's 37,370 and 66,692, but 54,000 to 58,000 from 64 KB to 400 KB against Rosetta's 14,000 to 15,000. Its Nehalem variant runs at a flat 29,500 under the engine: its aligned SSE moves each compute an address and check alignment, where `movups` folds the offset and checks nothing. `rep movsb` is the engine's best small copy, at 47,000 to 68,000.
+
+A guest profile then says how much it matters: dtrace at 997 Hz per CPU, 2 vCPUs, one Mojave boot, over 12 s of Preview opening the 135 MB `Mojave.heic` and 15 s of Safari loading apple.com, cold then warm, as shares of samples outside the idle loop and dtrace's own. Of the 60 hottest kernel and 60 hottest user functions, so lower bounds:
+
+| | pmap | fault paths | memmove | HEVC decoder |
+|---|---|---|---|---|
+| Preview cold | 5.8% | 2.5% | 0.9% | 40.6% |
+| Preview warm | 2.9% | 1.7% | 1.0% | 58.9% |
+| Safari cold | 9.0% | 3.7% | 0.6% | |
+| Safari warm | 6.1% | 2.8% | 0.4% | |
+
+So copies are about 1% and aren't worth translator work. `pmap_enter_options` and `pmap_remove_range_options` are 3 to 9%, but a fastcall would remove only the trap of each store, a small part of that, as estimated from the store and fault costs above. Preview's image open is mostly one function of the software HEVC decoder, most samples at one rip: that loop's translation is the lever there. No x87 showed among the named functions.
+
 ### mmap_touch again
 
 At N=4 it waits only 10% of a core for the monitor lock on Mavericks and 35% on Mojave, with about two trapped stores per page. So the guest's own spinlock, stretched by those traps, is what's left, as above. A lower flood limit, 16 writes rather than 64, was the cheapest thing to try, as `munmap` writes 64 slots with no walk between. Alternating, two boots each at N=4: Mavericks 813, 596 against 412, 650 Kpages/s; Mojave 416, 470 against 414, 487; stores per page on Mavericks down from about 1.6 to 2 to about 1.2 to 1.5. No clear gain under this load, so it stays at 64.
