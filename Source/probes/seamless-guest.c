@@ -435,8 +435,8 @@ static CGWindowID front_window_of(pid_t pid) {
 
 static const char *session_menu_tool;
 
-// Runs the menu tool, which is what Accessibility's grant names, and waits: what comes next depends on it being done.
-static int run_menu_tool(const char *command, pid_t pid, CGWindowID id, const char *x, const char *y) {
+// Runs the menu tool, which is what Accessibility's grant names, and waits: the press after it depends on it being done.
+static int raise_with_menu_tool(pid_t pid, CGWindowID id) {
     if (!session_menu_tool)
         return 127;
     char pid_text[16], window_text[16];
@@ -444,12 +444,7 @@ static int run_menu_tool(const char *command, pid_t pid, CGWindowID id, const ch
     snprintf(window_text, sizeof(window_text), "%u", id);
     pid_t child = fork();
     if (!child) {
-        if (x)
-            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text, "--x", x,
-                  "--y", y, (char *)NULL);
-        else
-            execl(session_menu_tool, session_menu_tool, command, "--pid", pid_text, "--window", window_text,
-                  (char *)NULL);
+        execl(session_menu_tool, session_menu_tool, "raise-window", "--pid", pid_text, "--window", window_text, (char *)NULL);
         _exit(127);
     }
     int status = 127;
@@ -468,7 +463,7 @@ static void raise_for_press(struct Stream *s, CGWindowID id) {
     activate_owner(s);
     if (front_window_of(pid) == id)
         return;
-    int error = run_menu_tool("raise-window", pid, id, NULL, NULL);
+    int error = raise_with_menu_tool(pid, id);
     double started = now();
     while (!error && front_window_of(pid) != id && now() - started < 0.25)
         usleep(5000);
@@ -1060,12 +1055,17 @@ static int drain_input(struct Stream *s) {
                 _exit(127);
             }
         } else if (m.type == SWM_SET_PLACE) {
-            char x[16], y[16];
-            snprintf(x, sizeof(x), "%d", m.place_x);
-            snprintf(y, sizeof(y), "%d", m.place_y);
-            int error = run_menu_tool("place-window", session_app_pid ? session_app_pid : s->pid, m.u.window_id, x, y);
-            printf("# %.3f placed window %u at %s,%s: error %d\n", now(), m.u.window_id, x, y, error);
+            printf("# %.3f placing window %u at %d,%d\n", now(), m.u.window_id, m.place_x, m.place_y);
             fflush(stdout);
+            if (session_menu_tool && !fork()) {
+                char pid[16], window[16], x[16], y[16];
+                snprintf(pid, sizeof(pid), "%d", session_app_pid ? session_app_pid : s->pid);
+                snprintf(window, sizeof(window), "%u", m.u.window_id);
+                snprintf(x, sizeof(x), "%d", m.place_x);
+                snprintf(y, sizeof(y), "%d", m.place_y);
+                execl(session_menu_tool, session_menu_tool, "place-window", "--pid", pid, "--window", window, "--x", x, "--y", y, (char *)NULL);
+                _exit(127);
+            }
         } else if (m.type == SWM_SET_FULL_SCREEN) {
             if (session_menu_tool && session_app_pid && !fork()) {
                 char pid[16], window[16];
@@ -1521,7 +1521,7 @@ static int place(const char *app, double x, double y, int slot, int slot_width, 
 
 struct TreeWindow {
     int full_screen, asked_full_screen;
-    double full_since, left_at; // When it went into full screen, unpaired, and when it left the screen for elsewhere.
+    double first_seen, full_since, left_at; // When it was new, went into full screen unpaired, and left the screen for elsewhere.
     CGWindowID became; // The window in full screen for this one, while it's away.
     int away; // Off the screen: see tree_window_is_away.
     uint32_t materials_hash;
@@ -2197,6 +2197,8 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             s->alpha = (uint32_t)alpha;
             s->margin = margin;
             int kind = !no_pixels ? 0 : crop ? SWM_CROP : SWM_OVERLAY;
+            if (!w->first_seen)
+                w->first_seen = now();
             if (tree_shared && tree_send_return(s, w, item))
                 goto done;
             if (own_surface && tree_send_surface_origin(s, w, id))
@@ -2398,12 +2400,13 @@ static int stream_tree(struct Stream *s, const char *app, pid_t pid, double fps,
             if (!windows[i].id || !windows[i].full_since)
                 continue;
             int left = -1;
-            for (int j = 0; j < TREE_MAX_WINDOWS; j++)
+            // Only for a number that's new: one that was already this window has nothing to take over from.
+            for (int j = 0; windows[i].full_since - windows[i].first_seen < 3 && j < TREE_MAX_WINDOWS; j++)
                 if (j != i && windows[j].id && windows[j].pid == windows[i].pid && windows[j].away == 1 &&
                     !windows[j].became && now() - windows[j].left_at < 3 &&
                     (left < 0 || windows[j].left_at > windows[left].left_at))
                     left = j;
-            if (left < 0 && now() - windows[i].full_since < 1)
+            if (left < 0 && windows[i].full_since - windows[i].first_seen < 3 && now() - windows[i].full_since < 1)
                 continue;
             windows[i].full_since = 0;
             if (left >= 0) {

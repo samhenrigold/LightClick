@@ -156,9 +156,11 @@ public final class SeamlessDesktop {
         var ran = SeamlessGuestRun(exitCode: nil, output: "", failure: nil)
         // In one request, as each costs about a second on Mavericks. Dropping just after setup, on Mavericks, means asking again:
         // the script never tries the hook twice in a guest's start, and nothing's reached the user yet.
-        for attempt in 1...8 {
+        // A guest that's slow to answer, on a busy Mac, gets as long as a press gets to show anything: each request's own limit is short.
+        let started = CFAbsoluteTimeGetCurrent()
+        while true {
             ran = await guest.run("/bin/sh", ["-c", Self.pressScript, "sh", String(port)])
-            if stopped || control >= 0 || attempt == 8 { break }
+            if stopped || control >= 0 || CFAbsoluteTimeGetCurrent() - started > 120 { break }
             if ran.exitCode == Self.noTools {
                 // The guest has restarted since they went in.
                 Self.staged.remove(configuration.machine.path)
@@ -172,6 +174,10 @@ public final class SeamlessDesktop {
             }
         }
         note("# the guest's side ended, exit \(ran.exitCode.map(String.init) ?? "none")\n\(ran.output)\n\(ran.failure ?? "")")
+        if ran.exitCode == nil, control < 0, !stopped {
+            finish("This Mac isn’t answering. It may just be busy, so try again in a moment.", why: "no answer from the guest")
+            return
+        }
         finish(ran.exitCode == 3 ? "This Mac couldn’t reach Light Click. Seamless needs its networking on." : nil, why: "the guest's side ended")
     }
 
@@ -258,7 +264,7 @@ public final class SeamlessDesktop {
         [ -x /tmp/sg/ws-inject ] && [ -f /tmp/sg/hook.dylib ] || exit 3
         # Earlier builds loaded it through WindowServer's launchd job. That one's in this WindowServer, and patching twice isn't safe, so
         # the entry goes now and windows have their surfaces from the guest's next start.
-        boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed 's/.*sec = \\([0-9]*\\).*/\\1/')
+        boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed 's/.*{ sec = \\([0-9]*\\).*/\\1/')
         plist=/System/Library/LaunchDaemons/com.apple.WindowServer.plist
         if /usr/bin/grep -q seamless-ws-hook $plist; then
             /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables:DYLD_INSERT_LIBRARIES" $plist
@@ -268,13 +274,18 @@ public final class SeamlessDesktop {
         pid=$(/usr/bin/pgrep -x WindowServer); [ -n "$pid" ] || exit 3
         marker=/var/tmp/seamless-ws-press
         said=$(/bin/cat $marker 2>/dev/null)
+        # Another try may still be at it, if the host lost patience and not the guest.
+        waited=0
+        while [ "$said" = "$boot $pid tried" ] && [ $waited -lt 20 ]; do
+            /bin/sleep 0.5; said=$(/bin/cat $marker 2>/dev/null); waited=$((waited + 1))
+        done
         [ "$said" = "$boot $pid ok" ] && exit 0
         case "$said" in "$boot "*) exit 4;; esac
         # Written first, so a WindowServer that dies with this isn't tried again.
         echo "$boot $pid tried" > $marker
-        /bin/cp /tmp/sg/hook.dylib /usr/lib/seamless-ws-hook.dylib || exit 5
+        /bin/cp /tmp/sg/hook.dylib /usr/lib/seamless-ws-hook.dylib || { echo "$boot $pid failed" > $marker; exit 5; }
         /bin/chmod 755 /usr/lib/seamless-ws-hook.dylib
-        /tmp/sg/ws-inject /usr/lib/seamless-ws-hook.dylib 2>&1 || exit 6
+        /tmp/sg/ws-inject /usr/lib/seamless-ws-hook.dylib 2>&1 || { echo "$boot $pid failed" > $marker; exit 6; }
         [ "$(/usr/bin/pgrep -x WindowServer)" = "$pid" ] || exit 7
         echo "$boot $pid ok" > $marker
         """
