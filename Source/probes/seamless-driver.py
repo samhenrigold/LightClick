@@ -566,8 +566,8 @@ def desktop(activation_only=False):
         # Bytes each way on the agent's socket, often, to tell an unanswered request from an answer that never arrives.
         if first is None and time.time() - pressed > 2 and time.time() - socket_at > 4:
             socket_at = time.time()
-            rows = subprocess.run(['netstat', '-anv', '-f', 'unix'], capture_output=True, text=True).stdout.splitlines()
-            print(f'## {time.time() - pressed:.0f} s agent socket', [' '.join(row.split()[:10]) for row in rows if 'guest-agent' in row], flush=True)
+            sockets = subprocess.run(['netstat', '-anv', '-f', 'unix'], capture_output=True, text=True).stdout.splitlines()
+            print(f'## {time.time() - pressed:.0f} s agent socket', [' '.join(row.split()[:10]) for row in sockets if 'guest-agent' in row], flush=True)
         if first is None and time.time() - pressed > 12 + dumped * 25 and dumped < 3:
             dumped += 1
             monitor_dump(f'{time.time() - pressed:.0f} s after a press with no windows yet')
