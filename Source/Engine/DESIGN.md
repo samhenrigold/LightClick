@@ -565,6 +565,25 @@ Artifacts: `Build/image-decode/loop5-engine-sar16`, `loop5-control-old-engine`, 
 with separate guest-correctness reports despite the expected modern-host mismatch. No Final Cut Pro or other
 application speedup follows from these measurements.
 
+The patched discovery profile maps active decoder PID 820's VCPHEVC `__TEXT` at `0x104110000` from its own
+VM map (`Build/bench/loop6-patched-hevc-profile.hevc-profile.json`); the old PID 1082 base was `0x106c18000`.
+The old SAR-following offset `0xd9037` had 388 samples and disappeared from the new top 30, whose cutoff was seven:
+its new count was at most seven, not necessarily zero. The hottest new offset was `0xd92c0` (68 samples), after a CL shift.
+These are observer-loaded discovery counts, not timing comparisons. `Tests/vcphevc-cl.py` tested the exact 29 bytes
+`[0xd92bd,0xd92da)`, retaining both CL shifts, XOR, model load/store and final ADD in bounded synthetic local tables.
+Independent result/flag oracles passed 4096 cases and each batch hash. Three rotating rounds of one million iterations
+measured precise/diagnostic-fast/Rosetta medians of 7.292/7.285/7.159 ns per fragment including wrapper
+(`/tmp/lightclick-vcphevc-cl-baseline/result.json`). This neighborhood was already near Rosetta speed; no CL-liveness
+optimization was made, and that hypothesis should not be implemented without a demonstrated gain. Synthetic state
+does not reproduce the complete decoder's dependencies or workload.
+
+Separately, review exposed a correctness bug when a 32/64-bit shift writes RCX/ECX while taking its count from CL:
+flag generation reread the changed count register. The focused `t_cl_self_count` fixture failed the baseline while
+Rosetta passed all 30,720 checks. Preserving the effective count before the destination write now passes the same
+30,720 Engine checks. Kernel verification passed with zero failures, including exact RCX and defined flags at the
+following fault before TEST; the C API run also had zero failures across 1431 roundtrips. This is a correctness fix,
+not a performance claim.
+
 ### Mojave's page faults: its kernel's bzero
 
 In a page-fault loop, best ns per page, 2 vCPUs: Mojave 2,350 to 3,260 under the engine and 3,468 under TCG; Mavericks 1,282 to 1,298. A dtrace profile of the loop on Mojave put `__bzero` at 56% of kernel samples, 3,107 of 5,579, against 39 of 4,341 on Mavericks, whose pmap time is about the same. Mojave zeroes each new page with `rep stos` under CR0.TS, and in hybrid mode `rep stos` never took the bulk stub: its pattern was a NEON register set outside the stub, where a TS trap couldn't be backed out of, so every element went through the plain loop. The pattern now goes into x22 by integer shifts and the stub stores it with `stp`. After, one boot against one on the build before: 1,367 to 1,414 ns a page against 2,351 to 2,531, `__bzero` 4 samples against 1,975. Mojave's fault now costs what Mavericks' does. Preview's HEIC open and Safari's page load ran as before, no panic. A 12-minute Mojave long run on it, 4 vCPUs: 24 cycles, 2,762 arithmetic checks, 12 file checks, 0 wrong, every application got a window, no reset; Chess killed when it wouldn't quit, as before, and stalls of 2 to 5 s under memory pressure. Launches, two boots of each build, alternating, 4 vCPUs, summed over six applications: warm 9.41 s against 9.90, cold 23.14 against 22.84, or 21.82 without one slow first launch, so about 5% faster warm and within noise cold.
