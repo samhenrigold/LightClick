@@ -2990,8 +2990,12 @@ int main(int argc, char **argv) {
         list_windows();
         return 0;
     }
-    if (!strcmp(command, "list"))
+    if (!strcmp(command, "list")) {
+        // The agent runs in the system session; list the console user's Aqua windows, as open-app does.
+        if (geteuid() == 0 && !in_session)
+            return run_in_console_session(argc, argv, 1);
         return list_windows();
+    }
     if (!strcmp(command, "hw-loop")) {
         // A composite of one window by WindowServer, on the GPU, as fast as it'll go, with its pixels never read here.
         if (geteuid() == 0 && !in_session)

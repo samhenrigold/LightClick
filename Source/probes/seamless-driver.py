@@ -556,6 +556,7 @@ def fps():
                 'cpu_note': 'Owned clone process CPU only; excludes WindowServer and meter. No CPU acceptance budget.'}
     channel_safe = True
     interrupted = False
+    activation_attempted = False
     guest = None
 
     def save():
@@ -639,8 +640,10 @@ def fps():
         raise RuntimeError('fps restore did not confirm visible VM and gpu mode 0 within45s')
 
     def activate():
+        nonlocal activation_attempted
         if state().get('Active'):
             raise RuntimeError('fps expected windowed state before activation')
+        activation_attempted = True
         ask({'Action': 'seamless-toggle'})
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
@@ -713,7 +716,7 @@ def fps():
     except Exception as error:
         evidence['error'] = repr(error)
     finally:
-        if guest is not None and not interrupted:
+        if guest is not None and not interrupted and activation_attempted:
             try:
                 restore()
                 evidence['restored'] = True
@@ -723,6 +726,8 @@ def fps():
                 raise
             except Exception as error:
                 evidence.update(result='INCONCLUSIVE', restoration_error=repr(error), restored=False)
+        if not activation_attempted and not interrupted:
+            evidence.update(restored=False, restoration_skipped='No Seamless activation was attempted.')
         save()
     print(f'{evidence["result"]} FPS regression guard; evidence {prefix}.json', flush=True)
     if evidence['result'] != 'PASS':

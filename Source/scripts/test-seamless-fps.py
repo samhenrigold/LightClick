@@ -128,6 +128,9 @@ def main():
                 assert len(calls) == 3 and not evidence['restored']
             else:
                 assert not active[0]
+            if case == 'guest-ambiguous':
+                assert not any(item.get('Action') == 'seamless-toggle' or item.get('Arguments') == ['gpu', '--rows'] for item in calls)
+                assert not evidence['states'] and 'No Seamless activation' in evidence['restoration_skipped']
             if case in ('pass', 'empty-titles'):
                 assert evidence['guest_fixture']['id'] == '43' and evidence['guest_fixture']['title'] == 'Seamless page'
                 if case == 'empty-titles':
