@@ -92,7 +92,7 @@ struct SeamlessFrameMessage {
     uint32_t window, frame, width, height;
     int32_t x, y;
 };
-static void seamless_send_surface(IOSurfaceRef surface, uint32_t window)
+static void seamless_send_surface(IOSurfaceRef surface, uint32_t window, mach_port_t hold, int *held)
 {
     static mach_port_t port;
     static uint32_t sent[4096];
@@ -106,9 +106,10 @@ static void seamless_send_surface(IOSurfaceRef surface, uint32_t window)
     mach_port_t capability = IOSurfaceCreateMachPort(surface);
     struct SeamlessFrameMessage m;
     memset(&m, 0, sizeof(m));
-    m.header.msgh_bits = MACH_MSGH_BITS_COMPLEX | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    m.header.msgh_bits = MACH_MSGH_BITS_COMPLEX | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
     m.header.msgh_size = sizeof(m);
     m.header.msgh_remote_port = port;
+    m.header.msgh_local_port = hold;
     m.header.msgh_id = SEAMLESS_FRAME_MESSAGE;
     m.body.msgh_descriptor_count = 1;
     m.surface.name = capability;
@@ -118,45 +119,140 @@ static void seamless_send_surface(IOSurfaceRef surface, uint32_t window)
     m.frame = ++sent[window & 4095]; /* A shape's share a count with its window's. */
     m.width = (uint32_t)IOSurfaceGetWidth(surface);
     m.height = (uint32_t)IOSurfaceGetHeight(surface);
-    mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, 0, 0, 0);
+    if (mach_msg(&m.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0, 0, 0, 0) == KERN_SUCCESS)
+        __atomic_fetch_add(held, 1, __ATOMIC_RELAXED);
     mach_port_deallocate(mach_task_self(), capability);
 }
 static uint64_t seamless_frames;
 void apple_gfx_seamless_frame(void) { __atomic_fetch_add(&seamless_frames, 1, __ATOMIC_RELAXED); }
-/* Which surface each window's composite last drew into. A composite is several command buffers, and after them the hook
+/* Which texture each window's composite last drew into. A composite is several command buffers, and after them the hook
  * draws into a small surface of its own, which is how a finished one is known, on the guest's own queue. So a surface only
  * goes if its marker follows: one of the guest's own that merely has such a size goes nowhere.
  * shortcut: one whose size also names a real window between its composites would be taken for it. Unseen. A channel other
- * than size would end that, and neither a texture's label nor, so far, anything else reaches here. */
+ * than size would end that, and neither a texture's label nor, so far, anything else reaches here.
+ *
+ * The guest goes back to its surfaces when it likes, and nothing here can make it wait. So what's sent is a copy, made in the
+ * marker's command buffer, right after the composite and before anything later: this exact frame, in a surface only this side
+ * writes, and not until whoever has it lets go, by the right each frame carries. With none free the frame's dropped, and the
+ * next of that window's has all of it. shortcut: the window's last frame, then, doesn't come till it changes again. */
+#define SEAMLESS_COPIES 3
+struct SeamlessCopies {
+    uint32_t width, height;
+    IOSurfaceRef surface[SEAMLESS_COPIES];
+    id<MTLTexture> texture[SEAMLESS_COPIES];
+    mach_port_t hold[SEAMLESS_COPIES];
+    int held[SEAMLESS_COPIES];
+};
 static os_unfair_lock seamless_latest_lock = OS_UNFAIR_LOCK_INIT;
-static IOSurfaceRef seamless_latest[8192]; /* After a window's, its shape's. */
+static id<MTLTexture> seamless_latest[8192]; /* After a window's, its shape's. */
 static uint64_t seamless_latest_passes[8192], seamless_sent_passes[8192];
-static void seamless_composite_drew(IOSurfaceRef surface, uint32_t window)
+static struct SeamlessCopies seamless_copies[8192];
+static uint64_t seamless_copied, seamless_copies_dropped;
+static void seamless_composite_drew(id<MTLTexture> texture, uint32_t window)
 {
-    CFRetain(surface);
+    [texture retain];
     os_unfair_lock_lock(&seamless_latest_lock);
-    IOSurfaceRef old = seamless_latest[window];
-    seamless_latest[window] = surface;
+    id<MTLTexture> old = seamless_latest[window];
+    seamless_latest[window] = texture;
     seamless_latest_passes[window]++;
     os_unfair_lock_unlock(&seamless_latest_lock);
-    if (old) CFRelease(old);
+    [old release];
 }
-static void seamless_composite_finished(uint32_t window)
+static int seamless_make_copies(struct SeamlessCopies *copies, id<MTLTexture> like)
+{
+    uint32_t width = (uint32_t)like.width, height = (uint32_t)like.height;
+    for (int i = 0; i < SEAMLESS_COPIES; i++) {
+        /* What a frame still held by the consumer is in keeps going through its right. */
+        if (copies->hold[i]) mach_port_mod_refs(mach_task_self(), copies->hold[i], MACH_PORT_RIGHT_RECEIVE, -1);
+        if (copies->surface[i]) CFRelease(copies->surface[i]);
+        [copies->texture[i] release];
+        copies->hold[i] = 0;
+        copies->surface[i] = NULL;
+        copies->texture[i] = nil;
+        copies->held[i] = 0;
+    }
+    copies->width = width;
+    copies->height = height;
+    for (int i = 0; i < SEAMLESS_COPIES; i++) {
+        NSDictionary *properties = @{
+            (id)kIOSurfaceWidth: @(width), (id)kIOSurfaceHeight: @(height), (id)kIOSurfaceBytesPerElement: @4,
+            (id)kIOSurfacePixelFormat: @(IOSurfaceGetPixelFormat(like.iosurface))
+        };
+        copies->surface[i] = IOSurfaceCreate((CFDictionaryRef)properties);
+        MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:like.pixelFormat
+                                                                                              width:width
+                                                                                             height:height
+                                                                                          mipmapped:NO];
+        descriptor.storageMode = like.storageMode;
+        copies->texture[i] = copies->surface[i] ? [like.device newTextureWithDescriptor:descriptor
+                                                                              iosurface:copies->surface[i]
+                                                                                  plane:0]
+                                                : nil;
+        if (!copies->texture[i] || mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &copies->hold[i])) {
+            copies->width = 0;
+            return 0;
+        }
+    }
+    return 1;
+}
+static int seamless_free_copy(struct SeamlessCopies *copies)
+{
+    for (int i = 0; i < SEAMLESS_COPIES; i++) {
+        struct {
+            mach_msg_header_t header;
+            mach_msg_max_trailer_t trailer;
+        } notice;
+        while (__atomic_load_n(&copies->held[i], __ATOMIC_RELAXED) &&
+               !mach_msg(&notice.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(notice), copies->hold[i], 0, 0))
+            __atomic_fetch_sub(&copies->held[i], 1, __ATOMIC_RELAXED);
+        if (!copies->held[i] && !IOSurfaceIsInUse(copies->surface[i])) return i;
+    }
+    return -1;
+}
+/* Before the marker's own pass is encoded, in its command buffer. A slot's copy goes when that's done. */
+static void seamless_composite_finished(id<MTLCommandBuffer> command, uint32_t window)
 {
     for (uint32_t slot = window; slot <= window + 4096; slot += 4096) {
-        IOSurfaceRef surface = NULL;
+        id<MTLTexture> source = nil;
         os_unfair_lock_lock(&seamless_latest_lock);
         if (seamless_latest_passes[slot] != seamless_sent_passes[slot] && seamless_latest[slot]) {
-            surface = seamless_latest[slot];
-            CFRetain(surface);
+            source = [seamless_latest[slot] retain];
             seamless_sent_passes[slot] = seamless_latest_passes[slot];
         }
         os_unfair_lock_unlock(&seamless_latest_lock);
-        if (surface) {
-            /* A shape goes as the window's ID with 0x10000. */
-            seamless_send_surface(surface, slot >= 4096 ? window | 0x10000 : window);
-            CFRelease(surface);
+        if (!source) continue;
+        struct SeamlessCopies *copies = &seamless_copies[slot];
+        int index = -1;
+        if ((copies->width == source.width && copies->height == source.height) || seamless_make_copies(copies, source))
+            index = seamless_free_copy(copies);
+        if (index < 0) {
+            __atomic_fetch_add(&seamless_copies_dropped, 1, __ATOMIC_RELAXED);
+            [source release];
+            continue;
         }
+        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+        [blit copyFromTexture:source
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(source.width, source.height, 1)
+                    toTexture:copies->texture[index]
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        [source release];
+        __atomic_fetch_add(&seamless_copied, 1, __ATOMIC_RELAXED);
+        IOSurfaceRef surface = copies->surface[index];
+        mach_port_t hold = copies->hold[index];
+        int *held = &copies->held[index];
+        uint32_t sent_as = slot >= 4096 ? window | 0x10000 : window; /* A shape goes as the window's ID with 0x10000. */
+        CFRetain(surface);
+        [command addCompletedHandler:^(id<MTLCommandBuffer> done) {
+            (void)done;
+            seamless_send_surface(surface, sent_as, hold, held);
+            CFRelease(surface);
+        }];
     }
 }
 /* What a guest's draws sample, with VIM_SEAMLESS_PVG_SAMPLED: whether its layers' contents have a host IOSurface. Each
@@ -318,18 +414,11 @@ static id preserving_render_encoder(id self, SEL cmd, MTLRenderPassDescriptor *p
                     NSLog(@"seamless surface %ux%u window %u values %@", width, height, window, values);
                     if (values) CFRelease(values);
                 }
-                seamless_composite_drew(surface, window);
+                seamless_composite_drew(target, window);
             } else if (tag == 0xc0) {
-                seamless_composite_drew(surface, window + 4096);
+                seamless_composite_drew(target, window + 4096);
             } else if (tag == 0xb0) {
-                static char once;
-                if (!objc_getAssociatedObject(self, &once)) {
-                    objc_setAssociatedObject(self, &once, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> done) {
-                        (void)done;
-                        seamless_composite_finished(window);
-                    }];
-                }
+                seamless_composite_finished((id<MTLCommandBuffer>)self, window);
             }
         }
     }

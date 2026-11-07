@@ -23,6 +23,10 @@
 #define SG_LAYER_FIELDS 12
 #define SG_MARGIN_POINTS 96 // As probes/seamless-viewer.m found: an active window's shadow fits in this.
 #define SG_BUFFERS 3
+// Drawn into, and never shared. What's drawn here stays till a shared buffer is free for it, so nothing's lost by
+// waiting.
+#define SG_WORK SG_BUFFERS
+#define SG_STORAGE (SG_BUFFERS + 1)
 #define SG_FRAME_MESSAGE 0x53474652
 struct SGFrameMessage {
     mach_msg_header_t header;
@@ -39,9 +43,14 @@ struct SGTreeEntry {
 struct SGWindow {
     uint32_t id;
     int width, height, x, y; // Of the surface: the window with its shadow margin.
-    IOSurfaceRef surface[SG_BUFFERS];
-    GLuint texture[SG_BUFFERS], framebuffer[SG_BUFFERS];
-    int front, back, drawn, dirty;
+    IOSurfaceRef surface[SG_STORAGE];
+    GLuint texture[SG_STORAGE], framebuffer[SG_STORAGE];
+    // Each frame sent carries a send-once right to its buffer's port. The consumer holds it while it uses the frame,
+    // and its going, by the consumer's letting go or its dying, is what says the buffer can be written again.
+    mach_port_t hold[SG_BUFFERS];
+    int held[SG_BUFFERS];
+    int front, drawn, dirty, unsent;
+    int ready; // The frame in front is finished, and hasn't got to the consumer.
     int cleared; // In this frame.
     int pending;
     GLsync pending_sync;
@@ -99,6 +108,12 @@ static void SGToken(float value) {
 
 static void SGFreeWindowStorage(struct SGWindow *w) {
     for (int i = 0; i < SG_BUFFERS; ++i) {
+        if (w->hold[i])
+            mach_port_mod_refs(mach_task_self(), w->hold[i], MACH_PORT_RIGHT_RECEIVE, -1);
+        w->hold[i] = 0;
+        w->held[i] = 0;
+    }
+    for (int i = 0; i < SG_STORAGE; ++i) {
         if (w->framebuffer[i])
             glDeleteFramebuffersEXT(1, &w->framebuffer[i]);
         if (w->texture[i])
@@ -119,7 +134,9 @@ static int SGMakeWindowStorage(struct DGHostContext *c, struct SGWindow *w, int 
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING_EXT, &draw);
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING_EXT, &read);
     int good = 1;
-    for (int i = 0; good && i < SG_BUFFERS; ++i) {
+    for (int i = 0; good && i < SG_BUFFERS; ++i)
+        good = !mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &w->hold[i]);
+    for (int i = 0; good && i < SG_STORAGE; ++i) {
         size_t row = ((size_t)width * 4 + 63) & ~(size_t)63;
         const CFStringRef keys[] = {kIOSurfaceWidth,       kIOSurfaceHeight,    kIOSurfaceBytesPerElement,
                                     kIOSurfaceBytesPerRow, kIOSurfaceAllocSize, kIOSurfacePixelFormat};
@@ -189,7 +206,9 @@ static struct SGWindow *SGWindowFor(struct DGHostContext *c, const struct SGTree
         memset(w->surface, 0, sizeof(w->surface));
         memset(w->texture, 0, sizeof(w->texture));
         memset(w->framebuffer, 0, sizeof(w->framebuffer));
-        w->drawn = w->dirty = w->pending = 0;
+        memset(w->hold, 0, sizeof(w->hold));
+        memset(w->held, 0, sizeof(w->held));
+        w->drawn = w->dirty = w->pending = w->ready = 0;
         w->front = 0;
         if (!SGMakeWindowStorage(c, w, width, height))
             return NULL;
@@ -201,8 +220,8 @@ static struct SGWindow *SGWindowFor(struct DGHostContext *c, const struct SGTree
             if (scissor)
                 glDisable(GL_SCISSOR_TEST);
             int dx = old.x - x, dy = old.y - y;
-            glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, old.framebuffer[old.front]);
-            glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, w->framebuffer[0]);
+            glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, old.framebuffer[SG_WORK]);
+            glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, w->framebuffer[SG_WORK]);
             glBlitFramebufferEXT(0, 0, old.width, old.height, dx, dy, dx + old.width, dy + old.height,
                                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
             glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, (GLuint)draw);
@@ -220,34 +239,23 @@ static struct SGWindow *SGWindowFor(struct DGHostContext *c, const struct SGTree
     return w;
 }
 
-// Keeps what's on the last surface, since WindowServer draws only what changed. On the first draw of a frame.
-static void SGStartFrame(struct SGWindow *w) {
-    if (w->dirty)
-        return;
-    int next = (w->front + 1) % SG_BUFFERS;
-    if (IOSurfaceIsInUse(w->surface[next])) {
-        int other = (next + 1) % SG_BUFFERS;
-        if (IOSurfaceIsInUse(w->surface[other]))
-            ++sg_in_use; // Tears if the consumer is still reading it. Better than stalling the guest.
-        else
-            next = other;
+// A shared buffer nobody holds and nothing's reading, or -1. shortcut: with none free a frame waits for the next update
+// of any window, so a consumer stalled past all of them as the guest goes idle shows the last frame sent till something
+// changes.
+static int SGFreeBuffer(struct SGWindow *w) {
+    for (int n = 1; n <= SG_BUFFERS; ++n) {
+        int i = (w->front + n) % SG_BUFFERS;
+        struct {
+            mach_msg_header_t header;
+            mach_msg_max_trailer_t trailer;
+        } notice;
+        while (w->held[i] &&
+               !mach_msg(&notice.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(notice), w->hold[i], 0, 0))
+            --w->held[i];
+        if (!w->held[i] && !IOSurfaceIsInUse(w->surface[i]))
+            return i;
     }
-    w->back = next;
-    w->dirty = 1;
-    if (!w->drawn)
-        return;
-    GLint read = 0;
-    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
-    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING_EXT, &read);
-    if (scissor)
-        glDisable(GL_SCISSOR_TEST);
-    glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, w->framebuffer[w->front]);
-    glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, w->framebuffer[next]);
-    glBlitFramebufferEXT(0, 0, w->width, w->height, 0, 0, w->width, w->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, (GLuint)read);
-    if (scissor)
-        glEnable(GL_SCISSOR_TEST);
-    ++sg_blits;
+    return -1;
 }
 
 struct SGSaved {
@@ -270,10 +278,10 @@ static struct SGWindow *SGRedirect(struct DGHostContext *c, struct SGSaved *save
     struct SGWindow *w = SGWindowFor(c, t);
     if (!w)
         return NULL;
-    SGStartFrame(w);
+    w->dirty = 1;
     glGetIntegerv(GL_VIEWPORT, saved->viewport);
     saved->scissor_on = glIsEnabled(GL_SCISSOR_TEST);
-    glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, w->framebuffer[w->back]);
+    glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, w->framebuffer[SG_WORK]);
     int partial = (int64_t)c->drawable->width * c->drawable->height < sg_primary_area;
     int origin_x = partial ? t->origin_x : 0, origin_y = partial ? t->origin_y : 0;
     glViewport(saved->viewport[0] + origin_x - w->x, saved->viewport[1] + origin_y - w->y, saved->viewport[2],
@@ -373,18 +381,22 @@ static void SGSendReady(void) {
             sg_port = 0;
     }
     for (struct SGWindow *w = sg_windows; w; w = w->next) {
-        if (!w->pending || glClientWaitSync(w->pending_sync, GL_SYNC_FLUSH_COMMANDS_BIT, 8000000) == GL_TIMEOUT_EXPIRED)
-            continue;
-        glDeleteSync(w->pending_sync);
-        w->pending = 0;
-        if (!sg_port)
+        if (w->pending &&
+            glClientWaitSync(w->pending_sync, GL_SYNC_FLUSH_COMMANDS_BIT, 8000000) != GL_TIMEOUT_EXPIRED) {
+            glDeleteSync(w->pending_sync);
+            w->pending = 0;
+            w->ready = 1;
+        }
+        if (!w->ready || !sg_port)
             continue;
         mach_port_t capability = IOSurfaceCreateMachPort(w->surface[w->front]);
         struct SGFrameMessage message;
         memset(&message, 0, sizeof(message));
-        message.header.msgh_bits = MACH_MSGH_BITS_COMPLEX | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+        message.header.msgh_bits =
+            MACH_MSGH_BITS_COMPLEX | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
         message.header.msgh_size = sizeof(message);
         message.header.msgh_remote_port = sg_port;
+        message.header.msgh_local_port = w->hold[w->front];
         message.header.msgh_id = SG_FRAME_MESSAGE;
         message.body.msgh_descriptor_count = 1;
         message.surface.name = capability;
@@ -396,10 +408,13 @@ static void SGSendReady(void) {
         message.height = (uint32_t)w->height;
         message.x = w->x;
         message.y = w->y;
-        if (mach_msg(&message.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(message), 0, 0, 0, 0) == KERN_SUCCESS)
+        if (mach_msg(&message.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(message), 0, 0, 0, 0) == KERN_SUCCESS) {
             ++w->sent;
-        else
-            ++w->drops;
+            ++w->held[w->front];
+            w->ready = 0;
+        } else {
+            ++w->drops; // It goes again next time, unless a newer frame has replaced it.
+        }
         mach_port_deallocate(mach_task_self(), capability);
     }
 }
@@ -407,22 +422,46 @@ static void SGSendReady(void) {
 // Every window drawn into since the last publish now has a finished frame, once its fence passes.
 static void SGEndFrame(void) {
     int any = 0;
-    for (struct SGWindow *w = sg_windows; w; w = w->next)
-        if (w->dirty) {
-            if (w->pending) {
-                // The one before hasn't finished: this frame replaces it.
+    GLint draw = 0, read = 0;
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING_EXT, &draw);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING_EXT, &read);
+    if (scissor)
+        glDisable(GL_SCISSOR_TEST);
+    for (struct SGWindow *w = sg_windows; w; w = w->next) {
+        if (!w->dirty && !w->unsent)
+            continue;
+        w->dirty = 0;
+        w->cleared = 0;
+        w->drawn = 1;
+        int next;
+        if (w->pending || w->ready) {
+            // The one before wasn't sent, so nobody has that buffer: this frame replaces it there.
+            if (w->pending)
                 glDeleteSync(w->pending_sync);
-                ++w->drops;
-            }
-            w->pending_sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-            w->pending = 1;
-            w->dirty = 0;
-            w->cleared = 0;
-            w->drawn = 1;
-            w->front = w->back;
-            ++w->frames;
-            any = 1;
+            w->pending = w->ready = 0;
+            ++w->drops;
+            next = w->front;
+        } else if ((next = SGFreeBuffer(w)) < 0) {
+            w->unsent = 1;
+            ++sg_in_use;
+            continue;
         }
+        w->unsent = 0;
+        glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, w->framebuffer[SG_WORK]);
+        glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, w->framebuffer[next]);
+        glBlitFramebufferEXT(0, 0, w->width, w->height, 0, 0, w->width, w->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        ++sg_blits;
+        w->pending_sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        w->pending = 1;
+        w->front = next;
+        ++w->frames;
+        any = 1;
+    }
+    glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, (GLuint)draw);
+    glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, (GLuint)read);
+    if (scissor)
+        glEnable(GL_SCISSOR_TEST);
     if (any)
         glFlush();
 }
@@ -463,7 +502,6 @@ static void SGFillDrawableForRead(struct DGHostContext *c) {
     struct SGWindow *w = SGWindowFor(c, &sg_layer);
     if (!w)
         return;
-    SGStartFrame(w);
     int partial = (int64_t)c->drawable->width * c->drawable->height < sg_primary_area;
     int x = w->x - (partial ? sg_layer.origin_x : 0), y = w->y - (partial ? sg_layer.origin_y : 0);
     GLint read = 0;
@@ -471,8 +509,7 @@ static void SGFillDrawableForRead(struct DGHostContext *c) {
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING_EXT, &read);
     if (scissor)
         glDisable(GL_SCISSOR_TEST);
-    glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, w->framebuffer[w->back]);
-    glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, c->framebuffer); // SGStartFrame leaves it on the surface.
+    glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, w->framebuffer[SG_WORK]);
     glBlitFramebufferEXT(0, 0, w->width, w->height, x, y, x + w->width, y + w->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, (GLuint)read);
     if (scissor)

@@ -73,6 +73,7 @@ private final class AgentGuest: SeamlessGuest {
 @MainActor
 private final class WindowSurfaces: SeamlessPixelSource {
     private var surfaces: [UInt32: IOSurfaceRef] = [:]
+    private var holds: [UInt32: GuestSurfaceHold] = [:]
     let noDisplayFile: URL
     weak var desktop: SeamlessDesktop?
     private var receiver: GuestWindowSurfaceReceiver?
@@ -85,8 +86,9 @@ private final class WindowSurfaces: SeamlessPixelSource {
             guard !frame.isShape else { return }
             let surface = UnsafeTransfer(frame.surface)
             let window = frame.window
+            let hold = frame.hold
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.arrived(window, surface.value) }
+                MainActor.assumeIsolated { self?.arrived(window, surface.value, hold) }
             }
         }
         if receiver == nil { return nil }
@@ -94,14 +96,16 @@ private final class WindowSurfaces: SeamlessPixelSource {
 
     static func service(_ identifier: String) -> String { "gold.samhenri.LightClick.seamless.\(identifier)" }
 
-    private func arrived(_ window: UInt32, _ surface: IOSurfaceRef) {
+    private func arrived(_ window: UInt32, _ surface: IOSurfaceRef, _ hold: GuestSurfaceHold?) {
         guard let desktop else { return }
         if surfaces.isEmpty { FileManager.default.createFile(atPath: noDisplayFile.path, contents: nil) }
         if surfaces[window] == nil {
-            desktop.note("# window \(window)'s own surface: \(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))")
+            desktop.note(
+                "# window \(window)'s own surface: \(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))")
         }
         surfaces[window] = surface
         desktop.windowPixelsChanged(window)
+        holds[window] = hold  // The last frame's goes, its layer having this one now.
     }
 
     var hasSurfaces: Bool { !surfaces.isEmpty }
@@ -111,6 +115,7 @@ private final class WindowSurfaces: SeamlessPixelSource {
     /// The display's frames are what show the window that's coming back.
     func stop() {
         surfaces = [:]
+        holds = [:]
         desktop = nil
         try? FileManager.default.removeItem(at: noDisplayFile)
     }
@@ -220,18 +225,23 @@ final class SeamlessHost: NSObject {
         else { return [:] }
         let directory = surfaceDirectory(identifier)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        guard windowSurfaces[session.machinePath] != nil
-            || WindowSurfaces(machineIdentifier: identifier, directory: directory).map({
-                windowSurfaces[session.machinePath] = $0
-                return true
-            }) ?? false
+        guard
+            windowSurfaces[session.machinePath] != nil
+                || WindowSurfaces(machineIdentifier: identifier, directory: directory).map({
+                    windowSurfaces[session.machinePath] = $0
+                    return true
+                }) ?? false
         else { return [:] }
-        return GuestWindowSurfaceReceiver.environment(service: WindowSurfaces.service(identifier), directory: directory.path)
-            .filter { $0.key.hasPrefix("VIM_SEAMLESS_PVG") }
+        return GuestWindowSurfaceReceiver.environment(
+            service: WindowSurfaces.service(identifier), directory: directory.path
+        )
+        .filter { $0.key.hasPrefix("VIM_SEAMLESS_PVG") }
     }
 
     @objc static func isActive(for session: VIMSession) -> Bool { desktops[session.machinePath] != nil }
-    @objc static func hasOwnSurfaces(for session: VIMSession) -> Bool { windowSurfaces[session.machinePath]?.hasSurfaces ?? false }
+    @objc static func hasOwnSurfaces(for session: VIMSession) -> Bool {
+        windowSurfaces[session.machinePath]?.hasSurfaces ?? false
+    }
 
     /// So the button's quick from the first press. Once the guest's agent answers, and not while something's measuring it or
     /// the app's only there to run one guest app.
@@ -295,7 +305,9 @@ final class SeamlessHost: NSObject {
             } else if count == 0, windowHidden.contains(path) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                     MainActor.assumeIsolated {
-                        if desktops[path] === desktop, desktop.windowCount == 0 { desktop.finish(why: "no windows left") }
+                        if desktops[path] === desktop, desktop.windowCount == 0 {
+                            desktop.finish(why: "no windows left")
+                        }
                     }
                 }
             }

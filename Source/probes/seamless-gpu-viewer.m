@@ -408,6 +408,10 @@ int main(int argc, char **argv) {
         mach_port_t port = MACH_PORT_NULL;
         mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
         mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+        // Every window comes at once when the mode goes on, and a sender doesn't wait.
+        mach_port_limits_t limits = {MACH_PORT_QLIMIT_LARGE};
+        mach_port_set_attributes(mach_task_self(), port, MACH_PORT_LIMITS_INFO, (mach_port_info_t)&limits,
+                                 MACH_PORT_LIMITS_INFO_COUNT);
         if (bootstrap_register(bootstrap_port, argv[1], port)) {
             fprintf(stderr, "can't register %s\n", argv[1]);
             return 1;
@@ -420,18 +424,60 @@ int main(int argc, char **argv) {
                   struct SGFrameMessage message;
                   mach_msg_max_trailer_t trailer;
               } packet;
-              if (mach_msg(&packet.message.header, MACH_RCV_MSG, 0, sizeof(packet), port, 0, 0))
+              // With SEAMLESS_STALL_MS, a consumer that falls behind: every so often it stops taking frames, then
+              // counts any surface that comes twice in what built up meanwhile. The producer reused that one with
+              // nobody having seen it.
+              static uint32_t backlog[256][2], backlog_count, taken, reused;
+              static int in_backlog;
+              static const char *stall;
+              if (!stall)
+                  stall = getenv("SEAMLESS_STALL_MS") ?: "";
+              if (*stall && !in_backlog && ++taken % 30 == 0) {
+                  usleep((useconds_t)atoi(stall) * 1000);
+                  in_backlog = 1;
+                  backlog_count = 0;
+              }
+              kern_return_t got = mach_msg(&packet.message.header, MACH_RCV_MSG | (in_backlog ? MACH_RCV_TIMEOUT : 0),
+                                           0, sizeof(packet), port, 0, 0);
+              if (got == MACH_RCV_TIMED_OUT)
+                  in_backlog = 0;
+              if (got)
                   continue;
               struct SGFrameMessage m = packet.message;
-              if (m.header.msgh_id != SG_FRAME_MESSAGE)
+              if (m.header.msgh_id != SG_FRAME_MESSAGE) {
+                  mach_msg_destroy(&m.header);
                   continue;
+              }
               IOSurfaceRef surface = IOSurfaceLookupFromMachPort(m.surface.name);
               mach_port_deallocate(mach_task_self(), m.surface.name);
-              if (!surface)
+              // This frame's hold on its surface, given up once the next one for the window has taken its place.
+              mach_port_t hold = m.header.msgh_remote_port;
+              if (!surface) {
+                  if (hold)
+                      mach_port_deallocate(mach_task_self(), hold);
                   continue;
+              }
+              if (in_backlog) {
+                  uint32_t id = IOSurfaceGetID(surface);
+                  for (uint32_t i = 0; i < backlog_count; i++)
+                      if (backlog[i][0] == m.window && backlog[i][1] == id)
+                          fprintf(stderr, "stall: window %u surface reused unseen, %u so far\n", m.window, ++reused);
+                  if (backlog_count < 256) {
+                      backlog[backlog_count][0] = m.window;
+                      backlog[backlog_count++][1] = id;
+                  }
+              }
               dispatch_async(dispatch_get_main_queue(), ^{
+                static NSMutableDictionary *held;
+                if (!held)
+                    held = [NSMutableDictionary new];
                 show(m.window, surface, m.width, m.height, m.x, m.y, m.frame);
                 CFRelease(surface);
+                NSNumber *previous = held[@(m.window)];
+                if (previous)
+                    mach_port_deallocate(mach_task_self(), previous.unsignedIntValue);
+                if (hold)
+                    held[@(m.window)] = @(hold);
               });
           }
         });
