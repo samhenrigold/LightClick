@@ -401,7 +401,7 @@ def desktop():
     for old in results.glob(f'{tag}-*.png'):
         old.unlink()
     guest = stage(guest_tool)
-    for app in ('Notes', 'TextEdit', 'Safari') if version_is_mojave() else ('TextEdit', 'Safari'):
+    for app in ('Finder', 'TextEdit', 'Safari') if version_is_mojave() else ('TextEdit', 'Safari'):
         run(guest, ['open-app', '--app', app])
     time.sleep(12)
     listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
@@ -564,7 +564,7 @@ def desktop():
         time.sleep(3)
         check('and returns', on_screen())
         for row in proxy_windows():
-            if 'Notes' in row:
+            if 'Finder' in row:
                 subprocess.run([str(results/'seamless-present-meter'), re.search(r'id=(\d+)', row).group(1), '0.2', '--save', str(results/f'{tag}-materials.png')], capture_output=True)
         # Not a pass or a fail yet: what a real guest full screen does to this window, and to the others.
         command.write_text('guest-full-screen')

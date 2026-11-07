@@ -131,19 +131,24 @@ public final class SeamlessDesktop {
             // shortcut: Mavericks only when asked, since a window that hasn't changed there has no surface yet, and a page's repaint
             // can miss it. Make it the default once those are right.
             let alsoBuild = environment["LC_SEAMLESS_MAVERICKS_SURFACES"] != nil ? "13F34" : "18G103"
-            let injected = await guest.run("/bin/sh", ["-c", Self.injectScript, "sh", alsoBuild])
+            var injected = await guest.run("/bin/sh", ["-c", Self.injectScript, "sh", alsoBuild])
+            // Dropped before it began. The script itself never tries twice in a guest's start, so asking again is safe.
+            for _ in 1...8 where injected.exitCode == nil && !stopped {
+                try? await Task.sleep(for: .seconds(5))
+                injected = await guest.run("/bin/sh", ["-c", Self.injectScript, "sh", alsoBuild])
+            }
             note("# hook into WindowServer: exit \(injected.exitCode.map(String.init) ?? "none") \(injected.output)\(injected.failure ?? "")")
             ownSurfaces = injected.exitCode == 0
             if stopped { return }
         }
         var ran = SeamlessGuestRun(exitCode: nil, output: "", failure: nil)
         // On Mavericks the agent's connection can drop just after setup, under whatever runs next. Nothing's reached the user yet.
-        for attempt in 1...4 {
+        for attempt in 1...8 {
             ran = await guest.run(
                 "/usr/bin/env",
                 ["SEAMLESS_RUN_IN_PLACE=1", "/tmp/sg/g", "leap", "--port", String(port), "--menu-tool", "/tmp/sg/ig"]
                     + (ownSurfaces ? ["--own-surfaces"] : []))
-            if stopped || ran.exitCode != nil || control >= 0 || attempt == 4 { break }
+            if stopped || ran.exitCode != nil || control >= 0 || attempt == 8 { break }
             note("# trying again: \(ran.failure ?? "")")
             try? await Task.sleep(for: .seconds(3))
         }
