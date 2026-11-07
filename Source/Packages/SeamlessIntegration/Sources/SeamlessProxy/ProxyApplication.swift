@@ -560,6 +560,9 @@ final class ProxyApplication: NSObject, NSApplicationDelegate, NSMenuDelegate, P
                     self.testResize(front.value)
                     return
                 }
+                // A command this build doesn't know isn't a move.
+                guard command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || command.hasPrefix("move")
+                else { return }
                 let screen = front.value.window.screen?.visibleFrame ?? .zero
                 // The other corner if it's there already, as a window nearly the screen's size can be, so it always moves.
                 var corner = NSPoint(x: screen.maxX - front.value.window.frame.width, y: screen.minY)
