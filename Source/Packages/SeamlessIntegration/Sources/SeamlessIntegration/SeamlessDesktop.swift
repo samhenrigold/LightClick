@@ -54,6 +54,8 @@ public final class SeamlessDesktop {
     private var saidFirstWindow = false
     private var saidReplaced = false
     private var prearming = false
+    private var prearmStopped = false
+    private static var prearmers: [String: (desktop: SeamlessDesktop, work: Task<Void, Never>)] = [:]
     private let environment = ProcessInfo.processInfo.environment
     private static var staged: Set<String> = []
     private static var hooked: Set<String> = []
@@ -143,6 +145,7 @@ public final class SeamlessDesktop {
     // MARK: The guest's side
 
     private func runInGuest() async {
+        await Self.stopPrearming(machine: configuration.machine.path)
         let ready = await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path)
         note("# tools in the guest")
         if stopped { return }
@@ -177,6 +180,23 @@ public final class SeamlessDesktop {
     /// Everything a press would otherwise wait for, while the machine's just running: the programs and the hook in the guest, and a
     /// proxy for each app with windows. Nothing shows, and nothing's changed until a press turns it on.
     public func prearm() async {
+        let machine = configuration.machine.path
+        let work = Task { await prearmWork() }
+        Self.prearmers[machine] = (self, work)
+        await work.value
+        if Self.prearmers[machine]?.desktop === self { Self.prearmers[machine] = nil }
+    }
+
+    /// The guest's agent serves one connection, and pre-arming's stays open for up to a minute: a press in that time had each of its
+    /// tries ended. So a press stops it and waits.
+    private static func stopPrearming(machine: String) async {
+        guard let running = prearmers[machine] else { return }
+        running.desktop.prearmStopped = true
+        running.desktop.endPrearming()
+        await running.work.value
+    }
+
+    private func prearmWork() async {
         guard await Self.prepare(guest: guest, tools: configuration.tools, machine: configuration.machine.path) else { return }
         if !Self.hooked.contains(configuration.machine.path) {
             let injected = await guest.run("/bin/sh", ["-c", Self.injectScript])
@@ -185,7 +205,7 @@ public final class SeamlessDesktop {
             if injected.exitCode != nil { Self.hooked.insert(configuration.machine.path) }
         }
         // Over the same connection as a press, as an icon's megabytes through the agent stop it answering for minutes.
-        guard listen() else { return }
+        guard !prearmStopped, listen() else { return }
         prearming = true
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(60))
@@ -291,6 +311,7 @@ public final class SeamlessDesktop {
             DispatchQueue.main.sync {
                 MainActor.assumeIsolated {
                     self?.control = client
+                    if self?.prearmStopped == true { shutdown(client, SHUT_RDWR) }
                     self?.note("# the guest's program connected")
                     if self?.stopped ?? true { shutdown(client, SHUT_RDWR) }
                 }

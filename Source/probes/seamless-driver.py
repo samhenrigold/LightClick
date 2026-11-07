@@ -395,7 +395,7 @@ def windowed(seconds):
     print(f'windowed_distinct {(last.get("Distinct", 0) - first.get("Distinct", 0)) / spent:.1f} /s', flush=True)
 
 
-def desktop():
+def desktop(activation_only=False):
     # The Seamless button, on a running machine: press, the apps' windows appear and the machine's goes, a click reaches one, press,
     # and the machine's window is back.
     for old in results.glob(f'{tag}-*.png'):
@@ -432,7 +432,8 @@ def desktop():
         return int(match.group(1)) if match else 0
 
     for _ in range(240):
-        if request({'Action': 'seamless-state'}, 60).get('Prepared'):
+        state = request({'Action': 'seamless-state'}, 60)
+        if state.get('Prepared') or 'Prepared' not in state:
             break
         time.sleep(1)
     # A second TextEdit window, in front of the first, for a press that only the host can tell apart.
@@ -460,6 +461,32 @@ def desktop():
     windows = proxy_windows()
     check('the machine window hides', not machine_window())
     check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
+    if activation_only:
+        # Using only what any build has: another app's window clicked, then whether the animating page keeps moving.
+        page = next((re.search(r'id=(\d+)', row).group(1) for row in proxy_windows() if 'Seamless page' in row), None)
+
+        def page_moving(when):
+            said = subprocess.run([meter, page or '0', '5'], capture_output=True, text=True).stdout.strip()
+            print(when, said, flush=True)
+            found = re.search(r'presented ([0-9.]+)', said)
+            return float(found.group(1)) if found else 0
+        if not proxy_pid('TextEdit') or not proxy_pid('Safari'):
+            print('guest frame', capture(f'{tag}-no-windows.png'), flush=True)
+            check('there are windows to test', False)
+            return
+        before = page_moving('before')
+        time.sleep(1)
+        os.kill(proxy_pid('TextEdit'), signal.SIGUSR1)
+        time.sleep(3)
+        after = page_moving('with the other app active')
+        os.kill(proxy_pid('Safari'), signal.SIGUSR1)
+        time.sleep(7)
+        back = page_moving('with the page clicked again')
+        print('OwnSurfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'), flush=True)
+        check('the page moves before another app activates', before >= 30)
+        check('and while it is active', after >= 30)
+        check('and when it comes back', back >= 30)
+        return
     # Two windows of one app overlapping in the guest and apart on the host: a press on the lower one is for it, not what's over it.
     lower = next((re.search(r'id=(\d+)', row).group(1) for row in proxy_windows() if 'seamless-note' in row), None)
     textedit_pid = next((int(re.search(r'pid=(\d+)', row).group(1)) for row in proxy_windows() if 'seamless-note' in row), 0)
@@ -506,6 +533,12 @@ def desktop():
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
         subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-desktop-{window}.png')], capture_output=True)
+    # What the surfaces hold, against what's just been read from the proxies.
+    held = results/f'{tag}-surfaces'
+    shutil.rmtree(held, ignore_errors=True)
+    held.mkdir()
+    request({'Action': 'seamless-save-surfaces', 'Directory': str(held)}, 60)
+    print('surfaces saved', sorted(path.name for path in held.iterdir()), flush=True)
     clicks = results/f'{tag}-clicks.txt'
     safari = proxy_pid('Safari')
     window = next((re.search(r'id=(\d+)', row).group(1) for row in windows if 'Safari' in row), None)
@@ -688,7 +721,6 @@ def desktop_with_old_hook():
         return said
 
     print('PASS' if lines() == '1' else 'FAIL', 'the entry is there to start with', flush=True)
-    time.sleep(70)
     for _ in range(240):
         if request({'Action': 'seamless-state'}, 60).get('Prepared'):
             break
@@ -798,6 +830,8 @@ if arguments[0] == 'capture-bench':
     capture_bench()
 elif arguments[0] == 'placement':
     placement()
+elif arguments[0] == 'desktop' and 'activation' in arguments:
+    desktop(activation_only=True)
 elif arguments[0] == 'desktop' and 'old-hook' in arguments:
     desktop_with_old_hook()
 elif arguments[0] == 'desktop':

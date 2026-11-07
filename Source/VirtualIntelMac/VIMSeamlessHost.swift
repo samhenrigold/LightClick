@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import GuestControl
 import SeamlessIntegration
 
@@ -76,6 +77,7 @@ private final class WindowSurfaces: SeamlessPixelSource {
     private var origins: [UInt32: (x: Int32, y: Int32)] = [:]
     private var holds: [UInt32: GuestSurfaceHold] = [:]
     private(set) var frames = 0
+    private var counts: [UInt32: Int] = [:]
     let noDisplayFile: URL
     weak var desktop: SeamlessDesktop?
     private var receiver: GuestWindowSurfaceReceiver?
@@ -102,6 +104,7 @@ private final class WindowSurfaces: SeamlessPixelSource {
     private func arrived(_ window: UInt32, _ surface: IOSurfaceRef, _ origin: (x: Int32, y: Int32), _ hold: GuestSurfaceHold?) {
         guard let desktop else { return }
         frames += 1
+        counts[window, default: 0] += 1
         if surfaces.isEmpty { FileManager.default.createFile(atPath: noDisplayFile.path, contents: nil) }
         if surfaces[window] == nil {
             desktop.note(
@@ -115,6 +118,17 @@ private final class WindowSurfaces: SeamlessPixelSource {
     }
 
     var hasSurfaces: Bool { !surfaces.isEmpty }
+
+    /// For a test: each window's latest surface as a PNG, named with its window, size and frame count.
+    func save(to directory: String) {
+        for (window, surface) in surfaces {
+            let image = CIImage(ioSurface: surface)
+            guard let colors = CGColorSpace(name: CGColorSpace.sRGB) else { continue }
+            let name = "surface-\(window)-\(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))-\(counts[window] ?? 0).png"
+            try? CIContext().writePNGRepresentation(
+                of: image, to: URL(fileURLWithPath: directory).appending(path: name), format: .RGBA8, colorSpace: colors)
+        }
+    }
 
     func surface(forWindow window: UInt32) -> IOSurfaceRef? { surfaces[window] }
 
@@ -244,6 +258,9 @@ final class SeamlessHost: NSObject {
         return GuestWindowSurfaceReceiver.environment(service: WindowSurfaces.service(identifier), directory: directory.path)
     }
 
+    @objc static func saveSurfaces(for session: VIMSession, to directory: String) {
+        windowSurfaces[session.machinePath]?.save(to: directory)
+    }
     @objc static func surfaceFrames(for session: VIMSession) -> Int { windowSurfaces[session.machinePath]?.frames ?? 0 }
     @objc static func isActive(for session: VIMSession) -> Bool { desktops[session.machinePath] != nil }
     @objc static func isPrepared(for session: VIMSession) -> Bool { SeamlessDesktop.isPrepared(machine: session.machinePath) }
