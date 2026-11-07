@@ -886,6 +886,55 @@ def desktop(activation_only=False):
     print('PASS seamless button' if all(checks) and machine_window() else 'FAIL seamless button', flush=True)
 
 
+DOCK_STATE = ('user=$(/usr/bin/stat -f %Su /dev/console); home=$(eval echo ~$user); '
+              'echo "user $user"; echo "autohide $(/usr/bin/sudo -u $user /usr/bin/defaults read com.apple.dock autohide 2>&1)"; '
+              'echo "delay $(/usr/bin/sudo -u $user /usr/bin/defaults read com.apple.dock autohide-delay 2>&1)"; '
+              '/bin/ls $home/Library/LaunchAgents/com.mac.virtualintelmac.seamless-restore.plist 2>&1; '
+              '/bin/cat /tmp/seamless-leap-restore.log 2>&1 | /usr/bin/tail -5; true')
+
+
+def hard_stop():
+    # Seamless on, then the app and QEMU killed with no chance to clean up. The guest's disk, as that left it, is kept for
+    # the next boot to show what comes back.
+    copy = Path(arguments[arguments.index('hard-stop') + 1])
+    guest = stage(guest_tool)
+    run(guest, ['open-app', '--app', 'TextEdit'])
+    for _ in range(240):
+        if request({'Action': 'seamless-state'}, 60).get('Prepared'):
+            break
+        time.sleep(1)
+    request({'Action': 'seamless-toggle'}, 60)
+    for _ in range(120):
+        if not request({'Action': 'seamless-state'}, 60).get('WindowVisible'):
+            break
+        time.sleep(1)
+    time.sleep(10)
+    print('in Seamless', request({'Action': 'seamless-state'}, 60), flush=True)
+    # Not asked first: the agent is the press's while windows are out, and nothing's flushed for the guest either.
+    listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
+    ours = [row for row in listing if f'Build/bench/{tag}/' in row]
+    app = [int(row.split()[0]) for row in ours if 'Contents/MacOS/Light Click' in row]
+    qemu = [int(row.split()[0]) for row in ours if 'qemu-system' in row]
+    for pid in app + qemu:
+        os.kill(pid, signal.SIGKILL)
+    print('killed the app', app, 'and QEMU', qemu, flush=True)
+    time.sleep(3)
+    clone = next((source/'Build/bench'/tag/'home/Library/Application Support/Light Click/Machines').glob('Clone of *.vintelmac'))
+    shutil.rmtree(copy, ignore_errors=True)
+    subprocess.run(['cp', '-c', '-R', str(clone), str(copy)], check=True)
+    (copy/'State/PendingConfiguration.plist').unlink(missing_ok=True)
+    print('kept', copy, flush=True)
+
+
+def hard_stop_check():
+    # The next boot of what a hard stop left: the Dock's preference back as it was, and what put it back gone.
+    time.sleep(60)
+    said = request({'Executable': '/bin/sh', 'Arguments': ['-c', DOCK_STATE]}, 60).get('Stdout') or ''
+    print('after the next boot:', said, flush=True)
+    back = 'autohide 1' not in said and 'seamless-restore.plist' in said and 'No such file' in said
+    print('PASS the Dock is back after a hard stop' if back else 'FAIL the Dock is back after a hard stop', flush=True)
+
+
 def desktop_with_old_hook():
     # A guest an earlier build left with the hook in WindowServer's job: a press takes the entry out and stays on the display's frames
     # for this start. Done without restarting the guest: a press from the next start is the ordinary one.
@@ -1013,6 +1062,10 @@ if arguments[0] == 'capture-bench':
     capture_bench()
 elif arguments[0] == 'placement':
     placement()
+elif 'hard-stop' in arguments:
+    hard_stop()
+elif 'hard-stop-check' in arguments:
+    hard_stop_check()
 elif 'install-watcher' in arguments:
     install_watcher()
 elif arguments[0] == 'desktop' and 'activation' in arguments:
