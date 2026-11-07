@@ -453,6 +453,32 @@ static void SGWriteRates(void) {
 }
 
 // Before each command runs.
+// A layer that samples what's behind it, such as Safari's address field, reads the drawable. With the display off
+// nothing draws there, so what it held last, other windows included, would show up in this one. So the drawable gets
+// this window's surface first. shortcut: only this window, so something over another window samples clear there;
+// ordered effect planes are what would do it right.
+static void SGFillDrawableForRead(struct DGHostContext *c) {
+    if (!sg_layer.id || !DGSeamlessDisplayOff(c))
+        return;
+    struct SGWindow *w = SGWindowFor(c, &sg_layer);
+    if (!w)
+        return;
+    SGStartFrame(w);
+    int partial = (int64_t)c->drawable->width * c->drawable->height < sg_primary_area;
+    int x = w->x - (partial ? sg_layer.origin_x : 0), y = w->y - (partial ? sg_layer.origin_y : 0);
+    GLint read = 0;
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING_EXT, &read);
+    if (scissor)
+        glDisable(GL_SCISSOR_TEST);
+    glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, w->framebuffer[w->back]);
+    glBindFramebufferEXT(GL_DRAW_FRAMEBUFFER_EXT, c->framebuffer); // SGStartFrame leaves it on the surface.
+    glBlitFramebufferEXT(0, 0, w->width, w->height, x, y, x + w->width, y + w->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebufferEXT(GL_READ_FRAMEBUFFER_EXT, (GLuint)read);
+    if (scissor)
+        glEnable(GL_SCISSOR_TEST);
+}
+
 static void DGSeamlessBefore(struct DGInterpreter *s, struct DGMessage *m) {
     if (m->op == DG_SURFACE_HOLD_PRESENT)
         ++sg_presents;
@@ -477,6 +503,9 @@ static void DGSeamlessBefore(struct DGInterpreter *s, struct DGMessage *m) {
             if (sg_replay_enabled) {
                 SGEndFrame();
                 SGSendReady();
+                // A draw before the next update's first marker isn't the last window's. Some other path draws: left to
+                // that window, its title bar turned up inside Safari's surface.
+                sg_layer.id = 0;
             }
             SGWriteRates();
             sg_spent += mach_absolute_time() - began;
@@ -485,6 +514,12 @@ static void DGSeamlessBefore(struct DGInterpreter *s, struct DGMessage *m) {
     }
     if (!sg_replay_enabled || c != sg_display)
         return;
+    if ((m->op == DG_OP_copy_tex_sub_image2D || m->op == DG_SNAPSHOT_DRAWABLE_TEXTURE ||
+         m->op == DG_BIND_DRAWABLE_TEXTURE) &&
+        CGLGetCurrentContext() == c->cgl && !c->inside_begin) {
+        SGFillDrawableForRead(c);
+        return;
+    }
     if (m->op == DG_OP_begin) {
         sg_immediate_active = 1;
         sg_immediate_mode = (int)(uint32_t)m->args[0];

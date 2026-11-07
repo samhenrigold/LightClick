@@ -80,6 +80,8 @@ struct SWSTable {
     } gpu_backdrops[SWS_BACKDROPS];
     // The tool writes this: leave the window's shadow out of its surface, for the host to draw one.
     volatile uint32_t gpu_no_shadow;
+    // The tool writes this, for measuring what the marker costs. Nothing reaches the host without one.
+    volatile uint32_t gpu_no_marker;
     // The tool writes this: how many surface updates to print the layer trees of.
     volatile int32_t gpu_census;
     // What a census printed as contents, by the index it printed: top row first, 4 bytes a pixel, in the arena.
