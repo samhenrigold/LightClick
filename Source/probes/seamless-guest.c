@@ -2969,6 +2969,8 @@ int main(int argc, char **argv) {
         if (option(argc, argv, "--no-shadow", NULL))
             t->gpu_no_shadow = (uint32_t)atoi(option(argc, argv, "--no-shadow", "0"));
         if (option(argc, argv, "--mode", NULL)) {
+            t->gpu_display_width = (uint32_t)CGDisplayPixelsWide(CGMainDisplayID());
+            t->gpu_display_height = (uint32_t)CGDisplayPixelsHigh(CGMainDisplayID());
             t->gpu_mode = (uint32_t)atoi(option(argc, argv, "--mode", "0"));
             // Needs the session, which --skip-desktop joins. Without it, the windows wait for something to draw.
             extern void seamless_poke_update(void);

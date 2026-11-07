@@ -507,6 +507,28 @@ int main(int argc, char **argv) {
             [backdropWindow orderBack:nil];
             NSArray *colors = @[ NSColor.redColor, NSColor.blueColor, NSColor.greenColor, NSColor.blackColor ];
             NSArray *names = @[ @"red", @"blue", @"green", @"black" ];
+            // With SEAMLESS_CHECKER, seamless-checker.m's checkerboard at four offsets, to compare with a guest's.
+            if (getenv("SEAMLESS_CHECKER")) {
+                NSMutableArray *patterns = [NSMutableArray new];
+                for (int offset = 0; offset < 80; offset += 20) {
+                    NSImage *tile = [NSImage imageWithSize:NSMakeSize(80, 80)
+                                                   flipped:YES
+                                            drawingHandler:^BOOL(NSRect dst) {
+                                              (void)dst;
+                                              [NSColor.whiteColor set];
+                                              NSRectFill(NSMakeRect(0, 0, 80, 80));
+                                              [NSColor.blackColor set];
+                                              for (int y = 0; y < 80; y += 40)
+                                                  for (int x = -80 + offset + (y / 40 % 2) * 40; x < 80; x += 80)
+                                                      NSRectFill(NSMakeRect(x, y, 40, 40));
+                                              return YES;
+                                            }];
+                    [patterns addObject:[NSColor colorWithPatternImage:tile]];
+                }
+                colors = patterns;
+                names = @[ @"o0", @"o20", @"o40", @"o60" ];
+                backdropWindow.backgroundColor = colors[0];
+            }
             [NSTimer
                 scheduledTimerWithTimeInterval:5
                                        repeats:YES
