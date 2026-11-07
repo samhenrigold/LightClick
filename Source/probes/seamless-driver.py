@@ -368,27 +368,20 @@ u=$(/usr/bin/stat -f%Su /dev/console); uid=$(/usr/bin/id -u "$u")
 
 
 def qualify_material_fixture(guest, window, proxy_windows, check):
+    """Capture host material state, stop Seamless, then read its retained guest backdrop snapshot."""
     check('the explicit materials fixture reached its guest window', window is not None)
     if window is None:
         return False
     command_file = results/f'{tag}-clicks.txt.command'
     materials_file = Path(str(command_file) + '.materials')
     deadline = time.monotonic() + 45
-    expected = 0
     report = None
     saw_proxy = False
     try:
         while time.monotonic() < deadline:
-            # The hook's original window ID is also the key on the wire and in the proxy's report. Read both ends;
-            # a fixture that drew a backdrop but never exported it must fail, rather than silently skip this check.
-            said = request({'Executable': guest, 'Arguments': ['gpu', '--rows']}, 5)
-            raw = said.get('Stdout') or ''
-            (results/f'{tag}-materials-guest.txt').write_text(raw)
-            records = re.findall(rf'^backdrop id {window} order \d+ material (\d+) ', raw, re.M)[:32]
-            # tree_send_materials caps a window at 32 rows. ProxyApplication excludes material 26 (vibrant cutouts),
-            # so compare its count with precisely the same subset; the fixture's OS chooses all material numbers.
-            expected = sum(int(material) != 26 for material in records)
-            row = next((row for row in proxy_windows() if 'Seamless materials fixture' in row), '')
+            # Host WindowServer may withhold titles. The unique fixture app owner identifies the proxy; the report's
+            # original guest window ID below provides the exact correlation.
+            row = next((row for row in proxy_windows() if 'owner="SeamlessMaterials (' in row), '')
             pid = re.search(r'pid=(\d+)', row)
             if pid:
                 saw_proxy = True
@@ -404,12 +397,30 @@ def qualify_material_fixture(guest, window, proxy_windows, check):
                 text = materials_file.read_text() if materials_file.exists() else ''
                 (results/f'{tag}-materials-proxy.txt').write_text(text)
                 report = material_report(text).get(window)
-                if expected > 0 and report and report[0] == expected and report[1] > 0 and report[2]:
+                if report and report[0] > 0 and report[1] > 0 and report[2]:
                     break
             time.sleep(0.25)
     finally:
-        # SIGUSR2 without a command is a move. A report command must not leak into later interaction checks.
         command_file.write_text('')
+    # The long-lived leap command owns the guest agent while Seamless is active. Finish it before issuing a diagnostic
+    # command. gpu --mode 0 preserves gpu_backdrops, so the persistent fixture's last composed rows remain available.
+    request({'Action': 'seamless-toggle'}, 15)
+    stopped_deadline = time.monotonic() + 45
+    raw = ''
+    snapshot_ready = False
+    while time.monotonic() < stopped_deadline:
+        said = request({'Executable': guest, 'Arguments': ['gpu', '--rows']},
+                       max(1, min(30, stopped_deadline-time.monotonic())))
+        raw = said.get('Stdout') or ''
+        snapshot_ready = said.get('ExitCode') == 0 and re.search(r'^gpu mode 0 ', raw, re.M) is not None
+        if snapshot_ready:
+            break
+        time.sleep(0.25)
+    (results/f'{tag}-materials-guest.txt').write_text(raw)
+    check('Seamless released the agent and stopped per-window composition', snapshot_ready)
+    records = re.findall(rf'^backdrop id {window} order \d+ material (\d+) ', raw, re.M)[:32] if snapshot_ready else []
+    # Match the transport's cap and the proxy's exclusion of vibrant cutouts.
+    expected = sum(int(material) != 26 for material in records)
     print(f'materials fixture window {window}: guest rows {expected}, proxy {report}', flush=True)
     check('the explicit fixture exported nonempty guest material rows', expected > 0)
     check('the explicit fixture has its host proxy', saw_proxy)
@@ -751,7 +762,6 @@ def desktop(activation_only=False, materials_only=False):
     check('its windows are on their own surfaces', request({'Action': 'seamless-state'}, 60).get('OwnSurfaces'))
     if materials_only:
         qualify_material_fixture(guest, fixture_window, proxy_windows, check)
-        request({'Action': 'seamless-toggle'}, 15)
         print('PASS materials fixture' if all(checks) else 'FAIL materials fixture', flush=True)
         if not all(checks):
             raise SystemExit(1)
@@ -828,10 +838,8 @@ def desktop(activation_only=False, materials_only=False):
     for row in windows:
         window = re.search(r'id=(\d+)', row).group(1)
         subprocess.run([str(results/'seamless-present-meter'), window, '0.2', '--save', str(results/f'{tag}-desktop-{window}.png')], capture_output=True)
-    # Only the inspected Mojave path exports materials. A persistent fixture makes a missing report a failure, even
-    # when the stock apps have no material on this OS/appearance. Appearance itself still needs a visual comparison.
-    if mojave:
-        qualify_material_fixture(guest, start_material_fixture(guest), proxy_windows, check)
+    # Materials have a dedicated fixture/agent-ownership phase: run `desktop materials` separately.
+    # Starting or querying another guest process here would contend with the active leap command.
     # What the surfaces hold, against what's just been read from the proxies.
     held = results/f'{tag}-surfaces'
     shutil.rmtree(held, ignore_errors=True)
