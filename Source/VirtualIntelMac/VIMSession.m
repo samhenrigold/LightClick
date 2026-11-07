@@ -4088,11 +4088,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
         !self.machine.hasPublishedGuestGraphics || ![NSFileManager.defaultManager fileExistsAtPath:journal.path])
         return;
     NSString *version = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @"";
-    if (![VIMGuestPayloadUpdate
-            offersUpdateWithMachine:self.machine.URL
-                              guest:self.machine.guest
-                            runtime:[NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime"]
-                         appVersion:version])
+    NSURL *runtime = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Runtime"];
+    NSString *declinedKey = [@"VIMDeclinedGuestPayload-" stringByAppendingString:self.machine.URL.path];
+    if (![VIMGuestPayloadUpdate offersUpdateWithMachine:self.machine.URL
+                                                  guest:self.machine.guest
+                                                runtime:runtime
+                                             appVersion:version
+                                         declinedDigest:[NSUserDefaults.standardUserDefaults stringForKey:declinedKey]])
         return;
     self.payloadUpdateOffered = YES;
     NSAlert *alert = [NSAlert new];
@@ -4105,7 +4107,13 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     [alert addButtonWithTitle:@"Later"];
     [alert beginSheetModalForWindow:self.window
                   completionHandler:^(NSModalResponse response) {
-                    if (response != NSAlertFirstButtonReturn || !self.task.running)
+                    if (response != NSAlertFirstButtonReturn) { // Later: not again until the app's support changes
+                        [NSUserDefaults.standardUserDefaults
+                            setObject:[VIMGuestPayloadUpdate bundledDigestWithGuest:self.machine.guest runtime:runtime]
+                               forKey:declinedKey];
+                        return;
+                    }
+                    if (!self.task.running)
                         return;
                     NSError *failure = nil;
                     if (![VIMSession repairMachine:self.machine error:&failure])

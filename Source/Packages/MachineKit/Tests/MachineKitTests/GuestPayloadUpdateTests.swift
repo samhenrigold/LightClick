@@ -30,6 +30,15 @@ import Testing
         #expect(
             GuestPayloadUpdate.offersUpdate(
                 preparedDigest: nil, preparedAppVersion: nil, bundledDigest: "B", appVersion: "15.1"))
+        // Later holds until the app's support changes.
+        #expect(
+            !GuestPayloadUpdate.offersUpdate(
+                preparedDigest: "A", preparedAppVersion: "15.0", bundledDigest: "B", appVersion: "15.1",
+                declinedDigest: "B"))
+        #expect(
+            GuestPayloadUpdate.offersUpdate(
+                preparedDigest: "A", preparedAppVersion: "15.0", bundledDigest: "C", appVersion: "15.2",
+                declinedDigest: "B"))
         // A runtime that doesn't say has nothing to offer.
         #expect(
             !GuestPayloadUpdate.offersUpdate(

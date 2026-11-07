@@ -23,10 +23,12 @@ public enum GuestPayloadUpdate {
 
     /// Offer the update when the support differs and this app is newer than the one that prepared the machine. A
     /// machine with no record is offered it once, as it predates the record; an older app never offers its support.
+    /// `declinedDigest` is the support the user last said Later to, which isn't offered again.
     public static func offersUpdate(
-        preparedDigest: String?, preparedAppVersion: String?, bundledDigest: String?, appVersion: String
+        preparedDigest: String?, preparedAppVersion: String?, bundledDigest: String?, appVersion: String,
+        declinedDigest: String? = nil
     ) -> Bool {
-        guard let bundledDigest, preparedDigest != bundledDigest else { return false }
+        guard let bundledDigest, preparedDigest != bundledDigest, declinedDigest != bundledDigest else { return false }
         guard let preparedAppVersion else { return true }
         return isVersion(appVersion, newerThan: preparedAppVersion)
     }
@@ -49,14 +51,21 @@ public enum GuestPayloadUpdate {
 
 @objc(VIMGuestPayloadUpdate)
 public final class GuestPayloadUpdateBridge: NSObject {
+    /// This app's support for a guest, to remember a Later by.
+    @objc public class func bundledDigest(guest: String, runtime: URL) -> String? {
+        GuestPayloadUpdate.bundledDigest(
+            packaging: try? Data(contentsOf: runtime.appendingPathComponent("Packaging.plist")), guest: guest)
+    }
+
     /// Whether the machine's window should offer this app's newer guest support.
-    @objc public class func offersUpdate(machine: URL, guest: String, runtime: URL, appVersion: String) -> Bool {
+    @objc public class func offersUpdate(
+        machine: URL, guest: String, runtime: URL, appVersion: String, declinedDigest: String?
+    ) -> Bool {
         let journal = machine.appendingPathComponent("State/GuestPreparation.plist")
         let prepared = GuestPayloadUpdate.prepared(journal: try? Data(contentsOf: journal))
         return GuestPayloadUpdate.offersUpdate(
             preparedDigest: prepared.digest, preparedAppVersion: prepared.appVersion,
-            bundledDigest: GuestPayloadUpdate.bundledDigest(
-                packaging: try? Data(contentsOf: runtime.appendingPathComponent("Packaging.plist")), guest: guest),
-            appVersion: appVersion)
+            bundledDigest: bundledDigest(guest: guest, runtime: runtime), appVersion: appVersion,
+            declinedDigest: declinedDigest)
     }
 }
