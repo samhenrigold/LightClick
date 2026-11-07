@@ -209,6 +209,10 @@ void seamless_poke_update(void) {
                                                          backing:NSBackingStoreBuffered
                                                            defer:NO];
         window.alphaValue = 0.01;
+        // Over the menu bar, and all of the display: a window drawn whole has to fit in the update, with its shadow,
+        // and one that stops at the menu bar leaves out any window near it.
+        window.level = NSScreenSaverWindowLevel;
+        [window setFrame:NSScreen.mainScreen.frame display:NO];
         [window orderFrontRegardless];
         [window displayIfNeeded];
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
