@@ -39,7 +39,7 @@ public actor QMPConnection {
     }
 
     private static let lifecycleEvents: Set<String> = [
-        "RESET", "SHUTDOWN", "SUSPEND", "WAKEUP", "GUEST_PANICKED", "WATCHDOG", "DEVICE_TRAY_MOVED"
+        "RESET", "SHUTDOWN", "SUSPEND", "WAKEUP", "GUEST_PANICKED", "WATCHDOG", "DEVICE_TRAY_MOVED", "PVG_HELPER_LOST"
     ]
     private static let responseSizeLimit = 1024 * 1024
 

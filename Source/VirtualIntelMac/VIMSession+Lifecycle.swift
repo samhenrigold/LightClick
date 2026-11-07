@@ -28,6 +28,8 @@ extension VIMSession {
             displayView?.displaySleeping = false
             statePanel?.isHidden = true
             status?.stringValue = "Running"
+        case .graphicsLost:
+            offerRestartAfterGraphicsLoss()
         case .trayOpened:
             forgetImages((imageDrivesObject as? ImageDrives)?.trayOpened(onDevice: qmp.device) ?? [:])
         case .other:
