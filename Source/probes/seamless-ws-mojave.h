@@ -80,6 +80,17 @@ static struct RectResult (*window_rect)(void *);
 static void *gpu_contributors[64];
 static unsigned gpu_contributor_count;
 static unsigned gpu_order;
+// Windows whose own CA surfaces changed in this update, from each surface's own update, so what's covered counts too.
+// The update's region can't say that: it's what changed on the display, and a window it merely overlaps hasn't changed.
+static _Atomic unsigned gpu_ca_dirty_count;
+static uint32_t gpu_ca_dirty[256];
+static int gpu_ca_is_dirty(uint32_t id) {
+    unsigned count = gpu_ca_dirty_count;
+    for (unsigned i = 0; i < count && i < 256; i++)
+        if (gpu_ca_dirty[i] == id)
+            return 1;
+    return 0;
+}
 static void *gpu_front; // The windows before this one in the update.
 static void *gpu_front_shown; // The same, leaving out those nobody will show.
 static void contributors_hook(void *connection, void *session) {
@@ -206,6 +217,11 @@ static char generate_layers_hook(char *state, char *window) {
     }
     if (shape)
         region_free(shape);
+    int changed = gpu_ca_is_dirty(id);
+    if (touched && !changed && !asked) {
+        region_free(touched);
+        touched = NULL;
+    }
     // One that's just opened was mid-effect, with its shadow missing and parts of it not drawn, when it was drawn
     // whole. So it's drawn whole again a second later, whatever else is happening.
     uint64_t now = mach_absolute_time(), second = 1000000000ull * table->ticks_denom / table->ticks_numer;
@@ -215,14 +231,16 @@ static char generate_layers_hook(char *state, char *window) {
         known_window->settles_at = 0;
     if (fresh)
         known_window->settles_at = now + second;
-    if (fresh || asked || touched || settling) {
+    if (fresh || asked || touched || settling || changed) {
         struct GPUWindow *w = gpu_window(id);
         if (settling)
             w->whole = 2;
         if (under_shown && !w->whole)
             w->whole = 1;
+        // An app drawing where the display won't show it says nothing of where, nor does a surface changing only where
+        // it's covered.
         if (fresh || !touched)
-            w->whole = 2; // An app drawing where the display won't show it says nothing of where.
+            w->whole = 2;
         if (touched) {
             void *grown = w->pending ? region_union(w->pending, touched) : NULL;
             if (grown) {
@@ -475,6 +493,7 @@ static void gpu_compose_damaged(void) {
         table->gpu_row_generation++;
         gpu_order = 0;
         gpu_contributor_count = 0;
+        gpu_ca_dirty_count = 0;
         if (gpu_front)
             region_free(gpu_front);
         gpu_front = NULL;
@@ -531,7 +550,21 @@ static void *copy_region_hook(void *update) {
         census_printing = 0;
         set_message_function(NULL, NULL);
     }
-    return copy_region_original(update);
+    void *region = copy_region_original(update);
+    // From CGXBeginSurfaceLayerUpdate, read from 18G103: its window is at -0x2b8 of its frame, and what it copies is
+    // that surface's own damage.
+    if (table && table->gpu_mode && region && __builtin_return_address(0) == (char *)loaded_image() + 0x13664b &&
+        !region_is_empty(region)) {
+        char *caller = *(char **)__builtin_frame_address(0);
+        char *window = *(char **)(caller - 0x2b8);
+        uint32_t id = window ? *(const uint32_t *)(window + 0x10) : 0;
+        unsigned count = gpu_ca_dirty_count;
+        if (id && count < 256 && !gpu_ca_is_dirty(id)) {
+            gpu_ca_dirty[count] = id;
+            gpu_ca_dirty_count = count + 1;
+        }
+    }
+    return region;
 }
 // In a census, the pixels of each layer's contents go to the table's arena, once each, and the tree says which by a
 // line before it. Through IOSurfaces: an image makes one when asked, as CA does for the GPU, and a surface is one.
