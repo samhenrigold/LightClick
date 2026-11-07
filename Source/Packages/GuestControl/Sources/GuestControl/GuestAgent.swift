@@ -159,11 +159,50 @@ public actor GuestAgent {
             "path": .string(path), "arg": .array(arguments.map(JSONValue.string)), "capture-output": true
         ]
         if let standardInput { request["input-data"] = .string(standardInput.base64EncodedString()) }
+        let isUART = shared.withLock { $0.isPreMetalGuest || $0.isRecoveryTransport }
+        let size = (try? JSONSerialization.data(withJSONObject: JSONValue.object(request).foundationObject).count) ?? 0
+        if isUART, size > Self.longestUARTRequest {
+            return try await runFromFile(
+                path, arguments: arguments, standardInput: standardInput, deadline: deadline,
+                timeout: timeout, patience: patience)
+        }
         let reply = try await command("guest-exec", arguments: request)
         guard let pid = reply["pid"], let number = pid.number, number.int64Value > 0 else {
             throw .guest(.noProcessIdentifier)
         }
         return try await waitForProcess(pid, deadline: deadline, patience: patience)
+    }
+
+    /// Over a guest's serial port, a request line of a couple of kilobytes went unanswered, sometimes for minutes, while
+    /// short ones were answered. So past this, a command goes as a file, in the same small acknowledged writes as staging.
+    static let longestUARTRequest = 900
+
+    /// The command, its arguments and its input, as a script and a file beside it in a private directory, run by name.
+    private func runFromFile(
+        _ path: String,
+        arguments: [String],
+        standardInput: Data?,
+        deadline: TimeInterval,
+        timeout: TimeInterval,
+        patience: TimeInterval
+    ) async throws(GuestAgentError) -> GuestProcessResult {
+        let directory = try await Self.makePrivateDirectory(
+            template: "/private/tmp/vim-exec.", failure: .cannotStart, using: self)
+        func quoted(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        var script = "exec " + ([path] + arguments).map(quoted).joined(separator: " ")
+        if let standardInput {
+            try await writeFile(standardInput, path: directory + "/input", deadline: deadline)
+            script += " < " + quoted(directory + "/input")
+        }
+        try await writeFile(Data((script + "\n").utf8), path: directory + "/run.sh", deadline: deadline)
+        let remaining = deadline > 0 ? max(0.001, deadline - ProcessInfo.processInfo.systemUptime) : 0
+        defer {
+            Task { [weak self] in
+                _ = try? await self?.runExecutable("/bin/rm", arguments: ["-rf", directory], timeout: 15)
+            }
+        }
+        return try await runExecutable(
+            "/bin/sh", arguments: [directory + "/run.sh"], timeout: remaining, patience: patience)
     }
 
     /// - Parameter patience: How long the agent may go without answering a status poll, in all, before this gives up.

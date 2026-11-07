@@ -134,6 +134,27 @@ struct GuestAgentTests {
         #expect(syncs == 2, "Synchronized again after the timeout")
     }
 
+    /// Over a serial port, a long command goes as a file and runs by name, so no request line is long.
+    @Test func aLongCommandToASerialGuestGoesAsAFile() async throws {
+        let fake = FakeGuestAgent { process in
+            process.path == "/usr/bin/mktemp"
+                ? .finished(exitCode: 0, output: "/private/tmp/vim-exec.Ab12Cd\n")
+                : .finished(exitCode: 0, output: "ran")
+        }
+        defer { fake.stop() }
+        let agent = try await connected(to: fake) { $0.isPreMetalGuest = true }
+        defer { agent.close() }
+        let long = String(repeating: "it's long ", count: 300)
+        let result = try await agent.runExecutable("/bin/sh", arguments: ["-c", long], timeout: 0)
+        #expect(result.output == "ran")
+        let (processes, files) = fake.state.withLock { ($0.processes, $0.files) }
+        #expect(processes.map(\.path).prefix(2) == ["/usr/bin/mktemp", "/bin/sh"])
+        #expect(processes.dropFirst().first?.arguments == ["/private/tmp/vim-exec.Ab12Cd/run.sh"])
+        #expect(processes.allSatisfy { $0.arguments.joined().count < GuestAgent.longestUARTRequest })
+        let script = String(decoding: files["/private/tmp/vim-exec.Ab12Cd/run.sh"] ?? Data(), as: UTF8.self)
+        #expect(script == "exec '/bin/sh' '-c' '" + long.replacingOccurrences(of: "'", with: "'\\''") + "'\n")
+    }
+
     @Test func aTimeoutIsReportedAsInterruptedAndNotRetried() async throws {
         let fake = FakeGuestAgent { _ in .running }
         defer { fake.stop() }
