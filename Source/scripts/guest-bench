@@ -149,23 +149,23 @@ def stop_test_processes(process, work):
             process.wait(timeout=3)
         deadline = time.monotonic()+20
         while time.monotonic() < deadline:
-            listing = subprocess.run(['ps', '-axo', 'pid=,comm='], capture_output=True, text=True, timeout=5)
+            listing = subprocess.run(['ps', '-axo', 'pid=,stat=,lstart=,comm='], capture_output=True, text=True, timeout=5)
             if listing.returncode or listing.stderr.strip() or not listing.stdout.strip():
                 raise RuntimeError('could not inspect remaining clone processes')
             leftovers = []
             for line in listing.stdout.splitlines():
-                fields = line.split(None, 1)
-                if len(fields) != 2 or not fields[0].isdigit():
+                fields = line.split(None, 7)
+                if len(fields) != 8 or not fields[0].isdigit():
                     raise RuntimeError('incomplete clone process inspection')
-                if fields[1].startswith(str(work)+'/'):
-                    pid = int(fields[0])
-                    stamp = process_identity(pid)
-                    if stamp is not None:
-                        leftovers.append((pid, stamp))
+                if fields[7].startswith(str(work)+'/') and not fields[1].startswith('Z'):
+                    # Path and birth time must come from one snapshot. A later identity lookup could already name
+                    # a replacement process if this PID exited immediately after discovery.
+                    leftovers.append((int(fields[0]), ' '.join(fields[2:7])))
             if not leftovers:
                 return None
             for pid, stamp in leftovers:
-                if process_identity(pid) == stamp:
+                current = process_identity(pid)
+                if current is not None and ' '.join(current.split()) == stamp:
                     try:
                         os.kill(pid, signal.SIGKILL if time.monotonic() > deadline-15 else signal.SIGTERM)
                     except ProcessLookupError:

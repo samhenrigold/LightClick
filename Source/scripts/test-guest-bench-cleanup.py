@@ -13,7 +13,7 @@ function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) 
 clock = Mock()
 clock.monotonic.return_value = 0
 signals = []
-lookup = Mock(return_value='original')
+lookup = Mock(return_value='Fri Nov 7 12:00:00 2026')
 runner = Mock()
 namespace = {'subprocess': SimpleNamespace(run=runner, TimeoutExpired=subprocess.TimeoutExpired),
              'time': clock, 'signal': signal, 'os': SimpleNamespace(kill=lambda *args: signals.append(args)),
@@ -32,14 +32,14 @@ for result in (SimpleNamespace(returncode=1, stdout='', stderr='denied'),
 runner.side_effect = subprocess.TimeoutExpired('ps', 5)
 assert stop(Mock(), work), 'inspection timeout was accepted as clean'
 runner.side_effect = None
-runner.return_value = SimpleNamespace(returncode=0, stdout='42 /other/app\n', stderr='')
+runner.return_value = SimpleNamespace(returncode=0, stdout='42 S Fri Nov 7 12:00:00 2026 /other/app\n', stderr='')
 assert stop(Mock(), work) is None
 assert not signals
 
-# A candidate PID reused between discovery and signaling must not be killed.
-runner.side_effect = [SimpleNamespace(returncode=0, stdout='42 /clone-test/app\n', stderr=''),
-                      SimpleNamespace(returncode=0, stdout='42 /other/app\n', stderr='')]
-lookup.side_effect = ['original', 'replacement']
+# A PID reused before the first identity lookup must not be signaled: the discovery snapshot owns the birth time.
+runner.side_effect = [SimpleNamespace(returncode=0, stdout='42 S Fri Nov 7 12:00:00 2026 /clone-test/app\n', stderr=''),
+                      SimpleNamespace(returncode=0, stdout='42 S Fri Nov 7 12:00:00 2026 /other/app\n', stderr='')]
+lookup.side_effect = ['Fri Nov 7 12:00:01 2026']
 assert stop(Mock(), work) is None
 assert not signals
 print('PASS guest-bench cleanup: inspection errors, timeout, exclusion and PID reuse')
