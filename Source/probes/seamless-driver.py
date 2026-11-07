@@ -721,6 +721,8 @@ def desktop(activation_only=False):
         for line in (materials_file.read_text().splitlines() if materials_file.exists() else []):
             print(f'materials {name}: {line}', flush=True)
             said_materials.append(line)
+    # A SIGUSR2 with no command is a move: leave it that way for what follows.
+    command_file.write_text('')
     sent = [line for line in said_materials if 'rows 0' not in line]
     def right(line):
         kinds = int(re.search(r'kinds (\d+)', line).group(1))
