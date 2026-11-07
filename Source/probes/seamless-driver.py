@@ -400,6 +400,12 @@ def windowed(seconds):
 def monitor_dump(why):
     # Where the agent's UART, COM2 at 0x2f8, and its interrupt are. IIR goes last, as reading it can clear what it says.
     print('# from the monitor,', why, flush=True)
+    # Both ends of the agent's socket: whether QEMU still holds a client the app has let go.
+    pids = [row.split()[0] for row in subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout.splitlines()
+            if f'Build/bench/{tag}/' in row]
+    if pids:
+        said = subprocess.run(['lsof', '-n', '-U', '-a', '-p', ','.join(pids)], capture_output=True, text=True).stdout
+        print('## lsof', '\n'.join(row for row in said.splitlines() if 'guest-agent' in row or '->' in row)[:3000], flush=True)
     for command in ('info chardev', 'info pic', 'info ioapic', 'info lapic', 'i/b 0x2f9', 'i/b 0x2fb', 'i/b 0x2fc', 'i/b 0x2fd', 'i/b 0x2fe', 'i/b 0x2fa', 'i/b 0x2fd'):
         print(f'## {command}', request({'Action': 'monitor', 'Command': command}, 30), flush=True)
 
