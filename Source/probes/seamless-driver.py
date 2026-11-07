@@ -473,7 +473,7 @@ while :; do
   n=$((n + 1))
   {
     /bin/date
-    /bin/ps -axo pid,ppid,stat,etime,pcpu,command | /usr/bin/grep -E "$comm|/tmp/sg|ws-inject|WindowServer|tccd" | /usr/bin/grep -v grep | /usr/bin/cut -c1-120
+    /bin/ps -axo pid,ppid,stat,etime,pcpu,command | /usr/bin/grep -E "$comm|/tmp/sg|ws-inject|WindowServer|tccd|perl" | /usr/bin/grep -v grep | /usr/bin/cut -c1-120
     /bin/launchctl list | /usr/bin/grep -iE "virtual|qemu|guest"
     /bin/cat /var/tmp/seamless-ws-press 2>/dev/null
     /usr/bin/tail -3 /tmp/seamless-oversleep.log
