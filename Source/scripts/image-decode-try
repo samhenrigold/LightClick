@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Prepare and run one bounded, UI-free ImageIO comparison in a disposable Mojave clone.
+
+    scripts/image-decode-try APP MACHINE [--deadline 1200] [--results NEW_DIRECTORY]
+
+Builds both probes and passes the independent tiny-pixel check before guest-bench can acquire its global clone lease.
+The original app and machine are never changed. Results are fresh-process measurements with uncontrolled file caches,
+not an application acceleration claim. Interrupts stop only this wrapper's child process and its own process group.
+"""
+import argparse
+import os
+from pathlib import Path
+import plistlib
+import signal
+import subprocess
+import sys
+import time
+
+
+def main():
+    source = Path(__file__).resolve().parents[1]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('app', type=Path)
+    parser.add_argument('machine', type=Path)
+    parser.add_argument('--deadline', type=int, default=1200, help='clone phase wall-clock seconds, at most 1800')
+    parser.add_argument('--results', type=Path, help='new directory; default Build/image-decode/run-TIME-PID')
+    args = parser.parse_args()
+    if not 60 <= args.deadline <= 1800:
+        parser.error('--deadline must be between 60 and 1800 seconds')
+    app, machine = args.app.resolve(), args.machine.resolve()
+    if not (app/'Contents/MacOS/Light Click').is_file() or not (machine/'Machine.plist').is_file():
+        parser.error('a built app and prepared machine package are required')
+    with (machine/'Machine.plist').open('rb') as file:
+        if plistlib.load(file).get('Guest') != 'mojave':
+            parser.error('this experiment is qualified only for a Mojave clone')
+    tag = time.strftime('image-decode-%Y%m%d-%H%M%S-') + str(os.getpid())
+    results = (args.results or source/'Build/image-decode'/tag).resolve()
+    if results.exists() or results.is_relative_to(app) or results.is_relative_to(machine):
+        parser.error('--results must name a new directory outside the app and source machine')
+    results.mkdir(parents=True)
+    log = results/'runner.log'
+    interrupted = [0]
+
+    def stop(number, frame):
+        interrupted[0] = number
+
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, stop)
+
+    def run(command, limit):
+        if interrupted[0]:
+            raise RuntimeError(f'interrupted by signal {interrupted[0]}')
+        with log.open('a') as stream:
+            process = subprocess.Popen(list(map(str, command)), stdin=subprocess.DEVNULL,
+                                       stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+            deadline = time.monotonic() + limit
+            while process.poll() is None and not interrupted[0] and time.monotonic() < deadline:
+                time.sleep(0.1)
+            if process.poll() is None:
+                # guest-bench owns its app/VM cleanup. Give it time to finish before touching the owned group.
+                process.terminate()
+                try:
+                    process.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=5)
+                raise RuntimeError(f'interrupted by signal {interrupted[0]}' if interrupted[0]
+                                   else f'phase timed out after {limit} seconds')
+            if process.returncode:
+                raise RuntimeError(f'phase exited {process.returncode}; see {log}')
+            if interrupted[0]:
+                raise RuntimeError(f'interrupted by signal {interrupted[0]}')
+
+    try:
+        common = ['xcrun', 'clang', '-fno-objc-arc', '-O2', '-Wall', '-Wextra', '-Wno-deprecated-declarations',
+                  '-framework', 'Foundation', '-framework', 'ImageIO', '-framework', 'CoreGraphics',
+                  source/'probes/image-decode.m']
+        host, guest = results/'image-decode-arm64', results/'image-decode-x86_64'
+        run([*common, '-arch', 'arm64', '-mmacosx-version-min=11.0', '-o', host], 120)
+        run([*common, '-arch', 'x86_64', '-mmacosx-version-min=10.14', '-o', guest], 120)
+        run([sys.executable, source/'scripts/test-image-decode.py', host], 30)
+        run([sys.executable, source/'scripts/guest-bench', app, machine, tag, '--fresh-identifier',
+             '--env', 'LC_HVDBT=1', '--driver', source/'probes/image-decode-driver.py',
+             '--driver-arg', results, '--driver-arg', host, '--driver-arg', guest], args.deadline)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(f'FAIL image-decode experiment: {error}; evidence {results}', flush=True)
+        return 128 + interrupted[0] if interrupted[0] else 1
+    print(f'PASS image-decode comparison recorded; no application acceleration claim; evidence {results}', flush=True)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
