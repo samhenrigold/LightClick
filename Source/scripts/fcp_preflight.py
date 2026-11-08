@@ -53,7 +53,7 @@ def command(argv,seconds,allowed=(0,)):
     a,b=captured(out),captured(err)
     row={'argv':argv,'exit_code':child.poll(),'timed_out':expired,'stdout':a['text'],'stderr':b['text'],'at_limit':a['at_limit'] or b['at_limit'],'readers_finished':a['reader_finished'] and b['reader_finished']}
     report['commands'].append(row)
-    if expired or row['exit_code'] not in allowed or row['at_limit'] or not row['readers_finished']:raise ValueError('bounded command failed: '+repr(argv))
+    if expired or (allowed is not None and row['exit_code'] not in allowed) or row['at_limit'] or not row['readers_finished']:raise ValueError('bounded command failed: '+repr(argv))
     return a['text'].encode('utf-8')
 def plist_command(argv):return plistlib.readPlistFromString(command(argv,10))
 def identity(path):
@@ -83,6 +83,11 @@ def observe(pid):
     raw=command([spec['ax_helper'],spec['variant'],str(pid)],14)
     return json.loads(raw)
 
+
+def install_trial(payload):
+    command(['/usr/sbin/pkgutil','--check-signature',payload],20,None)
+    report['package_signature']=dict(report['commands'][-1])
+    command(['/usr/sbin/installer','-allowUntrusted','-pkg',payload,'-target','/'],840)
 
 def validate_package_metadata(package,distribution):
     identity={'identifier':package.get('identifier'),'version':package.get('version')}
@@ -144,7 +149,7 @@ try:
         report['installation_mode']='reused_exact_preexisting_app'
     else:
         if spec['kind']=='app':command(['/usr/bin/ditto',payload,target],840)
-        else:command(['/usr/sbin/installer','-pkg',payload,'-target','/'],840)
+        else:install_trial(payload)
         report['installation_mode']='installed_this_boot'
     report['installed_identity']=exact_identity(target)
     binary=target+'/Contents/MacOS/'+spec['identity']['CFBundleExecutable']

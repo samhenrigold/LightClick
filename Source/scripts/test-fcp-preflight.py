@@ -77,6 +77,25 @@ class Checks(unittest.TestCase):
             self.assertEqual([x for x in calls if x.get('Action')=='insert-disc'],[dict(Action='insert-disc',Path=str(dmg),Slot=0)])
             self.assertEqual(json.loads((root/'results/result.json').read_text())['result'],'INCONCLUSIVE')
 
+    def test_historical_trial_signature_recorded_before_explicit_clone_installer(self):
+        node=next(node for node in ast.parse(GUEST).body if isinstance(node,ast.FunctionDef) and node.name=='install_trial')
+        calls=[];report={'commands':[]}
+        def command(argv,seconds,allowed=(0,)):
+            calls.append((argv,seconds,allowed))
+            report['commands'].append(dict(argv=argv,exit_code=1,stdout='untrusted certificate',stderr=''))
+        ns=dict(command=command,report=report);exec(compile(ast.Module(body=[node],type_ignores=[]),'<production trial install>','exec'),ns)
+        payload='/Volumes/Trial/FinalCutProXTrial.pkg';ns['install_trial'](payload)
+        self.assertEqual(calls[0],(['/usr/sbin/pkgutil','--check-signature',payload],20,None))
+        self.assertEqual(calls[1],(['/usr/sbin/installer','-allowUntrusted','-pkg',payload,'-target','/'],840,(0,)))
+        self.assertEqual(report['package_signature']['exit_code'],1)
+        self.assertIn('certificate',report['package_signature']['stdout'])
+        path=Path(__file__).parents[1]/'probes/fcp-install-preflight-driver.py'
+        tree=ast.parse(path.read_text())
+        requests=[node for node in ast.walk(tree) if isinstance(node,ast.Dict) and any(isinstance(v,ast.List) and v.elts and isinstance(v.elts[0],ast.Constant) and v.elts[0].value=='eject' for v in node.values)]
+        self.assertEqual(len(requests),1)
+        arguments=next(value for key,value in zip(requests[0].keys,requests[0].values) if isinstance(key,ast.Constant) and key.value=='Arguments')
+        self.assertEqual(eval(compile(ast.Expression(arguments),'<production eject route>','eval'),{'device':'disk7'}),['eject','/dev/disk7'])
+
     def test_actual_trial_distribution_package_id_not_application_id(self):
         import xml.etree.ElementTree as ET
         node=next(node for node in ast.parse(GUEST).body if isinstance(node,ast.FunctionDef) and node.name=='validate_package_metadata')

@@ -66,8 +66,8 @@ def experiment():
         if guest.get('disk',{}).get('DeviceIdentifier'):
             device=guest['disk']['DeviceIdentifier']
             if not isinstance(device,str) or not device.startswith('disk') or not device[4:].isdigit():raise ValueError('invalid retained whole-disk identity')
-            response=request({'Executable':'/usr/sbin/diskutil','Arguments':['unmountDisk','/dev/'+device]},30)
-            evidence['unmount_response']=response;checked_response(response);save()
+            response=request({'Executable':'/usr/sbin/diskutil','Arguments':['eject','/dev/'+device]},30)
+            evidence['eject_response']=response;checked_response(response);save()
     except SystemExit as error:
         ambiguous=True;evidence['error']=repr(error);save();raise
     except Exception as error:
