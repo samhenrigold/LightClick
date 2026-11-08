@@ -1,13 +1,15 @@
 // Disposable-guest FCP10.1 only. new-private-library presses the measured New…
 // button once and inventories dialogs. Explicit create-private-library additionally
 // permits one guest-targeted Go-to-Folder chord and a verified private-path Save.
-// Neither mode selects existing libraries, launches apps, posts global input or requests trust.
+// Existing library modes never post global input. Explicit open-generated-project-hid
+// posts one guest-global HID double-click only after Darwin13/private-fixture/frontmost guards.
 #import <Cocoa/Cocoa.h>
 #import <Carbon/Carbon.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <libproc.h>
 #import <mach/mach_time.h>
 #import <sys/stat.h>
+#import <sys/sysctl.h>
 #import <signal.h>
 #import <unistd.h>
 #import <errno.h>
@@ -372,7 +374,72 @@ static BOOL rectangle(AXUIElementRef element,CGRect *rect){
     if(position)CFRelease(position);if(size)CFRelease(size);*rect=(CGRect){point,extent};return valid;
 }
 static NSDictionary *rectJSON(CGRect rect){return @{@"x":@(rect.origin.x),@"y":@(rect.origin.y),@"width":@(rect.size.width),@"height":@(rect.size.height)};}
-static void openGenerated(AXUIElementRef application,pid_t pid,NSString *directory,NSMutableDictionary *report){
+/* Pure predicates are also compiled by the headless guard test; no event execution there. */
+static BOOL darwin13Release(const char *release){
+    if(!release || strncmp(release,"13.",3))return NO;
+    const char *p=release+3;if(*p<'0' || *p>'9')return NO;
+    for(;*p;p++)if((*p<'0' || *p>'9') && *p!='.')return NO;
+    return p[-1]>='0' && p[-1]<='9';
+}
+static BOOL guestDarwin13(void){
+    char release[64]={0};size_t size=sizeof(release);
+    return sysctlbyname("kern.osrelease",release,&size,NULL,0)==0 && size>0 && size<=sizeof(release) && release[size-1]==0 && darwin13Release(release);
+}
+static BOOL frontmostOwned(pid_t pid,ProcessSerialNumber *out){
+    ProcessSerialNumber front={0,0};pid_t actual=0;
+    BOOL okay=GetFrontProcess(&front)==noErr && GetProcessPID(&front,&actual)==noErr && actual==pid && identity(pid);
+    if(okay && out)*out=front;return okay;
+}
+static BOOL imageOnDisplay(CGRect image){
+    CGDirectDisplayID displays[16];uint32_t count=0;
+    if(CGGetActiveDisplayList(16,displays,&count)!=kCGErrorSuccess || !count || count>=16)return NO;
+    for(uint32_t i=0;i<count;i++)if(CGRectContainsRect(CGDisplayBounds(displays[i]),image))return YES;
+    return NO;
+}
+static uint64_t eventTimestamp(void){
+    mach_timebase_info_data_t info;mach_timebase_info(&info);
+    return (uint64_t)(((__uint128_t)mach_absolute_time()*info.numer)/info.denom);
+}
+/* Gate each DOWN, but always release our own press even if focus/deadline changes.
+ * No allocation or AX calls between a DOWN and its matching UP. */
+static int projectHIDSequence(CGEventRef events[4],pid_t pid,double interval,useconds_t delay,uint64_t stamps[4]){
+    int posted=0;double began=clockNow();
+    for(int click=0;click<2;click++){
+        if(!frontmostOwned(pid,NULL) || !room() || (click && clockNow()-began>=interval))break;
+        int down=click*2,up=down+1;
+        stamps[down]=eventTimestamp();CGEventSetTimestamp(events[down],stamps[down]);
+        CGEventPost(kCGHIDEventTap,events[down]);posted++;
+        usleep(delay);
+        stamps[up]=eventTimestamp();CGEventSetTimestamp(events[up],stamps[up]);
+        CGEventPost(kCGHIDEventTap,events[up]);posted++;
+        if(!click)usleep(delay);
+    }
+    return posted;
+}
+static void projectHIDClick(pid_t pid,NSString *directory,CGRect image,NSMutableDictionary *report){
+    ProcessSerialNumber front={0,0};
+    report[@"result"]=@"PROJECT_HID_GUARD_INCONCLUSIVE";
+    report[@"guestDarwin13"]=@(guestDarwin13());report[@"imageInsideGuestDisplay"]=@(imageOnDisplay(image));
+    if(![report[@"guestDarwin13"]boolValue] || ![report[@"imageInsideGuestDisplay"]boolValue] || !ownLibrary(directory) || !frontmostOwned(pid,&front) || !room())return;
+    double interval=[NSEvent doubleClickInterval];
+    if(!isfinite(interval) || interval<.01 || interval>10)return;
+    useconds_t delay=(useconds_t)(fmin(.02,interval/8)*1e6);
+    CGPoint point=CGPointMake(image.origin.x+image.size.width/8,image.origin.y+image.size.height/2);
+    CGEventSourceRef source=CGEventSourceCreate(kCGEventSourceStatePrivate);if(!source)return;
+    CGEventRef events[4]={0};BOOL complete=YES;
+    for(int i=0;i<4;i++){
+        events[i]=CGEventCreateMouseEvent(source,(i%2)?kCGEventLeftMouseUp:kCGEventLeftMouseDown,point,kCGMouseButtonLeft);
+        if(!events[i])complete=NO;
+        else{CGEventSetFlags(events[i],0);CGEventSetIntegerValueField(events[i],kCGMouseEventClickState,i<2?1:2);}
+    }
+    uint64_t stamps[4]={0};double began=clockNow();
+    int posted=complete?projectHIDSequence(events,pid,interval,delay,stamps):0;
+    for(int i=0;i<4;i++)if(events[i])CFRelease(events[i]);CFRelease(source);
+    NSMutableArray *timestamps=[NSMutableArray array];for(int i=0;i<posted;i++)[timestamps addObject:@(stamps[i])];
+    [report[@"actionsPerformed"]addObject:@{@"action":@"doubleClick",@"api":@"CGEventPost(kCGHIDEventTap)",@"scope":@"guest-global HID; Darwin13 gated",@"targetPID":@(pid),@"psnHigh":@(front.highLongOfPSN),@"psnLow":@(front.lowLongOfPSN),@"x":@(point.x),@"y":@(point.y),@"pointPolicy":@"center of left quarter of fresh AXImage",@"eventsPosted":@(posted),@"downsPosted":@(posted/2),@"upsPosted":@(posted/2),@"balancedRelease":@((posted%2)==0),@"eventTimestampsNanoseconds":timestamps,@"interEventDelayMicroseconds":@(delay),@"doubleClickIntervalSeconds":@(interval),@"elapsedSeconds":@(clockNow()-began),@"status":@"posted; delivery unqualified"}];
+    report[@"result"]=posted==4?@"PROJECT_HID_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW":@"PROJECT_HID_DOUBLE_CLICK_PARTIAL_UNCONFIRMED";
+}
+static void openGenerated(AXUIElementRef application,pid_t pid,NSString *directory,NSMutableDictionary *report,BOOL hid){
     ProjectTarget target={0},fresh={0};CGRect image={0},window={0},freshImage={0},freshWindow={0};
     report[@"result"]=@"PROJECT_OPEN_TARGET_INCONCLUSIVE";report[@"ownLibraryVerified"]=@(ownLibrary(directory));
     if(![report[@"ownLibraryVerified"]boolValue])goto done;
@@ -384,7 +451,8 @@ static void openGenerated(AXUIElementRef application,pid_t pid,NSString *directo
     report[@"imageRectangle"]=rectJSON(image);report[@"windowRectangle"]=rectJSON(window);
     fresh=findProject(application,pid,[NSMutableDictionary dictionary]);
     if(!fresh.image || !CFEqual(target.image,fresh.image) || !CFEqual(target.group,fresh.group) || !rectangle(fresh.image,&freshImage) || !rectangle(fresh.window,&freshWindow) || !CGRectEqualToRect(image,freshImage) || !CGRectEqualToRect(window,freshWindow) || !ownLibrary(directory) || !plainFocusedWindow(application,fresh.window,pid))goto done;
-    {
+    if(hid){projectHIDClick(pid,directory,image,report);}
+    else {
         AXUIElementRef semantic=[imageActions containsObject:@"AXOpen"]?fresh.image:[groupActions containsObject:@"AXOpen"]?fresh.group:NULL;
         if(semantic){
             AXError error=AXUIElementPerformAction(semantic,CFSTR("AXOpen"));actionResult(report[@"actionsPerformed"],@"AXOpen",@"verified generated project",error);
@@ -417,10 +485,10 @@ static void openGenerated(AXUIElementRef application,pid_t pid,NSString *directo
 
 int main(int argc,const char **argv) {
     @autoreleasepool {
-        if(argc!=5 || strcmp(argv[1],"10.1") || (strcmp(argv[3],"new-private-library") && strcmp(argv[3],"create-private-library") && strcmp(argv[3],"open-generated-project"))){fprintf(stderr,"usage: fcp-ax-actions 10.1 ownedPID new-private-library|create-private-library|open-generated-project ownFixtureDirectory\n");return 2;}
+        if(argc!=5 || strcmp(argv[1],"10.1") || (strcmp(argv[3],"new-private-library") && strcmp(argv[3],"create-private-library") && strcmp(argv[3],"open-generated-project") && strcmp(argv[3],"open-generated-project-hid"))){fprintf(stderr,"usage: fcp-ax-actions 10.1 ownedPID new-private-library|create-private-library|open-generated-project|open-generated-project-hid ownFixtureDirectory\n");return 2;}
         char *end=NULL;long number=strtol(argv[2],&end,10);if(!argv[2][0] || *end || number<=1 || number>INT_MAX)return 2;
         pid_t pid=(pid_t)number;NSString *directory=[NSString stringWithUTF8String:argv[4]];if(!directory)return 2;
-        BOOL createMode=!strcmp(argv[3],"create-private-library"),openMode=!strcmp(argv[3],"open-generated-project");surgicalCreation=createMode||openMode;
+        BOOL createMode=!strcmp(argv[3],"create-private-library"),hidMode=!strcmp(argv[3],"open-generated-project-hid"),openMode=!strcmp(argv[3],"open-generated-project")||hidMode;surgicalCreation=createMode||openMode;
         alarm(createMode?55:16);deadline=clockNow()+(createMode?48:12);
         NSMutableArray *actions=[NSMutableArray array];
         NSMutableDictionary *report=[@{@"result":@"INCONCLUSIVE",@"variant":@"10.1",@"pid":@(pid),@"mode":[NSString stringWithUTF8String:argv[3]],@"directory":directory,
@@ -428,8 +496,9 @@ int main(int argc,const char **argv) {
             @"trustRequested":@NO,@"axTrusted":@(AXIsProcessTrusted()),@"identityMatched":@(identity(pid)),@"privateFixtureValid":@(privateFixture(directory,!openMode))}mutableCopy];
         AXUIElementRef application=NULL,dialog=NULL,button=NULL;
         if(openMode){
+            if(hidMode){report[@"guestDarwin13"]=@(guestDarwin13());if(![report[@"guestDarwin13"]boolValue]){report[@"result"]=@"PROJECT_HID_REQUIRES_GUEST_DARWIN13";goto output;}}
             if([report[@"identityMatched"]boolValue] && [report[@"axTrusted"]boolValue] && [report[@"privateFixtureValid"]boolValue]){
-                application=AXUIElementCreateApplication(pid);AXUIElementSetMessagingTimeout(application,.15);openGenerated(application,pid,directory,report);
+                application=AXUIElementCreateApplication(pid);AXUIElementSetMessagingTimeout(application,.15);openGenerated(application,pid,directory,report,hidMode);
             }
             goto output;
         }
@@ -468,7 +537,7 @@ int main(int argc,const char **argv) {
         report[@"identityStillMatched"]=@(identity(pid));report[@"nodes"]=@(nodes);report[@"attributeFailures"]=@(failures);
         report[@"truncated"]=@(truncated);report[@"deadlineExceeded"]=@(expired);
         struct stat info;BOOL exists=lstat([report[@"intendedLibraryPath"]fileSystemRepresentation],&info)==0;report[@"intendedLibraryExists"]=@(exists);
-        report[@"qualification"]=openMode ? @"One exact generated-project open attempt only. Read-only post-action state is required; no timeline/render/export qualification." : createMode ? @"Explicit private-library creation attempt only; all input targets the owned guest FCP. No existing library selection or import/render/export qualification." : @"One verified New-button press only. Save-panel controls are inventoried; no path entered, Save pressed or existing library selected.";
+        report[@"qualification"]=hidMode ? @"One guest-global HID double-click attempt only, gated to Darwin13 and an exact owned fixture. Delivery unqualified; fresh read-only post-action tree requires review. No timeline/render/export qualification." : openMode ? @"One exact generated-project open attempt only. Read-only post-action state is required; no timeline/render/export qualification." : createMode ? @"Explicit private-library creation attempt only; all input targets the owned guest FCP. No existing library selection or import/render/export qualification." : @"One verified New-button press only. Save-panel controls are inventoried; no path entered, Save pressed or existing library selected.";
         if(button)CFRelease(button);if(dialog)CFRelease(dialog);if(application)CFRelease(application);
         NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:NULL];if(!json || json.length>1048576)return 3;
         fwrite(json.bytes,1,json.length,stdout);putchar('\n');alarm(0);return 0;
