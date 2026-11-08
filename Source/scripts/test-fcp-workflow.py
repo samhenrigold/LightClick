@@ -9,7 +9,7 @@ from pathlib import Path
 import types
 import unittest
 from fcp_preflight import GUEST
-from fcp_workflow import OBSERVE, PLACEHOLDER, compose_guest, replace_once, xml_template
+from fcp_workflow import OBSERVE, PLACEHOLDER, compose_guest, generated_project_evidence, replace_once, xml_template
 
 
 class Checks(unittest.TestCase):
@@ -176,11 +176,72 @@ class Checks(unittest.TestCase):
                 else:self.assertFalse(observed['available']);self.assertIn('bounded observer failed',observed['reason'])
             self.assertNotIn('PASS',json.dumps(report))
 
+    def test_generated_project_evidence_is_contextual_and_unambiguous(self):
+        group=dict(AXRole='AXGroup',AXDescription='LC-generated-8s',children=[
+            dict(AXRole='AXTextField',AXDescription='display name',AXValue='LC-generated-8s',AXEnabled=1),
+            dict(AXRole='AXImage',AXTitle='LC-generated-8s',AXEnabled=True),
+            dict(AXRole='AXLayoutItem',AXDescription='range selection',AXValue=8)])
+        view=dict(result='OBSERVED_WINDOWS',version='10.1',pid=321,identityMatched=True,identityStillMatched=1,axTrusted=1,
+                  windows=[dict(AXRole='AXWindow',AXSubrole='AXStandardWindow',children=[dict(AXRole='AXScrollArea',AXDescription='organizer',children=[dict(AXRole='AXGroup',AXDescription='events',children=[group])])])])
+        self.assertTrue(generated_project_evidence(view,321,'10.1'))
+        for field,value in [('pid',999),('version','10.4.4'),('axTrusted','1')]:
+            bad=copy.deepcopy(view);bad[field]=value;self.assertFalse(generated_project_evidence(bad,321,'10.1'))
+        bad=copy.deepcopy(view);bad['windows'][0]['children'][0]['AXDescription']='unrelated browser'
+        self.assertFalse(generated_project_evidence(bad,321,'10.1'))
+        for bad_value in (7.99,True,'8'):
+            bad=copy.deepcopy(view);bad['windows'][0]['children'][0]['children'][0]['children'][0]['children'][2]['AXValue']=bad_value
+            self.assertFalse(generated_project_evidence(bad,321,'10.1'))
+        bad=copy.deepcopy(view);bad['windows'][0]['children'][0]['children'][0]['children'].append(copy.deepcopy(group))
+        self.assertFalse(generated_project_evidence(bad,321,'10.1'))
+
+    def test_create_and_open_routes_after_evidence_once_and_keeps_post_action_reads(self):
+        group=dict(AXRole='AXGroup',AXDescription='LC-generated-8s',children=[
+            dict(AXRole='AXTextField',AXDescription='display name',AXValue='LC-generated-8s',AXEnabled=1),
+            dict(AXRole='AXImage',AXTitle='LC-generated-8s',AXEnabled=1),
+            dict(AXRole='AXLayoutItem',AXDescription='range selection',AXValue=8)])
+        view=dict(result='OBSERVED_WINDOWS',version='10.1',pid=321,identityMatched=1,identityStillMatched=1,axTrusted=1,
+                  windows=[dict(AXRole='AXWindow',AXSubrole='AXStandardWindow',children=[dict(AXRole='AXScrollArea',AXDescription='organizer',children=[dict(AXRole='AXGroup',AXDescription='events',children=[group])])])])
+        for outcome in ('open','missing-project','app-exited','open-error'):
+            calls=[];alive=[True];full_reads=[0]
+            inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
+            def command(argv,seconds):
+                calls.append((argv,seconds))
+                if argv[0]=='/own/ax-workload':return json.dumps(inventory).encode()
+                if argv[0]=='/own/ax-observe':
+                    full_reads[0]+=1;value=copy.deepcopy(view)
+                    if outcome=='missing-project':value['windows'][0]['children']=[]
+                    if outcome=='app-exited':alive[0]=False
+                    return json.dumps(value).encode()
+                if argv[0]=='/own/ax-actions':
+                    if argv[3]=='create-private-library':return json.dumps(dict(result='PRIVATE_LIBRARY_CREATED_REQUIRES_IMPORT_REVIEW',privateLibraryVerified=1)).encode()
+                    if outcome=='open-error':raise ValueError('ambiguous helper outcome after one attempt')
+                    return json.dumps(dict(result='PROJECT_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW')).encode()
+                return b'{}'
+            directory='/private/var/tmp/LightClickFCPFixture.Abc123';report=dict(workflow=dict(import_attempted=False))
+            ns=dict(app=types.SimpleNamespace(pid=321,poll=lambda:None if alive[0]else 1),report=report,command=command,json=json,
+                    os=types.SimpleNamespace(path=types.SimpleNamespace(lexists=lambda p:True,isdir=lambda p:True,islink=lambda p:False)),
+                    time=types.SimpleNamespace(time=lambda:0,sleep=lambda sec:None),launched_at=0,workflow_directory=directory,
+                    spec=dict(ax_helper='/own/ax-observe',workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',workflow_open_generated_project=True,variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
+            exec(compile('if True:\n'+OBSERVE,'<production create-and-open route>','exec'),ns)
+            actions=[c for c in calls if c[0][0]=='/own/ax-actions']
+            self.assertEqual(actions[0],(['/own/ax-actions','10.1','321','create-private-library',directory],60))
+            self.assertEqual(len([c for c in calls if c[0][0]=='/usr/bin/open']),1)
+            if outcome in ('open','open-error'):
+                self.assertEqual(actions[1:], [(['/own/ax-actions','10.1','321','open-generated-project',directory],20)])
+                self.assertEqual(full_reads[0],2)
+                self.assertIn('post_project_open_inventory',report['workflow'])
+                self.assertIn('post_project_open_full_observer',report['workflow'])
+                if outcome=='open-error':self.assertIn('ambiguous helper outcome',report['workflow']['project_open_action']['reason'])
+            else:
+                self.assertEqual(len(actions),1);self.assertEqual(full_reads[0],1)
+                self.assertNotIn('project_open_attempted',report['workflow'])
+            self.assertNotIn('PASS',json.dumps(report))
+
     def test_invalid_creation_modes_fail_before_staging(self):
         source=Path(__file__).resolve().parents[1]
         path=source/'probes/fcp-workflow-driver.py'
         tree=ast.parse(path.read_text());tree.body.pop()
-        for case,mode in (('mavericks-10.1','unknown'),('mojave-10.4.4','create-private-library')):
+        for case,mode in (('mavericks-10.1','unknown'),('mojave-10.4.4','create-private-library'),('mojave-10.4.4','create-and-open-private-project')):
             with tempfile.TemporaryDirectory() as tmp:
                 output=Path(tmp)/'result'
                 ns=dict(source=source,arguments=[case,str(output),'observer','inventory','actions',mode],

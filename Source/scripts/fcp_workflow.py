@@ -3,6 +3,8 @@ import ast
 import base64
 import hashlib
 import json
+import inspect
+import textwrap
 from pathlib import Path
 import runpy
 
@@ -67,7 +69,36 @@ PREPARE=r'''
 
 '''
 
-OBSERVE=r'''
+def generated_project_evidence(view,pid,variant):
+    """Recorded evidence gate only; live action helper independently rejects ambiguity."""
+    def native_true(value):return type(value) in (bool,int) and value in (0,1) and value==1
+    if (not isinstance(view,dict) or view.get('result')!='OBSERVED_WINDOWS'
+            or type(view.get('pid')) is not int or view['pid']!=pid or view.get('version')!=variant
+            or not all(native_true(view.get(key)) for key in ('identityMatched','identityStillMatched','axTrusted'))):return False
+    windows=view.get('windows',[])
+    if not isinstance(windows,list) or len(windows)!=1 or not isinstance(windows[0],dict) or windows[0].get('AXSubrole')!='AXStandardWindow':return False
+    labels=[0];valid=[0];count=[0]
+    def visit(node,organizer=False,events=False):
+        if not isinstance(node,dict):return
+        count[0]+=1
+        if count[0]>1024:return
+        organizer=organizer or (node.get('AXRole')=='AXScrollArea' and node.get('AXDescription')=='organizer')
+        events=events or (organizer and node.get('AXRole')=='AXGroup' and node.get('AXDescription')=='events')
+        children=node.get('children',[])
+        if not isinstance(children,list):return
+        if events and node.get('AXRole')=='AXGroup' and node.get('AXDescription')=='LC-generated-8s':
+            labels[0]+=1
+            names=[c for c in children if isinstance(c,dict) and c.get('AXRole')=='AXTextField' and c.get('AXDescription')=='display name' and c.get('AXValue')=='LC-generated-8s' and native_true(c.get('AXEnabled'))]
+            images=[c for c in children if isinstance(c,dict) and c.get('AXRole')=='AXImage' and c.get('AXTitle')=='LC-generated-8s' and native_true(c.get('AXEnabled'))]
+            ranges=[c for c in children if isinstance(c,dict) and c.get('AXRole')=='AXLayoutItem' and c.get('AXDescription')=='range selection' and type(c.get('AXValue')) in (int,float) and c['AXValue']==8]
+            if len(children)==3 and len(names)==len(images)==len(ranges)==1:valid[0]+=1
+        for child in children:visit(child,organizer,events)
+    visit(windows[0])
+    return count[0]<=1024 and labels[0]==valid[0]==1
+
+
+OBSERVE='\n'+textwrap.indent(inspect.getsource(generated_project_evidence),'    ')+r'''
+
     if app.poll() is None:
         report['workflow']['inventory_started_seconds']=time.time()-launched_at
         raw=command([spec['workflow_helper'],spec['variant'],str(app.pid),'inventory'],20)
@@ -129,6 +160,27 @@ OBSERVE=r'''
                             report['workflow']['post_library_full_observer']={'available':False,'reason':repr(error)}
                         report['workflow']['post_library_full_observer_finished_seconds']=time.time()-launched_at
                     else:report['workflow']['post_library_full_observer']={'available':False,'reason':'owned app exited before read-only capture'}
+                    if spec.get('workflow_open_generated_project'):
+                        full=report['workflow'].get('post_library_full_observer',{})
+                        created=report['workflow'].get('library_action',{})
+                        can_open=(app.poll() is None and created.get('result')=='PRIVATE_LIBRARY_CREATED_REQUIRES_IMPORT_REVIEW'
+                                  and native_true(created.get('privateLibraryVerified')) and generated_project_evidence(full,app.pid,spec['variant']))
+                        report['workflow']['project_open_evidence_gate']=can_open
+                        if can_open:
+                            report['workflow']['project_open_attempted']=True
+                            try:
+                                raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),'open-generated-project',workflow_directory],20)
+                                report['workflow']['project_open_action']=json.loads(raw)
+                            except Exception as error:report['workflow']['project_open_action']={'available':False,'reason':repr(error)}
+                            # Input delivery is not proof of opening. Always collect fresh read-only evidence;
+                            # never repeat XML-open, library actions or the project-open attempt.
+                            for key,argv in [('post_project_open_full_observer',[spec['ax_helper'],spec['variant'],str(app.pid)]),
+                                             ('post_project_open_inventory',[spec['workflow_helper'],spec['variant'],str(app.pid),'inventory'])]:
+                                if app.poll() is None:
+                                    try:report['workflow'][key]=json.loads(command(argv,14))
+                                    except Exception as error:report['workflow'][key]={'available':False,'reason':repr(error)}
+                                else:report['workflow'][key]={'available':False,'reason':'owned app exited before post-open observation'}
+                        else:report['workflow']['project_open_skipped']='owned app, verified creation or exact generated-project evidence missing'
                     library=workflow_directory+'/private.fcpbundle'
                     report['workflow']['library_artifact']={'path':library,'exists':os.path.lexists(library),'is_directory':os.path.isdir(library),'is_symlink':os.path.islink(library)}
 

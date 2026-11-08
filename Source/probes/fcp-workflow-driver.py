@@ -1,4 +1,4 @@
-"""guest-bench CASE NEW_RESULTS EXISTING_AX_OBSERVER EXISTING_SURGICAL_HELPER [EXISTING_LIBRARY_ACTION_HELPER [new-private-library|create-private-library]].
+"""guest-bench CASE NEW_RESULTS EXISTING_AX_OBSERVER EXISTING_SURGICAL_HELPER [EXISTING_LIBRARY_ACTION_HELPER [new-private-library|create-private-library|create-and-open-private-project]].
 Prepares verified generated media/XML, then inventories the live editor's actual menus.
 One standard OS-open attempt of generated XML; optional grounded New-library dialog helper.
 No guessed Save controls or import/playback/export qualification.
@@ -22,8 +22,10 @@ FIXTURE=Path('/private/tmp/lightclick-fcp-fixture-v1.dmg')
 def run_workflow():
     if len(arguments) not in (4,5,6):raise ValueError('requires fixed FCP case, new absolute results, existing observer, existing surgical helper')
     case,out,observer,helper=arguments[:4]
-    action_mode=arguments[5] if len(arguments)==6 else 'new-private-library'
-    if action_mode not in ('new-private-library','create-private-library') or (len(arguments)>=5 and case!='mavericks-10.1'):raise ValueError('library mode must be explicit and grounded for FCP10.1 before staging')
+    requested_mode=arguments[5] if len(arguments)==6 else 'new-private-library'
+    open_project=requested_mode=='create-and-open-private-project'
+    action_mode='create-private-library' if open_project else requested_mode
+    if requested_mode not in ('new-private-library','create-private-library','create-and-open-private-project') or (len(arguments)>=5 and case!='mavericks-10.1'):raise ValueError('library mode must be explicit and grounded for FCP10.1 before staging')
     output=Path(out)
     if case not in ('mavericks-10.1','mojave-10.4.4') or not output.is_absolute() or output.exists():raise ValueError('fixed case and new absolute results required')
     if not stat.S_ISREG(FIXTURE.lstat().st_mode) or FIXTURE.resolve()!=FIXTURE:raise ValueError('fixed readonly fixture image unavailable')
@@ -74,8 +76,8 @@ def run_workflow():
             if header!=bytes.fromhex('cffaedfe07000001'):raise ValueError('action helper must be thin x86_64')
             action_receipt=tracked_stage(action_helper)
             if not isinstance(action_receipt,str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin',action_receipt):raise ValueError('invalid action helper staging receipt')
-            extra.update(workflow_action_mode=action_mode,workflow_action_helper=action_receipt,workflow_action_helper_sha256=hashlib.sha256(action_helper.read_bytes()).hexdigest())
-            evidence['library_actions_requested']=True;save()
+            extra.update(workflow_open_generated_project=open_project,workflow_action_mode=action_mode,workflow_action_helper=action_receipt,workflow_action_helper_sha256=hashlib.sha256(action_helper.read_bytes()).hexdigest())
+            evidence['library_actions_requested']=True;evidence['requested_workflow_mode']=requested_mode;save()
         baseline=disks()
         inserted=setup({'Action':'insert-disc','Path':str(FIXTURE),'Slot':1},120)
         if inserted.get('Error') or not wire_bool(inserted.get('Inserted'),True):raise ValueError('fixture insertion unconfirmed')
@@ -129,6 +131,10 @@ def run_workflow():
                     and artifact.get('path')==workflow.get('directory','')+'/private.fcpbundle' and artifact.get('exists') is True and artifact.get('is_directory') is True and artifact.get('is_symlink') is False
                     and valid_inventory(workflow.get('inventory_after_library_action',{}))):evidence['result']='PRIVATE_LIBRARY_CREATED_REQUIRES_IMPORT_REVIEW'
 
+
+        if open_project and workflow.get('project_open_attempted') is True:
+            evidence['result']='PROJECT_OPEN_ATTEMPT_REQUIRES_REVIEW'
+        elif open_project:evidence['project_open_skipped']=workflow.get('project_open_skipped','project evidence missing')
 
     except BaseException as error:
         evidence['error']=repr(error);save();raise

@@ -12,6 +12,7 @@
 #import <unistd.h>
 #import <errno.h>
 #import <dlfcn.h>
+#import "fcp-ax-project-guard.h"
 
 static double deadline;
 static NSUInteger nodes, failures;
@@ -290,18 +291,148 @@ static void createPrivate(AXUIElementRef application,pid_t pid,NSString *directo
     if(submittedGoPanel)CFRelease(submittedGoPanel);releaseGo(&go);releaseSave(&save);
 }
 
+typedef struct { AXUIElementRef window,group,image; } ProjectTarget;
+static void releaseProject(ProjectTarget *x){if(x->window)CFRelease(x->window);if(x->group)CFRelease(x->group);if(x->image)CFRelease(x->image);memset(x,0,sizeof(*x));}
+static BOOL ownLibrary(NSString *directory){
+    NSString *path=[directory stringByAppendingPathComponent:@"private.fcpbundle"];struct stat info;char canonical[PATH_MAX]={0};
+    return privateFixture(directory,NO) && !lstat(path.fileSystemRepresentation,&info) && S_ISDIR(info.st_mode) && info.st_uid==getuid() && realpath(path.fileSystemRepresentation,canonical) && !strcmp(path.fileSystemRepresentation,canonical);
+}
+static BOOL plainFocusedWindow(AXUIElementRef application,AXUIElementRef window,pid_t pid){
+    if(!identity(pid) || !ownedElement(window,pid))return NO;
+    CFTypeRef windows=attribute(application,kAXWindowsAttribute),focused=attribute(application,kAXFocusedWindowAttribute);
+    BOOL valid=windows && CFGetTypeID(windows)==CFArrayGetTypeID() && CFArrayGetCount(windows)==1 && CFEqual(CFArrayGetValueAtIndex(windows,0),window) && focused && CFEqual(focused,window) && equals(window,kAXSubroleAttribute,@"AXStandardWindow");
+    if(windows)CFRelease(windows);if(focused)CFRelease(focused);
+    CFTypeRef children=attribute(window,kAXChildrenAttribute);
+    if(!children || CFGetTypeID(children)!=CFArrayGetTypeID() || CFArrayGetCount(children)>64)valid=NO;
+    else for(CFIndex i=0;i<CFArrayGetCount(children) && room();i++){
+        CFTypeRef child=CFArrayGetValueAtIndex(children,i);
+        if(child && CFGetTypeID(child)==AXUIElementGetTypeID() && (equals((AXUIElementRef)child,kAXRoleAttribute,@"AXSheet") || equals((AXUIElementRef)child,kAXRoleAttribute,@"AXAlert")))valid=NO;
+    }
+    if(children)CFRelease(children);return valid && room();
+}
+static void organizers(AXUIElementRef element,CFMutableArrayRef found,NSUInteger depth,NSUInteger *scanned,BOOL *incomplete){
+    if(!room() || ++*scanned>256){*incomplete=YES;return;}
+    if(equals(element,kAXRoleAttribute,@"AXScrollArea") && equals(element,CFSTR("AXDescription"),@"organizer")){CFArrayAppendValue(found,element);return;}
+    if(equals(element,CFSTR("AXDescription"),@"Display Area"))return;
+    BOOL structural=equals(element,kAXRoleAttribute,@"AXWindow") || equals(element,kAXRoleAttribute,@"AXSplitGroup") || equals(element,kAXRoleAttribute,@"AXGroup") || equals(element,kAXRoleAttribute,@"AXScrollArea");
+    if(!structural)return;
+    CFTypeRef children=attribute(element,kAXChildrenAttribute);
+    if(children && CFGetTypeID(children)==CFArrayGetTypeID()){
+        CFIndex count=CFArrayGetCount(children);if(count>64 || (depth>=8 && count))*incomplete=YES;
+        else for(CFIndex i=0;i<count && room();i++){CFTypeRef child=CFArrayGetValueAtIndex(children,i);if(child && CFGetTypeID(child)==AXUIElementGetTypeID())organizers((AXUIElementRef)child,found,depth+1,scanned,incomplete);}
+    }
+    if(children)CFRelease(children);
+}
+static ProjectTarget findProject(AXUIElementRef application,pid_t pid,NSMutableDictionary *evidence){
+    ProjectTarget result={0};CFTypeRef windows=attribute(application,kAXWindowsAttribute);
+    if(!windows || CFGetTypeID(windows)!=CFArrayGetTypeID() || CFArrayGetCount(windows)!=1){if(windows)CFRelease(windows);return result;}
+    AXUIElementRef window=(AXUIElementRef)CFArrayGetValueAtIndex(windows,0);
+    if(!plainFocusedWindow(application,window,pid)){CFRelease(windows);return result;}
+    CFMutableArrayRef found=CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);NSUInteger scanned=0;BOOL incomplete=NO;
+    organizers(window,found,0,&scanned,&incomplete);evidence[@"organizersFound"]=@(CFArrayGetCount(found));evidence[@"structuralNodesScanned"]=@(scanned);evidence[@"structuralScanIncomplete"]=@(incomplete);
+    if(CFArrayGetCount(found)==1 && !incomplete){
+        CFTypeRef groups=attribute((AXUIElementRef)CFArrayGetValueAtIndex(found,0),kAXChildrenAttribute);NSUInteger eventMatches=0;AXUIElementRef events=NULL;
+        if(groups && CFGetTypeID(groups)==CFArrayGetTypeID() && CFArrayGetCount(groups)<=32)for(CFIndex i=0;i<CFArrayGetCount(groups) && room();i++){
+            CFTypeRef group=CFArrayGetValueAtIndex(groups,i);if(group && CFGetTypeID(group)==AXUIElementGetTypeID() && equals((AXUIElementRef)group,kAXRoleAttribute,@"AXGroup") && equals((AXUIElementRef)group,CFSTR("AXDescription"),@"events")){eventMatches++;events=(AXUIElementRef)group;}
+        }
+        evidence[@"eventGroupsFound"]=@(eventMatches);
+        if(eventMatches==1){
+            CFTypeRef items=attribute(events,kAXChildrenAttribute);NSUInteger labels=0,valid=0;
+            if(items && CFGetTypeID(items)==CFArrayGetTypeID() && CFArrayGetCount(items)<=128)for(CFIndex i=0;i<CFArrayGetCount(items) && room();i++){
+                CFTypeRef item=CFArrayGetValueAtIndex(items,i);if(!item || CFGetTypeID(item)!=AXUIElementGetTypeID())continue;AXUIElementRef group=(AXUIElementRef)item;
+                if(!equals(group,kAXRoleAttribute,@"AXGroup") || !equals(group,CFSTR("AXDescription"),@"LC-generated-8s"))continue;
+                labels++;CFTypeRef children=attribute(group,kAXChildrenAttribute);NSUInteger names=0,images=0,ranges=0;AXUIElementRef image=NULL;
+                if(children && CFGetTypeID(children)==CFArrayGetTypeID() && CFArrayGetCount(children)==3)for(CFIndex j=0;j<3 && room();j++){
+                    CFTypeRef value=CFArrayGetValueAtIndex(children,j);if(!value || CFGetTypeID(value)!=AXUIElementGetTypeID())continue;AXUIElementRef child=(AXUIElementRef)value;
+                    if(equals(child,kAXRoleAttribute,@"AXTextField") && equals(child,CFSTR("AXDescription"),@"display name") && equals(child,kAXValueAttribute,@"LC-generated-8s") && enabled(child,YES))names++;
+                    if(equals(child,kAXRoleAttribute,@"AXImage") && equals(child,kAXTitleAttribute,@"LC-generated-8s") && enabled(child,YES)){images++;image=child;}
+                    if(equals(child,kAXRoleAttribute,@"AXLayoutItem") && equals(child,CFSTR("AXDescription"),@"range selection")){
+                        CFTypeRef value=attribute(child,kAXValueAttribute);double seconds=0;
+                        if(value && CFGetTypeID(value)==CFNumberGetTypeID() && CFNumberGetValue(value,kCFNumberDoubleType,&seconds) && seconds==8.0)ranges++;if(value)CFRelease(value);
+                    }
+                }
+                if(names==1 && images==1 && ranges==1 && ownedElement(group,pid) && ownedElement(image,pid)){valid++;releaseProject(&result);result.window=(AXUIElementRef)CFRetain(window);result.group=(AXUIElementRef)CFRetain(group);result.image=(AXUIElementRef)CFRetain(image);}
+                if(children)CFRelease(children);
+            }
+            evidence[@"projectLabelsFound"]=@(labels);evidence[@"validProjectTargets"]=@(valid);
+            if(labels!=1 || valid!=1)releaseProject(&result);if(items)CFRelease(items);
+        }
+        if(groups)CFRelease(groups);
+    }
+    CFRelease(found);CFRelease(windows);return result;
+}
+static NSArray *projectActions(AXUIElementRef element,NSMutableDictionary *report,NSString *key){
+    CFArrayRef actions=NULL;AXError error=AXUIElementCopyActionNames(element,&actions);report[[key stringByAppendingString:@"Status"]]=@(error);NSMutableArray *result=[NSMutableArray array];
+    if(error==kAXErrorSuccess && actions && CFArrayGetCount(actions)<=16)for(CFIndex i=0;i<CFArrayGetCount(actions);i++){id name=scalar(CFArrayGetValueAtIndex(actions,i));if([name isKindOfClass:[NSString class]])[result addObject:name];}
+    if(actions)CFRelease(actions);report[key]=result;return result;
+}
+static BOOL rectangle(AXUIElementRef element,CGRect *rect){
+    CFTypeRef position=attribute(element,kAXPositionAttribute),size=attribute(element,kAXSizeAttribute);CGPoint point={0};CGSize extent={0};
+    BOOL valid=position && size && CFGetTypeID(position)==AXValueGetTypeID() && CFGetTypeID(size)==AXValueGetTypeID() && AXValueGetValue(position,kAXValueCGPointType,&point) && AXValueGetValue(size,kAXValueCGSizeType,&extent);
+    if(position)CFRelease(position);if(size)CFRelease(size);*rect=(CGRect){point,extent};return valid;
+}
+static NSDictionary *rectJSON(CGRect rect){return @{@"x":@(rect.origin.x),@"y":@(rect.origin.y),@"width":@(rect.size.width),@"height":@(rect.size.height)};}
+static void openGenerated(AXUIElementRef application,pid_t pid,NSString *directory,NSMutableDictionary *report){
+    ProjectTarget target={0},fresh={0};CGRect image={0},window={0},freshImage={0},freshWindow={0};
+    report[@"result"]=@"PROJECT_OPEN_TARGET_INCONCLUSIVE";report[@"ownLibraryVerified"]=@(ownLibrary(directory));
+    if(![report[@"ownLibraryVerified"]boolValue])goto done;
+    target=findProject(application,pid,report);if(!target.image)goto done;
+    report[@"targetGroup"]=snapshot(target.group,0);
+    NSArray *imageActions=projectActions(target.image,report,@"imageActions"),*groupActions=projectActions(target.group,report,@"groupActions");
+    if([report[@"imageActionsStatus"]intValue]!=kAXErrorSuccess || [report[@"groupActionsStatus"]intValue]!=kAXErrorSuccess)goto done;
+    if(!rectangle(target.image,&image) || !rectangle(target.window,&window) || !LC_FCP_PROJECT_RECT_OK(image.origin.x,image.origin.y,image.size.width,image.size.height,window.origin.x,window.origin.y,window.size.width,window.size.height))goto done;
+    report[@"imageRectangle"]=rectJSON(image);report[@"windowRectangle"]=rectJSON(window);
+    fresh=findProject(application,pid,[NSMutableDictionary dictionary]);
+    if(!fresh.image || !CFEqual(target.image,fresh.image) || !CFEqual(target.group,fresh.group) || !rectangle(fresh.image,&freshImage) || !rectangle(fresh.window,&freshWindow) || !CGRectEqualToRect(image,freshImage) || !CGRectEqualToRect(window,freshWindow) || !ownLibrary(directory) || !plainFocusedWindow(application,fresh.window,pid))goto done;
+    {
+        AXUIElementRef semantic=[imageActions containsObject:@"AXOpen"]?fresh.image:[groupActions containsObject:@"AXOpen"]?fresh.group:NULL;
+        if(semantic){
+            AXError error=AXUIElementPerformAction(semantic,CFSTR("AXOpen"));actionResult(report[@"actionsPerformed"],@"AXOpen",@"verified generated project",error);
+            report[@"result"]=error==kAXErrorSuccess?@"PROJECT_OPEN_ACTION_SENT_REQUIRES_REVIEW":@"PROJECT_OPEN_ACTION_UNCONFIRMED";
+        }else{
+            typedef void (*PostToPID)(pid_t,CGEventRef);PostToPID post=(PostToPID)dlsym(RTLD_DEFAULT,"CGEventPostToPid");ProcessSerialNumber psn={0,0};pid_t mapped=0;
+            OSStatus status=post?noErr:GetProcessForPID(pid,&psn);OSStatus mapStatus=post?noErr:GetProcessPID(&psn,&mapped);
+            if((!post && (status!=noErr || mapStatus!=noErr || mapped!=pid)) || !plainFocusedWindow(application,fresh.window,pid) || !ownLibrary(directory))goto done;
+            CGPoint center=CGPointMake(image.origin.x+image.size.width/2,image.origin.y+image.size.height/2);CGEventRef events[4]={0};
+            for(int i=0;i<4;i++){
+                events[i]=CGEventCreateMouseEvent(NULL,(i%2)?kCGEventLeftMouseUp:kCGEventLeftMouseDown,center,kCGMouseButtonLeft);
+                if(!events[i]){for(int j=0;j<4;j++)if(events[j])CFRelease(events[j]);goto done;}
+                CGEventSetFlags(events[i],0);CGEventSetIntegerValueField(events[i],kCGMouseEventClickState,(i<2)?1:2);
+            }
+            // One double-click sequence, scoped to the guest app. No mouse-move/global post/warp.
+            int posted=0;
+            for(int i=0;i<4;i++){
+                if(identity(pid)){if(post)post(pid,events[i]);else CGEventPostToPSN(&psn,events[i]);posted++;}
+                CFRelease(events[i]);if(i<3)usleep(20000);
+            }
+            [report[@"actionsPerformed"]addObject:@{@"action":@"doubleClick",@"api":post?@"CGEventPostToPid":@"CGEventPostToPSN",@"targetPID":@(pid),@"psnHigh":@(psn.highLongOfPSN),@"psnLow":@(psn.lowLongOfPSN),@"centerX":@(center.x),@"centerY":@(center.y),@"eventsPosted":@(posted),@"status":@"posted; unconfirmed"}];
+            report[@"result"]=posted==4?@"PROJECT_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW":@"PROJECT_DOUBLE_CLICK_PARTIAL_UNCONFIRMED";
+        }
+    }
+    usleep(300000);
+ done:
+    if(target.window && identity(pid) && room())report[@"postOpenWindowTree"]=snapshot(target.window,0);
+    releaseProject(&fresh);releaseProject(&target);
+}
+
 int main(int argc,const char **argv) {
     @autoreleasepool {
-        if(argc!=5 || strcmp(argv[1],"10.1") || (strcmp(argv[3],"new-private-library") && strcmp(argv[3],"create-private-library"))){fprintf(stderr,"usage: fcp-ax-actions 10.1 ownedPID new-private-library|create-private-library ownFixtureDirectory\n");return 2;}
+        if(argc!=5 || strcmp(argv[1],"10.1") || (strcmp(argv[3],"new-private-library") && strcmp(argv[3],"create-private-library") && strcmp(argv[3],"open-generated-project"))){fprintf(stderr,"usage: fcp-ax-actions 10.1 ownedPID new-private-library|create-private-library|open-generated-project ownFixtureDirectory\n");return 2;}
         char *end=NULL;long number=strtol(argv[2],&end,10);if(!argv[2][0] || *end || number<=1 || number>INT_MAX)return 2;
         pid_t pid=(pid_t)number;NSString *directory=[NSString stringWithUTF8String:argv[4]];if(!directory)return 2;
-        BOOL createMode=!strcmp(argv[3],"create-private-library");surgicalCreation=createMode;
+        BOOL createMode=!strcmp(argv[3],"create-private-library"),openMode=!strcmp(argv[3],"open-generated-project");surgicalCreation=createMode||openMode;
         alarm(createMode?55:16);deadline=clockNow()+(createMode?48:12);
         NSMutableArray *actions=[NSMutableArray array];
         NSMutableDictionary *report=[@{@"result":@"INCONCLUSIVE",@"variant":@"10.1",@"pid":@(pid),@"mode":[NSString stringWithUTF8String:argv[3]],@"directory":directory,
             @"intendedLibraryPath":[directory stringByAppendingPathComponent:@"private.fcpbundle"],@"actionsPerformed":actions,@"libraryCreationAttempted":@NO,
-            @"trustRequested":@NO,@"axTrusted":@(AXIsProcessTrusted()),@"identityMatched":@(identity(pid)),@"privateFixtureValid":@(privateFixture(directory,YES))}mutableCopy];
+            @"trustRequested":@NO,@"axTrusted":@(AXIsProcessTrusted()),@"identityMatched":@(identity(pid)),@"privateFixtureValid":@(privateFixture(directory,!openMode))}mutableCopy];
         AXUIElementRef application=NULL,dialog=NULL,button=NULL;
+        if(openMode){
+            if([report[@"identityMatched"]boolValue] && [report[@"axTrusted"]boolValue] && [report[@"privateFixtureValid"]boolValue]){
+                application=AXUIElementCreateApplication(pid);AXUIElementSetMessagingTimeout(application,.15);openGenerated(application,pid,directory,report);
+            }
+            goto output;
+        }
         if([report[@"identityMatched"]boolValue] && [report[@"axTrusted"]boolValue] && [report[@"privateFixtureValid"]boolValue]){
             application=AXUIElementCreateApplication(pid);AXUIElementSetMessagingTimeout(application,.15);
             CFTypeRef windows=attribute(application,kAXWindowsAttribute);NSUInteger matches=0;
@@ -333,10 +464,11 @@ int main(int argc,const char **argv) {
                 }
             }else report[@"result"]=@"IMPORT_DIALOG_NOT_UNIQUE_OR_CHANGED";
         }
+    output:
         report[@"identityStillMatched"]=@(identity(pid));report[@"nodes"]=@(nodes);report[@"attributeFailures"]=@(failures);
         report[@"truncated"]=@(truncated);report[@"deadlineExceeded"]=@(expired);
         struct stat info;BOOL exists=lstat([report[@"intendedLibraryPath"]fileSystemRepresentation],&info)==0;report[@"intendedLibraryExists"]=@(exists);
-        report[@"qualification"]=createMode ? @"Explicit private-library creation attempt only; all input targets the owned guest FCP. No existing library selection or import/render/export qualification." : @"One verified New-button press only. Save-panel controls are inventoried; no path entered, Save pressed or existing library selected.";
+        report[@"qualification"]=openMode ? @"One exact generated-project open attempt only. Read-only post-action state is required; no timeline/render/export qualification." : createMode ? @"Explicit private-library creation attempt only; all input targets the owned guest FCP. No existing library selection or import/render/export qualification." : @"One verified New-button press only. Save-panel controls are inventoried; no path entered, Save pressed or existing library selected.";
         if(button)CFRelease(button);if(dialog)CFRelease(dialog);if(application)CFRelease(application);
         NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:NULL];if(!json || json.length>1048576)return 3;
         fwrite(json.bytes,1,json.length,stdout);putchar('\n');alarm(0);return 0;
