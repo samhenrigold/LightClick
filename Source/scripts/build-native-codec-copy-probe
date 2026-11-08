@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Build the opt-in copy experiment; never load or run its binaries."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+
+source = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--output', type=Path, required=True)
+parser.add_argument('--identity', default=os.environ.get('VIM_CODESIGN_IDENTITY'))
+args = parser.parse_args()
+if not args.output.is_absolute() or args.output.exists() or not args.identity:
+    parser.error('a new absolute output directory and signing identity are required')
+args.output.mkdir(parents=True)
+target = source/'NativeCodecTransport'
+host = args.output/'libLCCopyTransport.dylib'
+guest = args.output/'copy-guest-probe-x86_64'
+subprocess.run(['xcrun', 'clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                '-arch', 'arm64', '-mmacosx-version-min=11.0', '-fvisibility=hidden',
+                '-dynamiclib', str(target/'copy-mux.c'), str(target/'copy-worker.c'),
+                '-o', str(host)], check=True)
+subprocess.run(['xcrun', 'clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                '-arch', 'x86_64', '-mmacosx-version-min=10.9', str(target/'copy-guest-probe.c'),
+                '-framework', 'IOKit', '-framework', 'CoreFoundation', '-o', str(guest)], check=True)
+subprocess.run(['codesign', '--force', '--sign', args.identity, '--options', 'runtime', str(host)], check=True)
+subprocess.run(['codesign', '--verify', '--strict', str(host)], check=True)
+def entry(path):
+    return {'path': str(path), 'bytes': path.stat().st_size,
+            'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+manifest = {'status': 'COMPILED_SIGNED_NOT_LOADED_RUNTIME_UNQUALIFIED',
+            'host': entry(host), 'guest': entry(guest),
+            'sources': [entry(target/name) for name in ('copy-wire.h', 'copy-worker.h', 'copy-worker.c',
+                                                       'copy-mux.c', 'copy-guest-probe.c')],
+            'host_architectures': subprocess.check_output(['lipo', '-archs', str(host)], text=True).strip(),
+            'guest_architectures': subprocess.check_output(['lipo', '-archs', str(guest)], text=True).strip(),
+            'host_dependencies': subprocess.check_output(['otool', '-L', str(host)], text=True),
+            'host_codec_API_invoked': False, 'host_library_loaded': False, 'guest_run': False,
+            'scope': 'Copy-only experiment; no native encoder, GL executor replacement, speed or fidelity qualification'}
+(args.output/'manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
+print(args.output/'manifest.json')
