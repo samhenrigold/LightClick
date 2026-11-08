@@ -39,3 +39,10 @@ environment. Use `probes/native-codec-copy-driver.py` with a new results path,
 the exact guest helper and its SHA256. The driver requires an attested enabled
 QEMU BQL-release property before staging or running a potentially blocking RX.
 No failed or ambiguous request is resent; the harness retires the whole clone.
+
+An optional fourth driver argument, `throughput`, selects
+`--mavericks-copy-throughput`: 240 jobs with two prefilled buffers and at most
+two outstanding inputs. Its timer includes submission, copy, native FNV,
+completion validation and worker drain; it excludes setup and cleanup. The
+reported rate measures this copy-plus-hash pipeline on the guest clock, not
+encoding, application/UI frame rate, host CPU reduction or a speedup.
