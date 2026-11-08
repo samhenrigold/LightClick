@@ -1,6 +1,7 @@
-"""guest-bench CASE NEW_RESULTS EXISTING_AX_OBSERVER EXISTING_SURGICAL_HELPER.
+"""guest-bench CASE NEW_RESULTS EXISTING_AX_OBSERVER EXISTING_SURGICAL_HELPER [EXISTING_LIBRARY_ACTION_HELPER].
 Prepares verified generated media/XML, then inventories the live editor's actual menus.
-One standard OS-open attempt of the generated XML; no guessed library actions or import/playback/export qualification.
+One standard OS-open attempt of generated XML; optional grounded New-library dialog helper.
+No guessed Save controls or import/playback/export qualification.
 """
 import base64
 import hashlib
@@ -19,8 +20,8 @@ FIXTURE=Path('/private/tmp/lightclick-fcp-fixture-v1.dmg')
 
 
 def run_workflow():
-    if len(arguments)!=4:raise ValueError('requires fixed FCP case, new absolute results, existing observer, existing surgical helper')
-    case,out,observer,helper=arguments
+    if len(arguments) not in (4,5):raise ValueError('requires fixed FCP case, new absolute results, existing observer, existing surgical helper')
+    case,out,observer,helper=arguments[:4]
     output=Path(out)
     if case not in ('mavericks-10.1','mojave-10.4.4') or not output.is_absolute() or output.exists():raise ValueError('fixed case and new absolute results required')
     if not stat.S_ISREG(FIXTURE.lstat().st_mode) or FIXTURE.resolve()!=FIXTURE:raise ValueError('fixed readonly fixture image unavailable')
@@ -33,7 +34,7 @@ def run_workflow():
     ns['GUEST']=compose_guest(ns['GUEST'])
     output.mkdir(parents=True)
     evidence=dict(result='INCONCLUSIVE',case=case,fixture_image=str(FIXTURE),xml_template_manifest=manifest,setup_commands=[],
-                  scope='Generated media preparation, surgical observations and one OS-open of own XML only; no import/library/playback/export qualification or performance claim.')
+                  scope='Generated media/XML open and observations, with an optional grounded New-library dialog action; no import/library/playback/export qualification or performance claim.')
     attached=False;ambiguous=False
     def save(): (output/'result.json').write_text(json.dumps(evidence,indent=2)+'\n')
     def tracked(command,timeout):
@@ -63,6 +64,16 @@ def run_workflow():
         if not isinstance(receipt,str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin',receipt):raise ValueError('invalid surgical helper staging receipt')
         extra=dict(workflow_helper=receipt,workflow_helper_sha256=hashlib.sha256(helper.read_bytes()).hexdigest(),
                    workflow_xml_template=base64.b64encode(template).decode(),workflow_xml_template_sha256=hashlib.sha256(template).hexdigest())
+        if len(arguments)==5:
+            if case!='mavericks-10.1':raise ValueError('library action helper currently grounded only for FCP10.1')
+            action_helper=Path(arguments[4])
+            if not action_helper.is_file() or action_helper.is_symlink() or not 0<action_helper.stat().st_size<=2097152:raise ValueError('bounded existing action helper required')
+            with action_helper.open('rb') as stream:header=stream.read(8)
+            if header!=bytes.fromhex('cffaedfe07000001'):raise ValueError('action helper must be thin x86_64')
+            action_receipt=tracked_stage(action_helper)
+            if not isinstance(action_receipt,str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin',action_receipt):raise ValueError('invalid action helper staging receipt')
+            extra.update(workflow_action_helper=action_receipt,workflow_action_helper_sha256=hashlib.sha256(action_helper.read_bytes()).hexdigest())
+            evidence['library_actions_requested']=True;save()
         baseline=disks()
         inserted=setup({'Action':'insert-disc','Path':str(FIXTURE),'Slot':1},120)
         if inserted.get('Error') or not wire_bool(inserted.get('Inserted'),True):raise ValueError('fixture insertion unconfirmed')
@@ -102,6 +113,14 @@ def run_workflow():
             if workflow.get('import_attempted') is True:
                 evidence['result']='OS_OPEN_COMPLETED_REQUIRES_REVIEW' if workflow.get('open_command_completed') is True and valid_inventory(workflow.get('inventory_after_open',{})) else 'OS_OPEN_ATTEMPT_INCONCLUSIVE'
             else:evidence['result']='PREPARED_MENU_INVENTORY'
+        if workflow.get('library_action_attempted') is True:
+            action=workflow.get('library_action',{})
+            evidence['result']='LIBRARY_ACTION_INCONCLUSIVE'
+            if (action.get('result')=='NEW_LIBRARY_PANEL_OBSERVED_REQUIRES_REVIEW' and action.get('variant')==ns['CASES'][case]['variant']
+                    and type(action.get('pid')) is int and action['pid']==preflight.get('guest',{}).get('owned_app_pid')
+                    and all(wire_bool(action.get(key),True) for key in ('identityMatched','identityStillMatched','axTrusted'))
+                    and valid_inventory(workflow.get('inventory_after_library_action',{}))):evidence['result']='LIBRARY_PANEL_OBSERVED_REQUIRES_REVIEW'
+
     except BaseException as error:
         evidence['error']=repr(error);save();raise
     finally:

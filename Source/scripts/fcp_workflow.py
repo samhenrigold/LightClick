@@ -1,4 +1,4 @@
-"""Explicit guarded composition of the frozen FCP preflight for a first menu inventory."""
+"""Guarded composition of frozen FCP preflight, generated XML open, and optional grounded library dialog action."""
 import ast
 import base64
 import hashlib
@@ -52,6 +52,19 @@ PREPARE=r'''
     os.chmod(helper_path,0o755)
     spec['workflow_helper']=helper_path
     workflow_paths=[workflow_directory,clip_path,xml_path,helper_path]
+    if spec.get('workflow_action_helper'):
+        action_helper=spec['workflow_action_helper']
+        if not re.match(r'\A/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin\Z',action_helper):raise ValueError('invalid action helper receipt')
+        parent=os.path.dirname(action_helper);parent_info=os.lstat(parent)
+        if os.path.realpath(parent)!=parent or not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid!=0 or stat.S_IMODE(parent_info.st_mode)!=0o700:raise ValueError('action staging parent changed')
+        data=bounded_file(action_helper,2097152)
+        if hashlib.sha256(data).hexdigest()!=spec['workflow_action_helper_sha256']:raise ValueError('action helper bytes changed')
+        action_path=directory+'/ax-actions'
+        with open(action_path,'wb') as stream:stream.write(data)
+        os.chmod(action_path,0o755)
+        spec['workflow_action_helper']=action_path
+        workflow_paths.append(action_path)
+
 '''
 
 OBSERVE=r'''
@@ -71,6 +84,17 @@ OBSERVE=r'''
             if app.poll() is None:
                 raw=command([spec['workflow_helper'],spec['variant'],str(app.pid),'inventory'],14)
                 report['workflow']['inventory_after_open']=json.loads(raw)
+                after_open=report['workflow']['inventory_after_open']
+                if spec.get('workflow_action_helper') and app.poll() is None and after_open.get('result')=='MENU_INVENTORY' and after_open.get('variant')==spec['variant'] and type(after_open.get('pid')) is int and after_open['pid']==app.pid and after_open.get('mode')=='inventory' and all(native_true(after_open.get(k)) for k in ('identityMatched','identityStillMatched','axTrusted')):
+                    report['workflow']['library_action_attempted']=True
+                    raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),'new-private-library',workflow_directory],20)
+                    report['workflow']['library_action']=json.loads(raw)
+                    if app.poll() is None:
+                        raw=command([spec['workflow_helper'],spec['variant'],str(app.pid),'inventory'],14)
+                        report['workflow']['inventory_after_library_action']=json.loads(raw)
+                    library=workflow_directory+'/private.fcpbundle'
+                    report['workflow']['library_artifact']={'path':library,'exists':os.path.lexists(library),'is_directory':os.path.isdir(library),'is_symlink':os.path.islink(library)}
+
             else:report['workflow']['open_error']='owned app exited after OS open'
         report['workflow']['inventory_finished_seconds']=time.time()-launched_at
     else:report['workflow']['inventory_error']='owned app exited'

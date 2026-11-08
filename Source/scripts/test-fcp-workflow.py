@@ -68,6 +68,33 @@ class Checks(unittest.TestCase):
             self.assertEqual([c for c in calls if c.get('Action')=='insert-disc'],[dict(Action='insert-disc',Path=str(fixture),Slot=1)])
             self.assertFalse(any(c.get('Arguments',[''])[0]=='eject' for c in calls))
 
+    def test_optional_action_targets_exact_owned_dialog_and_private_fixture(self):
+        for wrong_after_pid in (False,True):
+            calls=[];inventories=[0]
+            inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
+            def command(argv,seconds):
+                calls.append((argv,seconds))
+                if argv[0]=='/own/ax-workload':
+                    inventories[0]+=1;value=dict(inventory)
+                    if wrong_after_pid and inventories[0]==2:value['pid']=999
+                    return json.dumps(value).encode()
+                if argv[0]=='/own/ax-actions':return json.dumps(dict(result='NEW_LIBRARY_PANEL_OBSERVED_REQUIRES_REVIEW')).encode()
+                return b''
+            directory='/private/var/tmp/LightClickFCPFixture.Abc123'
+            report=dict(workflow=dict(import_attempted=False))
+            ns=dict(app=types.SimpleNamespace(pid=321,poll=lambda:None),report=report,command=command,json=json,
+                    os=types.SimpleNamespace(path=types.SimpleNamespace(lexists=lambda p:False,isdir=lambda p:False,islink=lambda p:False)),
+                    time=types.SimpleNamespace(time=lambda:0,sleep=lambda sec:None),launched_at=0,workflow_directory=directory,
+                    spec=dict(workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
+            exec(compile('if True:\n'+OBSERVE,'<production optional library action>','exec'),ns)
+            actions=[call for call in calls if call[0][0]=='/own/ax-actions']
+            if wrong_after_pid:self.assertEqual(actions,[])
+            else:
+                self.assertEqual(actions,[(['/own/ax-actions','10.1','321','new-private-library',directory],20)])
+                self.assertFalse(report['workflow']['library_artifact']['exists'])
+                self.assertIn('inventory_after_library_action',report['workflow'])
+                self.assertNotIn('PASS',json.dumps(report))
+
     def test_open_exact_own_xml_only_after_trusted_inventory(self):
         for trusted in (1,0,'1'):
             calls=[];clock=[0]
