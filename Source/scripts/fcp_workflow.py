@@ -12,6 +12,20 @@ CLIP_SHA256='62dfa5b49d5f97d954c420d315c250015d8733f47c59752d002f8b841e650211'
 CLIP_BYTES=58747744
 PLACEHOLDER='/private/var/tmp/LightClickFCPFixture.PLACEHOLDER'
 
+def complete_hid_open(opened,pid):
+    if (not isinstance(opened,dict) or opened.get('mode')!='open-generated-project-hid'
+            or opened.get('result')!='PROJECT_HID_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW'
+            or type(opened.get('pid')) is not int or opened['pid']!=pid):return False
+    actions=opened.get('actionsPerformed',[])
+    if not isinstance(actions,list) or len(actions)!=1 or not isinstance(actions[0],dict):return False
+    action=actions[0];balanced=action.get('balancedRelease')
+    return (action.get('action')=='doubleClick' and action.get('api')=='CGEventPost(kCGHIDEventTap)' and action.get('targetPID')==pid
+            and type(action.get('eventsPosted')) is int and action['eventsPosted']==4
+            and type(action.get('downsPosted')) is int and action['downsPosted']==2
+            and type(action.get('upsPosted')) is int and action['upsPosted']==2
+            and type(balanced) in (bool,int) and balanced in (0,1) and balanced==1)
+
+
 RETENTION_HELPERS=r'''
 def launch_for_workflow(binary,env,spec,report):
     with open(os.devnull,'rb') as null:
@@ -38,9 +52,10 @@ def owned_retention_receipt(app,spec,report):
     def true(value):return type(value) in (bool,int) and value in (0,1) and value==1
     if (workflow.get('project_open_evidence_gate') is not True or workflow.get('project_open_attempted') is not True
             or created.get('result')!='PRIVATE_LIBRARY_CREATED_REQUIRES_IMPORT_REVIEW' or not true(created.get('privateLibraryVerified'))
-            or opened.get('mode')!='open-generated-project' or opened.get('variant')!='10.1'
+            or opened.get('mode')!=('open-generated-project-hid' if spec.get('workflow_open_project_hid') else 'open-generated-project') or opened.get('variant')!='10.1'
             or type(opened.get('pid')) is not int or opened['pid']!=app.pid
             or not all(true(opened.get(key)) for key in ('identityMatched','identityStillMatched','axTrusted'))):return None
+    if spec.get('workflow_open_project_hid') and not complete_hid_open(opened,app.pid):return None
     directory=workflow.get('directory','')
     if not re.match(r'\A/private/var/tmp/LightClickFCPFixture\.[A-Za-z0-9_-]{6,16}\Z',directory):return None
     metadata=os.lstat(directory)
@@ -53,17 +68,55 @@ def owned_retention_receipt(app,spec,report):
         elif not stat.S_ISREG(info.st_mode) or (info.st_size!=cap if kind=='file' else not 0<info.st_size<=cap):return None
     executable=spec['app']+'/Contents/MacOS/'+spec['identity']['CFBundleExecutable']
     if current_executable(app.pid)!=executable or os.path.realpath(executable)!=executable or os.getpgid(app.pid)!=app.pid or app.poll() is not None:return None
-    receipt={'retained':True,'mode':'create-open-and-retain-for-display','pid':app.pid,'executable':executable,
+    receipt={'retained':True,'mode':'create-open-hid-and-retain-for-display' if spec.get('workflow_open_project_hid') else 'create-open-and-retain-for-display','pid':app.pid,'executable':executable,
              'console_uid':os.getuid(),'process_group':os.getpgid(app.pid),'fixture_directory':directory,
              'private_library':directory+'/private.fcpbundle','app_stdio_available':False,
              'identity_scope':'owned live Popen child verified at collector exit; revalidate before later input',
              'project_open_result':opened.get('result'),'max_host_observation_seconds':90}
     for action in opened.get('actionsPerformed',[]):
-        if (action.get('targetPID')==app.pid and action.get('api',action.get('action'))=='CGEventPostToPSN'
+        if (action.get('targetPID')==app.pid and action.get('api',action.get('action')) in ('CGEventPostToPSN','CGEventPost(kCGHIDEventTap)')
                 and type(action.get('psnHigh')) is int and type(action.get('psnLow')) is int
                 and 0<=action['psnHigh']<=4294967295 and 0<=action['psnLow']<=4294967295 and (action['psnHigh'] or action['psnLow'])):
             receipt['helper_psn']={'high':action['psnHigh'],'low':action['psnLow']};break
     return receipt
+
+def close_system_memory_notice(spec,report):
+    if not spec.get('workflow_close_system_memory_notice'):return
+    import errno
+    record={'result':'INCONCLUSIVE','scope':'explicit Mavericks disposable-clone System utility only','queries':[],'signals':[]}
+    report['system_memory_notice']=record
+    try:
+        if spec.get('variant')!='10.1' or os.uname()[0]!='Darwin' or os.uname()[2].split('.')[0]!='13':raise ValueError('System utility gate requires guest Darwin13')
+        pids=set()
+        for name in ('Memory Slot Utility','MemorySlotUtility','Memory Slot Util','MemorySlotUtilit'):
+            text=command(['/usr/bin/pgrep','-x',name],3,(0,1))
+            row=report['commands'][-1];record['queries'].append({'name':name,'exit_code':row['exit_code'],'stdout':row['stdout']})
+            fields=text.split()
+            if (row['exit_code']==1 and fields) or (row['exit_code']==0 and not fields) or any(not value.isdigit() or not 1<int(value)<2147483648 for value in fields):raise ValueError('unexpected exact utility process query response')
+            pids.update(int(value)for value in fields)
+        if not pids:record['result']='ABSENT';return
+        if len(pids)!=1:raise ValueError('System utility PID ambiguous')
+        pid=next(iter(pids));path=current_executable(pid);record.update(pid=pid,executable=path)
+        allowed=('/System/Library/CoreServices/Memory Slot Utility.app/Contents/MacOS/Memory Slot Utility',
+                 '/System/Library/CoreServices/MemorySlotUtility.app/Contents/MacOS/MemorySlotUtility')
+        # Reject before touching any unexpected path, including all /Users locations.
+        if path not in allowed:raise ValueError('System utility actual executable is not an exact allowed System path')
+        info=os.lstat(path)
+        if os.path.realpath(path)!=path or not stat.S_ISREG(info.st_mode) or info.st_uid!=0:raise ValueError('System utility executable must be canonical root-owned regular file')
+        if current_executable(pid)!=path:raise ValueError('System utility identity changed before signal')
+        os.kill(pid,signal.SIGTERM);record['signals'].append({'pid':pid,'signal':int(signal.SIGTERM)})
+        until=time.time()+3
+        while True:
+            try:os.kill(pid,0) # Read-only existence probe; never another delivered signal.
+            except OSError as error:
+                if error.errno==errno.ESRCH:record['result']='TERMINATED';return
+                raise
+            now=current_executable(pid)
+            if now is not None and now!=path:raise ValueError('System utility identity changed after signal')
+            remaining=until-time.time()
+            if remaining<=0:raise ValueError('System utility did not exit within3seconds; no resend or force')
+            time.sleep(min(.1,remaining))
+    except Exception as error:record['result']='FAILED';record['error']=repr(error);raise
 
 def cleanup_for_workflow(owned,app,spec,report):
     errors=[];candidate=None
@@ -86,6 +139,9 @@ def cleanup_for_workflow(owned,app,spec,report):
 '''
 
 
+RETENTION_HELPERS=inspect.getsource(complete_hid_open)+'\n'+RETENTION_HELPERS
+
+
 def hold_retained_display_window(evidence,save,clock=None,sleep=None):
     """No commands/input here. Entire VM cleanup follows this finite diagnostic window."""
     import time
@@ -101,7 +157,8 @@ def hold_retained_display_window(evidence,save,clock=None,sleep=None):
 
 def valid_retention_receipt(guest,spec):
     receipt=guest.get('retained_owned_app',{});workflow=guest.get('workflow',{})
-    return (receipt.get('retained') is True and receipt.get('mode')=='create-open-and-retain-for-display'
+    if spec.get('workflow_open_project_hid') and not complete_hid_open(workflow.get('project_open_action',{}),guest.get('owned_app_pid')):return False
+    return (receipt.get('retained') is True and receipt.get('mode')==('create-open-hid-and-retain-for-display' if spec.get('workflow_open_project_hid') else 'create-open-and-retain-for-display')
             and type(receipt.get('pid')) is int and receipt['pid']==guest.get('owned_app_pid')
             and receipt.get('executable')==spec['app']+'/Contents/MacOS/'+spec['identity']['CFBundleExecutable']
             and receipt.get('fixture_directory')==workflow.get('directory')
@@ -267,7 +324,8 @@ OBSERVE='\n'+textwrap.indent(inspect.getsource(generated_project_evidence),'    
                         if can_open:
                             report['workflow']['project_open_attempted']=True
                             try:
-                                raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),'open-generated-project',workflow_directory],20)
+                                project_mode='open-generated-project-hid' if spec.get('workflow_open_project_hid') else 'open-generated-project'
+                                raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),project_mode,workflow_directory],20)
                                 report['workflow']['project_open_action']=json.loads(raw)
                             except Exception as error:report['workflow']['project_open_action']={'available':False,'reason':repr(error)}
                             # Input delivery is not proof of opening. Always collect fresh read-only evidence;
@@ -301,7 +359,7 @@ def compose_guest(base):
     launch_old="""    with open(os.devnull,'rb') as null:
         app=subprocess.Popen([binary],stdin=null,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,preexec_fn=limits,close_fds=True)
     log=(reader(app.stdout),reader(app.stderr))"""
-    text=replace_once(text,launch_old,"    app,log=launch_for_workflow(binary,env,spec,report)")
+    text=replace_once(text,launch_old,"    close_system_memory_notice(spec,report)\n    app,log=launch_for_workflow(binary,env,spec,report)")
     cleanup_old="""    errors=[]
     for child in reversed(owned):
         try:stop(child)

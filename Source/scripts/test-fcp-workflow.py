@@ -9,7 +9,7 @@ from pathlib import Path
 import types
 import unittest
 from fcp_preflight import GUEST
-from fcp_workflow import OBSERVE, PLACEHOLDER, RETENTION_HELPERS, hold_retained_display_window, compose_guest, generated_project_evidence, replace_once, xml_template
+from fcp_workflow import OBSERVE, PLACEHOLDER, RETENTION_HELPERS, hold_retained_display_window, compose_guest, complete_hid_open, generated_project_evidence, replace_once, xml_template
 
 
 class Checks(unittest.TestCase):
@@ -201,7 +201,7 @@ class Checks(unittest.TestCase):
             dict(AXRole='AXLayoutItem',AXDescription='range selection',AXValue=8)])
         view=dict(result='OBSERVED_WINDOWS',version='10.1',pid=321,identityMatched=1,identityStillMatched=1,axTrusted=1,
                   windows=[dict(AXRole='AXWindow',AXSubrole='AXStandardWindow',children=[dict(AXRole='AXScrollArea',AXDescription='organizer',children=[dict(AXRole='AXGroup',AXDescription='events',children=[group])])])])
-        for outcome in ('open','missing-project','app-exited','open-error'):
+        for outcome in ('open','hid-open','missing-project','app-exited','open-error'):
             calls=[];alive=[True];full_reads=[0]
             inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
             def command(argv,seconds):
@@ -215,19 +215,19 @@ class Checks(unittest.TestCase):
                 if argv[0]=='/own/ax-actions':
                     if argv[3]=='create-private-library':return json.dumps(dict(result='PRIVATE_LIBRARY_CREATED_REQUIRES_IMPORT_REVIEW',privateLibraryVerified=1)).encode()
                     if outcome=='open-error':raise ValueError('ambiguous helper outcome after one attempt')
-                    return json.dumps(dict(result='PROJECT_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW')).encode()
+                    return json.dumps(dict(result='PROJECT_HID_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW'if argv[3]=='open-generated-project-hid'else'PROJECT_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW')).encode()
                 return b'{}'
             directory='/private/var/tmp/LightClickFCPFixture.Abc123';report=dict(workflow=dict(import_attempted=False))
             ns=dict(app=types.SimpleNamespace(pid=321,poll=lambda:None if alive[0]else 1),report=report,command=command,json=json,
                     os=types.SimpleNamespace(path=types.SimpleNamespace(lexists=lambda p:True,isdir=lambda p:True,islink=lambda p:False)),
                     time=types.SimpleNamespace(time=lambda:0,sleep=lambda sec:None),launched_at=0,workflow_directory=directory,
-                    spec=dict(ax_helper='/own/ax-observe',workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',workflow_open_generated_project=True,variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
+                    spec=dict(ax_helper='/own/ax-observe',workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',workflow_open_generated_project=True,workflow_open_project_hid=outcome=='hid-open',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
             exec(compile('if True:\n'+OBSERVE,'<production create-and-open route>','exec'),ns)
             actions=[c for c in calls if c[0][0]=='/own/ax-actions']
             self.assertEqual(actions[0],(['/own/ax-actions','10.1','321','create-private-library',directory],60))
             self.assertEqual(len([c for c in calls if c[0][0]=='/usr/bin/open']),1)
-            if outcome in ('open','open-error'):
-                self.assertEqual(actions[1:], [(['/own/ax-actions','10.1','321','open-generated-project',directory],20)])
+            if outcome in ('open','hid-open','open-error'):
+                self.assertEqual(actions[1:], [(['/own/ax-actions','10.1','321','open-generated-project-hid'if outcome=='hid-open'else'open-generated-project',directory],20)])
                 self.assertEqual(full_reads[0],2)
                 self.assertIn('post_project_open_inventory',report['workflow'])
                 self.assertIn('post_project_open_full_observer',report['workflow'])
@@ -278,6 +278,14 @@ class Checks(unittest.TestCase):
         receipt=ns['owned_retention_receipt'](app,spec,report)
         self.assertTrue(receipt['retained']);self.assertEqual(receipt['pid'],321);self.assertEqual(receipt['executable'],executable)
         self.assertEqual(receipt['helper_psn'],dict(high=0,low=73746));self.assertEqual(receipt['project_open_result'],'PROJECT_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW')
+        hid=copy.deepcopy(report);hid_spec=dict(spec,workflow_open_project_hid=True)
+        opened=hid['workflow']['project_open_action'];opened.update(mode='open-generated-project-hid',result='PROJECT_HID_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW',
+            actionsPerformed=[dict(action='doubleClick',api='CGEventPost(kCGHIDEventTap)',targetPID=321,psnHigh=0,psnLow=73746,eventsPosted=4,downsPosted=2,upsPosted=2,balancedRelease=1)])
+        self.assertEqual(ns['owned_retention_receipt'](app,hid_spec,hid)['mode'],'create-open-hid-and-retain-for-display')
+        opened['actionsPerformed'][0]['upsPosted']=1;self.assertIsNone(ns['owned_retention_receipt'](app,hid_spec,hid))
+        opened['actionsPerformed'][0]['upsPosted']=2;opened['result']='PROJECT_HID_DOUBLE_CLICK_PARTIAL_UNCONFIRMED'
+        self.assertIsNone(ns['owned_retention_receipt'](app,hid_spec,hid))
+
         for field,value in [('error','setup failed'),('result','INCONCLUSIVE'),('app_stdio',dict(policy='pipes'))]:
             bad=copy.deepcopy(report);bad[field]=value;self.assertIsNone(ns['owned_retention_receipt'](app,spec,bad))
         bad=copy.deepcopy(report);bad['workflow']['project_open_evidence_gate']=False
@@ -318,51 +326,115 @@ class Checks(unittest.TestCase):
         self.assertFalse(evidence['retained_display_observation']['timing_qualified'])
 
     def test_retain_outer_mode_routes_then_leaves_channel_quiet_for_vm_cleanup(self):
-        from fcp_workflow import valid_retention_receipt
-        path=Path(__file__).parents[1]/'probes/fcp-workflow-driver.py';tree=ast.parse(path.read_text());tree.body.pop()
-        source=Path(__file__).parents[1];ns={'source':source};exec(compile(tree,str(path),'exec'),ns)
-        with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary).resolve();fixture=root/'fixture.dmg';fixture.write_bytes(b'fixture')
-            helper=root/'helper';helper.write_bytes(bytes.fromhex('cffaedfe07000001'))
-            calls=[];disk_lists=[0];holds=[]
-            spec=dict(variant='10.1',app='/Applications/Final Cut Pro.app',identity=dict(CFBundleExecutable='Final Cut Pro'))
-            base=dict(GUEST=GUEST,CASES={'mavericks-10.1':spec},checked_response=lambda r:r['Stdout'])
-            def experiment():
-                configured=base['CASES']['mavericks-10.1']
-                self.assertTrue(configured['workflow_retain_owned_app']);self.assertTrue(configured['workflow_open_generated_project'])
-                self.assertEqual(configured['workflow_action_mode'],'create-private-library')
-                output=Path(base['arguments'][1]);output.mkdir()
-                directory='/private/var/tmp/LightClickFCPFixture.ABC123'
-                guest=dict(owned_app_pid=321,cleanup_errors=[],workflow=dict(directory=directory,project_open_attempted=True,project_open_action=dict(result='PROJECT_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW')),
-                    retained_owned_app=dict(retained=True,mode='create-open-and-retain-for-display',pid=321,executable='/Applications/Final Cut Pro.app/Contents/MacOS/Final Cut Pro',fixture_directory=directory,private_library=directory+'/private.fcpbundle',process_group=321,max_host_observation_seconds=90,app_stdio_available=False))
-                self.assertTrue(valid_retention_receipt(guest,configured))
-                (output/'result.json').write_text(json.dumps(dict(result='INCONCLUSIVE',guest=guest)))
-            base['experiment']=experiment
-            def request(command,timeout):
-                calls.append(command)
-                if command.get('Action')=='insert-disc':return dict(Inserted=1)
-                args=command['Arguments']
-                if args==['list','-plist']:
-                    disk_lists[0]+=1;value=dict(WholeDisks=['disk0']+(['disk7']if disk_lists[0]>1 else []))
-                elif args[0]=='info':value=dict(DeviceIdentifier='disk7',Internal=False,BusProtocol='USB')
-                elif args[0]=='mountDisk':return dict(ExitCode=0,Stdout='mounted')
-                else:value=dict(AllDisksAndPartitions=[dict(DeviceIdentifier='disk7',Partitions=[dict(VolumeName='LC_FCP_Fixture',MountPoint='/Volumes/LC_FCP_Fixture')])])
-                return dict(ExitCode=0,Stdout=plistlib.dumps(value).decode())
-            def hold(evidence,save):holds.append(len(calls));save()
-            ns.update(FIXTURE=fixture,arguments=['mavericks-10.1',str(root/'result'),'observer',str(helper),str(helper),'create-open-and-retain-for-display'],
-                      stage=lambda p:'/private/var/tmp/VirtualIntelMac.Abc123/Transfer.bin',request=request,load_preflight=lambda *a:base,hold_retained_display_window=hold)
-            ns['run_workflow']()
-            self.assertEqual(holds,[len(calls)])
-            self.assertEqual(len([c for c in calls if c.get('Action')=='insert-disc']),1)
-            self.assertFalse(any(c.get('Arguments',[''])[0]=='eject'for c in calls))
-            evidence=json.loads((root/'result/result.json').read_text());self.assertEqual(evidence['result'],'RETAINED_OWNED_APP_FOR_DISPLAY_DIAGNOSTIC')
-            self.assertEqual(evidence['workflow']['project_open_action']['result'],'PROJECT_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW')
+        for workflow_mode in ('create-open-and-retain-for-display','create-open-hid-and-retain-for-display'):
+            from fcp_workflow import valid_retention_receipt
+            path=Path(__file__).parents[1]/'probes/fcp-workflow-driver.py';tree=ast.parse(path.read_text());tree.body.pop()
+            source=Path(__file__).parents[1];ns={'source':source};exec(compile(tree,str(path),'exec'),ns)
+            with tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary).resolve();fixture=root/'fixture.dmg';fixture.write_bytes(b'fixture')
+                helper=root/'helper';helper.write_bytes(bytes.fromhex('cffaedfe07000001'))
+                calls=[];disk_lists=[0];holds=[];opened_result=[]
+                spec=dict(variant='10.1',app='/Applications/Final Cut Pro.app',identity=dict(CFBundleExecutable='Final Cut Pro'))
+                base=dict(GUEST=GUEST,CASES={'mavericks-10.1':spec},checked_response=lambda r:r['Stdout'])
+                def experiment():
+                    configured=base['CASES']['mavericks-10.1']
+                    self.assertTrue(configured['workflow_retain_owned_app']);self.assertTrue(configured['workflow_open_generated_project'])
+                    self.assertEqual(configured['workflow_action_mode'],'create-private-library')
+                    self.assertEqual(configured['workflow_open_project_hid'],workflow_mode.endswith('hid-and-retain-for-display'))
+                    self.assertEqual(configured['workflow_close_system_memory_notice'],workflow_mode.endswith('hid-and-retain-for-display'))
+                    output=Path(base['arguments'][1]);output.mkdir()
+                    directory='/private/var/tmp/LightClickFCPFixture.ABC123'
+                    opened=dict(mode='open-generated-project-hid'if workflow_mode.endswith('hid-and-retain-for-display')else'open-generated-project',pid=321,result='PROJECT_HID_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW'if workflow_mode.endswith('hid-and-retain-for-display')else'PROJECT_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW',actionsPerformed=[dict(action='doubleClick',api='CGEventPost(kCGHIDEventTap)',targetPID=321,eventsPosted=4,downsPosted=2,upsPosted=2,balancedRelease=True)])
+                    guest=dict(owned_app_pid=321,cleanup_errors=[],workflow=dict(directory=directory,project_open_attempted=True,project_open_action=opened),
+                        retained_owned_app=dict(retained=True,mode=workflow_mode,pid=321,executable='/Applications/Final Cut Pro.app/Contents/MacOS/Final Cut Pro',fixture_directory=directory,private_library=directory+'/private.fcpbundle',process_group=321,max_host_observation_seconds=90,app_stdio_available=False))
+                    opened_result.append(opened['result'])
+                    self.assertTrue(valid_retention_receipt(guest,configured))
+                    (output/'result.json').write_text(json.dumps(dict(result='INCONCLUSIVE',guest=guest)))
+                base['experiment']=experiment
+                def request(command,timeout):
+                    calls.append(command)
+                    if command.get('Action')=='insert-disc':return dict(Inserted=1)
+                    args=command['Arguments']
+                    if args==['list','-plist']:
+                        disk_lists[0]+=1;value=dict(WholeDisks=['disk0']+(['disk7']if disk_lists[0]>1 else []))
+                    elif args[0]=='info':value=dict(DeviceIdentifier='disk7',Internal=False,BusProtocol='USB')
+                    elif args[0]=='mountDisk':return dict(ExitCode=0,Stdout='mounted')
+                    else:value=dict(AllDisksAndPartitions=[dict(DeviceIdentifier='disk7',Partitions=[dict(VolumeName='LC_FCP_Fixture',MountPoint='/Volumes/LC_FCP_Fixture')])])
+                    return dict(ExitCode=0,Stdout=plistlib.dumps(value).decode())
+                def hold(evidence,save):holds.append(len(calls));save()
+                ns.update(FIXTURE=fixture,arguments=['mavericks-10.1',str(root/'result'),'observer',str(helper),str(helper),workflow_mode],
+                          stage=lambda p:'/private/var/tmp/VirtualIntelMac.Abc123/Transfer.bin',request=request,load_preflight=lambda *a:base,hold_retained_display_window=hold)
+                ns['run_workflow']()
+                self.assertEqual(holds,[len(calls)])
+                self.assertEqual(len([c for c in calls if c.get('Action')=='insert-disc']),1)
+                self.assertFalse(any(c.get('Arguments',[''])[0]=='eject'for c in calls))
+                evidence=json.loads((root/'result/result.json').read_text());self.assertEqual(evidence['result'],'RETAINED_OWNED_APP_FOR_DISPLAY_DIAGNOSTIC')
+                self.assertEqual(evidence['workflow']['project_open_action']['result'],opened_result[0])
+
+    def test_system_utility_gate_only_signals_one_verified_system_pid(self):
+        import errno,re,signal,stat
+        allowed='/System/Library/CoreServices/Memory Slot Utility.app/Contents/MacOS/Memory Slot Utility'
+        for case in ('disabled','wrong-darwin','absent','terminate','wrong-path','wrong-owner','ambiguous','bad-status','permission','timeout','pid-changed','truncated','duplicate-alias','wrong-path-alias'):
+            clock=[0.];queries=[];signals=[];reads=[];report=dict(commands=[]);sent=[False]
+            def command(argv,seconds,allowed_codes):
+                self.assertEqual(argv[:2],['/usr/bin/pgrep','-x']);self.assertEqual(seconds,3);self.assertEqual(allowed_codes,(0,1));queries.append(argv)
+                present=case!='absent'and argv[-1]=='Memory Slot Utility'
+                if case in ('truncated','wrong-path-alias'):present=argv[-1]=='Memory Slot Util'
+                if case=='duplicate-alias':present=argv[-1]in('Memory Slot Utility','Memory Slot Util')
+                text='123\n'if present else ''
+                if case=='ambiguous'and not present:text='124\n'
+                if case=='bad-status'and present:text=''
+                code=0 if present or text else 1
+                report['commands'].append(dict(exit_code=code,stdout=text));return text.encode()
+            def executable(pid):
+                self.assertEqual(pid,123)
+                if case in ('wrong-path','wrong-path-alias'):return '/Users/not-permitted/Memory Slot Utility'
+                if case=='pid-changed'and sent[0]:return '/System/Library/CoreServices/Other.app/Contents/MacOS/Other'
+                return allowed
+            def metadata(path):
+                reads.append(path);self.assertEqual(path,allowed)
+                return types.SimpleNamespace(st_mode=stat.S_IFREG|0o755,st_uid=501 if case=='wrong-owner'else 0)
+            def kill(pid,number):
+                self.assertEqual(pid,123)
+                if number==signal.SIGTERM:
+                    signals.append((pid,number));sent[0]=True
+                    if case=='permission':raise OSError(errno.EPERM,'not owner')
+                elif number==0:
+                    if case not in ('timeout','pid-changed'):raise OSError(errno.ESRCH,'gone')
+                else:self.fail('unexpected delivered signal')
+            ns=dict(re=re,stat=stat,signal=signal,command=command,time=types.SimpleNamespace(time=lambda:clock[0],sleep=lambda t:clock.__setitem__(0,clock[0]+t)),
+                    os=types.SimpleNamespace(uname=lambda:('Darwin','','14.0'if case=='wrong-darwin'else'13.4'),lstat=metadata,kill=kill,path=types.SimpleNamespace(realpath=lambda p:p)))
+            exec(RETENTION_HELPERS,ns);ns['current_executable']=executable
+            try:ns['close_system_memory_notice'](dict(workflow_close_system_memory_notice=case!='disabled',variant='10.1'),report)
+            except (ValueError,OSError):self.assertIn(case,('wrong-darwin','wrong-path','wrong-owner','ambiguous','bad-status','permission','timeout','pid-changed','wrong-path-alias'))
+            else:self.assertIn(case,('disabled','absent','terminate','truncated','duplicate-alias'))
+            if case=='disabled':self.assertFalse(queries);self.assertNotIn('system_memory_notice',report)
+            elif case=='absent':self.assertEqual(report['system_memory_notice']['result'],'ABSENT')
+            elif case in ('terminate','truncated','duplicate-alias'):self.assertEqual(report['system_memory_notice']['result'],'TERMINATED');self.assertEqual(signals,[(123,signal.SIGTERM)])
+            else:self.assertEqual(report['system_memory_notice']['result'],'FAILED')
+            self.assertLessEqual(len(signals),1)
+            if case in ('disabled','wrong-darwin','absent','wrong-path','wrong-owner','ambiguous','bad-status','wrong-path-alias'):self.assertFalse(signals)
+            if case in ('wrong-path','wrong-path-alias'):self.assertEqual(reads,[]) # Never stat/read an unexpected or /Users path.
+            if case=='timeout':self.assertEqual(clock[0],3);self.assertEqual(signals,[(123,signal.SIGTERM)])
+        composed=compose_guest(GUEST)
+        self.assertLess(composed.index("report['console_uid']=join_console()"),composed.index('    close_system_memory_notice(spec,report)'))
+        self.assertLess(composed.index('    close_system_memory_notice(spec,report)'),composed.index('    app,log=launch_for_workflow'))
+
+    def test_hid_retention_requires_all_events_and_balanced_release(self):
+        action=dict(action='doubleClick',api='CGEventPost(kCGHIDEventTap)',targetPID=321,eventsPosted=4,downsPosted=2,upsPosted=2,balancedRelease=1)
+        report=dict(mode='open-generated-project-hid',result='PROJECT_HID_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW',pid=321,actionsPerformed=[action])
+        self.assertTrue(complete_hid_open(report,321))
+        for field,value in [('eventsPosted',2),('downsPosted',1),('upsPosted',1),('balancedRelease',False),('balancedRelease','1'),('targetPID',999)]:
+            bad=copy.deepcopy(report);bad['actionsPerformed'][0][field]=value;self.assertFalse(complete_hid_open(bad,321))
+        for field,value in [('result','PROJECT_HID_DOUBLE_CLICK_PARTIAL_UNCONFIRMED'),('mode','open-generated-project'),('pid',999)]:
+            bad=copy.deepcopy(report);bad[field]=value;self.assertFalse(complete_hid_open(bad,321))
+        ns={};exec(RETENTION_HELPERS,ns);self.assertTrue(ns['complete_hid_open'](report,321))
 
     def test_invalid_creation_modes_fail_before_staging(self):
         source=Path(__file__).resolve().parents[1]
         path=source/'probes/fcp-workflow-driver.py'
         tree=ast.parse(path.read_text());tree.body.pop()
-        for case,mode in (('mavericks-10.1','unknown'),('mojave-10.4.4','create-private-library'),('mojave-10.4.4','create-and-open-private-project'),('mojave-10.4.4','create-open-and-retain-for-display')):
+        for case,mode in (('mavericks-10.1','unknown'),('mojave-10.4.4','create-private-library'),('mojave-10.4.4','create-and-open-private-project'),('mojave-10.4.4','create-open-and-retain-for-display'),('mojave-10.4.4','create-open-hid-and-retain-for-display')):
             with tempfile.TemporaryDirectory() as tmp:
                 output=Path(tmp)/'result'
                 ns=dict(source=source,arguments=[case,str(output),'observer','inventory','actions',mode],
