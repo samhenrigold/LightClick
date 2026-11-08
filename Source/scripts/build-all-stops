@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Build and verify one opt-in All Stops experimental app, without launching it."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import plistlib
+import subprocess
+import sys
+
+source = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(source/'scripts'))
+from build_signing import resolve_identity
+from signing_options import host_options
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--engine', type=Path, required=True)
+parser.add_argument('--runtime-bin', type=Path)
+parser.add_argument('--output', type=Path, required=True)
+parser.add_argument('--jobs', type=int, default=4)
+args = parser.parse_args()
+args.engine = args.engine.resolve()
+args.output = args.output.resolve()
+if args.output.exists() or args.output.suffix != '.app':
+    parser.error('--output must name a new app')
+if not (args.engine/'.build/release/libEngine.a').is_file():
+    parser.error('--engine must contain the experimental release archive')
+identity = resolve_identity(source)
+env = dict(os.environ, LC_HVDBT_ENGINE=str(args.engine), VIM_CODESIGN_IDENTITY=identity)
+command = [sys.executable, str(source/'scripts/build-app'), '--configuration', 'Release',
+           '--jobs', str(args.jobs), '--output', str(args.output)]
+if args.runtime_bin:
+    command += ['--runtime-bin', str(args.runtime_bin.resolve())]
+subprocess.run(command, env=env, check=True)
+info_path = args.output/'Contents/Info.plist'
+info = plistlib.loads(info_path.read_bytes())
+info['LCExperimentalPerformancePreset'] = 'AllStops'
+info['CFBundleDisplayName'] = 'Light Click All Stops'
+info_path.write_bytes(plistlib.dumps(info))
+subprocess.run(['/usr/bin/codesign', '--force', '--sign', identity, *host_options(identity),
+                '--entitlements', str(source/'support/App.entitlements'), str(args.output)], check=True)
+subprocess.run([sys.executable, str(source/'scripts/verify-release-build.py'), '--app', str(args.output),
+                '--source', str(source), '--configuration', 'Release'], check=True)
+pins = {}
+for relative in ['Contents/Info.plist', 'Contents/MacOS/Light Click',
+                 'Contents/Resources/Runtime/bin/qemu-system-x86_64']:
+    data = (args.output/relative).read_bytes()
+    pins[relative] = {'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+receipt = {'preset': 'AllStops', 'app': str(args.output), 'configuration': 'Release',
+           'engine_archive_sha256': hashlib.sha256((args.engine/'.build/release/libEngine.a').read_bytes()).hexdigest(),
+           'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip(),
+           'source_patch_sha256': hashlib.sha256(subprocess.check_output(['git', 'diff', 'HEAD', '--',
+               'Source/Engine', 'Source/VirtualIntelMac/VIMLaunchPlan.swift', 'Source/VirtualIntelMac/VIMSession.m'],
+               cwd=source.parent)).hexdigest(),
+           'pins': pins, 'build_and_signature_verified': True, 'guest_runtime_qualified': False,
+           'speedup_measured': False}
+(args.output.parent/'all-stops-build.json').write_text(json.dumps(receipt, indent=2)+'\n')
+print('Built All Stops experimental app: '+str(args.output), flush=True)

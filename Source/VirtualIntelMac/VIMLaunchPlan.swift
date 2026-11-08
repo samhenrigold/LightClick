@@ -24,6 +24,8 @@ public final class LaunchInput: NSObject {
     /// The app's own launch arguments, which carry the development options.
     public var processArguments: [String] = []
     public var inheritedEnvironment: [String: String] = [:]
+    /// Enabled only by the explicitly packaged All Stops experimental app.
+    public var experimentalPerformancePreset = false
 
     public var appleSilicon = false
     public var preMetalGuest = false
@@ -519,6 +521,23 @@ public final class LaunchPlan: NSObject {
         // Host tuning must not leak between development launches or architectures.
         var env = input.inheritedEnvironment.filter { !$0.key.hasPrefix("PVG_") }
         env["DYLD_INSERT_LIBRARIES"] = nil
+        if input.experimentalPerformancePreset {
+            let defaults = [
+                "LC_HVDBT": "1",
+                "LC_HVDBT_INLINE_SHR8": "1",
+                "LC_HVDBT_PTE_SAME64": "1",
+                "LC_HVDBT_RETAIN_SHARED_DEAD": "1",
+                "LC_HVDBT_KEEPER_INACTIVE_GUARD": "1",
+                "LC_HVDBT_INVALIDATION_MEMBERSHIP": "1",
+                "LC_HVDBT_PAGE_REP": "1",
+                "LC_HVDBT_PROFILE_SHIFT_HELPERS": "0",
+                "LC_HVDBT_PROFILE_INVALIDATION": "0",
+                "LC_HVDBT_PROFILE_COMPILE_INPUTS": "0",
+                "LC_HVDBT_MMU_OBSERVATIONS": "0"
+            ]
+            for (name, value) in defaults where env[name] == nil { env[name] = value }
+            if !input.appleSilicon || cpuCount > 8 { env["LC_HVDBT"] = "0" }
+        }
         options.apply(to: &env)
         return env
     }

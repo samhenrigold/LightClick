@@ -1316,6 +1316,7 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     launch.configuration = config;
     launch.processArguments = launchArguments;
     launch.inheritedEnvironment = NSProcessInfo.processInfo.environment;
+    launch.experimentalPerformancePreset = [NSBundle.mainBundle.infoDictionary[@"LCExperimentalPerformancePreset"] isEqual:@"AllStops"];
     launch.appleSilicon = appleSilicon;
     launch.preMetalGuest = self.machine.preMetalGuest;
     launch.openGLResearchGuest = self.machine.openGLResearchGuest;

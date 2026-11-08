@@ -118,6 +118,33 @@ for scenario in scenarios {
         failures += 1
     }
 }
+if !record {
+    let input = makeInput(scenarios[0])
+    input.appleSilicon = true
+    input.configuration["CPUCount"] = 2
+    input.inheritedEnvironment = [:]
+    input.experimentalPerformancePreset = true
+    let enabled = ["LC_HVDBT", "LC_HVDBT_INLINE_SHR8", "LC_HVDBT_PTE_SAME64",
+                   "LC_HVDBT_RETAIN_SHARED_DEAD", "LC_HVDBT_KEEPER_INACTIVE_GUARD",
+                   "LC_HVDBT_INVALIDATION_MEMBERSHIP", "LC_HVDBT_PAGE_REP"]
+    func checkPreset(_ condition: Bool, _ message: String) {
+        if !condition { print("FAIL All Stops: \(message)"); failures += 1 }
+    }
+    let preset = LaunchPlan(input: input)!.environment
+    checkPreset(enabled.allSatisfy { preset[$0] == "1" }, "experimental options enabled")
+    checkPreset(preset["LC_HVDBT_PROFILE_COMPILE_INPUTS"] == "0", "expensive census disabled")
+    input.inheritedEnvironment = ["LC_HVDBT_INLINE_SHR8": "0"]
+    checkPreset(LaunchPlan(input: input)!.environment["LC_HVDBT_INLINE_SHR8"] == "0", "explicit override preserved")
+    input.configuration["CPUCount"] = 9
+    checkPreset(LaunchPlan(input: input)!.environment["LC_HVDBT"] == "0", "unsupported CPU count uses software")
+    input.configuration["CPUCount"] = 2
+    input.appleSilicon = false
+    checkPreset(LaunchPlan(input: input)!.environment["LC_HVDBT"] == "0", "Intel uses software")
+    input.appleSilicon = true
+    input.experimentalPerformancePreset = false
+    input.inheritedEnvironment = [:]
+    checkPreset(LaunchPlan(input: input)!.environment["LC_HVDBT_PAGE_REP"] == nil, "ordinary app remains unchanged")
+}
 if record {
     try JSONSerialization.data(
         withJSONObject: recorded, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
