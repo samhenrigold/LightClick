@@ -306,6 +306,8 @@ typedef struct {
     uint64_t stat_mmu_locked_rewalk_calls, stat_mmu_locked_rewalk_samples, stat_mmu_locked_rewalk_ticks;
     // Indices: plain32, plain64, LSE32, LSE64. Compare operand-width values observed before/after; no store is skipped.
     uint64_t stat_mmu_store_observed[4], stat_mmu_store_unchanged[4];
+    // Per-vCPU count-only census: cause(threshold/inactive/both)*2 + keeper; X marks reason*4 + keeper*2 + valid.
+    uint64_t stat_mmu_flood_decisions[6], stat_mmu_xmark_zaps[KILL_KINDS * 4];
 } EngineCtx;
 _Static_assert(sizeof(EngineCtx) <= CTX_SLOT, "EngineCtx must fit its existing per-vCPU slot");
 

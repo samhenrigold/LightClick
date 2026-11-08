@@ -376,6 +376,22 @@ public final class Tally: @unchecked Sendable {
             o += "Sampled ticks are unscaled/nonserialized counter reads; divide by counter_hz for seconds.\n"
             o += "Equality is an observation, not proof a store/zap can be skipped: concurrent walkers update A/D outside this lock.\n"
             o += "Only aligned plain4/8 and LSE32/64 stores are observed; CAS already skips unchanged updates.\n\n"
+            let flood = withUnsafeBytes(of: c.stat_mmu_flood_decisions) { Array($0.bindMemory(to: UInt64.self)) }
+            let xmarks = withUnsafeBytes(of: c.stat_mmu_xmark_zaps) { Array($0.bindMemory(to: UInt64.self)) }
+            o += "== shadow invalidation census (this vCPU; decisions and marked leaves, not killed bodies) ==\n"
+            for (cause, name) in ["threshold_only", "inactive_only", "both"].enumerated() {
+                for keeper in 0...1 {
+                    o += "mmu_flood_\(name)_keeper\(keeper) \(flood[cause * 2 + keeper])\n"
+                }
+            }
+            for reason in 0..<Int(KILL_KINDS) {
+                for keeper in 0...1 {
+                    for valid in 0...1 {
+                        o += "mmu_xmark_reason\(reason)_keeper\(keeper)_valid\(valid) \(xmarks[reason * 4 + keeper * 2 + valid])\n"
+                    }
+                }
+            }
+            o += "valid0 code-only marks have unknown prior PFN in killed_unmoved; zero does not mean moved.\n\n"
         }
         o += "cold blocks          " + perSecond(t.blocks) + "\n"
         o += "cold x86 insns       " + perSecond(t.insns) + "\n"
@@ -415,6 +431,14 @@ public final class Tally: @unchecked Sendable {
             o += "invalidation_map_unlink_ns \(t.invalidation_map_unlink_ns)\n"
             o += "invalidation_hash_fanout_ns \(t.invalidation_hash_fanout_ns)\n"
             o += "invalidation_icache_ns \(t.invalidation_icache_ns)\n\n"
+            let rejected = withUnsafeBytes(of: t.reuse_reject) { Array($0.bindMemory(to: UInt64.self)) }
+            o += "== dead body reuse census (global translator; do not sum vCPU files) ==\n"
+            o += "reuse_attempts \(t.reuse_attempts)\n"
+            o += "reuse_successes \(t.reused)\n"
+            for (index, name) in ["disabled", "no_slot", "not_dead", "rip", "key", "no_read_copy", "cpl", "compat", "fetch", "frame", "smp_entry", "bytes", "entry_cas"].enumerated() {
+                o += "reuse_reject_\(name) \(rejected[index])\n"
+            }
+            o += "First failed condition only, original short-circuit order. no_read_copy includes unsupported/cross-page/read-copy-budget cases.\n\n"
         }
         o +=
             "cold blocks a cache keyed by frame had: \(t.again_live) live in another view, \(t.again_dead) dead with the frame unchanged. Lower bounds\n\n"

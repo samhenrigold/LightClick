@@ -4,6 +4,12 @@
 #include <stdint.h>
 #include "engine_abi.h"
 
+enum {
+    TR_REUSE_DISABLED, TR_REUSE_NO_SLOT, TR_REUSE_NOT_DEAD, TR_REUSE_RIP, TR_REUSE_KEY,
+    TR_REUSE_NO_READ_COPY, TR_REUSE_CPL, TR_REUSE_COMPAT, TR_REUSE_FETCH, TR_REUSE_FRAME,
+    TR_REUSE_SMP_ENTRY, TR_REUSE_BYTES, TR_REUSE_ENTRY_CAS, TR_REUSE_REJECT_KINDS
+};
+
 typedef struct {
     uint8_t *priv; // host mapping of private memory
     uint8_t *ram; // host mapping of x86 RAM
@@ -80,6 +86,8 @@ typedef struct {
     uint64_t invalidation_membership_enabled, invalidation_membership_reliable, invalidation_membership_bytes;
     uint64_t invalidation_membership_inserts, invalidation_membership_view_visits, invalidation_membership_stale_visits;
     uint64_t invalidation_membership_removals, invalidation_membership_tracking_failures, invalidation_membership_full_scans;
+    // Opt-in global translator census (profile_invalidations). First rejected condition only, in original check order.
+    uint64_t reuse_attempts, reuse_reject[TR_REUSE_REJECT_KINDS];
 } TrStats;
 TrStats tr_stats(void);
 

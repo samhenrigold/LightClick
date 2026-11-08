@@ -516,20 +516,36 @@ static void remember_reads(HostBlock *hb, u64 rip) {
     read_copied[cur_part] += (u32)(hi - lo);
 }
 
+static inline bool reuse_rejected(u32 reason) {
+    if (cfg.profile_invalidations)
+        stats.reuse_reject[reason]++;
+    return false;
+}
+
 static bool reuse_dead_block(u32 key, int cpl, u64 rip, TrResult *res) {
+    if (cfg.profile_invalidations)
+        stats.reuse_attempts++;
     u32 it = cfg.no_reuse ? 0 : dead_slots[dead_slot(key, rip)];
     if (!it)
-        return false;
+        return reuse_rejected(cfg.no_reuse ? TR_REUSE_DISABLED : TR_REUSE_NO_SLOT);
     HostBlock *hb = &hblocks[it - 1];
     u64 gpa;
-    if (!hb->dead || hb->rip != rip || hb->view != key || !hb->read_bytes || hb->cpl != cpl || hb->compat != tr_compat || !fetch_walk(rip, &gpa) ||
-        (gpa & ~0xfffULL) != hb->frame[0] || (ctx_ptr->vcpu_count > 1 && hb->first_word != WORD_NOP)) // only a nop can come back under a peer running it
-        return false;
+    // Keep the original short-circuit order, especially the permission walk, byte comparison and entry CAS.
+    if (!hb->dead) return reuse_rejected(TR_REUSE_NOT_DEAD);
+    if (hb->rip != rip) return reuse_rejected(TR_REUSE_RIP);
+    if (hb->view != key) return reuse_rejected(TR_REUSE_KEY);
+    if (!hb->read_bytes) return reuse_rejected(TR_REUSE_NO_READ_COPY);
+    if (hb->cpl != cpl) return reuse_rejected(TR_REUSE_CPL);
+    if (hb->compat != tr_compat) return reuse_rejected(TR_REUSE_COMPAT);
+    if (!fetch_walk(rip, &gpa)) return reuse_rejected(TR_REUSE_FETCH);
+    if ((gpa & ~0xfffULL) != hb->frame[0]) return reuse_rejected(TR_REUSE_FRAME);
+    if (ctx_ptr->vcpu_count > 1 && hb->first_word != WORD_NOP) // only a nop can come back under a peer running it
+        return reuse_rejected(TR_REUSE_SMP_ENTRY);
     if (memcmp(ram_at(hb->frame[0] + hb->read_off), read_copies + hb->read_copy, hb->read_bytes))
-        return false;
+        return reuse_rejected(TR_REUSE_BYTES);
     u32 *entry = cc_base + hb->entry_word, dead = WORD_DEAD;
     if (!__atomic_compare_exchange_n(entry, &dead, hb->first_word, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
-        return false; // something that ran into it has since been sent on to a newer block, for good
+        return reuse_rejected(TR_REUSE_ENTRY_CAS); // something that ran into it has since been sent on to a newer block, for good
     sys_icache_invalidate(entry, 4);
     hb->dead = false;
     u32 idx = it - 1;

@@ -1218,6 +1218,11 @@ again:;
 // ---- Page-table writes ----
 
 
+static inline void mmu_xmark_zap(u64 old, u32 view) {
+    if (c->profile_mmu_observations && zap_why < KILL_KINDS)
+        c->stat_mmu_xmark_zaps[zap_why * 4 + (views[view].keeper != 0) * 2 + (old & 1)]++;
+}
+
 static void zap_entry(u64 *e, const ShadowDesc *d) {
     u64 v = *e;
     if (!v)
@@ -1232,6 +1237,7 @@ static void zap_entry(u64 *e, const ShadowDesc *d) {
                 tlbi_va(view_asid(d->view), va);
         }
         if ((v & PTE_X_MARK) && !evicting) {
+            mmu_xmark_zap(v, d->view);
             walk_any_tables = true;
             Walk now = (v & 1) ? x86_walk(views[d->view].cr3, va, 0, false) : (Walk){0};
             walk_any_tables = false;
@@ -1288,6 +1294,19 @@ static void zap_table(u32 idx) {
 // A frame written many times with no walk through it in between has stopped being a page table (a freed one reused as data, say). Unshadow
 // it, or every store to it would trap for as long as the frame lives.
 #define PT_FLOOD_WRITES 64
+static inline bool pt_flood_decision(ShadowDesc *d, bool nobody_home) {
+    if (!(d->level < 3 && d->parent))
+        return false;
+    bool threshold = ++d->writes > PT_FLOOD_WRITES; // Exactly the original eligibility and increment, including u32 wrap.
+    if (!(threshold || nobody_home))
+        return false;
+    if (c->profile_mmu_observations) {
+        u32 cause = threshold ? (nobody_home ? 2 : 0) : 1;
+        c->stat_mmu_flood_decisions[cause * 2 + (views[d->view].keeper != 0)]++;
+    }
+    return true;
+}
+
 static void pt_slot_changed(u64 gpa_slot) {
     u32 fr = (u32)(gpa_slot >> 12), i = (u32)((gpa_slot & 0xfff) >> 3);
     zap_why = KILL_PT_LEAF;
@@ -1297,7 +1316,7 @@ static void pt_slot_changed(u64 gpa_slot) {
         next = d->next_mirror;
         // A user table of an address space no vCPU is in: it is being torn down or its frame reused, and every store would trap. It refills if that address space ever runs.
         bool nobody_home = d->view != c->view && d->va_base >> 47 == 0 && !view_pinned(d->view);
-        if (d->level < 3 && d->parent && (++d->writes > PT_FLOOD_WRITES || nobody_home)) {
+        if (pt_flood_decision(d, nobody_home)) {
             u64 *parent = d->parent;
             ShadowDesc pd = desc[pool_index(parent)];
             u32 view = d->view;
