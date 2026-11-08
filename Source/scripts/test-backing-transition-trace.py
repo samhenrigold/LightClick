@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actual trace ring/file checks plus original renderer logic preservation; no GL/guest execution."""
+"""Trace ring/file checks and unaffected renderer paths; no GL/guest execution."""
 import argparse
 import json
 import os
@@ -19,7 +19,10 @@ def function(s,name):
 
 def source_checks():
  for filename,names in {
-  'passthrough-opengl-host.c':['DGResize','DGSelectDrawableMode','DGImportDrawableSurface','DGDrawablePixels'],
+  # Import paths now intentionally initialize a fresh BACK buffer. Their actual
+  # enabled/rollback behavior is exercised by test-initial-backing.py instead
+  # of requiring their complete bodies to match this historical revision.
+  'passthrough-opengl-host.c':['DGResize','DGSelectDrawableMode'],
   'passthrough-opengl-surfaces-host.c':['DGSurfaceCommandImpl'],
  }.items():
   relative='Source/PassthroughOpenGL/'+filename
@@ -34,6 +37,10 @@ def source_checks():
  assert cleanup.index('VIMTransitionFinish(s->transition)')<cleanup.index('free(s)')
  assert s.index('#include "backing-transition-trace-host.c"')>s.index('struct DGHostDrawable {')
  assert 'if(m->op==DG_OP_blit_framebuffer_EXT)DGTransitionBlit(context,m);' in s
+ for name in ('DGImportDrawableSurface','DGDrawablePixels'):
+  body=function(s,name)
+  assert body.count('DGTransitionLocal(')==1
+  assert 'VIM_TRANSITION_FRONT_SEED' in body
  helper=(root/'PassthroughOpenGL/backing-transition-trace-host.c').read_text()
  for forbidden in ('glGet','glRead','glFinish','glFlush','glBind','glFence','CGEvent'):
   assert forbidden not in helper
@@ -120,6 +127,6 @@ def check(binary):
    finally:final.unlink(missing_ok=True)
  finally:
   for p in (output,link,target):p.unlink(missing_ok=True)
- print('PASS actual8192 ring tail/global accounting/private exclusive output/refusals/cross-thread close/scalarTLS/endpoint and live-endpoint shutdown persistence/frozen final tail; renderer logic unchanged; no graphics execution')
+ print('PASS actual8192 ring tail/global accounting/private exclusive output/refusals/cross-thread close/scalarTLS/endpoint and live-endpoint shutdown persistence/frozen final tail; unaffected renderer paths preserved; no graphics execution')
 if __name__=='__main__':
  p=argparse.ArgumentParser(description=__doc__);g=p.add_mutually_exclusive_group(required=True);g.add_argument('--emit-c',type=Path);g.add_argument('--check',type=Path);a=p.parse_args();emit(a.emit_c) if a.emit_c else check(a.check)

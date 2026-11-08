@@ -208,6 +208,7 @@ struct DGHostContext {
 #include "direct-opcodes.h"
 // Explicit research-oracle selection. Zero keeps normal host GPU selection.
 static GLint dg_reference_renderer;
+#include "initial-backing-policy.h"
 struct DGHostDrawable {
     uint32_t name;
     int width, height;
@@ -223,6 +224,7 @@ struct DGHostDrawable {
     int scope_canonical;
 #endif
     uint64_t write_serial;
+    struct VIMInitialBackingState initial_backing;
     struct DGHostDrawable *next;
 };
 #include "backing-transition-trace-host.c"
@@ -1115,8 +1117,9 @@ static int DGSendDrawableSurface(struct DGHostContext *c, const struct DGMessage
 }
 /* Private bridge transactions preserve host state locally, not with a dozen
  * synchronous guest glGet calls. Pixels stay in the existing bottom-up order. */
+#include "initial-backing-host.c"
 static int DGImportDrawableSurface(struct DGHostContext *c, const void *pixels, size_t stride, size_t x, size_t y,
-                                   size_t width, size_t height, int reverse) {
+                                   size_t width, size_t height, int reverse, int *seed_back) {
     IOSurfaceRef surface = c->color_storage;
     if (!surface || IOSurfaceGetPlaneCount(surface) || IOSurfaceGetBytesPerElement(surface) != 4 ||
         IOSurfaceGetPixelFormat(surface) != 0x42475241 || x + width > IOSurfaceGetWidth(surface) ||
@@ -1140,6 +1143,11 @@ static int DGImportDrawableSurface(struct DGHostContext *c, const void *pixels, 
         c->error = GL_INVALID_OPERATION;
     c->drawable->alias_dirty = 1;
     ++c->drawable->write_serial;
+    // Leave the request pending only when FRONT succeeded and BACK needs the
+    // normalized GPU fallback. A failed FRONT retains its existing error path.
+    if (*seed_back && (!base || unlocked != kIOReturnSuccess ||
+                      DGInitialBackingCPU(c, pixels, stride, width, height, reverse)))
+        *seed_back = 0;
     DGTransitionLocal(c,VIM_TRANSITION_FRONT_SEED,c->error,(int)width,(int)height,x,y);
     return 1;
 }
@@ -1160,15 +1168,21 @@ static int DGDrawablePixels(struct DGHostContext *c, struct DGMessage *m, int re
     if (stride < width * element || stride > DG_MAX_BYTES || (view && (reading || m->args[3] > 1)) ||
         (height - 1) * stride + width * element != m->bytes)
         return -1;
+    int seed_back = !reading && VIMInitialBackingClaim(DGInitialBackingEnabled(), &c->drawable->initial_backing,
+        c->double_buffer, (uintptr_t)c->color_storage, (uintptr_t)c->back_storage, c->color, c->back,
+        c->drawable->width, c->drawable->height, c->drawable->write_serial, x, y, width, height);
     const unsigned char *pixels = (const void *)(m + 1);
     unsigned char *converted = NULL;
-    if (!reading && dg_surface_import &&
+    int front_imported = !reading && dg_surface_import &&
         DGImportDrawableSurface(c, pixels, (size_t)stride, (size_t)x, (size_t)y, (size_t)width, (size_t)height,
-                                view && m->args[3]))
+                                view && m->args[3], &seed_back);
+    if (front_imported && !seed_back)
         return 0;
     if (view && (m->args[3] || stride != width * 4)) {
         converted = malloc((size_t)(width * height * 4));
         if (!converted) {
+            if (front_imported)
+                return 0; // Preserve successful FRONT if optional BACK fallback cannot allocate.
             c->error = GL_OUT_OF_MEMORY;
             return 0;
         }
@@ -1216,9 +1230,12 @@ static int DGDrawablePixels(struct DGHostContext *c, struct DGMessage *m, int re
         glBindTexture(GL_TEXTURE_RECTANGLE_ARB, c->color);
         glTexSubImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, (GLint)x, (GLint)y, (GLsizei)width, (GLsizei)height, GL_BGRA,
                         GL_UNSIGNED_INT_8_8_8_8_REV, pixels);
+        if (seed_back)
+            DGInitialBackingUpload(c, pixels, (size_t)width, (size_t)height);
         glBindTexture(GL_TEXTURE_RECTANGLE_ARB, (GLuint)texture);
         c->drawable->alias_dirty = 1;
-        ++c->drawable->write_serial;
+        if (!front_imported)
+            ++c->drawable->write_serial;
     }
     free(converted);
     glBindBuffer(target, (GLuint)buffer);
@@ -1275,6 +1292,9 @@ static int DGBindDrawableTexture(struct DGHostContext *c, struct DGMessage *m, s
     GLenum internal = (GLenum)m->args[0];
     uint64_t width = m->args[1], height = m->args[2];
     int back = !!(m->args[3] & 2);
+    // An attempted BACK export may allow writes through a shared texture.
+    if (back && c->drawable)
+        VIMInitialBackingExpose(DGInitialBackingEnabled(), &c->drawable->initial_backing);
     IOSurfaceRef storage = back ? c->back_storage : c->color_storage;
     unsigned format = storage && IOSurfaceGetPixelFormat(storage) == DGSurfaceNativeFormat(VIM_GL_PIXEL_RGBA16)
                           ? VIM_GL_PIXEL_RGBA16
