@@ -3,7 +3,7 @@
 import glob,json,os,plistlib,shutil,subprocess,time
 if os.getuid()!=0 or not os.uname()[2].startswith('18.'):raise RuntimeError('Mojave clone required')
 base='/Library/Application Support/MavericksAppearance';icons=set()
-for path in glob.glob(base+'/SystemAssetBackup-*/report.json'):
+for path in glob.glob(base+'/SystemAssetBackup-*/report.json')+glob.glob(base+'/InstallerAssets-*/report.json'):
  try:icons.update(json.load(open(path)).get('semanticIcons',[]))
  except (IOError,ValueError):pass
 backup=base+'/IconCatalogBackup-'+str(int(time.time()));os.mkdir(backup,0700)

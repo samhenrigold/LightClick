@@ -8,13 +8,47 @@ static BOOL lcFontRenderingEnabled;
 static int lcCoreTextReplacements;
 static int namedImageReplacements;
 static int originalResourceReplacements;
-@interface LCClassicSidebar : NSView @end
-@implementation LCClassicSidebar
-- (BOOL)allowsVibrancy { return NO; }
-- (void)drawRect:(NSRect)r {
-    NSGradient *g = [[[NSGradient alloc] initWithStartingColor:[NSColor colorWithCalibratedRed:.86 green:.89 blue:.92 alpha:1]
-        endingColor:[NSColor colorWithCalibratedRed:.76 green:.80 blue:.85 alpha:1]] autorelease];
-    [g drawInRect:self.bounds angle:90];
+// Mojave material roles retain their native view hierarchy and interactions;
+// a non-vibrant background supplies the corresponding pre-Yosemite surface.
+@interface LCClassicMaterial : NSView
+@property NSInteger material;
+@property BOOL emphasized;
+@property(retain) NSImage *shapeMask;
+@end
+@implementation LCClassicMaterial
+- (NSView *)hitTest:(NSPoint)point {return nil;}
+- (BOOL)allowsVibrancy {return NO;}
+- (BOOL)wantsUpdateLayer {return YES;}
+- (void)updateLayer {
+    if(self.bounds.size.width<=0||self.bounds.size.height<=0)return;
+    NSImage *surface=[[[NSImage alloc]initWithSize:self.bounds.size]autorelease];
+    [surface lockFocus];[self drawRect:self.bounds];[surface unlockFocus];
+    NSRect rect=NSMakeRect(0,0,surface.size.width,surface.size.height);
+    self.layer.contents=(id)[surface CGImageForProposedRect:&rect context:nil hints:nil];
+    self.layer.contentsGravity=@"resize";
+    if(self.shapeMask){
+        NSImage *mask=[[[NSImage alloc]initWithSize:self.bounds.size]autorelease];
+        [mask lockFocus];[self.shapeMask drawInRect:self.bounds fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1];[mask unlockFocus];
+        CALayer *layer=self.layer.mask;if(!layer){layer=[CALayer layer];self.layer.mask=layer;}
+        layer.frame=self.bounds;layer.contents=(id)[mask CGImageForProposedRect:&rect context:nil hints:nil];
+    }else self.layer.mask=nil;
+}
+- (void)dealloc {[_shapeMask release];[super dealloc];}
+- (void)drawRect:(NSRect)dirty {
+    NSInteger role=self.material;NSColor *top=nil,*bottom=nil;
+    if(role==4) {
+        NSImage *image=[NSImage imageNamed:self.emphasized?@"LCMavericksSourceListActive":@"LCMavericksSourceListInactive"];
+        if(image){[image drawInRect:self.bounds fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1 respectFlipped:self.isFlipped hints:nil];return;}
+    }
+    if(role==7){top=[NSColor colorWithSRGBRed:.86 green:.89 blue:.92 alpha:1];bottom=[NSColor colorWithSRGBRed:.76 green:.80 blue:.85 alpha:1];}
+    else if(role==3||role==10){top=[NSColor colorWithWhite:.91 alpha:1];bottom=[NSColor colorWithWhite:.72 alpha:1];}
+    else if(role==2||role==9||role==13||role==15){top=[NSColor colorWithWhite:.22 alpha:1];bottom=[NSColor colorWithWhite:.12 alpha:1];}
+    else if(role==17){top=bottom=[NSColor colorWithSRGBRed:1 green:1 blue:.79 alpha:1];}
+    else if(role==18){top=bottom=[NSColor whiteColor];}
+    else if(role==22){top=bottom=[NSColor colorWithWhite:.51 alpha:1];}
+    else {top=bottom=[NSColor colorWithWhite:(role==5||role==6)?.97:.93 alpha:1];}
+    NSGradient *gradient=[[[NSGradient alloc]initWithStartingColor:bottom endingColor:top]autorelease];
+    [gradient drawInRect:self.bounds angle:90];
 }
 @end
 static NSFont *originalFont(CGFloat size, BOOL bold) {
@@ -42,17 +76,31 @@ static NSFont *originalFont(CGFloat size, BOOL bold) {
 + (NSFont *)bold:(CGFloat)s { return originalFont(s,YES); }
 + (NSFont *)weighted:(CGFloat)s weight:(CGFloat)weight {return originalFont(s,weight>=NSFontWeightMedium);}
 @end
-static IMP oldMove, oldVibrancy;
-static void moved(id self, SEL cmd) {
-    ((void(*)(id,SEL))oldMove)(self,cmd);
-    if ([[self valueForKey:@"material"] integerValue] != 7 || ![(NSView *)self window] || objc_getAssociatedObject(self,@selector(drawRect:))) return;
-    LCClassicSidebar *bg=[[[LCClassicSidebar alloc] initWithFrame:[self bounds]] autorelease];
-    bg.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
-    [self addSubview:bg positioned:NSWindowBelow relativeTo:nil];
-    [(NSView *)self setAppearance:[NSAppearance appearanceNamed:@"NSAppearanceNameAqua"]];
-    objc_setAssociatedObject(self,@selector(drawRect:),bg,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+static IMP oldMove,oldMaterial,oldVibrancy;
+static char materialBackgroundKey;
+static void updateMaterial(NSVisualEffectView *view) {
+    // Titlebar effects can own drawings that are not represented by child
+    // views. Their original CoreUI frame renderer remains the shared path.
+    LCClassicMaterial *background=objc_getAssociatedObject(view,&materialBackgroundKey);
+    if(!view.window)return;
+    if(view.material==3){[background removeFromSuperview];objc_setAssociatedObject(view,&materialBackgroundKey,nil,OBJC_ASSOCIATION_RETAIN_NONATOMIC);return;}
+    if(!background){background=[[[LCClassicMaterial alloc]initWithFrame:view.bounds]autorelease];background.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;background.wantsLayer=YES;[view addSubview:background positioned:NSWindowBelow relativeTo:nil];objc_setAssociatedObject(view,&materialBackgroundKey,background,OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
+    if(background.material!=view.material){background.material=view.material;[background setNeedsDisplay:YES];}
+    if(background.shapeMask!=view.maskImage){background.shapeMask=view.maskImage;[background setNeedsDisplay:YES];}
+    BOOL active=view.state==NSVisualEffectStateActive||(view.state==NSVisualEffectStateFollowsWindowActiveState&&NSApp.isActive&&(view.window.isMainWindow||view.window.isKeyWindow));
+    if(background.emphasized!=active){background.emphasized=active;[background setNeedsDisplay:YES];}
+    BOOL dark=view.material==2||view.material==9||view.material==13||view.material==15;
+    NSString *appearance=dark?NSAppearanceNameVibrantDark:NSAppearanceNameAqua;
+    if(![view.appearance.name isEqual:appearance])[view setAppearance:[NSAppearance appearanceNamed:appearance]];
 }
-static BOOL noVibrancy(id self,SEL cmd) { return [[self valueForKey:@"material"] integerValue]==7 ? NO : ((BOOL(*)(id,SEL))oldVibrancy)(self,cmd); }
+static void moved(id self,SEL cmd){((void(*)(id,SEL))oldMove)(self,cmd);updateMaterial(self);}
+static void classicMaterial(id self,SEL cmd,NSInteger role){((void(*)(id,SEL,NSInteger))oldMaterial)(self,cmd,role);updateMaterial(self);}
+static BOOL noVibrancy(id self,SEL cmd){return [(NSVisualEffectView *)self material]==3?((BOOL(*)(id,SEL))oldVibrancy)(self,cmd):NO;}
+static void refreshMaterials(NSView *view){if([view isKindOfClass:[NSVisualEffectView class]])updateMaterial((NSVisualEffectView *)view);for(NSView *child in view.subviews)refreshMaterials(child);}
+@interface LCClassicMaterialObserver : NSObject @end
+@implementation LCClassicMaterialObserver
+- (void)windowUpdated:(NSNotification *)notification {NSWindow *window=notification.object;if([window isKindOfClass:[NSWindow class]])refreshMaterials(window.contentView.superview?:window.contentView);}
+@end
 
 static void installOriginalArtRendering(void);
 static void installProgressSubclass(void);
@@ -80,13 +128,15 @@ void MavericksAppearanceInstall(int mode) {
     }
     Method weighted=class_getClassMethod([NSFont class],@selector(systemFontOfSize:weight:));
     if(weighted)method_setImplementation(weighted,class_getMethodImplementation(object_getClass([FontSpike class]),@selector(weighted:weight:)));
-    installArchivedFonts();if(mode==2){installNamedImages();void(*coreUIInstall)(void)=dlsym(RTLD_DEFAULT,"MavericksCoreUIInstall");if(coreUIInstall)coreUIInstall();}
+    installArchivedFonts();if(mode==2){installNamedImages();void(*catalogInstall)(void)=dlsym(RTLD_DEFAULT,"MavericksCatalogInstall");if(catalogInstall)catalogInstall();void(*coreUIInstall)(void)=dlsym(RTLD_DEFAULT,"MavericksCoreUIInstall");if(coreUIInstall)coreUIInstall();}
     Class effect=NSClassFromString(@"NSVisualEffectView");
     if(mode==2 && effect) {
+        LCClassicMaterialObserver *observer=[LCClassicMaterialObserver new];[[NSNotificationCenter defaultCenter]addObserver:observer selector:@selector(windowUpdated:) name:NSWindowDidUpdateNotification object:nil];
         Method m=class_getInstanceMethod(effect,@selector(viewDidMoveToWindow));
         oldMove=method_getImplementation(m);
         class_addMethod(effect,@selector(viewDidMoveToWindow),(IMP)moved,"v@:");
         method_setImplementation(class_getInstanceMethod(effect,@selector(viewDidMoveToWindow)),(IMP)moved);
+        Method material=class_getInstanceMethod(effect,@selector(setMaterial:));oldMaterial=method_getImplementation(material);method_setImplementation(material,(IMP)classicMaterial);
         oldVibrancy=class_getMethodImplementation(effect,@selector(allowsVibrancy));
         class_addMethod(effect,@selector(allowsVibrancy),(IMP)noVibrancy,"B@:");
         method_setImplementation(class_getInstanceMethod(effect,@selector(allowsVibrancy)),(IMP)noVibrancy);
@@ -141,7 +191,7 @@ static void progressValue(NSProgressIndicator *view,SEL cmd,double value) {
 }
 static NSColor *legacyWindowBackground(id self,SEL cmd) { return [NSColor colorWithSRGBRed:237.0/255 green:237.0/255 blue:237.0/255 alpha:1]; }
 static NSColor *legacyDisabled(id self,SEL cmd) { return [NSColor colorWithSRGBRed:.5 green:.5 blue:.5 alpha:1]; }
-static NSColor *legacyBlack(id self,SEL cmd) { return [NSColor blackColor]; }
+static NSColor *legacyBlack(id self,SEL cmd) { NSString *name=[NSAppearance currentAppearance].name;return name&&[name rangeOfString:@"Dark"].location!=NSNotFound?[NSColor whiteColor]:[NSColor blackColor]; }
 static void installOriginalArtRendering(void) {
     Method draw=class_getInstanceMethod([NSProgressIndicator class],@selector(drawRect:));originalProgressDraw=method_getImplementation(draw);
     class_addMethod([NSProgressIndicator class],@selector(drawRect:),(IMP)progressDraw,"v@:{CGRect={CGPoint=dd}{CGSize=dd}}");
@@ -376,7 +426,8 @@ static void installWindowBackground(void) {
     if([self lcOriginalKind]<0)return [super drawTitle:title withFrame:frame inView:view];
     buttonTitleCalls++;
     NSMutableAttributedString *text=[[title mutableCopy] autorelease];
-    [text addAttribute:NSForegroundColorAttributeName value:self.enabled?[NSColor blackColor]:[NSColor disabledControlTextColor] range:NSMakeRange(0,text.length)];
+    NSString *appearance=view.effectiveAppearance.name;BOOL dark=[self lcOriginalKind]!=NSMomentaryPushInButton&&appearance&&[appearance rangeOfString:@"Dark"].location!=NSNotFound;
+    [text addAttribute:NSForegroundColorAttributeName value:self.enabled?(dark?[NSColor whiteColor]:[NSColor blackColor]):[NSColor disabledControlTextColor] range:NSMakeRange(0,text.length)];
     return [super drawTitle:text withFrame:frame inView:view];
 }
 @end
@@ -483,8 +534,8 @@ static NSImage *originalNamedImage(NSString *name) {
 static NSImage *loadOriginalResourceImage(NSString *name,NSBundle *bundle) {
     if(![name isKindOfClass:[NSString class]]||[name containsString:@"/"]||![bundle isKindOfClass:[NSBundle class]])return nil;
     static NSSet *paths;static NSCache *cache;static dispatch_once_t once;
-    dispatch_once(&once,^{NSData *data=[NSData dataWithContentsOfFile:@"/Library/Application Support/MavericksAppearance/LegacyResources.json"];id array=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL]:nil;paths=[[NSSet alloc]initWithArray:[array isKindOfClass:[NSArray class]]?array:@[]];cache=[NSCache new];cache.countLimit=256;});
-    NSString *path=[bundle pathForImageResource:name];
+    dispatch_once(&once,^{NSData *data=[NSData dataWithContentsOfFile:@"/Library/Application Support/MavericksAppearance/LegacyResources.json"];id array=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL]:nil;NSMutableSet *resolved=[NSMutableSet set];if([array isKindOfClass:[NSArray class]])for(NSString *path in array)[resolved addObject:[path stringByResolvingSymlinksInPath]];paths=[resolved copy];cache=[NSCache new];cache.countLimit=256;});
+    NSString *path=[[bundle pathForImageResource:name]stringByResolvingSymlinksInPath];
     if(![paths containsObject:path])return nil;
     NSImage *image=[cache objectForKey:path];
     if(!image){image=[[[NSImage alloc]initWithContentsOfFile:path]autorelease];if(!image)return nil;
@@ -521,3 +572,5 @@ static void installNamedImages(void) {
     Method bundle=class_getInstanceMethod([NSBundle class],@selector(imageForResource:));
     if(bundle){nativeBundleImage=method_getImplementation(bundle);method_setImplementation(bundle,(IMP)classicBundleImage);}
 }
+
+NSImage *MavericksAppearanceOriginalImage(NSString *name,NSBundle *bundle){return originalNamedImage(name)?:originalResourceImage(name,bundle);}

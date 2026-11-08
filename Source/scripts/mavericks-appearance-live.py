@@ -45,7 +45,7 @@ elif sys.argv[2]=='guest-script':
     local=Path(sys.argv[3]).resolve();remote=stage(local);print(run('/usr/bin/python',[remote],1800 if local.name=='mavericks-system-assets-apply.py' else 300))
 elif sys.argv[2]=='install-library':
     library=root/'DesktopAppearance.dylib'
-    subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-fno-objc-arc','-Wno-deprecated-declarations','-framework','Cocoa','-framework','CoreText','-framework','QuartzCore','-F'+subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()+'/System/Library/PrivateFrameworks','-framework','CoreUI','-dynamiclib',str(source/'compat/MavericksAppearance/MavericksAppearance.m'),str(source/'compat/MavericksAppearance/MavericksDesktop.m'),str(source/'compat/MavericksAppearance/MavericksWidgets.m'),str(source/'compat/MavericksAppearance/MavericksCoreUI.m'),'-o',str(library)],check=True)
+    subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-fno-objc-arc','-Wno-deprecated-declarations','-framework','Cocoa','-framework','CoreText','-framework','QuartzCore','-F'+subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()+'/System/Library/PrivateFrameworks','-framework','CoreUI','-dynamiclib',str(source/'compat/MavericksAppearance/MavericksAppearance.m'),str(source/'compat/MavericksAppearance/MavericksDesktop.m'),str(source/'compat/MavericksAppearance/MavericksWidgets.m'),str(source/'compat/MavericksAppearance/MavericksCoreUI.m'),str(source/'compat/MavericksAppearance/MavericksCatalog.m'),'-o',str(library)],check=True)
     remote=stage(library);run('/bin/mkdir',['-p','/Library/Application Support/MavericksAppearance'])
     run('/bin/cp',[remote,'/Library/Application Support/MavericksAppearance/MavericksAppearance.next.dylib'])
     run('/bin/chmod',['0644','/Library/Application Support/MavericksAppearance/MavericksAppearance.next.dylib']);run('/bin/mv',['/Library/Application Support/MavericksAppearance/MavericksAppearance.next.dylib','/Library/Application Support/MavericksAppearance/MavericksAppearance.dylib']);print('Installed appearance library in cloned guest')
@@ -89,19 +89,22 @@ elif sys.argv[2]=='install-legacy-compat':
 elif sys.argv[2]=='install-named':
     remote=stage(source/'Build/mavericks-appearance/assets/named-images.tar.gz')
     run('/bin/mkdir',['-p','/Library/Application Support/MavericksAppearance/NamedImages'])
-    run('/usr/bin/tar',['xzf',remote,'-C','/Library/Application Support/MavericksAppearance/NamedImages']);print('Installed the original AppKit image catalog')
+    print(run('/usr/bin/python',['-c',(source/'probes/mavericks-named-assets-apply.py').read_text(),remote]))
+    print('Installed the original AppKit image catalog')
 elif sys.argv[2]=='install-dock-art':
     remote=stage(source/'Build/mavericks-appearance/original-dock-scene/mavericks-glass@2x.png')
     run('/bin/mkdir',['-p','/Library/Application Support/MavericksAppearance/Art'])
     run('/bin/cp',[remote,'/Library/Application Support/MavericksAppearance/Art/mavericks-glass@2x.png']);run('/bin/chmod',['0644','/Library/Application Support/MavericksAppearance/Art/mavericks-glass@2x.png']);print('Installed original Dock glass artwork')
-elif sys.argv[2]=='install-installer-assets':
-    archive=stage(source/'Build/mavericks-appearance/assets/installer-assets.tar.gz');manifest=stage(source/'Build/mavericks-appearance/assets/installer-assets.json')
+elif sys.argv[2] in ('install-installer-assets','install-bundle-assets'):
+    artifact='bundle-assets' if sys.argv[2]=='install-bundle-assets' else 'installer-assets'
+    archive=stage(source/('Build/mavericks-appearance/assets/'+artifact+'.tar.gz'));manifest=stage(source/('Build/mavericks-appearance/assets/'+artifact+'.json'))
     print(run('/usr/bin/python',['-c',(source/'probes/mavericks-installer-assets-apply.py').read_text(),archive,manifest],900))
-elif sys.argv[2]=='install-installer-assets-media':
-    volumes=json.loads(run('/usr/bin/python',['-c','import json,os;print(json.dumps(["/Volumes/"+n+"/" for n in os.listdir("/Volumes") if os.path.isfile("/Volumes/"+n+"/installer-assets.json") and os.path.isfile("/Volumes/"+n+"/installer-assets.tar.gz") and os.statvfs("/Volumes/"+n).f_flag&1]))']))
+elif sys.argv[2] in ('install-installer-assets-media','install-bundle-assets-media'):
+    artifact='bundle-assets' if sys.argv[2]=='install-bundle-assets-media' else 'installer-assets'
+    volumes=json.loads(run('/usr/bin/python',['-c','import json,os,sys;print(json.dumps(["/Volumes/"+n+"/" for n in os.listdir("/Volumes") if os.path.isfile("/Volumes/"+n+"/"+sys.argv[1]+".json") and os.path.isfile("/Volumes/"+n+"/"+sys.argv[1]+".tar.gz") and os.statvfs("/Volumes/"+n).f_flag&1]))',artifact]))
     if len(volumes)!=1:raise RuntimeError('Exactly one read-only installer asset medium required: '+str(volumes))
     base=volumes[0]
-    print(run('/usr/bin/python',['-c',(source/'probes/mavericks-installer-assets-apply.py').read_text(),base+'installer-assets.tar.gz',base+'installer-assets.json'],900))
+    print(run('/usr/bin/python',['-c',(source/'probes/mavericks-installer-assets-apply.py').read_text(),base+artifact+'.tar.gz',base+artifact+'.json'],900))
 elif sys.argv[2]=='relaunch-apps':
     executable=root/'RelaunchApplications'
     subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-fno-objc-arc','-Wno-deprecated-declarations','-framework','Cocoa',str(source/'probes/mavericks-relaunch-applications.m'),'-o',str(executable)],check=True)
@@ -140,6 +143,10 @@ elif sys.argv[2]=='install-art':
     remote=stage(source/'Build/mavericks-appearance/assets/render-art.tar');run('/bin/mkdir',['-p','/Library/Application Support/MavericksAppearance/Art']);run('/usr/bin/tar',['xf',remote,'-C','/Library/Application Support/MavericksAppearance/Art']);print('Original control artwork installed')
 elif sys.argv[2]=='inspect':
     probe=stage(source/'Build/mavericks-appearance/control-inspect');text=run(probe,[]);(root/'selectors.json').write_text(text);print(text)
+elif sys.argv[2]=='inspect-image-catalogs':
+    executable=root/'ImageCatalogs'
+    subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-framework','Cocoa',str(source/'probes/mavericks-image-catalogs.m'),'-o',str(executable)],check=True)
+    remote=stage(executable);result=run(remote,[]);(root/'image-catalogs.json').write_text(result);print(root/'image-catalogs.json')
 elif sys.argv[2]=='capture':
     label=sys.argv[3];mode=sys.argv[4] if len(sys.argv)>4 else '2';reference=mode=='reference';state=sys.argv[5] if len(sys.argv)>5 else 'active'
     if not label.replace('-','').replace('_','').isalnum() or state not in ('active','inactive','disabled','progress0','progress50','progress100'):raise ValueError('Invalid label/state')

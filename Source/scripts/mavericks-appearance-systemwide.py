@@ -12,6 +12,7 @@ parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('results',type=Path)
 parser.add_argument('--source-volume',action='store_true')
 parser.add_argument('--installer-media',action='store_true')
+parser.add_argument('--bundle-media',action='store_true',help='Apply the read-only bundle-identity resource disc')
 args=parser.parse_args();source=Path(__file__).resolve().parents[1]
 root=args.results.resolve();build=source/'Build/mavericks-appearance'
 if not root.is_relative_to(build)or not(root/'Appearance Experiment.app').is_dir()or(root/'Finish').exists():raise SystemExit('An owned running appearance clone is required')
@@ -21,6 +22,7 @@ if missing:raise SystemExit('Prepare local reference assets first: '+', '.join(m
 steps=[['qualify-systemwide'],['install-art'],['install-named'],['install-dock-art'],['install-legacy-coreui']]
 if args.source_volume:steps.append(['guest-script',str(source/'probes/mavericks-system-assets-apply.py')])
 if args.installer_media:steps.append(['install-installer-assets-media'])
+if args.bundle_media:steps.append(['install-bundle-assets-media'])
 steps += [['install-font-alias'],['install-library'],['guest-script',str(source/'probes/mavericks-icon-catalog-apply.py')],['guest-script',str(source/'probes/mavericks-refresh-assets.py')],['guest-script',str(source/'probes/mavericks-desktop-activate.py')],['relaunch-apps']]
 report={'started':time.time(),'steps':[],'complete':False}
 path=root/'systemwide-install.json'

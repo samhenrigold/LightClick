@@ -45,7 +45,9 @@ static NSScrollerStyle preferredStyle(id cls,SEL cmd){return NSScrollerStyleLega
 static IMP scrollViewSetStyle;
 static void classicScrollViewStyle(id view,SEL cmd,NSScrollerStyle style){((void(*)(id,SEL,NSScrollerStyle))scrollViewSetStyle)(view,cmd,NSScrollerStyleLegacy);}
 static char sourceListKey;
-
+static char sourceSelectionKey;
+static BOOL sourceRowSelected(NSTableRowView *row){return row.isSelected||[objc_getAssociatedObject(row,&sourceSelectionKey)boolValue];}
+static BOOL sourceListEmphasized(NSTableRowView *row){return NSApp.isActive&&(row.window.isMainWindow||row.window.isKeyWindow);}
 static BOOL sourceRow(NSView *view) {
     for(NSView *parent=view.superview;parent;parent=parent.superview)
         if([parent isKindOfClass:[NSTableView class]])return objc_getAssociatedObject(parent,&sourceListKey)!=nil || [(NSTableView *)parent selectionHighlightStyle]==NSTableViewSelectionHighlightStyleSourceList;
@@ -56,7 +58,7 @@ static void drawClassicSelection(NSTableRowView *row,SEL cmd,NSRect dirty) {
         IMP native=class_getMethodImplementation(class_getSuperclass(object_getClass(row)),cmd);
         ((void(*)(id,SEL,NSRect))native)(row,cmd,dirty);return;
     }
-    NSImage *image=[NSImage imageNamed:(row.window.isMainWindow||row.window.isKeyWindow)?@"LCMavericksSourceListActive":@"LCMavericksSourceListInactive"];
+    NSImage *image=[NSImage imageNamed:sourceListEmphasized(row)?@"LCMavericksSourceListActive":@"LCMavericksSourceListInactive"];
     if(image)[image drawInRect:row.bounds fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1 respectFlipped:row.isFlipped hints:nil];
     else {IMP native=class_getMethodImplementation(class_getSuperclass(object_getClass(row)),cmd);((void(*)(id,SEL,NSRect))native)(row,cmd,dirty);}
 }
@@ -65,7 +67,7 @@ static void setClassicRowStyle(NSTableRowView *row,SEL cmd,NSTableViewSelectionH
     ((void(*)(id,SEL,NSTableViewSelectionHighlightStyle))native)(row,cmd,sourceRow(row)?NSTableViewSelectionHighlightStyleRegular:style);
 }
 static NSBackgroundStyle classicRowInterior(NSTableRowView *row,SEL cmd) {
-    if(sourceRow(row))return row.isSelected&&(row.window.isMainWindow||row.window.isKeyWindow)?NSBackgroundStyleDark:NSBackgroundStyleLight;
+    if(sourceRow(row))return sourceRowSelected(row)&&sourceListEmphasized(row)?NSBackgroundStyleDark:NSBackgroundStyleLight;
     IMP native=class_getMethodImplementation(class_getSuperclass(object_getClass(row)),cmd);return ((NSBackgroundStyle(*)(id,SEL))native)(row,cmd);
 }
 static void headerText(NSView *view) {
@@ -87,6 +89,7 @@ static void styleLists(NSView *view,BOOL sidebar) {
             objc_setAssociatedObject(table,&sourceListKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             if(![table.backgroundColor isEqual:[NSColor clearColor]])table.backgroundColor=[NSColor clearColor];
             [table enumerateAvailableRowViewsUsingBlock:^(NSTableRowView *row,NSInteger index){
+                BOOL selected=row.isSelected||[table.selectedRowIndexes containsIndex:index];objc_setAssociatedObject(row,&sourceSelectionKey,@(selected),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 if(![NSStringFromClass(row.class) hasPrefix:@"LCMavericksRow_"]) {
                     Class original=object_getClass(row);NSString *name=[@"LCMavericksRow_" stringByAppendingString:NSStringFromClass(original)];
                     Class replacement=NSClassFromString(name);

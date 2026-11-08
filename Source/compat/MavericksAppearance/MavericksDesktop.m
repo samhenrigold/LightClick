@@ -5,6 +5,7 @@
 #include <sys/sysctl.h>
 extern NSDictionary *MavericksAppearanceDiagnostics(void);
 extern NSDictionary *MavericksCoreUIDiagnostics(void);
+extern NSDictionary *MavericksCatalogDiagnostics(void);
 
 @interface LCGlassDockShelf : CALayer @end
 @implementation LCGlassDockShelf
@@ -26,11 +27,33 @@ extern NSDictionary *MavericksCoreUIDiagnostics(void);
 }
 @end
 static IMP originalFloorLayout;
+static IMP originalIndicatorDisplay;
 static char shelfKey;
 static CGImageRef originalDockGlass(void) {
     static CGImageRef image;static dispatch_once_t once;
     dispatch_once(&once,^{CGDataProviderRef data=CGDataProviderCreateWithFilename("/Library/Application Support/MavericksAppearance/Art/mavericks-glass@2x.png");if(data){image=CGImageCreateWithPNGDataProvider(data,NULL,YES,kCGRenderingIntentDefault);CGDataProviderRelease(data);}});
     return image;
+}
+static CGImageRef originalDockIndicator(void) {
+    static CGImageRef image;static dispatch_once_t once;
+    dispatch_once(&once,^{CGDataProviderRef data=CGDataProviderCreateWithFilename("/System/Library/CoreServices/Dock.app/Contents/Resources/indicator_small@2x.png");if(data){image=CGImageCreateWithPNGDataProvider(data,NULL,YES,kCGRenderingIntentDefault);CGDataProviderRelease(data);}});
+    return image;
+}
+static void displayClassicIndicator(CALayer *layer,SEL cmd) {
+    CGImageRef image=originalDockIndicator();
+    if(image&&layer.bounds.size.width>layer.bounds.size.height*1.5){layer.contents=(id)image;layer.contentsGravity=kCAGravityResize;return;}
+    if(originalIndicatorDisplay)((void(*)(id,SEL))originalIndicatorDisplay)(layer,cmd);
+}
+static void restyleDockIndicators(CALayer *layer,int depth) {
+    if(!layer||depth>5)return;
+    if([NSStringFromClass(layer.class)isEqual:@"DOCKIndicatorLayer"]&&originalDockIndicator()){
+        CGRect frame=layer.frame;CGFloat center=CGRectGetMidX(frame);
+        layer.backgroundColor=CGColorGetConstantColor(kCGColorClear);layer.cornerRadius=0;layer.opaque=NO;layer.mask=nil;layer.filters=nil;layer.compositingFilter=nil;
+        layer.zPosition=1000;
+        layer.contentsScale=2;layer.needsDisplayOnBoundsChange=YES;
+        layer.frame=CGRectMake(center-14,0,28,12);[layer setNeedsDisplay];
+    }
+    for(CALayer *child in layer.sublayers)restyleDockIndicators(child,depth+1);
 }
 static void collectDockIcons(CALayer *layer,CALayer *floor,BOOL tile,BOOL excluded,int depth,NSMutableArray *images) {
     if(!layer||layer==floor||depth>12||layer.hidden||layer.opacity<.01)return;
@@ -80,21 +103,26 @@ static void classicFloorLayout(CALayer *floor,SEL cmd) {
     floor.backgroundColor=CGColorGetConstantColor(kCGColorClear);floor.borderWidth=0;floor.masksToBounds=NO;
     [CATransaction begin];[CATransaction setDisableActions:YES];shelf.frame=floor.bounds;
     CGImageRef glass=originalDockGlass();
-    if(glass){shelf.contents=(id)glass;shelf.contentsScale=2;shelf.contentsGravity=kCAGravityResize;shelf.contentsCenter=CGRectMake(.5,.5,0,0);shelf.shadowOpacity=0;}
+    if(glass){CGRect frame=floor.bounds;frame.size.height=MIN(frame.size.height,43);shelf.frame=frame;shelf.contents=(id)glass;shelf.contentsScale=2;shelf.contentsGravity=kCAGravityResize;shelf.contentsCenter=CGRectMake(.5,.5,0,0);shelf.shadowOpacity=0;}
     else [shelf setNeedsDisplay];
-    updateDockReflections(floor,shelf);[CATransaction commit];
+    updateDockReflections(floor,shelf);CALayer *root=floor.superlayer;if(root.superlayer)root=root.superlayer;restyleDockIndicators(root,0);[CATransaction commit];
 }
 static NSDictionary *layerTree(CALayer *layer,int depth) {
     if(!layer || depth>7)return @{};NSMutableArray *children=[NSMutableArray array];
     for(CALayer *child in layer.sublayers)[children addObject:layerTree(child,depth+1)];
-    return @{@"class":NSStringFromClass(layer.class),@"name":layer.name?:@"",@"frame":NSStringFromRect(NSRectFromCGRect(layer.frame)),@"children":children};
+    return @{@"class":NSStringFromClass(layer.class),@"name":layer.name?:@"",@"frame":NSStringFromRect(NSRectFromCGRect(layer.frame)),@"hidden":@(layer.hidden),@"children":children};
 }
 static NSDictionary *viewTree(NSView *view,int depth) {
     if(!view || depth>9)return @{};NSMutableArray *children=[NSMutableArray array];
     for(NSView *child in view.subviews)[children addObject:viewTree(child,depth+1)];
-    NSMutableDictionary *row=[NSMutableDictionary dictionaryWithDictionary:@{@"class":NSStringFromClass(view.class),@"frame":NSStringFromRect(view.frame),@"children":children}];
+    NSMutableDictionary *row=[NSMutableDictionary dictionaryWithDictionary:@{@"class":NSStringFromClass(view.class),@"frame":NSStringFromRect(view.frame),@"hidden":@(view.hidden),@"children":children}];
     if(view.layer)row[@"layer"]=layerTree(view.layer,0);
     if([view isKindOfClass:[NSVisualEffectView class]])row[@"material"]=@([(NSVisualEffectView *)view material]);
+    if([view isKindOfClass:[NSTableView class]]) {
+        NSTableView *table=(NSTableView *)view;NSMutableArray *available=[NSMutableArray array];
+        [table enumerateAvailableRowViewsUsingBlock:^(NSTableRowView *item,NSInteger index){NSMutableDictionary *r=[NSMutableDictionary dictionaryWithDictionary:@{@"index":@(index),@"class":NSStringFromClass(item.class),@"selected":@(item.isSelected)}];if(item.isSelected)r[@"view"]=viewTree(item,0);[available addObject:r];}];
+        row[@"table"]=@{@"selection":table.selectedRowIndexes.description,@"rows":available,@"highlight":@(table.selectionHighlightStyle)};
+    }
     return row;
 }
 static void restyleFinderView(NSView *view,BOOL sidebar) {
@@ -129,7 +157,7 @@ static void reportDesktop(void) {
             id layer=[context valueForKey:@"layer"];if([layer isKindOfClass:[CALayer class]])[contexts addObject:layerTree(layer,0)];
         } @catch(id exception){}
     }
-    NSData *data=[NSJSONSerialization dataWithJSONObject:@{@"coreUI":MavericksCoreUIDiagnostics(),@"appearanceDiagnostics":MavericksAppearanceDiagnostics(),@"contexts":contexts,@"classes":classes,@"windows":windows} options:0 error:NULL];
+    NSData *data=[NSJSONSerialization dataWithJSONObject:@{@"catalogImages":MavericksCatalogDiagnostics(),@"coreUI":MavericksCoreUIDiagnostics(),@"appearanceDiagnostics":MavericksAppearanceDiagnostics(),@"contexts":contexts,@"classes":classes,@"windows":windows} options:0 error:NULL];
     [data writeToFile:[@"/tmp/MavericksAppearance-" stringByAppendingFormat:@"%@.json",[NSProcessInfo processInfo].processName] atomically:YES];
 }
 __attribute__((constructor)) static void initializeDesktop(void) {
@@ -141,6 +169,8 @@ __attribute__((constructor)) static void initializeDesktop(void) {
         [[NSNotificationCenter defaultCenter] addObserver:controller selector:@selector(update:) name:NSWindowDidUpdateNotification object:nil];
     }
     if([name isEqual:@"Dock"]) {
+        Class indicator=NSClassFromString(@"DOCKIndicatorLayer");SEL draw=@selector(display);
+        if(indicator){Method method=class_getInstanceMethod(indicator,draw);originalIndicatorDisplay=method_getImplementation(method);class_addMethod(indicator,draw,(IMP)displayClassicIndicator,method_getTypeEncoding(method));method_setImplementation(class_getInstanceMethod(indicator,draw),(IMP)displayClassicIndicator);}
         Class floor=NSClassFromString(@"Dock.FloorLayer")?:NSClassFromString(@"DOCKFloorLayer");SEL selector=@selector(layoutSublayers);
         if(floor) {
             Method method=class_getInstanceMethod(floor,selector);originalFloorLayout=method_getImplementation(method);
@@ -149,4 +179,6 @@ __attribute__((constructor)) static void initializeDesktop(void) {
         }
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),dispatch_get_main_queue(),^{reportDesktop();});
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,20*NSEC_PER_SEC),dispatch_get_main_queue(),^{reportDesktop();});
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,45*NSEC_PER_SEC),dispatch_get_main_queue(),^{reportDesktop();});
 }

@@ -3,7 +3,7 @@ import hashlib,json,os,plistlib,shutil,subprocess,sys,tarfile,tempfile,time
 if os.getuid()!=0 or not os.uname()[2].startswith('18.'):raise RuntimeError('Mojave experiment required')
 archive,manifest_path=sys.argv[1:];manifest=json.load(open(manifest_path))
 base='/Library/Application Support/MavericksAppearance';work=tempfile.mkdtemp(prefix='InstallerAssets-',dir=base)
-backup=work+'/Backup';os.mkdir(backup,0700);files={};changed=[];unmatched=[];saved=set()
+backup=work+'/Backup';os.mkdir(backup,0700);files={};changed=[];unmatched=[];saved=set();identities={}
 with tarfile.open(archive)as tar:
  for member in tar:
   if not member.isfile() or not member.name.startswith('files/') or not member.name[6:].isdigit():raise RuntimeError('Unexpected installer asset archive member')
@@ -11,6 +11,12 @@ with tarfile.open(archive)as tar:
 def install(row,dst,semantic=False):
  if not dst.startswith(('/Applications/','/System/Library/','/Library/Desktop Pictures/')) or '..' in dst.split('/') or os.path.islink(dst):raise RuntimeError('Unexpected asset destination')
  if not dst.lower().endswith(('.icns','.png','.tiff','.tif','.jpg','.jpeg','.gif','.pdf','.clr')):raise RuntimeError('Only image resources may be installed')
+ if row.get('identifier'):
+  contents=row['bundleContents']
+  if not dst.startswith(contents+'/Resources/'):raise RuntimeError('Mapped resource leaves its bundle')
+  if contents not in identities:
+   info=plistlib.readPlistFromString(subprocess.check_output(['/usr/bin/plutil','-convert','xml1','-o','-',contents+'/Info.plist']));identities[contents]=info.get('CFBundleIdentifier')
+  if identities[contents]!=row['identifier']:raise RuntimeError('Mapped target bundle identity changed')
  src=work+'/'+row['payload']
  if hashlib.sha256(open(src,'rb').read()).hexdigest()!=row['sha256']:raise RuntimeError('Source hash mismatch')
  if not os.path.isdir(os.path.dirname(dst)):unmatched.append(dst);return
@@ -38,5 +44,15 @@ for icon in manifest['declaredIcons']:
   if not os.path.splitext(name)[1]:name+='.icns'
   install(files[icon['source']],icon['bundleContents']+'/Resources/'+name,True)
  except (ValueError,subprocess.CalledProcessError):continue
-json.dump({'source':manifest['source'],'changed':changed,'unmatched':unmatched},open(work+'/report.json','w'),indent=2)
+semantic_icons=[]
+for icon in manifest['declaredIcons']:
+ path=icon['bundleContents']+'/Info.plist'
+ if not os.path.isfile(path):continue
+ info=plistlib.readPlistFromString(subprocess.check_output(['/usr/bin/plutil','-convert','xml1','-o','-',path]))
+ name=info.get('CFBundleIconFile','')
+ if info.get('CFBundleIdentifier')!=icon['identifier'] or not name or '/'in name:continue
+ if not os.path.splitext(name)[1]:name+='.icns'
+ target=icon['bundleContents']+'/Resources/'+name
+ if os.path.isfile(target):semantic_icons.append(target)
+json.dump({'source':manifest['source'],'semanticIcons':semantic_icons,'changed':changed,'unmatched':unmatched},open(work+'/report.json','w'),indent=2)
 print(json.dumps({'changed':len(changed),'semanticIcons':sum(int(r['semanticIcon'])for r in changed),'unmatched':len(unmatched),'backup':work}))

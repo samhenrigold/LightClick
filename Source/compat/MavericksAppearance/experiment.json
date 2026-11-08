@@ -3,25 +3,40 @@
   "reference": "Mavericks 10.9.5 and its original installer",
   "rendering": {
     "engine": "Namespaced original CoreUI with 82 private Objective-C class names",
-    "entryPoints": ["CUIDraw", "NSAppearance._createLayerContents:contentsCenter:"],
+    "entryPoints": [
+      "CUIDraw",
+      "NSAppearance._createLayerContents:contentsCenter:"
+    ],
     "fallback": "Mojave rendering for unsupported widgets; failed legacy draws are discarded",
-    "images": "Public and private NSImage factories; verified original loose resources take precedence over newer asset catalogs",
+    "images": "Public and private NSImage factories plus native CUICatalog/CUINamedImage bridging; compatible original pixels keep native layout and event metadata",
     "fonts": "Original Lucida Grande UI roles, archived font decoding, CoreText and system font alias",
-    "desktop": "Original Dock glass artwork with live icon reflections; native Dock tiles remain in charge of interaction",
-    "controls": "Original button, progress, segment, slider, scrollbar and source-list artwork"
+    "desktop": "Original Dock glass artwork, original illuminated running indicators and live icon reflections; native Dock tiles retain interaction",
+    "controls": "Original button, progress, segment, slider, scrollbar and source-list artwork",
+    "materials": "Shared non-vibrant surfaces for NSVisualEffectView roles, including original selection artwork; approximate colors for newer roles require visual qualification"
   },
   "resources": {
     "committed": "Tools and compatibility code only",
     "localOnly": "Apple frameworks, fonts, bitmaps, original Dock images and installer payloads stay in Build",
     "backup": "Per-file journals and original bytes inside each disposable guest",
-    "applications": "Bundle identifiers and declared icon names map compatible original icons across renamed resources"
+    "applications": "Full bundle-identity inventory maps moved and renamed bundles; declared icons and matching resource paths use only exact unique identifiers",
+    "catalogInstallation": "Transactional replacement with root ownership and console-user readability checks"
   },
   "validation": {
     "originalRendererPixelMatches": 8,
-    "primitiveFamilies": ["push button", "checkbox", "tab", "scrollbar", "window frame", "menu bar", "segmented button", "textured segmented button"],
+    "primitiveFamilies": [
+      "push button",
+      "checkbox",
+      "tab",
+      "scrollbar",
+      "window frame",
+      "menu bar",
+      "segmented button",
+      "textured segmented button"
+    ],
     "scope": "Equal raw RGBA hashes for the same drawing parameters on Mavericks and Mojave; this does not establish whole-desktop pixel identity"
   },
   "remaining": [
+    "Visual qualification of all material roles and controls across application states",
     "Full menu-bar material and geometry parity",
     "Finder-specific metrics and source-list focus states",
     "Dock background-window reflections, bounce synchronization and side orientations",
