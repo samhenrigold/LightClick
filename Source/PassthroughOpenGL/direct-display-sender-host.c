@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include "display-submit-trace.h"
 #ifdef VIM_DISPLAY_JOURNAL
 #include "direct-display-journal-host.c"
 #endif
@@ -223,8 +224,16 @@ static void DGDisplaySenderStop(const void *owner) {
     pthread_mutex_unlock(&dg_display_sender_lock);
 }
 static GLenum DGDisplaySubmitSealed(const void *owner, struct DGSurfaceSnapshot *v, uint64_t *ticket) {
-    if (!owner || !v || !v->completion || !v->completion_queue || !ticket || v->width < 320 || v->height < 200)
+    int trace = VIMDisplaySubmitTraceEnabled();
+    uint64_t at = trace ? mach_absolute_time() : 0;
+    if (!owner || !v || !v->completion || !v->completion_queue || !ticket || v->width < 320 || v->height < 200) {
+        if (trace)
+            VIMDisplaySubmitTrace(GL_INVALID_VALUE, -1, 0, 0, 0, at);
         return GL_INVALID_VALUE;
+    }
+    int occupied = -1, same_owner = 0, stopping = 0, exhausted = 0;
+    uint64_t epoch = trace ? v->epoch : 0;
+    uint64_t assigned_ticket = 0;
     pthread_mutex_lock(&dg_display_sender_lock);
     if (!dg_display_sender)
         dg_display_sender = DGDisplaySenderCreate(owner);
@@ -232,6 +241,14 @@ static GLenum DGDisplaySubmitSealed(const void *owner, struct DGSurfaceSnapshot 
     GLenum error = GL_INVALID_OPERATION;
     if (s && s->owner == owner) {
         pthread_mutex_lock(&s->lock);
+        if (trace) {
+            same_owner = 1;
+            stopping = s->stopping;
+            exhausted = s->next_ticket == UINT64_MAX;
+            occupied = 0;
+            for (unsigned i = 0; i < 3; ++i)
+                occupied += s->slots[i].version != NULL;
+        }
         for (unsigned i = 0; i < 3 && !s->stopping; ++i)
             if (!s->slots[i].version && s->next_ticket != UINT64_MAX) {
                 struct DGDisplaySubmission *job = &s->slots[i];
@@ -241,6 +258,8 @@ static GLenum DGDisplaySubmitSealed(const void *owner, struct DGSurfaceSnapshot 
                     job->version = v;
                     job->ticket = s->next_ticket++;
                     *ticket = job->ticket;
+                    if (trace)
+                        assigned_ticket = job->ticket;
                     error = GL_NO_ERROR;
                 }
                 if (error && job->reply) {
@@ -254,6 +273,9 @@ static GLenum DGDisplaySubmitSealed(const void *owner, struct DGSurfaceSnapshot 
             DGDisplaySenderWake(s);
     }
     pthread_mutex_unlock(&dg_display_sender_lock);
+    if (trace)
+        VIMDisplaySubmitTrace(error, occupied, VIMDisplaySubmitFullRefusal(error, occupied, same_owner, stopping, exhausted),
+                              epoch, assigned_ticket, at);
     return error;
 }
 static GLenum DGDisplaySubmitVersion(struct DGHostContext *c, struct DGSurfaceSnapshot *v, uint64_t *ticket) {
