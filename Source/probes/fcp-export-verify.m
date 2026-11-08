@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CVImageBuffer.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
 #import <CommonCrypto/CommonDigest.h>
@@ -22,6 +23,46 @@ static void require(BOOL value,NSString *reason){if(!value)@throw reason;if(now(
 static NSString *boundedDescription(id value){NSString *text=[value description]?:@"unspecified";return [text substringToIndex:MIN(text.length,1024)];}
 static NSString *hex(const unsigned char *bytes,size_t count){NSMutableString *s=[NSMutableString string];for(size_t i=0;i<count;i++)[s appendFormat:@"%02x",bytes[i]];return s;}
 static NSString *shaBytes(const void *bytes,size_t count){unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256(bytes,(CC_LONG)count,digest);return hex(digest,sizeof(digest));}
+// Diagnostics only. Never enumerate or serialize the full extension dictionary.
+static NSDictionary *colorScalar(CFTypeRef value){
+    if(!value)return @{@"present":@NO};
+    if(CFGetTypeID(value)==CFStringGetTypeID()){
+        NSString *text=(__bridge NSString *)value;BOOL truncated=text.length>128;
+        return @{@"present":@YES,@"type":@"string",@"value":[text substringToIndex:MIN(text.length,128)],@"truncated":@(truncated)};
+    }
+    if(CFGetTypeID(value)==CFBooleanGetTypeID())return @{@"present":@YES,@"type":@"boolean",@"value":@([(__bridge NSNumber *)value boolValue])};
+    if(CFGetTypeID(value)==CFNumberGetTypeID()){
+        double number=[(__bridge NSNumber *)value doubleValue];
+        if(isfinite(number))return @{@"present":@YES,@"type":@"number",@"value":(__bridge NSNumber *)value};
+        return @{@"present":@YES,@"type":@"number",@"nonfinite":@YES};
+    }
+    return @{@"present":@YES,@"unsupported_nonscalar":@YES};
+}
+static NSDictionary *formatColorDiagnostics(CMFormatDescriptionRef format){
+    CFDictionaryRef extensions=CMFormatDescriptionGetExtensions(format);
+    BOOL available=extensions && CFGetTypeID(extensions)==CFDictionaryGetTypeID();
+    // The first three CM color names map to these actual old CoreVideo keys;
+    // their newer standalone CM exports do not exist on Mavericks.
+    const CFStringRef keys[]={kCVImageBufferColorPrimariesKey,kCVImageBufferTransferFunctionKey,kCVImageBufferYCbCrMatrixKey,kCMFormatDescriptionExtension_FullRangeVideo};
+    NSArray *names=@[@"primaries",@"transfer_function",@"ycbcr_matrix",@"full_range_video"];
+    NSMutableDictionary *result=[NSMutableDictionary dictionaryWithObject:@(available) forKey:@"extensions_available"];
+    for(unsigned i=0;i<4;i++)result[names[i]]=colorScalar(available?CFDictionaryGetValue(extensions,keys[i]):NULL);
+    return result;
+}
+static NSDictionary *imageColorDiagnostics(CGImageRef image){
+    CGColorSpaceRef space=CGImageGetColorSpace(image);if(!space)return @{@"available":@NO};
+    NSMutableDictionary *result=[NSMutableDictionary dictionaryWithObjectsAndKeys:@YES,@"available",@(CGColorSpaceGetModel(space)),@"model",nil];
+    CFStringRef name=CGColorSpaceCopyName(space);result[@"name"]=colorScalar(name);if(name)CFRelease(name);
+    // Public10.5 API with an actual Mavericks export. Hash only; never export ICC bytes.
+    CFDataRef profile=CGColorSpaceCopyICCProfile(space);result[@"icc_available"]=@(profile!=NULL);
+    if(profile){
+        CFIndex bytes=CFDataGetLength(profile);result[@"icc_bytes"]=@(bytes);
+        if(bytes>0 && bytes<=1024*1024){result[@"icc_sha256"]=shaBytes(CFDataGetBytePtr(profile),(size_t)bytes);result[@"icc_hashed"]=@YES;}
+        else{result[@"icc_hashed"]=@NO;result[@"icc_hash_skipped"]=@"empty or over1MiB diagnostic budget";}
+        CFRelease(profile);
+    }
+    return result;
+}
 static BOOL validMediaFile(mode_t mode,uid_t owner,uid_t current,uint64_t links,uint64_t bytes,BOOL source){
     return S_ISREG(mode) && current>0 && owner==current && links==1 && (source ? bytes==58747744ULL : bytes>0 && bytes<=512ULL*1024*1024);
 }
@@ -84,7 +125,7 @@ static NSDictionary *describeAsset(AVURLAsset *asset,AVAssetTrack **videoOut){
     require(video.count==1,@"expected exactlyone video track");require(audio.count<=8,@"audio track metadata budget exceeded");AVAssetTrack *track=video[0];loadKeys(track,@[@"formatDescriptions",@"naturalSize",@"preferredTransform",@"nominalFrameRate",@"timeRange"]);
     require(track.formatDescriptions.count==1,@"expected exactlyone video format description");CMFormatDescriptionRef format=(CMFormatDescriptionRef)track.formatDescriptions[0];FourCharCode codec=CMFormatDescriptionGetMediaSubType(format);CMVideoDimensions dimensions=CMVideoFormatDescriptionGetDimensions(format);CGSize presentation=CMVideoFormatDescriptionGetPresentationDimensions(format,true,true);
     NSMutableArray *audioRows=[NSMutableArray array];for(AVAssetTrack *a in audio){loadKeys(a,@[@"formatDescriptions",@"timeRange"]);require(a.formatDescriptions.count<=8,@"audio format description budget");NSMutableArray *codecs=[NSMutableArray array];for(id desc in a.formatDescriptions)[codecs addObject:fourCC(CMFormatDescriptionGetMediaSubType((CMFormatDescriptionRef)desc))];[audioRows addObject:@{@"track_id":@(a.trackID),@"codecs":codecs,@"start":timeJSON(a.timeRange.start),@"duration":timeJSON(a.timeRange.duration)}];}
-    NSDictionary *result=@{@"codec":fourCC(codec),@"width":@(dimensions.width),@"height":@(dimensions.height),@"presentation_width":@(presentation.width),@"presentation_height":@(presentation.height),@"presentation_uses_pixel_aspect_ratio":@YES,@"presentation_uses_clean_aperture":@YES,@"natural_width":@(track.naturalSize.width),@"natural_height":@(track.naturalSize.height),@"nominal_frame_rate":@(track.nominalFrameRate),@"asset_duration":timeJSON(asset.duration),@"track_start":timeJSON(track.timeRange.start),@"track_duration":timeJSON(track.timeRange.duration),@"transform_identity":@(CGAffineTransformIsIdentity(track.preferredTransform)),@"audio_tracks":audioRows};
+    NSDictionary *result=@{@"codec":fourCC(codec),@"color_extensions":formatColorDiagnostics(format),@"width":@(dimensions.width),@"height":@(dimensions.height),@"presentation_width":@(presentation.width),@"presentation_height":@(presentation.height),@"presentation_uses_pixel_aspect_ratio":@YES,@"presentation_uses_clean_aperture":@YES,@"natural_width":@(track.naturalSize.width),@"natural_height":@(track.naturalSize.height),@"nominal_frame_rate":@(track.nominalFrameRate),@"asset_duration":timeJSON(asset.duration),@"track_start":timeJSON(track.timeRange.start),@"track_duration":timeJSON(track.timeRange.duration),@"transform_identity":@(CGAffineTransformIsIdentity(track.preferredTransform)),@"audio_tracks":audioRows};
     *videoOut=track;return result;
 }
 static NSData *pngData(CGImageRef image){CFMutableDataRef data=CFDataCreateMutable(NULL,0);CGImageDestinationRef destination=data?CGImageDestinationCreateWithData(data,CFSTR("public.png"),1,NULL):NULL;if(!destination){if(data)CFRelease(data);return nil;}CGImageDestinationAddImage(destination,image,NULL);BOOL done=CGImageDestinationFinalize(destination);CFRelease(destination);NSData *result=done && CFDataGetLength(data)<=262144?[NSData dataWithData:(__bridge NSData *)data]:nil;CFRelease(data);return result;}
@@ -95,7 +136,7 @@ static NSDictionary *thumbnail(AVAssetImageGenerator *generator,int frame,unsign
         require(frameTime(actual,frame),@"thumbnail actual timestamp is not requested frame");require(CGImageGetWidth(image)==320 && CGImageGetHeight(image)==180,@"thumbnail dimensions not320x180");
         space=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);context=space?CGBitmapContextCreate(pixels,320,180,8,320*4,space,kCGImageAlphaPremultipliedLast|kCGBitmapByteOrder32Big):NULL;require(context!=NULL,@"sRGB thumbnail bitmap unavailable");
         CGContextSetBlendMode(context,kCGBlendModeCopy);CGContextSetInterpolationQuality(context,kCGInterpolationHigh);CGContextDrawImage(context,CGRectMake(0,0,320,180),image);normalized=CGBitmapContextCreateImage(context);require(normalized!=NULL,@"normalized thumbnail unavailable");*png=pngData(normalized);
-        result=@{@"requested_frame":@(frame),@"requested_time":timeJSON(CMTimeMake(frame,30)),@"actual_time":timeJSON(actual),@"width":@320,@"height":@180,@"pixel_format":@"sRGB RGBA8 premultiplied; matched CoreGraphics bitmap row order",@"aperture_mode":AVAssetImageGeneratorApertureModeCleanAperture,@"rgba_sha256":shaBytes(pixels,pixelBytes),@"png_encoded":@(*png!=nil)};
+        result=@{@"requested_frame":@(frame),@"requested_time":timeJSON(CMTimeMake(frame,30)),@"actual_time":timeJSON(actual),@"width":@320,@"height":@180,@"decoded_image_color_space":imageColorDiagnostics(image),@"pixel_format":@"sRGB RGBA8 premultiplied; matched CoreGraphics bitmap row order",@"aperture_mode":AVAssetImageGeneratorApertureModeCleanAperture,@"rgba_sha256":shaBytes(pixels,pixelBytes),@"png_encoded":@(*png!=nil)};
     }@finally{if(normalized)CGImageRelease(normalized);if(context)CGContextRelease(context);if(space)CGColorSpaceRelease(space);CGImageRelease(image);}return result;
 }
 static NSDictionary *difference(const unsigned char *a,const unsigned char *b){uint64_t absolute[3]={0},squared[3]={0};unsigned maximum[3]={0};BOOL alphaExact=YES;for(size_t i=0;i<320*180;i++){for(unsigned c=0;c<3;c++){unsigned d=(unsigned)abs((int)a[i*4+c]-(int)b[i*4+c]);absolute[c]+=d;squared[c]+=(uint64_t)d*d;if(d>maximum[c])maximum[c]=d;}alphaExact&=a[i*4+3]==b[i*4+3];}NSMutableArray *mae=[NSMutableArray array],*rmse=[NSMutableArray array],*peak=[NSMutableArray array];for(unsigned c=0;c<3;c++){[mae addObject:@((double)absolute[c]/(320*180))];[rmse addObject:@(sqrt((double)squared[c]/(320*180)))];[peak addObject:@(maximum[c])];}return @{@"rgb_mae":mae,@"rgb_rmse":rmse,@"rgb_max_abs":peak,@"alpha_exact":@(alphaExact),@"fidelity_qualified":@NO,@"qualification":@"Lossy H264 export requires review against generated source; no automatic pixel-error acceptance threshold."};}

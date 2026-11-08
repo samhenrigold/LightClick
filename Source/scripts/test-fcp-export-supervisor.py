@@ -22,7 +22,7 @@ import fcp_export as module
 
 FIXTURE='/private/var/tmp/LightClickFCPFixture.ABC123'
 HELPER='/private/var/tmp/LightClickFCP.ABC123/export-verify'
-PIN='798516cf2ae54e80bceb0dc9e6fa1f7121fd698df248b7a1d977504d4db27739'
+PIN='125b717c73e6d737eb5dfa8eb0dc34dcc521cfeffa7343c3b621d69ca785559d'
 PAYLOAD=b'mocked immutable verifier bytes; never executable'
 
 class Hashlib:

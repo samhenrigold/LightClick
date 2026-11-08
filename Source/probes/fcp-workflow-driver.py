@@ -92,7 +92,7 @@ def run_workflow():
             if not verifier.is_file() or verifier.is_symlink() or not 0<verifier.stat().st_size<=2097152:raise ValueError('bounded existing export verifier required')
             verifier_data=verifier.read_bytes()
             verifier_sha=hashlib.sha256(verifier_data).hexdigest()
-            if verifier_data[:8]!=bytes.fromhex('cffaedfe07000001') or verifier_sha!='798516cf2ae54e80bceb0dc9e6fa1f7121fd698df248b7a1d977504d4db27739':raise ValueError('pinned x86_64 export verifier changed')
+            if verifier_data[:8]!=bytes.fromhex('cffaedfe07000001') or verifier_sha!='125b717c73e6d737eb5dfa8eb0dc34dcc521cfeffa7343c3b621d69ca785559d':raise ValueError('pinned x86_64 export verifier changed')
             verifier_receipt=tracked_stage(verifier)
             if not isinstance(verifier_receipt,str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin',verifier_receipt):raise ValueError('invalid export verifier staging receipt')
             extra.update(workflow_export_verifier=verifier_receipt,workflow_export_verifier_sha256=verifier_sha)

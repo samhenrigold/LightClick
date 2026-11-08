@@ -141,7 +141,7 @@ def run_private_export_verifier(spec, app, workflow_directory):
         finally:
             os.close(fd)
         helper = spec.get('workflow_export_verifier', '')
-        pinned = '798516cf2ae54e80bceb0dc9e6fa1f7121fd698df248b7a1d977504d4db27739'
+        pinned = '125b717c73e6d737eb5dfa8eb0dc34dcc521cfeffa7343c3b621d69ca785559d'
         if (spec.get('workflow_export_verifier_sha256') != pinned
                 or not re.match(r'\A/private/var/tmp/LightClickFCP\.[A-Za-z0-9_-]{6,16}/export-verify\Z', helper)):
             raise ValueError('immutable verifier receipt/path invalid')
