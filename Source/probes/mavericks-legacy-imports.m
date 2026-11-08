@@ -1,0 +1,4 @@
+#import <Foundation/Foundation.h>
+#include <dlfcn.h>
+#include "legacy-imports.h"
+int main(void){@autoreleasepool{NSArray *libraries=[NSJSONSerialization JSONObjectWithData:[librariesJSON dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];NSMutableArray *unloaded=[NSMutableArray array];for(NSString *path in libraries)if(!dlopen(path.UTF8String,RTLD_LAZY|RTLD_GLOBAL))[unloaded addObject:path];NSArray *symbols=[NSJSONSerialization JSONObjectWithData:[symbolsJSON dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];NSMutableArray *missing=[NSMutableArray array];for(NSString *name in symbols)if(!dlsym(RTLD_DEFAULT,name.UTF8String))[missing addObject:name];puts([[[[NSString alloc]initWithData:[NSJSONSerialization dataWithJSONObject:@{@"unloaded":unloaded,@"missing":missing} options:0 error:NULL] encoding:NSUTF8StringEncoding]autorelease]UTF8String]);}}
