@@ -348,8 +348,15 @@ class Checks(unittest.TestCase):
                     guest=dict(owned_app_pid=321,cleanup_errors=[],workflow=dict(directory=directory,project_open_attempted=True,project_open_action=opened),
                         retained_owned_app=dict(retained=True,mode=workflow_mode,pid=321,executable='/Applications/Final Cut Pro.app/Contents/MacOS/Final Cut Pro',fixture_directory=directory,private_library=directory+'/private.fcpbundle',process_group=321,max_host_observation_seconds=90,app_stdio_available=False))
                     opened_result.append(opened['result'])
-                    self.assertTrue(valid_retention_receipt(guest,configured))
-                    (output/'result.json').write_text(json.dumps(dict(result='INCONCLUSIVE',guest=guest)))
+                    # stage() enriches only preflight's local spec, never the CASES table.
+                    self.assertNotIn('ax_helper_sha256',configured)
+                    completed_spec=dict(configured,ax_helper_sha256='a'*64,ax_helper='/private/var/tmp/VirtualIntelMac.Def456/Transfer.bin')
+                    guest['retained_owned_app']['console_uid']=501
+                    guest['retained_owned_app']['readonly_observer']=dict(path='/private/var/tmp/LightClickFCP.ABC123/ax-observe',sha256='a'*64,bytes=12345,uid=501,private_home='/private/var/tmp/LightClickFCP.ABC123/home')
+                    self.assertFalse(valid_retention_receipt(guest,configured))
+                    self.assertTrue(valid_retention_receipt(guest,completed_spec))
+                    self.assertFalse(valid_retention_receipt(guest,dict(completed_spec,ax_helper_sha256='b'*64)))
+                    (output/'result.json').write_text(json.dumps(dict(result='INCONCLUSIVE',spec=completed_spec,guest=guest)))
                 base['experiment']=experiment
                 def request(command,timeout):
                     calls.append(command)

@@ -140,7 +140,7 @@ def run_workflow():
         if retain_app:
             guest=preflight.get('guest',{})
             evidence['retained_owned_app']=guest.get('retained_owned_app',{})
-            if valid_retention_receipt(guest,ns['CASES'][case]):
+            if valid_retention_receipt(guest,preflight['spec']):
                 retained_for_observation=True
                 evidence['result']='RETAINED_OWNED_APP_FOR_DISPLAY_DIAGNOSTIC'
                 # No further diagnostic commands: the host may use the now-free channel serially.
