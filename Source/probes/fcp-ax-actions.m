@@ -626,9 +626,10 @@ static AXUIElementRef settingsPopup(AXUIElementRef pane,pid_t pid,NSString *valu
             AXUIElementRef element=(AXUIElementRef)child;
             if(ownedElement(element,pid) && equals(element,kAXRoleAttribute,@"AXPopUpButton") && equals(element,kAXValueAttribute,value) && enabled(element,YES)){matches++;result=element;}
         }
+        // AX children are borrowed from this array, not retained by the group.
+        if(matches==1 && result && room())CFRetain(result);else result=NULL;
         if(children)CFRelease(children);
     }
-    if(matches==1 && result && room())CFRetain(result);else result=NULL;
     if(group)CFRelease(group);return result;
 }
 static BOOL paneStillOwned(AXUIElementRef pane,pid_t pid,NSString *directory){

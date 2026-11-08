@@ -53,3 +53,76 @@ if fixture.exists():
     for value in ('Source - Apple ProRes 422','QuickTime Player (default)'):assert sum(c.get('AXValue')==value for c in popups)==1
 subprocess.run(['xcrun','clang','-std=c11','-Wall','-Wextra','-Werror','-fsyntax-only','-x','c','-'],input='\n'.join(checks).encode(),timeout=20,check=True)
 print('PASS 162 actual footer predicates, perf53 controls, two exact conditional menu selections, one Next/no Save boundary; no helper execution')
+
+# Executable RAM-only ownership regression. Actual settingsPopup body is translated
+# only from NSString/literal spelling to C strings; control flow stays unchanged.
+import argparse
+import resource
+parser=argparse.ArgumentParser();parser.add_argument('--emit-c',type=Path);parser.add_argument('--check',type=Path);args=parser.parse_args()
+popup=s[s.index('static AXUIElementRef settingsPopup('):s.index('static BOOL paneStillOwned(')]
+retain='        if(matches==1 && result && room())CFRetain(result);else result=NULL;\n'
+assert popup.index(retain)<popup.index('if(children)CFRelease(children)')
+legacy=popup.replace(retain,'').replace('    if(group)CFRelease(group);return result;',retain+'    if(group)CFRelease(group);return result;')
+def native(body,name):
+    body=body.replace('settingsPopup(',name+'(').replace('NSString *value','const char *value')
+    return re.sub(r'@"([^"\n]*)"',lambda m:'"'+m.group(1)+'"',body)
+if args.emit_c:
+    prefix=r'''
+#include <assert.h>
+#include <limits.h>
+#include <stdio.h>
+#include <string.h>
+typedef int BOOL,pid_t;
+typedef unsigned NSUInteger;
+typedef long CFIndex;
+#define YES 1
+#define nil NULL
+#define kAXChildrenAttribute 1
+#define kAXRoleAttribute 2
+#define kAXValueAttribute 3
+struct Object {int kind,refs,count,owner,enabled;const char *role,*value;struct Object *children[2];};
+typedef struct Object *CFTypeRef;
+typedef struct Object *AXUIElementRef;
+static struct Object group,array,children[2];
+static int room_limit,room_calls;
+static BOOL room(void){return ++room_calls<=room_limit;}
+static void *CFRetain(CFTypeRef object){assert(object && object->refs>0 && "borrowed AX child expired before retain");++object->refs;return object;}
+static void CFRelease(CFTypeRef object){assert(object && object->refs>0);if(--object->refs==0 && object->kind==2)for(int i=0;i<object->count;++i)CFRelease(object->children[i]);}
+static int CFGetTypeID(CFTypeRef object){assert(object && object->refs>0);return object->kind;}
+static int CFArrayGetTypeID(void){return 2;}
+static int AXUIElementGetTypeID(void){return 1;}
+static CFIndex CFArrayGetCount(CFTypeRef object){assert(object->refs>0);return object->count;}
+static CFTypeRef CFArrayGetValueAtIndex(CFTypeRef object,CFIndex index){assert(object->refs>0 && index<object->count);return object->children[index];}
+static AXUIElementRef uniqueChild(AXUIElementRef pane,const char *role,const char *title,pid_t pid){(void)pane;(void)role;(void)title;(void)pid;return CFRetain(&group);}
+static CFTypeRef attribute(AXUIElementRef object,int key){assert(object==&group && key==kAXChildrenAttribute);return &array;}
+static BOOL ownedElement(AXUIElementRef object,pid_t pid){assert(object->refs>0);return object->owner==pid;}
+static BOOL equals(AXUIElementRef object,int key,const char *text){assert(object->refs>0);return !strcmp(key==kAXRoleAttribute?object->role:object->value,text);}
+static BOOL enabled(AXUIElementRef object,BOOL value){assert(object->refs>0);return object->enabled==value;}
+'''
+    suffix=r'''
+static void reset(int count,int budget){
+ group=(struct Object){.kind=1,.refs=1};array=(struct Object){.kind=2,.refs=1,.count=count};
+ for(int i=0;i<2;++i){children[i]=(struct Object){.kind=1,.refs=1,.owner=7,.enabled=1,.role="AXPopUpButton",.value="Source - Apple ProRes 422"};array.children[i]=children+i;}
+ room_limit=budget;room_calls=0;
+}
+int main(int argc,char **argv){
+ (void)argv;
+ if(argc>1){reset(1,INT_MAX);(void)settingsPopupLegacy(NULL,7,"Source - Apple ProRes 422");return 0;}
+ reset(1,INT_MAX);AXUIElementRef found=settingsPopup(NULL,7,"Source - Apple ProRes 422");assert(found==children && found->refs==1 && array.refs==0 && group.refs==1);CFRelease(found);assert(children[0].refs==0);
+ reset(1,INT_MAX);children[0].value="Other";assert(!settingsPopup(NULL,7,"Source - Apple ProRes 422") && children[0].refs==0 && array.refs==0);
+ reset(2,INT_MAX);assert(!settingsPopup(NULL,7,"Source - Apple ProRes 422") && children[0].refs==0 && children[1].refs==0);
+ reset(1,0);assert(!settingsPopup(NULL,7,"Source - Apple ProRes 422") && children[0].refs==0);
+ reset(1,1);assert(!settingsPopup(NULL,7,"Source - Apple ProRes 422") && children[0].refs==0);
+ reset(1,INT_MAX);children[0].owner=8;assert(!settingsPopup(NULL,7,"Source - Apple ProRes 422") && children[0].refs==0);
+ reset(1,INT_MAX);children[0].enabled=0;assert(!settingsPopup(NULL,7,"Source - Apple ProRes 422") && children[0].refs==0);
+ puts("PASS actual settingsPopup retained ownership: unique/none/duplicates/deadline/PID/enabled");return 0;
+}
+'''
+    args.emit_c.write_text(prefix+native(popup,'settingsPopup')+native(legacy,'settingsPopupLegacy')+suffix)
+if args.check:
+    def no_core():resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+    fixed=subprocess.run([str(args.check)],capture_output=True,text=True,timeout=10,preexec_fn=no_core)
+    assert fixed.returncode==0 and not fixed.stderr,(fixed.returncode,fixed.stderr[:1024])
+    old=subprocess.run([str(args.check),'legacy'],capture_output=True,text=True,timeout=10,preexec_fn=no_core)
+    assert old.returncode!=0 and 'borrowed AX child expired before retain' in old.stderr,(old.returncode,old.stderr[:1024])
+    print(f'PASS ownership witness: reconstructed old ordering fails({old.returncode}); actual corrected body passes(0); cores disabled')
