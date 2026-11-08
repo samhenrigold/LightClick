@@ -22,7 +22,7 @@ import fcp_export as module
 
 FIXTURE='/private/var/tmp/LightClickFCPFixture.ABC123'
 HELPER='/private/var/tmp/LightClickFCP.ABC123/export-verify'
-PIN='4ea324317573d13665904794855f26852aecbb0f86a0c4ec5b08edb9210278ee'
+PIN='798516cf2ae54e80bceb0dc9e6fa1f7121fd698df248b7a1d977504d4db27739'
 PAYLOAD=b'mocked immutable verifier bytes; never executable'
 
 class Hashlib:
@@ -70,16 +70,17 @@ class Checks(unittest.TestCase):
             if case=='collision':(root/'fixture/export-verification.json').write_bytes(b'preserve preexisting')
             raw=json.dumps(good).encode()+b'\n'
             if case=='malformed':raw=b'{bad JSON\n'
+            if case=='dyld-no-stdout':raw=b''
             if case=='stdout-overflow':raw=b'x'*524290
             class Child:
                 def __init__(self,argv,**kwargs):
                     self.code=None;self.pid=888;self.argv=argv;self.polls=0
                     self_outer.assertEqual(argv,[HELPER,FIXTURE]);self_outer.assertTrue(callable(kwargs['preexec_fn']));self_outer.assertIsInstance(kwargs['stdout'],int);self_outer.assertIsInstance(kwargs['stderr'],int)
-                    os.write(kwargs['stdout'],raw);os.write(kwargs['stderr'],b'e'*8193 if case=='stderr-overflow'else b'')
+                    os.write(kwargs['stdout'],raw);os.write(kwargs['stderr'],b'e'*8193 if case=='stderr-overflow'else b'dyld: missing symbol\n' if case=='dyld-no-stdout'else b'')
                     launched.append(self)
                 def poll(self):
                     self.polls+=1
-                    if self.code is None and case not in('timeout','app-exits','wall-rollback','term-ignored','wrong-group','unreaped','mach-fallback'):self.code=7 if case=='nonzero'else 0
+                    if self.code is None and case not in('timeout','app-exits','wall-rollback','term-ignored','wrong-group','unreaped','mach-fallback'):self.code=7 if case=='nonzero'else -5 if case=='dyld-no-stdout'else 0
                     return self.code
             def stop(child):raise AssertionError('existing wall-clock stop must not be used')
             fakeos.getpgid=lambda pid:777 if case=='wrong-group'else pid
@@ -91,7 +92,7 @@ class Checks(unittest.TestCase):
                 clock[0]+=seconds
                 wall[0]-=1000000 if case=='wall-rollback'else -seconds
             self_outer=self
-            ns=dict(json=json,os=fakeos,stat=stat,hashlib=Hashlib,subprocess=types.SimpleNamespace(Popen=Child),time=types.SimpleNamespace(monotonic=lambda:clock[0],time=lambda:wall[0],sleep=sleep),owned=[app],limits=lambda:None,stop=stop,current_executable=lambda pid:'/Applications/Final Cut Pro.app/Contents/MacOS/Final Cut Pro')
+            ns=dict(json=json,os=fakeos,stat=stat,hashlib=Hashlib,subprocess=types.SimpleNamespace(Popen=Child),time=types.SimpleNamespace(monotonic=lambda:clock[0],time=lambda:wall[0],sleep=sleep),owned=[app],limits=lambda:None,stop=stop,current_executable=lambda pid:'/usr/bin/other' if case=='app-exec-changed' and launched else '/Applications/Final Cut Pro.app/Contents/MacOS/Final Cut Pro')
             exec(compile(module.guest_export_source(),'<actual guest supervisor>','exec'),ns)
             if case=='mach-fallback':
                 del ns['time'].monotonic
@@ -110,6 +111,11 @@ class Checks(unittest.TestCase):
             if case=='success':
                 self.assertTrue(result['structure_qualified']);self.assertEqual(result['save_action_status'],-25204);self.assertGreater(result['stdout_receipt']['bytes'],131072);self.assertNotIn('inline_pngs',json.dumps(result));self.assertEqual(files['export-verification.json'],raw)
             else:self.assertFalse(result['structure_qualified'])
+            self.assertEqual(result['app_alive_before'],case!='app-already-exited')
+            self.assertEqual(result['app_alive_after'],case not in('app-already-exited','app-exits','app-exec-changed'))
+            if case=='dyld-no-stdout':
+                self.assertEqual(result['exit_code'],-5);self.assertEqual(result['stdout_receipt']['bytes'],0)
+                self.assertIn('dyld: missing symbol',result['stderr_preview']);self.assertEqual(files['export-verification.json'],b'')
             if case=='collision':self.assertEqual(files['export-verification.json'],b'preserve preexisting')
             if case=='app-already-exited':
                 self.assertEqual(result['app_exit_code_before'],-11);self.assertEqual(result['app_exit_code_after'],-11)
@@ -126,7 +132,7 @@ class Checks(unittest.TestCase):
             return result
 
     def test_supervisor_actual_file_process_boundaries(self):
-        for case in('success','incomplete','string-flag','wrong-mode','wrong-pid','wrong-path','wrong-sha','collision','nonzero','timeout','app-exits','app-already-exited','stderr-overflow','stdout-overflow','malformed','wall-rollback','term-ignored','wrong-group','unreaped','mach-fallback'):
+        for case in('success','incomplete','string-flag','wrong-mode','wrong-pid','wrong-path','wrong-sha','collision','nonzero','dyld-no-stdout','timeout','app-exits','app-already-exited','app-exec-changed','stderr-overflow','stdout-overflow','malformed','wall-rollback','term-ignored','wrong-group','unreaped','mach-fallback'):
             with self.subTest(case=case):self.supervise(case)
 
     @staticmethod

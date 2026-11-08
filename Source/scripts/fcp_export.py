@@ -113,6 +113,7 @@ def run_private_export_verifier(spec, app, workflow_directory):
         actor = spec.get('workflow_export_action', {})
         if app in owned:
             result['app_exit_code_before'] = app.poll()
+            result['app_alive_before'] = result['app_exit_code_before'] is None
         uid = os.getuid()
         if (spec.get('workflow_export_action_mode') != 'export-h264-private-fixture'
                 or spec.get('variant') != '10.1' or os.uname()[0] != 'Darwin'
@@ -140,7 +141,7 @@ def run_private_export_verifier(spec, app, workflow_directory):
         finally:
             os.close(fd)
         helper = spec.get('workflow_export_verifier', '')
-        pinned = '4ea324317573d13665904794855f26852aecbb0f86a0c4ec5b08edb9210278ee'
+        pinned = '798516cf2ae54e80bceb0dc9e6fa1f7121fd698df248b7a1d977504d4db27739'
         if (spec.get('workflow_export_verifier_sha256') != pinned
                 or not re.match(r'\A/private/var/tmp/LightClickFCP\.[A-Za-z0-9_-]{6,16}/export-verify\Z', helper)):
             raise ValueError('immutable verifier receipt/path invalid')
@@ -234,6 +235,8 @@ def run_private_export_verifier(spec, app, workflow_directory):
                 result['cleanup_error'] = repr(error)
         if app in owned:
             result['app_exit_code_after'] = app.poll()
+            if not result['launched']:
+                result['app_alive_after'] = result['app_exit_code_after'] is None
         # Preserve receipts even on parse/child failure, never unlink/truncate output.
         for i, fd in enumerate(fds):
             key = 'stdout_receipt' if i == 0 else 'stderr_receipt'

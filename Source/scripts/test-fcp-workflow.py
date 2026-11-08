@@ -12,6 +12,7 @@ import base64
 import hashlib
 import os
 import zlib
+import textwrap
 from fcp_preflight import GUEST
 from fcp_workflow import OBSERVE, PLACEHOLDER, RETENTION_HELPERS, hold_retained_display_window, compose_guest, complete_hid_open, decode_workflow_report, encode_workflow_report, generated_project_evidence, replace_once, workflow_checked_response, xml_template
 
@@ -23,6 +24,24 @@ def ready_inventory(**values):
 
 
 class Checks(unittest.TestCase):
+    def test_empty_or_invalid_verifier_receipt_preserves_diagnostics_without_fetch(self):
+        source=(Path(__file__).parents[1]/'probes/fcp-workflow-driver.py').read_text()
+        start=source.index("        if export_private:\n            verification=workflow.get('export_verification',{})")
+        block=textwrap.dedent(source[start:source.index('        if retain_app:',start)])
+        for value in (None,{},dict(bytes=0),dict(bytes=-1),dict(bytes=True),dict(bytes='1'),dict(bytes=524290),dict(bytes=1),dict(bytes=524289)):
+            fetched=[];saved=[];verification=dict(stdout_receipt=value,structure_qualified=True,app_alive_after=True,exit_code=-5,stderr_preview='dyld: missing symbol')
+            def fetch(*args):fetched.append(args);return dict(closed_media_revalidated=True)
+            ns=dict(export_private=True,workflow=dict(export_verification=verification,directory='/own/fixture'),evidence={},tracked=object(),preflight=dict(guest=dict(console_uid=501)),output=Path('/own/output'),fetch_private_export_report=fetch,save=lambda:saved.append(True))
+            exec(compile(block,'<actual host verifier receipt gate>','exec'),ns)
+            valid=isinstance(value,dict) and type(value.get('bytes')) is int and 1<=value['bytes']<=524289
+            self.assertEqual(len(fetched),int(valid));self.assertEqual(len(saved),1)
+            self.assertEqual(ns['evidence']['export_verification'],verification)
+            if valid:self.assertNotIn('verifier_report_unavailable',ns['evidence'])
+            else:
+                self.assertEqual(ns['evidence']['result'],'PRIVATE_EXPORT_VERIFICATION_INCONCLUSIVE')
+                self.assertIn('verifier_report_unavailable',ns['evidence'])
+                self.assertNotIn('export_verification_artifacts',ns['evidence'])
+
     def test_lossless_workflow_transport_and_original_error(self):
         report={'result':'INCONCLUSIVE','error':'original helper failure: \u00d7','commands':[{'stdout':'AXWindow '*16000}]*6}
         envelope=encode_workflow_report(report)
