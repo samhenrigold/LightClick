@@ -44,11 +44,25 @@ elif sys.argv[2]=='desktop':
 elif sys.argv[2]=='guest-script':
     local=Path(sys.argv[3]).resolve();remote=stage(local);print(run('/usr/bin/python',[remote],1800 if local.name=='mavericks-system-assets-apply.py' else 300))
 elif sys.argv[2]=='install-library':
-    library=root/'DesktopAppearance.dylib'
-    subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-fno-objc-arc','-Wno-deprecated-declarations','-framework','Cocoa','-framework','CoreText','-framework','QuartzCore','-F'+subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()+'/System/Library/PrivateFrameworks','-framework','CoreUI','-dynamiclib',str(source/'compat/MavericksAppearance/MavericksAppearance.m'),str(source/'compat/MavericksAppearance/MavericksDesktop.m'),str(source/'compat/MavericksAppearance/MavericksWidgets.m'),str(source/'compat/MavericksAppearance/MavericksCoreUI.m'),str(source/'compat/MavericksAppearance/MavericksCatalog.m'),'-o',str(library)],check=True)
-    remote=stage(library);run('/bin/mkdir',['-p','/Library/Application Support/MavericksAppearance'])
-    run('/bin/cp',[remote,'/Library/Application Support/MavericksAppearance/MavericksAppearance.next.dylib'])
-    run('/bin/chmod',['0644','/Library/Application Support/MavericksAppearance/MavericksAppearance.next.dylib']);run('/bin/mv',['/Library/Application Support/MavericksAppearance/MavericksAppearance.next.dylib','/Library/Application Support/MavericksAppearance/MavericksAppearance.dylib']);print('Installed appearance library in cloned guest')
+    body=root/'MavericksAppearanceBody.dylib';library=root/'DesktopAppearance.dylib'
+    subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-fno-objc-arc','-Wno-deprecated-declarations','-framework','Cocoa','-framework','CoreText','-framework','QuartzCore','-F'+subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()+'/System/Library/PrivateFrameworks','-framework','CoreUI','-dynamiclib',str(source/'compat/MavericksAppearance/MavericksAppearance.m'),str(source/'compat/MavericksAppearance/MavericksDesktop.m'),str(source/'compat/MavericksAppearance/MavericksWidgets.m'),str(source/'compat/MavericksAppearance/MavericksCoreUI.m'),str(source/'compat/MavericksAppearance/MavericksCatalog.m'),'-o',str(body)],check=True)
+    subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-dynamiclib','-Wl,-headerpad,0x1000',str(source/'compat/MavericksAppearance/MavericksLoader.c'),'-o',str(library)],check=True)
+    subprocess.run([sys.executable,str(source/'scripts/prepare-mavericks-injection.py'),str(library)],check=True)
+    run('/bin/mkdir',['-p','/Library/Application Support/MavericksAppearance'])
+    for artifact,name in [(body,'MavericksAppearanceBody'),(library,'MavericksAppearance')]:
+        remote=stage(artifact);target='/Library/Application Support/MavericksAppearance/'+name
+        run('/bin/cp',[remote,target+'.next.dylib']);run('/bin/chmod',['0644',target+'.next.dylib']);run('/bin/mv',[target+'.next.dylib',target+'.dylib'])
+    print('Installed platform-aware appearance loader and desktop library in cloned guest')
+elif sys.argv[2]=='probe-button-labels':
+    executable=root/'ButtonLabelProbe'
+    subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-fno-objc-arc','-Wno-deprecated-declarations','-framework','Cocoa',str(source/'probes/mavericks-button-labels.m'),'-o',str(executable)],check=True)
+    remote=stage(executable);target='/tmp/MavericksButtonLabelProbe';output='/tmp/MavericksButtonLabels'
+    run('/bin/cp',[remote,target]);run('/bin/chmod',['0755',target]);run('/bin/mkdir',['-p',output])
+    uid=run('/usr/bin/stat',['-f','%u','/dev/console']).strip();run('/usr/sbin/chown',[uid,output])
+    print(run('/bin/launchctl',['asuser',uid,'/usr/bin/sudo','-n','-u','#'+uid,'/usr/bin/env','-u','DYLD_INSERT_LIBRARIES',target,'/Library/Application Support/MavericksAppearance/MavericksAppearanceBody.dylib',output],180))
+elif sys.argv[2]=='restore-native-catalog':
+    remote=stage(source/'Build/mavericks-appearance/assets/native-mojave-SystemAppearance.car')
+    print(run('/usr/bin/python',['-c',(source/'probes/mavericks-restore-native-catalog.py').read_text(),remote]))
 elif sys.argv[2]=='install-legacy-coreui':
     remote=stage(source/'Build/mavericks-appearance/assets/isolated-coreui.tar.gz')
     print(run('/usr/bin/python',['-c','import os,sys,tarfile,tempfile,time; base="/Library/Application Support/MavericksAppearance"; work=tempfile.mkdtemp(prefix="CoreUI-",dir=base); tarfile.open(sys.argv[1]).extractall(work); target=base+"/LoreUI.framework"; backup=base+"/LoreUI.previous-"+str(time.time()); os.rename(target,backup) if os.path.exists(target) else None; os.rename(work+"/LoreUI.framework",target); os.rmdir(work)',remote]))
@@ -57,6 +71,13 @@ elif sys.argv[2]=='probe-legacy-coreui':
     executable=root/'CoreUIProbe'
     subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-framework','Cocoa',str(source/'probes/mavericks-coreui.m'),'-o',str(executable)],check=True)
     remote=stage(executable);print(run(remote,sys.argv[3:],180))
+elif sys.argv[2]=='inspect-reference':
+    helper=root/'ReferenceSession';library=root/'ReferenceInspector.dylib'
+    subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9',str(source/'probes/mavericks-reference-session.m'),'-o',str(helper)],check=True)
+    remote=stage(helper);run('/bin/cp',[remote,'/tmp/MavericksReferenceSession']);run('/bin/chmod',['0755','/tmp/MavericksReferenceSession'])
+    subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-fno-objc-arc','-Wno-deprecated-declarations','-framework','Cocoa','-framework','QuartzCore','-F'+subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()+'/System/Library/PrivateFrameworks','-framework','CoreUI','-dynamiclib',str(source/'probes/mavericks-reference-inspector.m'),'-o',str(library)],check=True)
+    remote=stage(library);run('/bin/cp',[remote,'/tmp/MavericksReferenceInspector.dylib']);run('/bin/chmod',['0644','/tmp/MavericksReferenceInspector.dylib'])
+    print(run('/usr/bin/python',['-c',(source/'probes/mavericks-reference-inspector-activate.py').read_text()],120))
 elif sys.argv[2]=='export-named':
     executable=root/'ExportNamedImages'
     subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-fno-objc-arc','-Wno-deprecated-declarations','-framework','Cocoa','-I',str(source/'Build/mavericks-appearance'),str(source/'probes/mavericks-export-named-images.m'),'-o',str(executable)],check=True)
@@ -118,6 +139,9 @@ elif sys.argv[2]=='legacy-imports':
     executable=root/'LegacyImports'
     subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-framework','Foundation','-I',str(source/'Build/mavericks-appearance'),str(source/'probes/mavericks-legacy-imports.m'),'-o',str(executable)],check=True)
     remote=stage(executable);print(run(remote,[],180))
+elif sys.argv[2]=='install-icon-aliases':
+    remote=stage(source/'Build/mavericks-appearance/assets/icon-aliases.json')
+    print(run('/usr/bin/python',['-c',(source/'probes/mavericks-icon-aliases-apply.py').read_text(),remote],900))
 elif sys.argv[2]=='install-shell-icons':
     archive=stage(source/'Build/mavericks-appearance/assets/shell-icons.tar');manifest=stage(source/'Build/mavericks-appearance/assets/shell-icons.json')
     print(run('/usr/bin/python',['-c',(source/'probes/mavericks-shell-assets-apply.py').read_text(),archive,manifest],300))

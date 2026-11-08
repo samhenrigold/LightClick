@@ -11,15 +11,16 @@
     "images": "Public and private NSImage factories plus native CUICatalog/CUINamedImage bridging; compatible original pixels keep native layout and event metadata",
     "fonts": "Original Lucida Grande UI roles, archived font decoding, CoreText and system font alias",
     "desktop": "Original Dock glass artwork, original illuminated running indicators and live icon reflections; native Dock tiles retain interaction",
-    "controls": "Original button, progress, segment, slider, scrollbar and source-list artwork",
-    "materials": "Shared non-vibrant surfaces for NSVisualEffectView roles, including original selection artwork; approximate colors for newer roles require visual qualification"
+    "controls": "Original button, progress, segment, slider, scrollbar and source-list artwork; enabled rounded push-button labels remain black across regular/small/mini, pressed, image-bearing and nib-decoded controls",
+    "materials": "Shared non-vibrant surfaces for NSVisualEffectView roles, including original selection artwork; approximate colors for newer roles require visual qualification",
+    "processCompatibility": "Minimal macOS/iOSMac and i386 bootstrap; native macOS x86_64 loads the appearance body, unsupported platforms retain native UI"
   },
   "resources": {
     "committed": "Tools and compatibility code only",
     "localOnly": "Apple frameworks, fonts, bitmaps, original Dock images and installer payloads stay in Build",
     "backup": "Per-file journals and original bytes inside each disposable guest",
-    "applications": "Full bundle-identity inventory maps moved and renamed bundles; declared icons and matching resource paths use only exact unique identifiers",
-    "catalogInstallation": "Transactional replacement with root ownership and console-user readability checks"
+    "applications": "Unique canonical bundle identifiers map moved/renamed apps; external icon aliases and public custom-icon metadata preserve signed Info.plist bytes",
+    "catalogInstallation": "Stock Mojave fallback catalog validated against signed CodeResources; legacy engine and named-image catalog installed separately"
   },
   "validation": {
     "originalRendererPixelMatches": 8,
@@ -33,7 +34,9 @@
       "segmented button",
       "textured segmented button"
     ],
-    "scope": "Equal raw RGBA hashes for the same drawing parameters on Mavericks and Mojave; this does not establish whole-desktop pixel identity"
+    "scope": "Equal raw RGBA hashes for the same drawing parameters on Mavericks and Mojave; this does not establish whole-desktop pixel identity",
+    "pushLabelCases": 7,
+    "pushLabelScope": "Offscreen actual AppKit drawTitle input and rendered-pixel checks; six enabled cases black, disabled gray. Exact reported application awaits visual verification."
   },
   "remaining": [
     "Visual qualification of all material roles and controls across application states",

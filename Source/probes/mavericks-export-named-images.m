@@ -53,6 +53,7 @@ int main(int argc,char **argv) {@autoreleasepool {
     NSString *directory=@(argv[1]);
     [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:NULL];
     NSMutableArray *names=[[[NSJSONSerialization JSONObjectWithData:[sourceNamesJSON dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL] mutableCopy] autorelease];
+    [names addObject:@"NSAppleMenuImage"];
     NSMutableDictionary *additional=[NSMutableDictionary dictionary];
     NSMutableArray *windows=[NSMutableArray array];
     for(NSNumber *active in @[@YES,@NO]) {

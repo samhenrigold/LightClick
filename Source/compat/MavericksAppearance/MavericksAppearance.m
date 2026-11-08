@@ -4,6 +4,19 @@
 #include <sys/sysctl.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+BOOL MavericksAppearanceProcessSupported(void) {
+    static int supported=-1;if(supported>=0)return supported;
+    const struct mach_header *header=_dyld_get_image_header(0);
+    if(header->magic!=MH_MAGIC_64)return (supported=0);
+    const uint8_t *cursor=(const uint8_t *)header+sizeof(struct mach_header_64);
+    for(uint32_t i=0;i<header->ncmds;i++){
+        const struct load_command *command=(const struct load_command *)cursor;
+        if(command->cmd==LC_BUILD_VERSION&&((const struct build_version_command *)command)->platform==6)return (supported=0);
+        cursor+=command->cmdsize;
+    }return (supported=1);
+}
 static BOOL lcFontRenderingEnabled;
 static int lcCoreTextReplacements;
 static int namedImageReplacements;
@@ -112,7 +125,7 @@ static void installArchivedFonts(void);
 static void installNamedImages(void);
 void MavericksAppearanceInstall(int mode) {
     static BOOL installed=NO;
-    if(installed || mode==0) return;
+    if(installed || mode==0 || !MavericksAppearanceProcessSupported()) return;
     char version[32]={0}; size_t size=sizeof(version); sysctlbyname("kern.osrelease",version,&size,NULL,0);
     if(atoi(version)!=18) return; // This private-ABI experiment is qualified for Mojave only.
     installed=YES;lcFontRenderingEnabled=YES;
@@ -368,7 +381,8 @@ static void installWindowBackground(void) {
 }
 
 // Exact standard cells use Mojave's inspected type and layout ABI, including decoded nib cells.
-// Custom cells, attributed colors and unsupported layouts keep their renderer.
+// Custom cells, attributed colors and unsupported layouts keep their renderer,
+// except standard rounded push labels, which use the classic enabled text color.
 @interface NSButtonCell (LCMojaveButtonGeometry)
 - (NSUInteger)_buttonType;
 - (void)_imageRect:(NSRect *)image titleRect:(NSRect *)title forBounds:(NSRect)bounds;
@@ -380,6 +394,9 @@ static void installWindowBackground(void) {
     NSInteger value=(NSInteger)[self _buttonType];
     BOOL leading=self.imagePosition==NSImageLeft || (self.imagePosition==NSImageLeading && self.controlView.userInterfaceLayoutDirection==NSUserInterfaceLayoutDirectionLeftToRight);
     if((value==NSSwitchButton || value==NSRadioButton) && !leading)return -1;
+    // Mojave supplies white attributed text for its default blue push button.
+    // Standard rounded push buttons always use Mavericks' black enabled label.
+    if(value==NSMomentaryPushInButton)return self.bezelStyle==NSRoundedBezelStyle&&!self.image?value:-1;
     NSAttributedString *title=self.attributedTitle;
     for(NSUInteger i=0;i<title.length;i++) {
         NSColor *color=[title attribute:NSForegroundColorAttributeName atIndex:i effectiveRange:NULL];
@@ -387,7 +404,6 @@ static void installWindowBackground(void) {
             if(!rgb || rgb.redComponent!=0 || rgb.greenComponent!=0 || rgb.blueComponent!=0)return -1;
         }
     }
-    if(value==NSMomentaryPushInButton && (self.bezelStyle!=NSRoundedBezelStyle || self.image))return -1;
     return value==NSSwitchButton||value==NSRadioButton||value==NSMomentaryPushInButton?value:-1;
 }
 - (NSSize)cellSize {
@@ -409,7 +425,10 @@ static void installWindowBackground(void) {
     BOOL active=view.window.isKeyWindow,pressed=self.highlighted;
     NSInteger offset=self.state==NSMixedState?0:self.state==NSOffState?2:4;
     NSInteger base=kind==NSSwitchButton?(!self.enabled?123:pressed?114:active?87:132):(!self.enabled?1527:pressed?1518:active?1491:1536);
-    NSImage *original=art([NSString stringWithFormat:@"%04ld.png",(long)(base+offset)]);
+    // Unchecked controls use neutral artwork, even in the active Aqua window.
+    NSInteger asset=base+offset;
+    if(self.enabled&&active&&!pressed&&self.state==NSOffState)asset=kind==NSSwitchButton?98:1502;
+    NSImage *original=art([NSString stringWithFormat:@"%04ld.png",(long)asset]);
     if(!original){[super drawImage:image withFrame:rect inView:view];return;}
     buttonImageCalls++;
     [original drawInRect:rect fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1 respectFlipped:view.isFlipped hints:nil];
@@ -423,10 +442,13 @@ static void installWindowBackground(void) {
     threePart(art(file),body,20,20,view.isFlipped);
 }
 - (NSRect)drawTitle:(NSAttributedString *)title withFrame:(NSRect)frame inView:(NSView *)view {
-    if([self lcOriginalKind]<0)return [super drawTitle:title withFrame:frame inView:view];
+    BOOL push=[self respondsToSelector:@selector(_buttonType)]&&[self _buttonType]==NSMomentaryPushInButton&&self.bezelStyle==NSRoundedBezelStyle;
+    // Label color also applies to small/mini and image-bearing push buttons,
+    // whose bezel geometry is deliberately left to their existing renderer.
+    if(!push&&[self lcOriginalKind]<0)return [super drawTitle:title withFrame:frame inView:view];
     buttonTitleCalls++;
     NSMutableAttributedString *text=[[title mutableCopy] autorelease];
-    NSString *appearance=view.effectiveAppearance.name;BOOL dark=[self lcOriginalKind]!=NSMomentaryPushInButton&&appearance&&[appearance rangeOfString:@"Dark"].location!=NSNotFound;
+    NSString *appearance=view.effectiveAppearance.name;BOOL dark=!push&&appearance&&[appearance rangeOfString:@"Dark"].location!=NSNotFound;
     [text addAttribute:NSForegroundColorAttributeName value:self.enabled?(dark?[NSColor whiteColor]:[NSColor blackColor]):[NSColor disabledControlTextColor] range:NSMakeRange(0,text.length)];
     return [super drawTitle:text withFrame:frame inView:view];
 }
@@ -531,17 +553,20 @@ static NSImage *originalNamedImage(NSString *name) {
     @synchronized(images){images[key]=image;namedImageReplacements++;}
     return image;
 }
+static char applicationIconKey;
+BOOL MavericksAppearanceIsApplicationIcon(NSImage *image){return [objc_getAssociatedObject(image,&applicationIconKey)boolValue];}
 static NSImage *loadOriginalResourceImage(NSString *name,NSBundle *bundle) {
     if(![name isKindOfClass:[NSString class]]||[name containsString:@"/"]||![bundle isKindOfClass:[NSBundle class]])return nil;
-    static NSSet *paths;static NSCache *cache;static dispatch_once_t once;
-    dispatch_once(&once,^{NSData *data=[NSData dataWithContentsOfFile:@"/Library/Application Support/MavericksAppearance/LegacyResources.json"];id array=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL]:nil;NSMutableSet *resolved=[NSMutableSet set];if([array isKindOfClass:[NSArray class]])for(NSString *path in array)[resolved addObject:[path stringByResolvingSymlinksInPath]];paths=[resolved copy];cache=[NSCache new];cache.countLimit=256;});
-    NSString *path=[[bundle pathForImageResource:name]stringByResolvingSymlinksInPath];
-    if(![paths containsObject:path])return nil;
+    static NSSet *paths;static NSCache *cache;static NSDictionary *iconAliases;static dispatch_once_t once;
+    dispatch_once(&once,^{NSData *data=[NSData dataWithContentsOfFile:@"/Library/Application Support/MavericksAppearance/LegacyResources.json"];id array=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL]:nil;NSMutableSet *resolved=[NSMutableSet set];if([array isKindOfClass:[NSArray class]])for(NSString *path in array)[resolved addObject:[path stringByResolvingSymlinksInPath]];paths=[resolved copy];cache=[NSCache new];cache.countLimit=256;NSData *icons=[NSData dataWithContentsOfFile:@"/Library/Application Support/MavericksAppearance/LegacyIconAliases.json"];iconAliases=icons?[[NSJSONSerialization JSONObjectWithData:icons options:0 error:NULL]retain]:nil;});
+    NSString *identifier=bundle.bundleIdentifier.lowercaseString;NSDictionary *icon=identifier?iconAliases[identifier]:nil;BOOL isIcon=[icon[@"names"]containsObject:name.stringByDeletingPathExtension];
+    NSString *path=isIcon?icon[@"file"]:[[bundle pathForImageResource:name]stringByResolvingSymlinksInPath];
+    if(!isIcon&&![paths containsObject:path])return nil;
     NSImage *image=[cache objectForKey:path];
     if(!image){image=[[[NSImage alloc]initWithContentsOfFile:path]autorelease];if(!image)return nil;
         if([[path stringByDeletingPathExtension]hasSuffix:@"@2x"])image.size=NSMakeSize(image.size.width/2,image.size.height/2);
         else if([[path pathExtension]caseInsensitiveCompare:@"png"]==NSOrderedSame){NSString *retina=[[[path stringByDeletingPathExtension]stringByAppendingString:@"@2x"]stringByAppendingPathExtension:path.pathExtension];if([paths containsObject:retina]){NSImageRep *rep=[NSBitmapImageRep imageRepWithContentsOfFile:retina];if(rep){rep.size=image.size;[image addRepresentation:rep];}}}
-        if([name hasSuffix:@"Template"])image.template=YES;[cache setObject:image forKey:path];}
+        if([name hasSuffix:@"Template"])image.template=YES;if(isIcon)objc_setAssociatedObject(image,&applicationIconKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);[cache setObject:image forKey:path];}
     originalResourceReplacements++;return image;
 }
 static __thread BOOL loadingOriginalResource;

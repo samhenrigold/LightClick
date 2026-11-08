@@ -1,6 +1,7 @@
 // Preserve native catalog metadata while substituting compatible original pixels.
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
+extern BOOL MavericksAppearanceIsApplicationIcon(NSImage *);
 extern NSImage *MavericksAppearanceOriginalImage(NSString *,NSBundle *);
 static char catalogBundleKey,originalImageKey,originalScaleKey,renderedImageKey;
 static IMP nativeCatalogURL,nativeCatalogBundle,nativeCatalogName,nativeCatalogNameError,nativeCatalogImage,nativeImage,nativeCroppedImage;
@@ -57,7 +58,7 @@ static CGImageRef catalogPixels(id self,SEL cmd) {
     size_t width=CGImageGetWidth(fallback),height=CGImageGetHeight(fallback);
     // Insets, cropping and view geometry belong to the native catalog. A name
     // alone is insufficient evidence that artwork can safely share those metrics.
-    if(scale<=0||original.size.width*scale>width+.01||original.size.height*scale>height+.01){@synchronized(samples){sizeMismatches++;}return fallback;}
+    if(scale<=0||(!MavericksAppearanceIsApplicationIcon(original)&&(original.size.width*scale>width+.01||original.size.height*scale>height+.01))){@synchronized(samples){sizeMismatches++;}return fallback;}
     CGImageRef cached=(CGImageRef)objc_getAssociatedObject(self,&renderedImageKey);if(cached)return cached;
     if(width>4096||height>4096)return fallback;
     renderingOriginal=YES;CGImageRef rendered=NULL;
@@ -66,7 +67,7 @@ static CGImageRef catalogPixels(id self,SEL cmd) {
         CGContextRef context=CGBitmapContextCreate(NULL,width,height,8,0,space,(CGBitmapInfo)kCGImageAlphaPremultipliedLast);CGColorSpaceRelease(space);
         if(context){
             [NSGraphicsContext saveGraphicsState];
-            @try{[NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithCGContext:context flipped:NO]];CGFloat w=original.size.width*scale,h=original.size.height*scale;[original drawInRect:NSMakeRect(floor((width-w)/2),floor((height-h)/2),w,h)fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1 respectFlipped:NO hints:nil];}
+            @try{[NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithCGContext:context flipped:NO]];CGFloat w=original.size.width*scale,h=original.size.height*scale;if(MavericksAppearanceIsApplicationIcon(original)){CGFloat ratio=MIN(width/w,height/h);w*=ratio;h*=ratio;}[original drawInRect:NSMakeRect(floor((width-w)/2),floor((height-h)/2),w,h)fromRect:NSZeroRect operation:NSCompositeSourceOver fraction:1 respectFlipped:NO hints:nil];}
             @finally{[NSGraphicsContext restoreGraphicsState];}
             rendered=CGBitmapContextCreateImage(context);CGContextRelease(context);
         }

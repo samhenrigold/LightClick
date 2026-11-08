@@ -10,7 +10,7 @@ sys.path.insert(0,str(SOURCE/'scripts'))
 from clone_lease import launch_clone, stop_owned, process_identity
 ASSET_SHA256="3ad4f97797b44dd1d13030d9c90e09012542a4530610c934fee9227a52a2538c"
 asset=SOURCE/"Build/mavericks-appearance/SystemAppearance.car"
-if not asset.is_file() or hashlib.sha256(asset.read_bytes()).hexdigest()!=ASSET_SHA256:
+if '--experimental-third-party-car' in sys.argv and (not asset.is_file() or hashlib.sha256(asset.read_bytes()).hexdigest()!=ASSET_SHA256):
     raise SystemExit("Missing/mismatched experiment asset: download https://raw.githubusercontent.com/MoonPadUSer/macOSMavericksTheme/master/SystemAppearance.car to "+str(asset)+"; expected SHA256 "+ASSET_SHA256)
 app,machine=map(lambda s:Path(s).resolve(),sys.argv[1:3])
 reference='--reference' in sys.argv
@@ -110,14 +110,15 @@ try:
         if not reference:
             if '--final' not in sys.argv:
                 capture('font',1);capture('font-material',2)
-            asset=stage(SOURCE/'Build/mavericks-appearance/SystemAppearance.car')
-            target='/System/Library/CoreServices/SystemAppearance.bundle/Contents/Resources/SystemAppearance.car'
-            run('/bin/cp',[target,target+'.appearance-spike-backup'])
-            run('/bin/cp',[asset,target])
-            if '--final' not in sys.argv: capture('assets',0)
+            if '--experimental-third-party-car' in sys.argv:
+                asset=stage(SOURCE/'Build/mavericks-appearance/SystemAppearance.car')
+                target='/System/Library/CoreServices/SystemAppearance.bundle/Contents/Resources/SystemAppearance.car'
+                run('/bin/cp',[target,target+'.appearance-spike-backup'])
+                run('/bin/cp',[asset,target])
+                if '--final' not in sys.argv: capture('assets',0)
             capture('combined',2)
         (root/'result.json').write_text(json.dumps({'completed':True,'fixture_sha256':hashlib.sha256((root/'fixture').read_bytes()).hexdigest(),'prepared':'--prepared' in sys.argv,'sdk109':'--sdk109' in sys.argv,'reference':reference,'reports':reports,
-            'asset_source':'https://github.com/MoonPadUSer/macOSMavericksTheme','asset_sha256':hashlib.sha256((SOURCE/'Build/mavericks-appearance/SystemAppearance.car').read_bytes()).hexdigest()},indent=2))
+            'asset_source':'https://github.com/MoonPadUSer/macOSMavericksTheme' if '--experimental-third-party-car' in sys.argv else None,'asset_sha256':hashlib.sha256((SOURCE/'Build/mavericks-appearance/SystemAppearance.car').read_bytes()).hexdigest() if '--experimental-third-party-car' in sys.argv else None},indent=2))
     if '--hold' in sys.argv:
         print('HELD',root,'finish by creating Finish in this results directory',flush=True)
         deadline=time.monotonic()+(14400 if '--desktop' in sys.argv else 3600)

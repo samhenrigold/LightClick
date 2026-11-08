@@ -2,6 +2,7 @@
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
 #include <sys/sysctl.h>
+extern BOOL MavericksAppearanceProcessSupported(void);
 extern NSImage *MavericksAppearanceImage(NSString *name);
 static void stretch(NSImage *image,NSRect rect,BOOL vertical,CGFloat cap,BOOL flipped) {
     CGFloat length=vertical?image.size.height:image.size.width,total=vertical?rect.size.height:rect.size.width;
@@ -111,6 +112,7 @@ static void styleLists(NSView *view,BOOL sidebar) {
 - (void)windowUpdated:(NSNotification *)note {NSWindow *window=note.object;if([window isKindOfClass:[NSWindow class]])styleLists(window.contentView,NO);}
 @end
 __attribute__((constructor)) static void initializeWidgets(void) {
+    if(!MavericksAppearanceProcessSupported())return;
     char release[32]={0};size_t length=sizeof(release);sysctlbyname("kern.osrelease",release,&length,NULL,0);if(atoi(release)!=18)return;
     Class cls=[NSScroller class];SEL frame=@selector(initWithFrame:),coder=@selector(initWithCoder:);
     scrollerFrame=class_getMethodImplementation(cls,frame);scrollerCoder=class_getMethodImplementation(cls,coder);scrollerSetStyle=class_getMethodImplementation(cls,@selector(setScrollerStyle:));

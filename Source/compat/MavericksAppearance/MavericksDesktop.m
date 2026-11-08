@@ -3,6 +3,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #include <sys/sysctl.h>
+extern BOOL MavericksAppearanceProcessSupported(void);
 extern NSDictionary *MavericksAppearanceDiagnostics(void);
 extern NSDictionary *MavericksCoreUIDiagnostics(void);
 extern NSDictionary *MavericksCatalogDiagnostics(void);
@@ -36,7 +37,7 @@ static CGImageRef originalDockGlass(void) {
 }
 static CGImageRef originalDockIndicator(void) {
     static CGImageRef image;static dispatch_once_t once;
-    dispatch_once(&once,^{CGDataProviderRef data=CGDataProviderCreateWithFilename("/System/Library/CoreServices/Dock.app/Contents/Resources/indicator_small@2x.png");if(data){image=CGImageCreateWithPNGDataProvider(data,NULL,YES,kCGRenderingIntentDefault);CGDataProviderRelease(data);}});
+    dispatch_once(&once,^{CGDataProviderRef data=CGDataProviderCreateWithFilename("/System/Library/CoreServices/Dock.app/Contents/Resources/indicator_medium@2x.png");if(data){image=CGImageCreateWithPNGDataProvider(data,NULL,YES,kCGRenderingIntentDefault);CGDataProviderRelease(data);}});
     return image;
 }
 static void displayClassicIndicator(CALayer *layer,SEL cmd) {
@@ -51,10 +52,15 @@ static void restyleDockIndicators(CALayer *layer,int depth) {
         layer.backgroundColor=CGColorGetConstantColor(kCGColorClear);layer.cornerRadius=0;layer.opaque=NO;layer.mask=nil;layer.filters=nil;layer.compositingFilter=nil;
         layer.zPosition=1000;
         layer.contentsScale=2;layer.needsDisplayOnBoundsChange=YES;
-        layer.frame=CGRectMake(center-14,0,28,12);[layer setNeedsDisplay];
+        layer.frame=CGRectMake(center-27,0,54,12);[layer setNeedsDisplay];
     }
     for(CALayer *child in layer.sublayers)restyleDockIndicators(child,depth+1);
 }
+static CGImageRef originalDockSeparator(void) {
+    static CGImageRef image;static dispatch_once_t once;
+    dispatch_once(&once,^{CGDataProviderRef data=CGDataProviderCreateWithFilename("/System/Library/CoreServices/Dock.app/Contents/Resources/separator@2x.png");if(data){image=CGImageCreateWithPNGDataProvider(data,NULL,YES,kCGRenderingIntentDefault);CGDataProviderRelease(data);}});return image;
+}
+static char separatorKey;
 static void collectDockIcons(CALayer *layer,CALayer *floor,BOOL tile,BOOL excluded,int depth,NSMutableArray *images) {
     if(!layer||layer==floor||depth>12||layer.hidden||layer.opacity<.01)return;
     NSString *name=[NSStringFromClass(layer.class)stringByAppendingFormat:@" %@",layer.name?:@""];
@@ -82,7 +88,7 @@ static void updateDockReflections(CALayer *floor,CALayer *shelf) {
         CALayer *reflection=index<previous.count?previous[index]:[CALayer layer];index++;
         reflection.contents=image[@"contents"];reflection.contentsGravity=image[@"gravity"];reflection.contentsScale=shelf.contentsScale;
         reflection.transform=CATransform3DIdentity;
-        reflection.frame=CGRectMake(source.origin.x,source.origin.y-source.size.height,source.size.width,source.size.height);
+        reflection.frame=CGRectMake(source.origin.x-shelf.frame.origin.x,source.origin.y-shelf.frame.origin.y-source.size.height,source.size.width,source.size.height);
         reflection.transform=CATransform3DMakeScale(1,-1,1);[reflections addObject:reflection];
     }
     container.sublayers=reflections;
@@ -99,11 +105,21 @@ static void classicFloorLayout(CALayer *floor,SEL cmd) {
         [floor addSublayer:shelf];
     }
     // The native floor owns only the background; Dock tiles and their event handling remain siblings.
-    for(CALayer *child in floor.sublayers)if(child!=shelf)child.hidden=YES;
+    for(CALayer *child in floor.sublayers)if(child!=shelf){
+        CGRect frame=child.frame;BOOL separator=objc_getAssociatedObject(child,&separatorKey)!=nil||([NSStringFromClass(child.class)isEqual:@"CALayer"]&&frame.size.width<=2&&frame.size.height>=15);
+        if(separator&&originalDockSeparator()){
+            objc_setAssociatedObject(child,&separatorKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);CGFloat center=CGRectGetMidX(frame);
+            child.hidden=NO;child.backgroundColor=CGColorGetConstantColor(kCGColorClear);child.borderWidth=0;child.contents=(id)originalDockSeparator();child.contentsScale=2;child.contentsGravity=kCAGravityResize;child.frame=CGRectMake(center-14.5,0,29,66);child.zPosition=10;
+        }else child.hidden=YES;
+    }
     floor.backgroundColor=CGColorGetConstantColor(kCGColorClear);floor.borderWidth=0;floor.masksToBounds=NO;
     [CATransaction begin];[CATransaction setDisableActions:YES];shelf.frame=floor.bounds;
     CGImageRef glass=originalDockGlass();
-    if(glass){CGRect frame=floor.bounds;frame.size.height=MIN(frame.size.height,43);shelf.frame=frame;shelf.contents=(id)glass;shelf.contentsScale=2;shelf.contentsGravity=kCAGravityResize;shelf.contentsCenter=CGRectMake(.5,.5,0,0);shelf.shadowOpacity=0;}
+    if(glass){CGRect frame=floor.bounds;frame.size.height=MIN(frame.size.height,43);
+        CALayer *root=floor.superlayer;if(root.superlayer)root=root.superlayer;NSMutableArray *icons=[NSMutableArray array];collectDockIcons(root,floor,NO,NO,0,icons);
+        CGFloat left=0,right=frame.size.width;
+        for(NSDictionary *icon in icons){CGRect r=NSRectToCGRect([icon[@"rect"]rectValue]);left=MIN(left,CGRectGetMinX(r)-28);right=MAX(right,CGRectGetMaxX(r)+28);}
+        frame.origin.x=left;frame.size.width=right-left;shelf.frame=frame;shelf.contents=(id)glass;shelf.contentsScale=2;shelf.contentsGravity=kCAGravityResize;shelf.contentsCenter=CGRectMake(.5,.5,0,0);shelf.shadowOpacity=0;}
     else [shelf setNeedsDisplay];
     updateDockReflections(floor,shelf);CALayer *root=floor.superlayer;if(root.superlayer)root=root.superlayer;restyleDockIndicators(root,0);[CATransaction commit];
 }
@@ -161,6 +177,7 @@ static void reportDesktop(void) {
     [data writeToFile:[@"/tmp/MavericksAppearance-" stringByAppendingFormat:@"%@.json",[NSProcessInfo processInfo].processName] atomically:YES];
 }
 __attribute__((constructor)) static void initializeDesktop(void) {
+    if(!MavericksAppearanceProcessSupported())return;
     char release[32]={0};size_t size=sizeof(release);sysctlbyname("kern.osrelease",release,&size,NULL,0);if(atoi(release)!=18)return;
     NSString *name=[NSProcessInfo processInfo].processName;
     if(![@[@"Dock",@"Finder",@"SystemUIServer"] containsObject:name])return;

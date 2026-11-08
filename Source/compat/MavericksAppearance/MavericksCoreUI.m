@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 #include <sys/sysctl.h>
 #include <objc/runtime.h>
+extern BOOL MavericksAppearanceProcessSupported(void);
 extern int CUIDraw(void *,CGRect,CGContextRef,CFDictionaryRef,CFDictionaryRef *);
 typedef int (*LCDraw)(void *,CGRect,CGContextRef,CFDictionaryRef,CFDictionaryRef *);
 typedef Boolean (*LCExists)(void *,CFDictionaryRef);
@@ -14,12 +15,13 @@ static unsigned long originalDraws,fallbackDraws,originalLayerContents;
 static NSMutableDictionary *observed;
 static NSMutableSet *widgets;
 static NSDictionary *widgetAliases;
+static id appleVariant,variantKey;
 static __thread BOOL inside;
 static void loadEngine(void) {
     static dispatch_once_t once;
     dispatch_once(&once,^{
         char release[32]={0};size_t size=sizeof(release);sysctlbyname("kern.osrelease",release,&size,NULL,0);
-        if(atoi(release)!=18 || getenv("MAVERICKS_DISABLE_COREUI"))return;
+        if(!MavericksAppearanceProcessSupported() || atoi(release)!=18 || getenv("MAVERICKS_DISABLE_COREUI"))return;
         void *handle=dlopen("/Library/Application Support/MavericksAppearance/LoreUI.framework/Versions/A/LoreUI",RTLD_NOW|RTLD_LOCAL|RTLD_FIRST);
         if(handle){
             legacyDraw=dlsym(handle,"CUIDraw");legacyExists=dlsym(handle,"CUIExists");legacyContents=dlsym(handle,"CUICreateLayerContents");
@@ -29,7 +31,8 @@ static void loadEngine(void) {
             for(NSString *name in manifest[@"widgets"]){id *value=dlsym(handle,name.UTF8String);if(value&&*value)[widgets addObject:*value];}
             id *textured=dlsym(handle,"kCUIWidgetButtonSegmentedTextured");
             id *zoom=dlsym(handle,"kCUIWidgetTitleBarZoomBox");
-            widgetAliases=[@{@"kCUIWidgetButtonSegmentedSeparatedToolbar":textured?*textured:@"segmentedbutton",@"kCUIWidgetButtonSegmentedToolbar":textured?*textured:@"segmentedbutton",@"kCUIWidgetButtonSegmentedSeparated":@"segmentedbutton",@"kCUIWidgetTitleBarFullScreenEnter":zoom?*zoom:@"titlebarzoom"}retain];
+            id *title=dlsym(handle,"kCUIWidgetMenuTitle"),*apple=dlsym(handle,"kCUIVariantMenuTitleApple"),*variant=dlsym(handle,"kCUIVariantKey");appleVariant=apple?*apple:nil;variantKey=variant?*variant:nil;
+            widgetAliases=[@{@"kCUIWidgetMenuTitleApple":title?*title:@"menutitle",@"kCUIWidgetButtonSegmentedSeparatedToolbar":textured?*textured:@"segmentedbutton",@"kCUIWidgetButtonSegmentedToolbar":textured?*textured:@"segmentedbutton",@"kCUIWidgetButtonSegmentedSeparated":@"segmentedbutton",@"kCUIWidgetTitleBarFullScreenEnter":zoom?*zoom:@"titlebarzoom"}retain];
         }
         observed=[NSMutableDictionary new];
     });
@@ -42,7 +45,7 @@ static CGImageRef classicLayerContents(id appearance,SEL selector,NSDictionary *
     if(inside)return ((CGImageRef(*)(id,SEL,id,CGRect *))nativeLayerContents)(appearance,selector,options,center);
     inside=YES;loadEngine();
     NSString *widget=options[@"widget"];NSMutableDictionary *adapted=nil;
-    if(widget&&widgetAliases[widget]){adapted=[[options mutableCopy]autorelease];adapted[@"widget"]=widgetAliases[widget];}
+    if(widget&&widgetAliases[widget]){adapted=[[options mutableCopy]autorelease];adapted[@"widget"]=widgetAliases[widget];if([widget isEqual:@"kCUIWidgetMenuTitleApple"]&&appleVariant&&variantKey)adapted[variantKey]=appleVariant;}
     NSDictionary *parameters=adapted?:options;CGImageRef image=NULL;CGRect originalCenter=CGRectZero;
     if(legacyContents && [widgets containsObject:parameters[@"widget"]] && ![widget isEqual:@"image"]){
         int status=legacyContents(NULL,(CFDictionaryRef)parameters,&image,&originalCenter);
@@ -78,7 +81,7 @@ static int classicCUIDraw(void *renderer,CGRect rect,CGContextRef context,CFDict
     inside=YES;loadEngine();
     NSDictionary *parameters=(NSDictionary *)options;id widget=parameters[@"widget"];
     NSMutableDictionary *adapted=nil;
-    if(widget && widgetAliases[widget]){adapted=[[parameters mutableCopy]autorelease];adapted[@"widget"]=widgetAliases[widget];}
+    if(widget && widgetAliases[widget]){adapted=[[parameters mutableCopy]autorelease];adapted[@"widget"]=widgetAliases[widget];if([widget isEqual:@"kCUIWidgetMenuTitleApple"]&&appleVariant&&variantKey)adapted[variantKey]=appleVariant;}
     // In 10.9 CUIExists tests named-image availability only, not widget availability.
     // Use the actual exported widget vocabulary for control rendering.
     CFDictionaryRef drawingOptions=(CFDictionaryRef)(adapted?:parameters);
