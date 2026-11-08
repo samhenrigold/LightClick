@@ -430,6 +430,33 @@ class Checks(unittest.TestCase):
             bad=copy.deepcopy(report);bad[field]=value;self.assertFalse(complete_hid_open(bad,321))
         ns={};exec(RETENTION_HELPERS,ns);self.assertTrue(ns['complete_hid_open'](report,321))
 
+    def test_readonly_observer_receipt_is_private_bounded_and_hash_checked(self):
+        import hashlib,os,re,stat
+        with tempfile.TemporaryDirectory(prefix='lightclick-observer-receipt-')as temporary:
+            parent=Path(temporary).resolve();parent.chmod(0o700);home=parent/'home';home.mkdir(mode=0o700)
+            observer=parent/'ax-observe';data=b'readonly observer receipt fixture; never executed';observer.write_bytes(data);observer.chmod(0o755)
+            guest='/private/var/tmp/LightClickFCP.ABC123'
+            def local(path):return str(parent)+path[len(guest):]if path.startswith(guest)else path
+            def canonical(path):
+                value=os.path.realpath(local(path))
+                return guest+value[len(str(parent)):]if value==str(parent)or value.startswith(str(parent)+'/')else value
+            # Virtual guest prefix maps to this test's permitted host temporary directory.
+            guest_os=types.SimpleNamespace(path=types.SimpleNamespace(dirname=os.path.dirname,realpath=canonical),
+                lstat=lambda path:os.lstat(local(path)),open=lambda path,flags:os.open(local(path),flags),
+                fstat=os.fstat,fdopen=os.fdopen,dup=os.dup,close=os.close,getuid=os.getuid,
+                O_RDONLY=os.O_RDONLY,O_NOFOLLOW=os.O_NOFOLLOW,O_NONBLOCK=os.O_NONBLOCK)
+            spec=dict(ax_helper=guest+'/ax-observe',ax_helper_sha256=hashlib.sha256(data).hexdigest())
+            ns=dict(os=guest_os,re=re,stat=stat,hashlib=hashlib);exec(RETENTION_HELPERS,ns)
+            receipt=ns['readonly_observer_receipt'](spec)
+            self.assertEqual(receipt['path'],guest+'/ax-observe');self.assertEqual(receipt['bytes'],len(data));self.assertEqual(receipt['private_home'],guest+'/home')
+            self.assertIsNone(ns['readonly_observer_receipt']({}))
+            for bad in (dict(spec,ax_helper='/Users/forbidden/ax-observe'),dict(spec,ax_helper=guest+'/arbitrary-helper'),dict(spec,ax_helper_sha256='0'*64)):
+                with self.assertRaises(ValueError):ns['readonly_observer_receipt'](bad)
+            observer.unlink();observer.symlink_to(home)
+            with self.assertRaises(ValueError):ns['readonly_observer_receipt'](spec)
+            observer.unlink();observer.write_bytes(data);observer.chmod(0o755);parent.chmod(0o755)
+            with self.assertRaises(ValueError):ns['readonly_observer_receipt'](spec)
+
     def test_invalid_creation_modes_fail_before_staging(self):
         source=Path(__file__).resolve().parents[1]
         path=source/'probes/fcp-workflow-driver.py'

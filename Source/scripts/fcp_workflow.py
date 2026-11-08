@@ -3,6 +3,7 @@ import ast
 import base64
 import hashlib
 import json
+import re
 import inspect
 import textwrap
 from pathlib import Path
@@ -44,6 +45,25 @@ def current_executable(pid):
     if library.proc_pidpath(pid,buffer,ctypes.sizeof(buffer))<=0:return None
     return buffer.value.decode('utf-8','strict')
 
+def readonly_observer_receipt(spec):
+    path=spec.get('ax_helper');expected=spec.get('ax_helper_sha256')
+    if path is None and expected is None:return None # Older synthetic/retained receipts remain valid.
+    if (not isinstance(path,(str,type(u''))) or not re.match(r'\A/private/var/tmp/LightClickFCP\.[A-Za-z0-9_-]{6,16}/ax-observe\Z',path)
+            or not isinstance(expected,(str,type(u''))) or not re.match(r'\A[0-9a-f]{64}\Z',expected)):raise ValueError('invalid readonly observer receipt')
+    parent=os.path.dirname(path);home=parent+'/home'
+    for directory in (parent,home):
+        info=os.lstat(directory)
+        if os.path.realpath(directory)!=directory or not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700:raise ValueError('readonly observer directory identity changed')
+    if os.path.realpath(path)!=path:raise ValueError('readonly observer path noncanonical')
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1 or not info.st_mode&0o111 or not 0<info.st_size<=2097152:raise ValueError('readonly observer file outside scope')
+        with os.fdopen(os.dup(fd),'rb') as stream:data=stream.read(2097153)
+        if len(data)!=info.st_size or hashlib.sha256(data).hexdigest()!=expected:raise ValueError('readonly observer hash/size changed')
+    finally:os.close(fd)
+    return {'path':path,'sha256':expected,'bytes':len(data),'uid':os.getuid(),'private_home':home,'scope':'existing fixed readonly FCP AX observer'}
+
 def owned_retention_receipt(app,spec,report):
     if (not spec.get('workflow_retain_owned_app') or spec.get('variant')!='10.1'
             or report.get('result')!='OBSERVED_LAUNCH' or report.get('error')
@@ -73,6 +93,8 @@ def owned_retention_receipt(app,spec,report):
              'private_library':directory+'/private.fcpbundle','app_stdio_available':False,
              'identity_scope':'owned live Popen child verified at collector exit; revalidate before later input',
              'project_open_result':opened.get('result'),'max_host_observation_seconds':90}
+    observer=readonly_observer_receipt(spec)
+    if observer is not None:receipt['readonly_observer']=observer
     for action in opened.get('actionsPerformed',[]):
         if (action.get('targetPID')==app.pid and action.get('api',action.get('action')) in ('CGEventPostToPSN','CGEventPost(kCGHIDEventTap)')
                 and type(action.get('psnHigh')) is int and type(action.get('psnLow')) is int
@@ -158,6 +180,12 @@ def hold_retained_display_window(evidence,save,clock=None,sleep=None):
 def valid_retention_receipt(guest,spec):
     receipt=guest.get('retained_owned_app',{});workflow=guest.get('workflow',{})
     if spec.get('workflow_open_project_hid') and not complete_hid_open(workflow.get('project_open_action',{}),guest.get('owned_app_pid')):return False
+    observer=receipt.get('readonly_observer')
+    if observer is not None:
+        if (not isinstance(observer,dict) or not isinstance(observer.get('path'),str)
+                or not re.fullmatch(r'/private/var/tmp/LightClickFCP\.[A-Za-z0-9_-]{6,16}/ax-observe',observer['path'])
+                or observer.get('sha256')!=spec.get('ax_helper_sha256') or type(observer.get('bytes')) is not int or not 0<observer['bytes']<=2097152
+                or observer.get('uid')!=receipt.get('console_uid') or observer.get('private_home')!=observer['path'].rsplit('/',1)[0]+'/home'):return False
     return (receipt.get('retained') is True and receipt.get('mode')==('create-open-hid-and-retain-for-display' if spec.get('workflow_open_project_hid') else 'create-open-and-retain-for-display')
             and type(receipt.get('pid')) is int and receipt['pid']==guest.get('owned_app_pid')
             and receipt.get('executable')==spec['app']+'/Contents/MacOS/'+spec['identity']['CFBundleExecutable']
