@@ -64,7 +64,7 @@ static void drawClassicSelection(NSTableRowView *row,SEL cmd,NSRect dirty) {
 }
 static void setClassicRowStyle(NSTableRowView *row,SEL cmd,NSTableViewSelectionHighlightStyle style) {
     IMP native=class_getMethodImplementation(class_getSuperclass(object_getClass(row)),cmd);
-    ((void(*)(id,SEL,NSTableViewSelectionHighlightStyle))native)(row,cmd,sourceRow(row)?NSTableViewSelectionHighlightStyleRegular:style);
+    ((void(*)(id,SEL,NSTableViewSelectionHighlightStyle))native)(row,cmd,sourceRow(row)?NSTableViewSelectionHighlightStyleSourceList:style);
 }
 static NSBackgroundStyle classicRowInterior(NSTableRowView *row,SEL cmd) {
     if(sourceRow(row))return sourceRowSelected(row)&&sourceListEmphasized(row)?NSBackgroundStyleDark:NSBackgroundStyleLight;
@@ -87,6 +87,7 @@ static void styleLists(NSView *view,BOOL sidebar) {
         NSTableView *table=(NSTableView *)view;
         if(sidebar || table.selectionHighlightStyle==NSTableViewSelectionHighlightStyleSourceList) {
             objc_setAssociatedObject(table,&sourceListKey,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if(table.selectionHighlightStyle!=NSTableViewSelectionHighlightStyleSourceList)table.selectionHighlightStyle=NSTableViewSelectionHighlightStyleSourceList;
             if(![table.backgroundColor isEqual:[NSColor clearColor]])table.backgroundColor=[NSColor clearColor];
             [table enumerateAvailableRowViewsUsingBlock:^(NSTableRowView *row,NSInteger index){
                 BOOL selected=row.isSelected||[table.selectedRowIndexes containsIndex:index];objc_setAssociatedObject(row,&sourceSelectionKey,@(selected),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -96,8 +97,9 @@ static void styleLists(NSView *view,BOOL sidebar) {
                     if(!replacement){replacement=objc_allocateClassPair(original,name.UTF8String,0);class_addMethod(replacement,@selector(drawSelectionInRect:),(IMP)drawClassicSelection,"v@:{CGRect={CGPoint=dd}{CGSize=dd}}");class_addMethod(replacement,@selector(interiorBackgroundStyle),(IMP)classicRowInterior,"q@:");class_addMethod(replacement,@selector(setSelectionHighlightStyle:),(IMP)setClassicRowStyle,"v@:q");objc_registerClassPair(replacement);}
                     object_setClass(row,replacement);
                 }
-                // Source-list materials bypass drawSelectionInRect after Yosemite; use the regular drawing entry point.
-                if(row.selectionHighlightStyle!=NSTableViewSelectionHighlightStyleRegular){row.selectionHighlightStyle=NSTableViewSelectionHighlightStyleRegular;[row setNeedsDisplay:YES];}
+                // Retain source-list group and focus semantics. The shared
+                // material path supplies the original selection artwork.
+                if(row.selectionHighlightStyle!=NSTableViewSelectionHighlightStyleSourceList){row.selectionHighlightStyle=NSTableViewSelectionHighlightStyleSourceList;[row setNeedsDisplay:YES];}
                 if(row.isGroupRowStyle)headerText(row);
             }];
         }
