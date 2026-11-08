@@ -77,6 +77,28 @@ class Checks(unittest.TestCase):
             self.assertEqual([x for x in calls if x.get('Action')=='insert-disc'],[dict(Action='insert-disc',Path=str(dmg),Slot=0)])
             self.assertEqual(json.loads((root/'results/result.json').read_text())['result'],'INCONCLUSIVE')
 
+    def test_production_identity_decodes_real_binary_and_xml_info_without_rewriting(self):
+        import hashlib, os, shutil, signal, stat, subprocess, sys, threading, time, types
+        provided=Path('/private/tmp/lightclick-fcp1044-package-metadata/selected/Info.plist')
+        expected=dict(CFBundleIdentifier='com.apple.FinalCutTrial',CFBundleShortVersionString='10.4.4',CFBundleVersion='330236',CFBundleExecutable='Final Cut Pro Trial')
+        # Always exercise a real binary plist and XML through production plutil, even outside this scratch checkout.
+        original=provided.read_bytes() if provided.is_file() else plistlib.dumps(expected,fmt=plistlib.FMT_BINARY)
+        self.assertTrue(original.startswith(b'bplist00'))
+        expected_from_source={key:plistlib.loads(original).get(key) for key in expected}
+        self.assertEqual(expected_from_source,expected)
+        functions=[node for node in ast.parse(GUEST).body if isinstance(node,ast.FunctionDef) and node.name in ('stop','limits','reader','captured','command','identity')]
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve();app=root/'Final Cut Pro Trial.app';(app/'Contents').mkdir(parents=True)
+            path=app/'Contents/Info.plist'
+            ns=dict(os=os,subprocess=subprocess,threading=threading,time=time,signal=signal,stat=stat,CAP=131072,owned=[],report={'commands':[]},plistlib=types.SimpleNamespace(readPlistFromString=plistlib.loads))
+            exec(compile(ast.Module(body=functions,type_ignores=[]),'<production identity>','exec'),ns)
+            for kind,data in (('binary',original),('xml',plistlib.dumps(plistlib.loads(original),fmt=plistlib.FMT_XML))):
+                with self.subTest(kind=kind):
+                    path.write_bytes(data);before=hashlib.sha256(path.read_bytes()).hexdigest()
+                    self.assertEqual(ns['identity'](str(app)),expected)
+                    self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(),before)
+                    self.assertEqual(ns['report']['commands'][-1]['argv'],['/usr/bin/plutil','-convert','xml1','-o','-',str(path)])
+
     def test_historical_trial_signature_recorded_before_explicit_clone_installer(self):
         node=next(node for node in ast.parse(GUEST).body if isinstance(node,ast.FunctionDef) and node.name=='install_trial')
         calls=[];report={'commands':[]}

@@ -59,7 +59,8 @@ def plist_command(argv):return plistlib.readPlistFromString(command(argv,10))
 def identity(path):
     p=path+'/Contents/Info.plist'
     if os.path.realpath(p)!=p or not stat.S_ISREG(os.lstat(p).st_mode) or os.stat(p).st_size>524288:raise ValueError('invalid app plist')
-    x=plistlib.readPlist(p)
+    # Python2 plistlib cannot decode binary Info.plist. Convert in-memory via plutil; never rewrite the app.
+    x=plistlib.readPlistFromString(command(['/usr/bin/plutil','-convert','xml1','-o','-',p],10))
     return dict((k,x.get(k)) for k in ('CFBundleIdentifier','CFBundleShortVersionString','CFBundleVersion','CFBundleExecutable'))
 def exact_identity(path):
     x=identity(path)
