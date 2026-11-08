@@ -8,8 +8,12 @@ import tempfile
 from pathlib import Path
 import types
 import unittest
+import base64
+import hashlib
+import os
+import zlib
 from fcp_preflight import GUEST
-from fcp_workflow import OBSERVE, PLACEHOLDER, RETENTION_HELPERS, hold_retained_display_window, compose_guest, complete_hid_open, generated_project_evidence, replace_once, xml_template
+from fcp_workflow import OBSERVE, PLACEHOLDER, RETENTION_HELPERS, hold_retained_display_window, compose_guest, complete_hid_open, decode_workflow_report, encode_workflow_report, generated_project_evidence, replace_once, workflow_checked_response, xml_template
 
 
 def ready_inventory(**values):
@@ -19,6 +23,53 @@ def ready_inventory(**values):
 
 
 class Checks(unittest.TestCase):
+    def test_lossless_workflow_transport_and_original_error(self):
+        report={'result':'INCONCLUSIVE','error':'original helper failure: \u00d7','commands':[{'stdout':'AXWindow '*16000}]*6}
+        envelope=encode_workflow_report(report)
+        self.assertLess(len(envelope.encode()),512*1024)
+        self.assertEqual(json.loads(decode_workflow_report(envelope)),report)
+        composed=compose_guest(GUEST)
+        self.assertIn('print(encode_workflow_report(report))',composed)
+        self.assertLess(composed.index('import ctypes, hashlib'),composed.index('def encode_workflow_report'))
+        self.assertIn('import base64, zlib',composed)
+        # Compile/execute the exact injected encoder without running any guest code.
+        tree=ast.parse(composed);encoder=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='encode_workflow_report')
+        ns=dict(json=json,zlib=zlib,base64=base64,hashlib=hashlib)
+        exec(compile(ast.Module(body=[encoder],type_ignores=[]),'<injected encoder>','exec'),ns)
+        self.assertEqual(ns['encode_workflow_report'](report),envelope)
+
+    def test_transport_plain_commands_and_exit_errors_unchanged(self):
+        def plain(response):
+            if response.get('ExitCode')!=0:raise ValueError('original exit failure')
+            return response['Stdout']
+        checked=workflow_checked_response(plain)
+        for text in ('mounted\n',plistlib.dumps({'WholeDisks':['disk0']}).decode(),'{"ordinary":1}'):
+            self.assertEqual(checked(dict(ExitCode=0,Stdout=text)),text)
+        with self.assertRaisesRegex(ValueError,'original exit failure'):checked(dict(ExitCode=3,Stdout=encode_workflow_report({})))
+        with self.assertRaises(ValueError):checked(dict(ExitCode=0,Stdout=json.dumps({'_lightclick_workflow_report':1})))
+
+    def test_transport_rejects_corruption_bombs_trailing_and_headers(self):
+        original=json.loads(encode_workflow_report({'error':'retained'}))
+        bad=[]
+        for key,value in [('version',2),('version',True),('codec','gzip'),('raw_length',True),('raw_length',2097153),('raw_length',1),('sha256','0'*64),('payload','!')]:
+            envelope=dict(original);envelope[key]=value;bad.append(json.dumps(envelope))
+        for compressed in (zlib.compress(b'x'*2097153),zlib.compress(b'{}')+b'trailing',zlib.compress(b'{}')+zlib.compress(b'{}'),zlib.compress(b'{}')[:-1]):
+            envelope=dict(original);envelope.update(payload=base64.b64encode(compressed).decode(),raw_length=2,sha256=hashlib.sha256(b'{}').hexdigest());bad.append(json.dumps(envelope))
+        bad.append(json.dumps(original).replace('"version": 1','"version": 1, "version": 1'))
+        envelope=dict(original);envelope['unknown']=1;bad.append(json.dumps(envelope))
+        envelope=dict(original);envelope['payload']='A'*(512*1024);bad.append(json.dumps(envelope))
+        for text in bad:
+            with self.assertRaises(ValueError):decode_workflow_report(text)
+
+    def test_transport_explicit_overlimit_failure_not_partial_report(self):
+        for report,reason in [({'error':'original error preserved','data':'x'*2097152},'RAW_REPORT_LIMIT'),
+                              ({'error':'original error preserved','data':base64.b64encode(os.urandom(600000)).decode()},'ENVELOPE_LIMIT')]:
+            text=encode_workflow_report(report);envelope=json.loads(text)
+            self.assertLess(len(text.encode()),512*1024)
+            self.assertEqual(envelope['status'],'error');self.assertEqual(envelope['reason'],reason)
+            self.assertEqual(envelope['original_error'],report['error'])
+            with self.assertRaisesRegex(ValueError,'original error preserved'):decode_workflow_report(text)
+
     def test_composition_keeps_existing_cleanup_and_refuses_anchor_drift(self):
         composed=compose_guest(GUEST)
         ast.parse(composed)

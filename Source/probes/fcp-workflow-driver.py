@@ -13,7 +13,7 @@ import stat
 import sys
 import time
 sys.path.insert(0,str(source/'scripts'))
-from fcp_workflow import compose_guest, hold_retained_display_window, load_preflight, valid_retention_receipt, xml_template
+from fcp_workflow import compose_guest, hold_retained_display_window, load_preflight, valid_retention_receipt, workflow_checked_response, xml_template
 from fcp_preflight import wire_bool
 
 FIXTURE=Path('/private/tmp/lightclick-fcp-fixture-v1.dmg')
@@ -37,6 +37,7 @@ def run_workflow():
     with helper.open('rb') as stream:header=stream.read(8)
     if header!=bytes.fromhex('cffaedfe07000001'):raise ValueError('surgical helper must be thin x86_64')
     ns=load_preflight(source/'probes/fcp-install-preflight-driver.py',globals())
+    ns['checked_response']=workflow_checked_response(ns['checked_response'])
     template,manifest=xml_template(source)
     ns['GUEST']=compose_guest(ns['GUEST'])
     output.mkdir(parents=True)

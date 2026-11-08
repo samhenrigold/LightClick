@@ -8,10 +8,96 @@ import inspect
 import textwrap
 from pathlib import Path
 import runpy
+import zlib
 
 CLIP_SHA256='62dfa5b49d5f97d954c420d315c250015d8733f47c59752d002f8b841e650211'
 CLIP_BYTES=58747744
 PLACEHOLDER='/private/var/tmp/LightClickFCPFixture.PLACEHOLDER'
+
+WORKFLOW_REPORT_RAW_LIMIT=2*1024*1024
+WORKFLOW_REPORT_ENVELOPE_LIMIT=512*1024
+
+
+def encode_workflow_report(report,raw_limit=2*1024*1024,envelope_limit=512*1024):
+    """Python2-compatible guest transport; never print a partial report as complete."""
+    def failure(reason,observed=None):
+        original=report.get('error') if isinstance(report,dict) else None
+        if not isinstance(original,(str,type(u''))):original=None
+        elif len(original)>8192:
+            original={'retained':False,'characters':len(original),'reason':'original error exceeds failure-envelope budget'}
+        return json.dumps({'_lightclick_workflow_report':1,'version':1,'codec':'zlib+base64',
+                           'status':'error','reason':reason,'raw_limit':raw_limit,'envelope_limit':envelope_limit,
+                           'observed_raw_length':observed,'original_error':original},separators=(',',':'))
+    try:
+        chunks=[];length=0
+        for chunk in json.JSONEncoder(ensure_ascii=True,separators=(',',':')).iterencode(report):
+            chunk=chunk.encode('ascii');length+=len(chunk)
+            if length>raw_limit:return failure('RAW_REPORT_LIMIT',length)
+            chunks.append(chunk)
+        raw=b''.join(chunks)
+        compressed=zlib.compress(raw,6)
+        # Reject before allocating base64 when it cannot fit the envelope.
+        if 4*((len(compressed)+2)//3)>envelope_limit-1024:
+            return failure('ENVELOPE_LIMIT',length)
+        envelope=json.dumps({'_lightclick_workflow_report':1,'version':1,'codec':'zlib+base64','status':'ok',
+                             'raw_length':length,'sha256':hashlib.sha256(raw).hexdigest(),
+                             'payload':base64.b64encode(compressed).decode('ascii')},separators=(',',':'))
+        if len(envelope.encode('ascii'))>envelope_limit:return failure('ENVELOPE_LIMIT',length)
+        return envelope
+    except Exception:
+        return failure('REPORT_ENCODING_FAILED')
+
+
+def decode_workflow_report(text):
+    """Decode only the reserved workflow envelope; other command output is unchanged."""
+    if not isinstance(text,str) or len(text)>WORKFLOW_REPORT_RAW_LIMIT or len(text.encode('utf-8'))>WORKFLOW_REPORT_RAW_LIMIT:
+        raise ValueError('workflow response outside plain-command budget')
+    duplicates=[]
+    def object_pairs(pairs):
+        result={}
+        for key,value in pairs:
+            if key in result:duplicates.append(key)
+            result[key]=value
+        return result
+    try:envelope=json.loads(text,object_pairs_hook=object_pairs)
+    except (ValueError,TypeError):return text
+    if not isinstance(envelope,dict) or '_lightclick_workflow_report' not in envelope:return text
+    if len(text.encode('utf-8'))>WORKFLOW_REPORT_ENVELOPE_LIMIT or duplicates:
+        raise ValueError('workflow envelope outside budget or contains duplicate keys')
+    if (type(envelope.get('_lightclick_workflow_report')) is not int or envelope['_lightclick_workflow_report']!=1
+            or type(envelope.get('version')) is not int or envelope['version']!=1 or envelope.get('codec')!='zlib+base64'):
+        raise ValueError('unsupported workflow report envelope')
+    common={'_lightclick_workflow_report','version','codec','status'}
+    if envelope.get('status')=='error':
+        if (set(envelope)!=common|{'reason','raw_limit','envelope_limit','observed_raw_length','original_error'}
+                or envelope.get('reason') not in ('RAW_REPORT_LIMIT','ENVELOPE_LIMIT','REPORT_ENCODING_FAILED')
+                or type(envelope.get('raw_limit')) is not int or envelope['raw_limit']!=WORKFLOW_REPORT_RAW_LIMIT
+                or type(envelope.get('envelope_limit')) is not int or envelope['envelope_limit']!=WORKFLOW_REPORT_ENVELOPE_LIMIT):
+            raise ValueError('invalid workflow failure envelope')
+        raise ValueError('workflow report transport failed: '+envelope['reason']+'; original_error='+repr(envelope['original_error']))
+    if envelope.get('status')!='ok' or set(envelope)!=common|{'raw_length','sha256','payload'}:
+        raise ValueError('invalid workflow report envelope fields')
+    length,digest,payload=envelope['raw_length'],envelope['sha256'],envelope['payload']
+    if (type(length) is not int or not 0<length<=WORKFLOW_REPORT_RAW_LIMIT or not isinstance(digest,str)
+            or re.fullmatch(r'[0-9a-f]{64}',digest) is None or not isinstance(payload,str)):
+        raise ValueError('invalid workflow report length/hash/payload')
+    try:compressed=base64.b64decode(payload.encode('ascii'),validate=True)
+    except (ValueError,UnicodeError):raise ValueError('invalid workflow report base64')
+    decoder=zlib.decompressobj()
+    try:raw=decoder.decompress(compressed,WORKFLOW_REPORT_RAW_LIMIT+1)
+    except zlib.error:raise ValueError('invalid workflow zlib stream')
+    if (len(raw)>WORKFLOW_REPORT_RAW_LIMIT or decoder.unconsumed_tail or not decoder.eof or decoder.unused_data
+            or len(raw)!=length or hashlib.sha256(raw).hexdigest()!=digest):
+        raise ValueError('workflow report integrity, stream end or size mismatch')
+    decoded=raw.decode('utf-8','strict')
+    if not isinstance(json.loads(decoded),dict):raise ValueError('workflow report is not a dictionary')
+    return decoded
+
+
+def workflow_checked_response(plain_checked_response):
+    def checked(response):
+        return decode_workflow_report(plain_checked_response(response))
+    return checked
 
 def complete_hid_open(opened,pid):
     if (not isinstance(opened,dict) or opened.get('mode')!='open-generated-project-hid'
@@ -466,7 +552,9 @@ def compose_guest(base):
         try:stop(child)
         except Exception as error:errors.append(repr(error))"""
     text=replace_once(text,cleanup_old,"    errors=cleanup_for_workflow(owned,app,spec,report)")
-    text=replace_once(text,"try:\n    def interrupted(n,frame):",RETENTION_HELPERS+"\ntry:\n    def interrupted(n,frame):")
+    transport="import base64, zlib\n"+inspect.getsource(encode_workflow_report)+"\n"
+    text=replace_once(text,"try:\n    def interrupted(n,frame):",transport+RETENTION_HELPERS+"\ntry:\n    def interrupted(n,frame):")
+    text=replace_once(text,'    print(json.dumps(report))','    print(encode_workflow_report(report))')
     ast.parse(text)
     return text
 
