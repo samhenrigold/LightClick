@@ -40,10 +40,18 @@ public final class Tally: @unchecked Sendable {
     private var portWrites: [String] = []
     private var processLog: [String] = []
     private var recentTerminalSignals = RecentTerminalSignals()
+    private let shareMarkersEnabled: Bool
+    private let shareMarkerTimebase: mach_timebase_info_data_t?
+    private var shareMarkers = ShareWitnessMarkers()
 
     init(engine: Engine, path: String) {
         self.engine = engine
         self.path = path
+        let enabled = ProcessInfo.processInfo.environment["LC_HVDBT_SHARE_MARKERS"] == "1"
+        shareMarkersEnabled = enabled
+        var timebase = mach_timebase_info_data_t()
+        shareMarkerTimebase = enabled && mach_timebase_info(&timebase) == KERN_SUCCESS
+            && timebase.numer != 0 && timebase.denom != 0 ? timebase : nil
     }
 
     func startWriting() {
@@ -155,15 +163,19 @@ public final class Tally: @unchecked Sendable {
     func processNote() {
         let c = engine.ctx.pointee
         let r = withUnsafeBytes(of: c.x) { Array($0.bindMemory(to: UInt64.self)) }
-        var o = String(format: "proc %8.3f ", seconds(mach_absolute_time() &- startTicks)) + "cr3 \(hex(c.cr3)) "
+        let noteTicks = mach_absolute_time()
+        var o = String(format: "proc %8.3f ", seconds(noteTicks &- startTicks)) + "cr3 \(hex(c.cr3)) "
+        var shareInspection: ShareWitnessMarkers.Inspection?
         var retainTerminalSignal = false
         switch c.req_a.0 {
         case 1:
             switch r[0] & 0xFFFFFF {
             case 4, 0x18D:
-                let text =
-                    engine.readGuest(r[6], count: Int(min(r[2], 240))).map { String(decoding: $0, as: UTF8.self) }
-                    ?? "unreadable"
+                let inspection = ShareWitnessMarkers.inspect(enabled: shareMarkersEnabled, fd: r[7], count: r[2]) {
+                    engine.readGuest(r[6], count: $0)
+                }
+                shareInspection = inspection
+                let text = inspection.ordinaryBytes.map { String(decoding: $0, as: UTF8.self) } ?? "unreadable"
                 o += "write fd \(r[7]): " + text.replacingOccurrences(of: "\n", with: " ")
             case 1: o += "exit \(r[7] & 0xFF)"
             case 0x37: o += "reboot how \(hex(r[7]))"
@@ -202,6 +214,10 @@ public final class Tally: @unchecked Sendable {
         }
         lock.lock()
         if processLog.count < 2000 { processLog.append(o) }
+        if let shareInspection {
+            shareMarkers.append(shareInspection, hostTicks: noteTicks,
+                                elapsedTicks: noteTicks &- startTicks, cr3: c.cr3)
+        }
         if retainTerminalSignal { recentTerminalSignals.append(o) }
         lock.unlock()
     }
@@ -294,10 +310,11 @@ public final class Tally: @unchecked Sendable {
     private func seconds(_ ticks: UInt64) -> Double { Double(ticks) / 24_000_000 }
 
     private func addTimelineRow() {
+        let snapshotStartTicks = shareMarkersEnabled ? mach_absolute_time() : 0
         let c = engine.ctx.pointee
         let t = tr_stats()
         lock.lock()
-        let row = [
+        var row = [
             String(format: "%8.1f", seconds(mach_absolute_time() &- startTicks)), String(c.stat_pt_writes),
             String(c.stat_pt_writes_zap),
             String(c.stat_cr3), String(t.blocks), String(t.insns),
@@ -305,6 +322,12 @@ public final class Tally: @unchecked Sendable {
             String(c.stat_mmio), String(fallbacks), String(c.stat_irq), String(format: "%.1f", seconds(c.stat_mon_wait) * 1000),
             String(format: "%.1f", seconds(engine.translatorWaitTicks) * 1000), samples.last ?? "-"
         ]
+        if shareMarkersEnabled {
+            // Bracket all counter reads and formatting; not an atomic cross-vCPU snapshot.
+            let snapshotEndTicks = mach_absolute_time()
+            row.append(String(snapshotStartTicks))
+            row.append(String(snapshotEndTicks))
+        }
         timeline.append(row.joined(separator: "\t"))
         lock.unlock()
     }
@@ -337,6 +360,18 @@ public final class Tally: @unchecked Sendable {
         o += "== process log: spawns, exits, wait4 results, user faults other than #PF and #NM, oldest first ==\n"
         for line in processLog { o += line + "\n" }
         o += "\n"
+        if shareMarkersEnabled {
+            o += "== share witness writes (this vCPU; newest64; payload <=512 ASCII bytes; pre-syscall, delivery unqualified) ==\n"
+            o += "host_start_ticks \(startTicks)\n"
+            if let timebase = shareMarkerTimebase {
+                o += "host_timebase_numer \(timebase.numer) host_timebase_denom \(timebase.denom)\n"
+            } else { o += "host_timebase_unavailable 1\n" }
+            o += "share_marker_observed \(shareMarkers.observed) dropped \(shareMarkers.dropped) rejected \(shareMarkers.rejected)\n"
+            for marker in shareMarkers.records {
+                o += "host_ticks \(marker.hostTicks) elapsed_ticks \(marker.elapsedTicks) cr3 \(hex(marker.cr3)) " + marker.payload + "\n"
+            }
+            o += "\n"
+        }
         o += "== recent terminal-signal waits (this vCPU; newest64 retained, oldest first; each <=8192 UTF8 bytes) ==\n"
         o += "terminal_waits_observed \(recentTerminalSignals.observed) dropped \(recentTerminalSignals.dropped) truncated \(recentTerminalSignals.truncated)\n"
         for line in recentTerminalSignals.notes { o += line + "\n" }
@@ -575,7 +610,7 @@ public final class Tally: @unchecked Sendable {
             "\n== rip samples: seconds, where, rip. One a second, oldest first; a tcg rip is only as fresh as the last TB exit ==\n"
             + samples.joined(separator: "\n") + "\n"
         o +=
-            "\n== timeline: seconds, pt stores, pt table drops, cr3, blocks, insns, translate ms, mmio, fallbacks, irqs, all vCPUs' ms waiting for the monitor lock, this vCPU's for the translator's, rip ==\n"
+            "\n== timeline: seconds, pt stores, pt table drops, cr3, blocks, insns, translate ms, mmio, fallbacks, irqs, all vCPUs' ms waiting for the monitor lock, this vCPU's for the translator's, rip" + (shareMarkersEnabled ? ", snapshot start host ticks, snapshot end host ticks ==\n" : " ==\n")
         o += timeline.joined(separator: "\n") + "\n"
         lock.unlock()
         try? Data(o.utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
