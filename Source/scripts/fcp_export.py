@@ -111,6 +111,8 @@ def run_private_export_verifier(spec, app, workflow_directory):
     try:
         clock = monotonic_clock()
         actor = spec.get('workflow_export_action', {})
+        if app in owned:
+            result['app_exit_code_before'] = app.poll()
         uid = os.getuid()
         if (spec.get('workflow_export_action_mode') != 'export-h264-private-fixture'
                 or spec.get('variant') != '10.1' or os.uname()[0] != 'Darwin'
@@ -230,6 +232,8 @@ def run_private_export_verifier(spec, app, workflow_directory):
                 stop_verifier(child)
             except Exception as error:
                 result['cleanup_error'] = repr(error)
+        if app in owned:
+            result['app_exit_code_after'] = app.poll()
         # Preserve receipts even on parse/child failure, never unlink/truncate output.
         for i, fd in enumerate(fds):
             key = 'stdout_receipt' if i == 0 else 'stderr_receipt'

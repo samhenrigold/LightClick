@@ -550,6 +550,7 @@ OBSERVE='\n'+textwrap.indent(inspect.getsource(generated_project_evidence)+inspe
 
             else:report['workflow']['open_error']='owned app exited after OS open'
         report['workflow']['inventory_finished_seconds']=time.time()-launched_at
+        report['workflow']['owned_app_exit_code_after_workflow']=app.poll()
     else:report['workflow']['inventory_error']='owned app exited'
 '''
 
@@ -561,6 +562,7 @@ def replace_once(text,old,new):
 
 def compose_guest(base):
     text=replace_once(base,"    report['console_uid']=join_console()",PREPARE+"\n    report['console_uid']=join_console()")
+    text=replace_once(text,'    launched_at=time.time()',"    launched_at=time.time()\n    report['owned_app_launch_wall_time']=launched_at")
     text=replace_once(text,'    os.initgroups(user.pw_name,user.pw_gid);os.setgid(user.pw_gid);os.setuid(uid)',
                       '    for path in workflow_paths:os.chown(path,uid,user.pw_gid)\n    os.initgroups(user.pw_name,user.pw_gid);os.setgid(user.pw_gid);os.setuid(uid)')
     text=replace_once(text,"    report['result']='OBSERVED_LAUNCH'",OBSERVE+"\n    report['result']='OBSERVED_LAUNCH'")

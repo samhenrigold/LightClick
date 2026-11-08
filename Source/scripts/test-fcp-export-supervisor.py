@@ -56,7 +56,7 @@ class Checks(unittest.TestCase):
             root=Path(tmp);(root/'fixture').mkdir(mode=0o700);(root/'helper').mkdir(mode=0o700);(root/'helper/home').mkdir(mode=0o700)
             (root/'helper/export-verify').write_bytes(PAYLOAD);(root/'helper/export-verify').chmod(0o755);(root/'fixture/export.mov').write_bytes(b'owned candidate')
             fakeos=MappedOS(root);clock=[0.];launched=[];stopped=[];signals=[];wall=[1000000.]
-            app=types.SimpleNamespace(pid=321,poll=lambda:0 if case=='app-exits'and launched else None)
+            app=types.SimpleNamespace(pid=321,poll=lambda:-11 if case=='app-already-exited' else 0 if case=='app-exits'and launched else None)
             actor=dict(result='PRIVATE_EXPORT_CANDIDATE_REQUIRES_MEDIA_VERIFICATION',mode='export-h264-private-fixture',variant='10.1',pid=321,outputPath=FIXTURE+'/export.mov',exportSaveActionStatus=-25204)
             for key in('identityMatched','identityStillMatched','axTrusted','privateFixtureValid','exportAttempted','savePressed','privateExportControlsVerified','pathNavigationVerified','candidateFileVerified'):actor[key]=True
             spec=dict(variant='10.1',workflow_export_action_mode='export-h264-private-fixture',workflow_export_action=actor,workflow_export_verifier=HELPER,workflow_export_verifier_sha256=PIN)
@@ -105,12 +105,14 @@ class Checks(unittest.TestCase):
                 self.assertEqual(len(initialized),1)
             else:result=ns['run_private_export_verifier'](spec,app,FIXTURE)
             files={p.name:p.read_bytes()for p in(root/'fixture').iterdir()if p.is_file()}
-            if case in('string-flag','wrong-mode','wrong-pid','wrong-path','wrong-sha','collision'):self.assertFalse(launched)
+            if case in('string-flag','wrong-mode','wrong-pid','wrong-path','wrong-sha','collision','app-already-exited'):self.assertFalse(launched)
             else:self.assertEqual(len(launched),1)
             if case=='success':
                 self.assertTrue(result['structure_qualified']);self.assertEqual(result['save_action_status'],-25204);self.assertGreater(result['stdout_receipt']['bytes'],131072);self.assertNotIn('inline_pngs',json.dumps(result));self.assertEqual(files['export-verification.json'],raw)
             else:self.assertFalse(result['structure_qualified'])
             if case=='collision':self.assertEqual(files['export-verification.json'],b'preserve preexisting')
+            if case=='app-already-exited':
+                self.assertEqual(result['app_exit_code_before'],-11);self.assertEqual(result['app_exit_code_after'],-11)
             if case in('timeout','app-exits','wall-rollback','mach-fallback'):self.assertEqual(len(stopped),1);self.assertIs(stopped[0],launched[0]);self.assertEqual(signals,[(888,15)])
             if case in('timeout','wall-rollback','mach-fallback'):
                 self.assertTrue(result['timed_out']);self.assertGreaterEqual(result['elapsed_seconds'],66);self.assertLess(clock[0],67)
@@ -124,7 +126,7 @@ class Checks(unittest.TestCase):
             return result
 
     def test_supervisor_actual_file_process_boundaries(self):
-        for case in('success','incomplete','string-flag','wrong-mode','wrong-pid','wrong-path','wrong-sha','collision','nonzero','timeout','app-exits','stderr-overflow','stdout-overflow','malformed','wall-rollback','term-ignored','wrong-group','unreaped','mach-fallback'):
+        for case in('success','incomplete','string-flag','wrong-mode','wrong-pid','wrong-path','wrong-sha','collision','nonzero','timeout','app-exits','app-already-exited','stderr-overflow','stdout-overflow','malformed','wall-rollback','term-ignored','wrong-group','unreaped','mach-fallback'):
             with self.subTest(case=case):self.supervise(case)
 
     @staticmethod
