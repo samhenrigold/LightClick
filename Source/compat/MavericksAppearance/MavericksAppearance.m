@@ -183,7 +183,7 @@ static void threePart(NSImage *image, NSRect dst, CGFloat left, CGFloat right, B
     for(int i=0;i<3;i++)if(dw[i]>0&&sw[i]>0)[image drawInRect:NSMakeRect(dst.origin.x+dx[i],dst.origin.y,dw[i],dst.size.height) fromRect:NSMakeRect(sx[i],0,sw[i],size.height) operation:NSCompositeSourceOver fraction:1 respectFlipped:flipped hints:nil];
 }
 static IMP originalProgressDraw, originalProgressValue;
-static int progressDrawCalls,progressFallbackCalls,buttonImageCalls,buttonBezelCalls,buttonTitleCalls;
+static int progressDrawCalls,progressFallbackCalls,buttonImageCalls,buttonBezelCalls,buttonTitleCalls,buttonStyleContextCalls;
 static void progressDraw(NSProgressIndicator *view,SEL cmd,NSRect dirty) {
     progressDrawCalls++;
     NSImage *track=art(@"1425.png"),*fill=art(view.window.isKeyWindow?@"1309.png":@"1357.png");
@@ -215,7 +215,7 @@ static void installOriginalArtRendering(void) {
     for(NSString *name in @[@"controlTextColor",@"windowFrameTextColor",@"labelColor"]) { Method m=class_getClassMethod([NSColor class],NSSelectorFromString(name));if(m)method_setImplementation(m,(IMP)legacyBlack); }
 }
 
-NSDictionary *MavericksAppearanceDiagnostics(void) { return @{@"originalResourceReplacements":@(originalResourceReplacements),@"namedImageReplacements":@(namedImageReplacements),@"coreTextFontReplacements":@(lcCoreTextReplacements),@"buttonImageCalls":@(buttonImageCalls),@"buttonBezelCalls":@(buttonBezelCalls),@"buttonTitleCalls":@(buttonTitleCalls),@"progressDrawCalls":@(progressDrawCalls),@"progressFallbackCalls":@(progressFallbackCalls),@"originalTrackLoaded":@(art(@"1425.png")!=nil)}; }
+NSDictionary *MavericksAppearanceDiagnostics(void) { return @{@"originalResourceReplacements":@(originalResourceReplacements),@"namedImageReplacements":@(namedImageReplacements),@"coreTextFontReplacements":@(lcCoreTextReplacements),@"buttonImageCalls":@(buttonImageCalls),@"buttonBezelCalls":@(buttonBezelCalls),@"buttonTitleCalls":@(buttonTitleCalls),@"buttonStyleContextCalls":@(buttonStyleContextCalls),@"progressDrawCalls":@(progressDrawCalls),@"progressFallbackCalls":@(progressFallbackCalls),@"originalTrackLoaded":@(art(@"1425.png")!=nil)}; }
 
 @interface LCClassicProgressIndicator : NSProgressIndicator @end
 @implementation LCClassicProgressIndicator
@@ -386,9 +386,39 @@ static void installWindowBackground(void) {
 @interface NSButtonCell (LCMojaveButtonGeometry)
 - (NSUInteger)_buttonType;
 - (void)_imageRect:(NSRect *)image titleRect:(NSRect *)title forBounds:(NSRect)bounds;
+- (NSTextField *)_titleTextField;
+- (void)_updateTitleTextFieldValue;
+- (void)_updateTitleTextFieldWithFrame:(NSRect)frame inView:(NSView *)view;
 @end
 @interface LCClassicButtonCell : NSButtonCell @end
+static BOOL classicPushLabel(NSButtonCell *cell) {
+    if(![cell respondsToSelector:@selector(_buttonType)]||cell.bezelStyle!=NSRoundedBezelStyle)return NO;
+    NSUInteger type=[cell _buttonType];return type==NSMomentaryPushInButton||type==NSMomentaryLightButton||type==NSMomentaryChangeButton;
+}
+static IMP nativeButtonStyleEffect;
+static id classicButtonStyleEffect(NSButtonCell *cell,SEL selector,NSView *view) {
+    if(classicPushLabel(cell)) {
+        buttonStyleContextCalls++;
+        // Modern style effects can replace even explicit attributed-title ink
+        // with white. Rounded classic pushes use plain black/gray drawing.
+        return nil;
+    }
+    return ((id(*)(id,SEL,NSView *))nativeButtonStyleEffect)(cell,selector,view);
+}
 @implementation LCClassicButtonCell
+- (BOOL)lcUsesClassicPushLabel {return classicPushLabel(self);}
+- (void)lcUpdatePushTitleField {
+    if(![self lcUsesClassicPushLabel])return;
+    NSTextField *field=[self _titleTextField];if(!field)return;
+    NSColor *color=self.enabled?[NSColor blackColor]:[NSColor disabledControlTextColor];
+    // Mojave's layer-backed buttons draw through NSButtonTextField rather
+    // than drawTitle:. Its emphasized background style otherwise selects white.
+    [(NSTextFieldCell *)field.cell setBackgroundStyle:NSBackgroundStyleLight];field.textColor=color;
+    NSMutableAttributedString *title=[[field.attributedStringValue mutableCopy]autorelease];
+    if(title.length){[title addAttribute:NSForegroundColorAttributeName value:color range:NSMakeRange(0,title.length)];field.attributedStringValue=title;}
+}
+- (void)_updateTitleTextFieldValue {[super _updateTitleTextFieldValue];[self lcUpdatePushTitleField];}
+- (void)_updateTitleTextFieldWithFrame:(NSRect)frame inView:(NSView *)view {[super _updateTitleTextFieldWithFrame:frame inView:view];[self lcUpdatePushTitleField];}
 - (NSInteger)lcOriginalKind {
     if(self.controlSize!=NSRegularControlSize || ![self respondsToSelector:@selector(_buttonType)])return -1;
     NSInteger value=(NSInteger)[self _buttonType];
@@ -396,7 +426,7 @@ static void installWindowBackground(void) {
     if((value==NSSwitchButton || value==NSRadioButton) && !leading)return -1;
     // Mojave supplies white attributed text for its default blue push button.
     // Standard rounded push buttons always use Mavericks' black enabled label.
-    if(value==NSMomentaryPushInButton)return self.bezelStyle==NSRoundedBezelStyle&&!self.image?value:-1;
+    if([self lcUsesClassicPushLabel])return !self.image?NSMomentaryPushInButton:-1;
     NSAttributedString *title=self.attributedTitle;
     for(NSUInteger i=0;i<title.length;i++) {
         NSColor *color=[title attribute:NSForegroundColorAttributeName atIndex:i effectiveRange:NULL];
@@ -442,7 +472,7 @@ static void installWindowBackground(void) {
     threePart(art(file),body,20,20,view.isFlipped);
 }
 - (NSRect)drawTitle:(NSAttributedString *)title withFrame:(NSRect)frame inView:(NSView *)view {
-    BOOL push=[self respondsToSelector:@selector(_buttonType)]&&[self _buttonType]==NSMomentaryPushInButton&&self.bezelStyle==NSRoundedBezelStyle;
+    BOOL push=[self lcUsesClassicPushLabel];
     // Label color also applies to small/mini and image-bearing push buttons,
     // whose bezel geometry is deliberately left to their existing renderer.
     if(!push&&[self lcOriginalKind]<0)return [super drawTitle:title withFrame:frame inView:view];
@@ -463,6 +493,8 @@ static id classicButtonFrame(id self,SEL cmd,NSRect rect) {id object=((id(*)(id,
 static id classicButtonCoder(id self,SEL cmd,id coder) {id object=((id(*)(id,SEL,id))originalButtonCoderInit)(self,cmd,coder);classicButtonCell(object);return object;}
 static void installButtonSubclass(void) {
     Class cell=[NSButtonCell class];SEL cellCoder=@selector(initWithCoder:);
+    Method effect=class_getInstanceMethod(cell,NSSelectorFromString(@"_effectiveStyleEffectConfigurationInView:"));
+    if(effect){nativeButtonStyleEffect=method_getImplementation(effect);method_setImplementation(effect,(IMP)classicButtonStyleEffect);}
     originalButtonCellCoderInit=class_getMethodImplementation(cell,cellCoder);
     class_addMethod(cell,cellCoder,(IMP)classicButtonCellCoder,"@@:@");method_setImplementation(class_getInstanceMethod(cell,cellCoder),(IMP)classicButtonCellCoder);
     Class cls=[NSButton class];SEL frame=@selector(initWithFrame:),coder=@selector(initWithCoder:);

@@ -133,6 +133,10 @@ static NSDictionary *viewTree(NSView *view,int depth) {
     for(NSView *child in view.subviews)[children addObject:viewTree(child,depth+1)];
     NSMutableDictionary *row=[NSMutableDictionary dictionaryWithDictionary:@{@"class":NSStringFromClass(view.class),@"frame":NSStringFromRect(view.frame),@"hidden":@(view.hidden),@"children":children}];
     if(view.layer)row[@"layer"]=layerTree(view.layer,0);
+    if([view isKindOfClass:[NSButton class]]) {
+        NSButton *button=(NSButton *)view;id cell=button.cell;SEL type=NSSelectorFromString(@"_buttonType");
+        row[@"button"]=@{@"cellClass":NSStringFromClass([cell class]),@"bezelStyle":@(button.bezelStyle),@"enabled":@(button.enabled),@"kind":@([cell respondsToSelector:type]?((NSUInteger(*)(id,SEL))[cell methodForSelector:type])(cell,type):NSUIntegerMax)};
+    }
     if([view isKindOfClass:[NSVisualEffectView class]])row[@"material"]=@([(NSVisualEffectView *)view material]);
     if([view isKindOfClass:[NSTableView class]]) {
         NSTableView *table=(NSTableView *)view;NSMutableArray *available=[NSMutableArray array];
@@ -174,13 +178,15 @@ static void reportDesktop(void) {
         } @catch(id exception){}
     }
     NSData *data=[NSJSONSerialization dataWithJSONObject:@{@"catalogImages":MavericksCatalogDiagnostics(),@"coreUI":MavericksCoreUIDiagnostics(),@"appearanceDiagnostics":MavericksAppearanceDiagnostics(),@"contexts":contexts,@"classes":classes,@"windows":windows} options:0 error:NULL];
-    [data writeToFile:[@"/tmp/MavericksAppearance-" stringByAppendingFormat:@"%@.json",[NSProcessInfo processInfo].processName] atomically:YES];
+    NSString *name=[NSProcessInfo processInfo].processName;
+    NSString *directory=[name isEqual:@"Notes"]?[NSHomeDirectory()stringByAppendingPathComponent:@"Library/Caches"]:@"/tmp";
+    [data writeToFile:[directory stringByAppendingPathComponent:[NSString stringWithFormat:@"MavericksAppearance-%@.json",name]] atomically:YES];
 }
 __attribute__((constructor)) static void initializeDesktop(void) {
     if(!MavericksAppearanceProcessSupported())return;
     char release[32]={0};size_t size=sizeof(release);sysctlbyname("kern.osrelease",release,&size,NULL,0);if(atoi(release)!=18)return;
     NSString *name=[NSProcessInfo processInfo].processName;
-    if(![@[@"Dock",@"Finder",@"SystemUIServer"] containsObject:name])return;
+    if(![@[@"Dock",@"Finder",@"SystemUIServer",@"Notes"] containsObject:name])return;
     if([name isEqual:@"Finder"]) {
         LCFinderAppearanceController *controller=[LCFinderAppearanceController new];
         [[NSNotificationCenter defaultCenter] addObserver:controller selector:@selector(update:) name:NSWindowDidUpdateNotification object:nil];

@@ -35,8 +35,8 @@
       "textured segmented button"
     ],
     "scope": "Equal raw RGBA hashes for the same drawing parameters on Mavericks and Mojave; this does not establish whole-desktop pixel identity",
-    "pushLabelCases": 7,
-    "pushLabelScope": "Offscreen actual AppKit drawTitle input and rendered-pixel checks; six enabled cases black, disabled gray. Exact reported application awaits visual verification."
+    "pushLabelCases": 21,
+    "pushLabelScope": "Three momentary push types across seven states/layouts with default-button/key-window context. Direct drawing pixels and native title-field attributes checked; actual Notes welcome Continue button verified black on blue in the unlocked guest."
   },
   "remaining": [
     "Visual qualification of all material roles and controls across application states",
