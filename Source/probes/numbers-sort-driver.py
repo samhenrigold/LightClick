@@ -1,6 +1,7 @@
-"""guest-bench NEW_RESULTS EXISTING_HELPER EXPECTED_SHA256.
+"""guest-bench NEW_RESULTS EXISTING_HELPER EXPECTED_SHA256 [32|512].
 
-One owned Numbers2.3/i386 CSV/sort qualification, not a performance test.
+One owned Numbers2.3/i386 CSV/sort task with full model verification.
+Timing describes AppleEvent/model boundaries, not UI completion or pure sort CPU.
 The helper uses declared legacy AppleEvents; no AppleScript commands are guessed.
 Never run the guest helper or this collector on the host.
 """
@@ -24,6 +25,8 @@ class Timebase(ctypes.Structure):_fields_=[('numer',ctypes.c_uint),('denom',ctyp
 tb=Timebase();libc.mach_absolute_time.restype=ctypes.c_uint64
 if libc.mach_timebase_info(ctypes.byref(tb)) or not tb.numer or not tb.denom:raise Stop('mach clock unavailable')
 def now():return libc.mach_absolute_time()*float(tb.numer)/tb.denom/1e9
+collector_started=int(libc.mach_absolute_time())
+report['collector_timing']={'clock':'mach_absolute_time','timebase_numer':int(tb.numer),'timebase_denom':int(tb.denom),'markers':{'collector_started':collector_started}}
 deadline=now()+80
 def interrupted(number,frame):raise Stop('collector interrupted '+str(number))
 for sig in (signal.SIGALRM,signal.SIGTERM,signal.SIGINT):signal.signal(sig,interrupted)
@@ -148,7 +151,9 @@ def join(finder):
     same_process(finder)
 try:
     if os.geteuid()!=0 or len(sys.argv)!=2 or os.uname()[0]!='Darwin' or os.uname()[2].split('.')[0]!='13':raise Stop('owned root Darwin13 collector required')
-    spec=json.loads(sys.argv[1]);staged=spec['helper_path'];expected=spec['helper_sha256']
+    spec=json.loads(sys.argv[1]);staged=spec['helper_path'];expected=spec['helper_sha256'];rows=spec['rows']
+    if type(rows)not in(int,long) or rows not in(32,512):raise Stop('rows must be exactly32 or512')
+    report['rows_requested']=rows
     if not re.match(r'\A/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin\Z',staged):raise Stop('helper stage prefix')
     parent=os.path.dirname(staged);a=os.lstat(parent)
     if os.path.realpath(parent)!=parent or not stat.S_ISDIR(a.st_mode) or a.st_uid!=0 or stat.S_IMODE(a.st_mode)!=0o700:raise Stop('stage parent identity')
@@ -172,7 +177,7 @@ try:
     if existing['exit_code']!=1 or existing['stdout']['text'].strip() or existing['stderr']['text']:raise Stop('preexisting Numbers refused')
     directory=tempfile.mkdtemp(prefix='LightClickNumbersSort.',dir='/private/var/tmp');os.chmod(directory,0o700)
     home=directory+'/home';os.mkdir(home,0o700);helper=directory+'/sort-helper';csv=directory+'/input.csv'
-    csv_data=''.join('%d,%d\n'%(key,key*17+3)for key in range(32,0,-1))
+    csv_data=''.join('%d,%d\n'%(key,key*17+3)for key in range(rows,0,-1))
     create(helper,helper_data,0o700,uid,user.pw_gid);create(csv,csv_data,0o600,uid,user.pw_gid)
     if hashlib.sha256(regular(helper,1048576,uid)).hexdigest()!=expected:raise Stop('private helper copy mismatch')
     os.chown(home,uid,user.pw_gid);os.chown(directory,uid,user.pw_gid)
@@ -181,6 +186,7 @@ try:
     if os.getuid()!=uid or os.geteuid()!=uid or os.stat('/dev/console').st_uid!=uid:raise Stop('console credentials changed')
     same_process(finder);report['console_uid']=uid
     env.update(HOME=home,CFFIXED_USER_HOME=home,TMPDIR=directory+'/')
+    report['collector_timing']['markers']['app_spawn']=int(libc.mach_absolute_time())
     app,app_log=spawn([BINARY],env,(4096,16384));report['owned_app_pid']=app.pid
     app_until=min(deadline,now()+5)
     while True:
@@ -191,8 +197,13 @@ try:
             time.sleep(.05)
     report['app_identity_before']=app_identity
     helper_argv=[helper,'--pid',str(app.pid),'--csv',csv,'--uid',str(uid)]
+    if rows==512:helper_argv+=['--rows','512']
     report['helper_launches']=1
+    report['collector_timing']['markers']['helper_spawn']=int(libc.mach_absolute_time())
     helper_result=command(helper_argv,60,env,(24576,4096));report['helper']=helper_result
+    report['collector_timing']['markers']['helper_complete']=int(libc.mach_absolute_time())
+    ct=report['collector_timing'];cm=ct['markers'];scale=float(tb.numer)/tb.denom/1e9
+    ct.update(scope='collector_process_spawn_through_helper_stdio_collection',phase_seconds=dict((key,(value-collector_started)*scale)for key,value in cm.items()),app_spawn_to_helper_spawn_seconds=(cm['helper_spawn']-cm['app_spawn'])*scale,app_spawn_to_helper_complete_seconds=(cm['helper_complete']-cm['app_spawn'])*scale,helper_process_and_stdio_seconds=(cm['helper_complete']-cm['helper_spawn'])*scale)
     if app.poll() is not None:raise Stop('owned Numbers exited during helper')
     same_process(app_identity);same_process(finder)
     report['app_identity_after']=identity(app.pid,uid,BINARY);report['finder_after']=identity(finder['pid'],uid,FINDER)
@@ -234,13 +245,119 @@ def process_identity(row, path):
             type(row.get('start_microseconds')) is int and 0 <= row['start_microseconds'] < 1000000)
 
 
-def qualify(response, expected, csv_hash):
+def finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def unsigned(value, maximum=(1 << 64) - 1):
+    return type(value) is int and 0 <= value <= maximum
+
+
+def same_seconds(value, expected):
+    # NSNumber JSON doubles and independent integer-tick conversion may round.
+    return finite_number(value) and math.isclose(value, expected, rel_tol=1e-8, abs_tol=1e-8)
+
+
+def clock_fields(clock, names, upper):
+    if not isinstance(clock, dict) or clock.get('clock') != 'mach_absolute_time':
+        raise ValueError('mach clock evidence missing')
+    numer, denom = clock.get('timebase_numer'), clock.get('timebase_denom')
+    if not unsigned(numer, 0xffffffff) or not numer or not unsigned(denom, 0xffffffff) or not denom:
+        raise ValueError('mach timebase invalid')
+    markers = clock.get('markers')
+    if not isinstance(markers, dict) or set(markers) != set(names):
+        raise ValueError('clock markers incomplete')
+    ticks = [markers[name] for name in names]
+    if any(not unsigned(tick) or not tick for tick in ticks) or any(a >= b for a, b in zip(ticks, ticks[1:])):
+        raise ValueError('clock markers not strictly ordered')
+    phases = [(tick-ticks[0])*numer/denom/1e9 for tick in ticks]
+    if not all(math.isfinite(value) for value in phases) or not 0 < phases[-1] < upper:
+        raise ValueError('clock interval outside deadline')
+    return phases
+
+
+def validate_measurements(report, value, rows):
+    collector = report.get('collector_timing')
+    if collector is not None:
+        # These bracket process creation and helper completion/stdio collection.
+        # Their epoch is never compared with the helper's separate phase clock.
+        cnames = ('collector_started', 'app_spawn', 'helper_spawn', 'helper_complete')
+        cseconds = clock_fields(collector, cnames, 80)
+        phases = collector.get('phase_seconds')
+        durations = {'app_spawn_to_helper_spawn_seconds': cseconds[2]-cseconds[1],
+                     'app_spawn_to_helper_complete_seconds': cseconds[3]-cseconds[1],
+                     'helper_process_and_stdio_seconds': cseconds[3]-cseconds[2]}
+        if (collector.get('scope') != 'collector_process_spawn_through_helper_stdio_collection' or
+                not isinstance(phases, dict) or set(phases) != set(cnames) or
+                any(not same_seconds(phases[n], sec) for n, sec in zip(cnames, cseconds)) or
+                any(not same_seconds(collector.get(k), sec) for k, sec in durations.items())):
+            raise ValueError('collector process timing conversion mismatch')
+    elif rows != 32:
+        raise ValueError('collector task timing missing')
+    if value.get('timing_qualified') is False and rows == 32 and 'timing' not in value:
+        # Original 32-row qualification helper remains supported unchanged.
+        return
+    if value.get('timing_qualified') is not True or type(value.get('rows_requested')) is not int or value['rows_requested'] != rows:
+        raise ValueError('helper measured-task scope missing')
+    names = ('before_open', 'open_reply', 'initial_model_verified', 'before_sort', 'sort_reply', 'sorted_model_verified')
+    timing = value.get('timing')
+    seconds = clock_fields(timing, names, 60)
+    if (timing.get('complete') is not True or
+            timing.get('scope') != 'guest_AE_roundtrip_and_full_model_verification_startup_excluded' or
+            any(timing.get(k) is not False for k in ('pure_algorithm_timing', 'ui_completion_observed',
+                                                     'host_cpu_observed', 'observer_overhead_calibrated'))):
+        raise ValueError('helper timing interpretation unqualified')
+    phases = timing.get('phase_seconds')
+    if not isinstance(phases, dict) or set(phases) != set(names) or any(not same_seconds(phases[n], s) for n, s in zip(names, seconds)):
+        raise ValueError('helper phase conversion mismatch')
+    derived = {'open_roundtrip_seconds': seconds[1], 'import_model_verified_seconds': seconds[2],
+               'sort_roundtrip_seconds': seconds[4]-seconds[3],
+               'sort_model_verified_seconds': seconds[5]-seconds[3], 'task_model_verified_seconds': seconds[5]}
+    if any(not same_seconds(timing.get(k), s) or not 0 < timing[k] < 60 for k, s in derived.items()):
+        raise ValueError('helper phase durations mismatch')
+    if not finite_number(value.get('helper_seconds')) or not seconds[-1] <= value['helper_seconds'] <= 60:
+        raise ValueError('helper elapsed interval inconsistent')
+    cpu = value.get('target_cpu')
+    if (not isinstance(cpu, dict) or type(cpu.get('available')) is not bool or type(cpu.get('qualified')) is not bool or
+            type(cpu.get('pid')) is not int or cpu['pid'] != report['owned_app_pid'] or
+            cpu.get('scope') != 'owned_Numbers_process_snapshots_bracketing_before_open_to_sorted_model_verified' or
+            cpu.get('host_cpu_observed') is not False):
+        raise ValueError('target guest CPU scope invalid')
+    time_keys = ('before_user_ticks', 'before_system_ticks', 'after_user_ticks', 'after_system_ticks',
+                 'user_ticks', 'system_ticks', 'user_seconds', 'system_seconds', 'unit', 'timebase_numer', 'timebase_denom')
+    if cpu['available']:
+        if (any(type(cpu.get(k)) is not int for k in ('before_status', 'before_errno', 'after_status', 'after_errno')) or
+                any(type(cpu.get(k)) is not bool for k in ('before_sampled', 'after_sampled'))):
+            raise ValueError('target guest CPU sample statuses missing')
+    elif cpu['qualified'] or any(k in cpu for k in ('before_status', 'before_errno', 'after_status', 'after_errno', 'before_sampled', 'after_sampled')):
+        raise ValueError('unavailable CPU has fabricated samples')
+    if not cpu['qualified']:
+        if any(k in cpu for k in time_keys):
+            raise ValueError('unqualified CPU has numerical times')
+        return  # Optional CPU failures do not invalidate a verified wall task.
+    if (not cpu['available'] or cpu.get('unit') != 'RUSAGE_INFO_V0_mach_absolute_ticks' or
+            any(type(cpu.get(k)) is not int or cpu[k] != timing[k] for k in ('timebase_numer', 'timebase_denom')) or
+            cpu['before_status'] != 0 or cpu['after_status'] != 0 or
+            cpu['before_sampled'] is not True or cpu['after_sampled'] is not True or
+            any(not unsigned(cpu.get(k)) for k in time_keys[:6])):
+        raise ValueError('target CPU counters unqualified')
+    for label in ('user', 'system'):
+        before, after, delta = (cpu[k] for k in ('before_'+label+'_ticks', 'after_'+label+'_ticks', label+'_ticks'))
+        if after < before or delta != after-before or not same_seconds(cpu.get(label+'_seconds'), delta*cpu['timebase_numer']/cpu['timebase_denom']/1e9):
+            raise ValueError('target CPU delta mismatch')
+
+
+def qualify(response, expected, csv_hash, rows=32):
+    if type(rows) is not int or rows not in (32, 512):
+        raise ValueError('rows must be exactly32 or512')
     if not isinstance(response, dict) or 'Error' in response or type(response.get('ExitCode')) is not int or response['ExitCode'] != 0:
         raise ValueError('collector failed/ambiguous; stop all requests')
     text = response.get('Stdout')
     if not isinstance(text, str) or len(text.encode()) > 65536:
         raise ValueError('collector receipt outside bound')
     report = json.loads(text)
+    if report.get('rows_requested', 32) != rows or type(report.get('rows_requested', 32)) is not int:
+        raise ValueError('collector rows changed')
     if (type(report.get('schema')) is not int or report['schema'] != 1 or report.get('result') != 'NUMBERS_SORT_COLLECTED' or
             report.get('helper_sha256') != expected or report.get('csv_sha256') != csv_hash or
             type(report.get('helper_launches')) is not int or report['helper_launches'] != 1 or
@@ -278,13 +395,13 @@ def qualify(response, expected, csv_hash):
     if (not isinstance(directory, str) or not re.fullmatch(r'/private/var/tmp/LightClickNumbersSort\.[A-Za-z0-9_-]{6,16}', directory) or
             report.get('csv_path') != directory+'/input.csv' or type(report.get('owned_app_pid')) is not int or
             report['owned_app_pid'] != report['app_identity_before']['pid'] or
-            helper.get('argv') != [directory+'/sort-helper', '--pid', str(report['owned_app_pid']), '--csv', report['csv_path'], '--uid', '501']):
+            helper.get('argv') != [directory+'/sort-helper', '--pid', str(report['owned_app_pid']), '--csv', report['csv_path'], '--uid', '501'] + (['--rows', '512'] if rows == 512 else [])):
         raise ValueError('helper/document scope changed')
     value = json.loads(helper['stdout']['text'])
     wanted = {'schema': 1, 'result': 'NUMBERS_LEGACY_SORT_PASS', 'pid': report['owned_app_pid'], 'uid': 501,
-              'csv_path': report['csv_path'], 'initial_documents': 0, 'row_count': 32, 'column_count': 2,
+              'csv_path': report['csv_path'], 'initial_documents': 0, 'row_count': rows, 'column_count': 2,
               'sort_status': 0, 'sort_event': 'NmTb/SORT', 'sort_direction': 'ascn',
-              'document_owned': True, 'no_ui_input': True, 'timing_qualified': False,
+              'document_owned': True, 'no_ui_input': True,
               'document_count': 1, 'sheet_count': 1, 'table_count': 1, 'phase': 'complete',
               'document_ownership_basis': 'empty_to_one_private_open_and_full_fixture',
               'sort_send_count': 1, 'readback_mode': 'two_column_bulk_values',
@@ -305,21 +422,33 @@ def qualify(response, expected, csv_hash):
             readiness.get('before_first_send') is not True or type(readiness.get('helper_seconds')) not in (int, float) or
             not math.isfinite(readiness['helper_seconds']) or not 0 <= readiness['helper_seconds'] <= 60):
         raise ValueError('application readiness unqualified')
-    for key, keys in (('before_pairs', range(32, 0, -1)), ('after_pairs', range(1, 33))):
+    for key in ('before', 'after'):
+        shape = value.get(key+'_shape', {})
+        types = value.get(key+'_numeric_types')
+        if (shape.get('row_count_type') != 'long' or shape.get('column_count_type') != 'long' or
+                shape.get('column_value_types') != ['list', 'list'] or
+                shape.get('column_value_counts') != [rows, rows] or
+                any(type(n) is not int for n in shape.get('column_value_counts', [])) or
+                not isinstance(types, list) or not types or len(types) != len(set(types)) or
+                any(t not in ('shor', 'long', 'comp', 'magn', 'ucom', 'sing', 'doub') for t in types)):
+            raise ValueError('bulk numeric readback descriptor/counts invalid')
+    for key, keys in (('before_pairs', range(rows, 0, -1)), ('after_pairs', range(1, rows + 1))):
         pairs = value.get(key)
-        if not isinstance(pairs, list) or len(pairs) != 32:
+        if not isinstance(pairs, list) or len(pairs) != rows:
             raise ValueError('full table readback missing')
         for pair, number in zip(pairs, keys):
             if (not isinstance(pair, list) or len(pair) != 2 or
                     any(type(v) not in (int, float) or not math.isfinite(v) for v in pair) or
                     pair != [number, number * 17 + 3]):
                 raise ValueError('table order/pairs did not qualify')
+    validate_measurements(report, value, rows)
     return report, value
 
 
 def run():
-    if len(arguments) != 3:
-        raise ValueError('fresh RESULTS, compiled helper, exact SHA256 required')
+    if len(arguments) not in (3, 4) or (len(arguments) == 4 and arguments[3] not in ('32', '512')):
+        raise ValueError('fresh RESULTS, compiled helper, exact SHA256, optional32/512 required')
+    rows = int(arguments[3]) if len(arguments) == 4 else 32
     results, helper = map(Path, arguments[:2]); expected = arguments[2]
     if not results.is_absolute() or results.exists() or not re.fullmatch(r'[0-9a-f]{64}', expected):
         raise ValueError('fresh absolute results and exact hash required')
@@ -331,7 +460,8 @@ def run():
         raise ValueError('helper architecture/bytes changed')
     results.mkdir(parents=True)
     report = {'result': 'INCOMPLETE', 'helper_sha256': expected, 'requests': [], 'performance_qualified': False,
-              'scope': 'One private Numbers09 CSV/model-sort qualification, no speed/UI claim'}
+              'scope': 'One private Numbers09 verified CSV/model-sort task; no comparative speed/UI/host CPU claim',
+              'rows_requested': rows}
     def save():
         (results/'result.json').write_text(json.dumps(report, indent=2)+'\n')
     deadline = time.monotonic()+170
@@ -355,13 +485,13 @@ def run():
         if (not isinstance(transfer, dict) or transfer.get('FilesStaged') is not True or
                 not isinstance(directory, str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}', directory)):
             raise ValueError('stage directory outside owned pattern')
-        spec = {'helper_path': directory+'/Transfer.bin', 'helper_sha256': expected}
+        spec = {'helper_path': directory+'/Transfer.bin', 'helper_sha256': expected, 'rows': rows}
         response = checked({'Executable': '/usr/bin/python', 'Arguments': ['-c', COLLECTOR, json.dumps(spec)]}, 100)
         text = response.get('Stdout')
         if isinstance(text, str) and len(text.encode()) <= 65536:
             (results/'collector-receipt.txt').write_text(text)
-        csv = ''.join('%d,%d\n' % (key, key*17+3) for key in range(32, 0, -1)).encode()
-        receipt, value = qualify(response, expected, hashlib.sha256(csv).hexdigest())
+        csv = ''.join('%d,%d\n' % (key, key*17+3) for key in range(rows, 0, -1)).encode()
+        receipt, value = qualify(response, expected, hashlib.sha256(csv).hexdigest(), rows)
         report.update(result='NUMBERS09_PRIVATE_SORT_QUALIFIED', collector=receipt, helper=value); save()
     except BaseException as error:
         report.update(result='STOP_ALL_REQUESTS', error=repr(error)[:512]); save(); raise

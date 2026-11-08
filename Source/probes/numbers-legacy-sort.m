@@ -1,4 +1,4 @@
-/* Guest-only Numbers 2.3 qualification, not a timing benchmark.
+/* Guest-only Numbers 2.3: complete-model qualification and bounded task timing.
  * Root compiles for x86_64/min10.9; NEVER execute this helper on the host.
  * Wire declarations: Numbers.scriptSuite f5bff41c70f87ca9473880d457f134fdf4aaae21d9d602e4d26fe9e78b41022e.
  * NSCoreSuite declares document fileName as ppth. No UI scripting, activation,
@@ -9,6 +9,7 @@
 #import <Carbon/Carbon.h>
 #include <libproc.h>
 #include <sys/proc_info.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <mach/mach_time.h>
@@ -18,11 +19,13 @@
 #include <math.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
 static const char *kNumbers = "/Applications/Numbers.app/Contents/MacOS/Numbers";
 static NSMutableDictionary *report;
@@ -34,6 +37,19 @@ static NSAppleEventDescriptor *target;
 static mach_timebase_info_data_t timebase;
 static uint64_t started;
 static unsigned sends, sortSends;
+static int expectedRows = 32;
+enum { BEFORE_OPEN, OPEN_REPLY, INITIAL_MODEL_VERIFIED, BEFORE_SORT, SORT_REPLY,
+       SORTED_MODEL_VERIFIED, MARK_COUNT };
+static uint64_t marks[MARK_COUNT];
+static unsigned markCount;
+static struct rusage_info_v0 cpuBefore, cpuAfter;
+static BOOL cpuAvailable, cpuBeforeOK, cpuAfterOK;
+static int cpuBeforeStatus, cpuBeforeErrno, cpuAfterStatus, cpuAfterErrno;
+typedef int (*RusageFunction)(int, int, rusage_info_t *);
+static RusageFunction readRusage;
+_Static_assert(sizeof(struct rusage_info_v0) == 96, "RUSAGE_INFO_V0 ABI");
+_Static_assert(offsetof(struct rusage_info_v0, ri_user_time) == 16, "V0 user time ABI");
+_Static_assert(offsetof(struct rusage_info_v0, ri_system_time) == 24, "V0 system time ABI");
 
 static NSString *fourcc(OSType code) {
     char b[5] = {(char)(code >> 24), (char)(code >> 16), (char)(code >> 8), (char)code, 0};
@@ -46,7 +62,94 @@ static double elapsed(void) {
     return (double)(mach_absolute_time() - started) * timebase.numer / timebase.denom / 1e9;
 }
 
+static double tickSeconds(uint64_t ticks) {
+    return (double)ticks * timebase.numer / timebase.denom / 1e9;
+}
+
+/* All six boundaries use one fixed array. No phase log/JSON allocation occurs
+ * between the clock read and the immediately following AE send/return. */
+static BOOL timingReport(void) {
+    static NSString *const names[MARK_COUNT] = {@"before_open", @"open_reply", @"initial_model_verified",
+        @"before_sort", @"sort_reply", @"sorted_model_verified"};
+    NSMutableDictionary *raw = [NSMutableDictionary dictionary], *seconds = [NSMutableDictionary dictionary];
+    BOOL valid = timebase.numer && timebase.denom && markCount <= MARK_COUNT;
+    for (unsigned i = 0; i < markCount && i < MARK_COUNT; ++i) {
+        [raw setObject:@(marks[i]) forKey:names[i]];
+        if (!marks[i] || (i && marks[i] <= marks[i - 1])) valid = NO;
+        if (valid) {
+            double value = tickSeconds(marks[i] - marks[0]);
+            if (!isfinite(value) || value < 0) valid = NO;
+            else [seconds setObject:@(value) forKey:names[i]];
+        }
+    }
+    NSMutableDictionary *t = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"clock":@"mach_absolute_time", @"timebase_numer":@(timebase.numer), @"timebase_denom":@(timebase.denom),
+        @"markers":raw, @"phase_seconds":seconds,
+        @"scope":@"guest_AE_roundtrip_and_full_model_verification_startup_excluded",
+        @"pure_algorithm_timing":@NO, @"ui_completion_observed":@NO, @"host_cpu_observed":@NO,
+        @"observer_overhead_calibrated":@NO }];
+    if (valid && markCount == MARK_COUNT) {
+        const unsigned a[] = {BEFORE_OPEN, BEFORE_OPEN, BEFORE_SORT, BEFORE_SORT, BEFORE_OPEN};
+        const unsigned b[] = {OPEN_REPLY, INITIAL_MODEL_VERIFIED, SORT_REPLY, SORTED_MODEL_VERIFIED, SORTED_MODEL_VERIFIED};
+        static NSString *const fields[] = {@"open_roundtrip_seconds", @"import_model_verified_seconds",
+            @"sort_roundtrip_seconds", @"sort_model_verified_seconds", @"task_model_verified_seconds"};
+        for (unsigned i = 0; i < 5; ++i) {
+            double value = tickSeconds(marks[b[i]] - marks[a[i]]);
+            if (!isfinite(value) || value <= 0 || value >= 60) valid = NO;
+            else [t setObject:@(value) forKey:fields[i]];
+        }
+    } else valid = NO;
+    [t setObject:(valid ? @YES : @NO) forKey:@"complete"];
+    [report setObject:t forKey:@"timing"];
+    return valid;
+}
+
+static void cpuReport(BOOL taskComplete) {
+    NSMutableDictionary *c = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"available":(cpuAvailable ? @YES : @NO), @"qualified":@NO, @"pid":@(targetPID),
+        @"scope":@"owned_Numbers_process_snapshots_bracketing_before_open_to_sorted_model_verified",
+        @"host_cpu_observed":@NO }];
+    if (cpuAvailable) {
+        [c setObject:@(cpuBeforeStatus) forKey:@"before_status"]; [c setObject:@(cpuBeforeErrno) forKey:@"before_errno"];
+        [c setObject:@(cpuAfterStatus) forKey:@"after_status"]; [c setObject:@(cpuAfterErrno) forKey:@"after_errno"];
+        [c setObject:(cpuBeforeOK ? @YES : @NO) forKey:@"before_sampled"];
+        [c setObject:(cpuAfterOK ? @YES : @NO) forKey:@"after_sampled"];
+    }
+    if (taskComplete && cpuBeforeOK && cpuAfterOK && cpuBefore.ri_proc_start_abstime &&
+        cpuBefore.ri_proc_start_abstime == cpuAfter.ri_proc_start_abstime &&
+        !cpuBefore.ri_proc_exit_abstime && !cpuAfter.ri_proc_exit_abstime &&
+        !memcmp(cpuBefore.ri_uuid, cpuAfter.ri_uuid, sizeof(cpuBefore.ri_uuid)) &&
+        cpuAfter.ri_user_time >= cpuBefore.ri_user_time && cpuAfter.ri_system_time >= cpuBefore.ri_system_time) {
+        uint64_t user = cpuAfter.ri_user_time - cpuBefore.ri_user_time;
+        uint64_t system = cpuAfter.ri_system_time - cpuBefore.ri_system_time;
+        /* PERIOD XNU2422.1.72: fill_task_rusage_v2 copies task_power_info's
+         * timer_grab totals directly; task_vtimer_update converts such deltas
+         * through absolutetime_to_microtime. Preserve raw ticks and use this
+         * guest's timebase, rather than assuming a cross-era nanosecond ABI. */
+        [c setObject:@"RUSAGE_INFO_V0_mach_absolute_ticks" forKey:@"unit"];
+        [c setObject:@(timebase.numer) forKey:@"timebase_numer"];
+        [c setObject:@(timebase.denom) forKey:@"timebase_denom"];
+        [c setObject:@(cpuBefore.ri_user_time) forKey:@"before_user_ticks"];
+        [c setObject:@(cpuBefore.ri_system_time) forKey:@"before_system_ticks"];
+        [c setObject:@(cpuAfter.ri_user_time) forKey:@"after_user_ticks"];
+        [c setObject:@(cpuAfter.ri_system_time) forKey:@"after_system_ticks"];
+        [c setObject:@(user) forKey:@"user_ticks"]; [c setObject:@(system) forKey:@"system_ticks"];
+        [c setObject:@(tickSeconds(user)) forKey:@"user_seconds"];
+        [c setObject:@(tickSeconds(system)) forKey:@"system_seconds"];
+        [c setObject:@YES forKey:@"qualified"];
+    }
+    [report setObject:c forKey:@"target_cpu"];
+}
+
 static void emit(int code) {
+    BOOL validTiming = timingReport();
+    cpuReport(code == 0 && validTiming);
+    [report setObject:(code == 0 && validTiming ? @YES : @NO) forKey:@"timing_qualified"];
+    if (code == 0 && !validTiming) {
+        [report setObject:@"NUMBERS_LEGACY_SORT_UNQUALIFIED" forKey:@"result"];
+        [report setObject:@"timing_incomplete_or_nonmonotonic" forKey:@"reason"];
+        code = 1;
+    }
     [report setObject:phase forKey:@"phase"];
     [report setObject:@(sends) forKey:@"send_count"];
     [report setObject:@(sortSends) forKey:@"sort_send_count"];
@@ -106,6 +209,28 @@ static void identity(BOOL first) {
         refuse(@"process_start_changed", 0, nil);
     }
     if (elapsed() >= 58.0) refuse(@"deadline", 0, nil);
+}
+
+static void markPhase(unsigned index) {
+    if (index != markCount || index >= MARK_COUNT) refuse(@"phase_marker_order", 0, nil);
+    marks[markCount++] = mach_absolute_time();
+}
+
+static void cpuSnapshot(BOOL before) {
+    identity(NO);
+    if (before) {
+        readRusage = (RusageFunction)dlsym(RTLD_DEFAULT, "proc_pid_rusage");
+        cpuAvailable = readRusage != NULL;
+    }
+    if (cpuAvailable) {
+        struct rusage_info_v0 *sample = before ? &cpuBefore : &cpuAfter;
+        errno = 0;
+        int status = readRusage(targetPID, RUSAGE_INFO_V0, (rusage_info_t *)sample);
+        int savedErrno = errno;
+        if (before) { cpuBeforeStatus = status; cpuBeforeErrno = savedErrno; cpuBeforeOK = status == 0; }
+        else { cpuAfterStatus = status; cpuAfterErrno = savedErrno; cpuAfterOK = status == 0; }
+    }
+    identity(NO);
 }
 
 static void waitForApplicationLaunch(void) {
@@ -183,8 +308,14 @@ static NSAppleEventDescriptor *sendLegacyEvent(OSType eventClass, OSType eventID
     if (eventClass == 'NmTb' && eventID == 'SORT') {
         if (++sortSends != 1) { AEDisposeDesc(&event); refuse(@"sort_repeat_refused", 0, nil); }
     }
+    BOOL isOpen = eventClass == 'aevt' && eventID == 'odoc';
+    BOOL isSort = eventClass == 'NmTb' && eventID == 'SORT';
+    if (isOpen) markPhase(BEFORE_OPEN);
+    if (isSort) markPhase(BEFORE_SORT);
     e = AESendMessage(&event, &reply,
                      kAEWaitReply | kAENeverInteract | kAEDontRecord | kAEDontReconnect, ticks);
+    if (isOpen) markPhase(OPEN_REPLY);
+    if (isSort) markPhase(SORT_REPLY);
     AEDisposeDesc(&event);
     identity(NO);
     if (e) { AEDisposeDesc(&reply); refuse(@"send_failed_no_retry", e, nil); }
@@ -235,7 +366,7 @@ static NSArray *pairs(NSAppleEventDescriptor *table, BOOL ascending) {
     int nr = number(rows), nc = number(cols);
     [report setObject:@(nr) forKey:@"row_count"];
     [report setObject:@(nc) forKey:@"column_count"];
-    if (nr != 32 || nc != 2) refuse(@"table_shape_no_header_normalization", 0, nil);
+    if (nr != expectedRows || nc != 2) refuse(@"table_shape_no_header_normalization", 0, nil);
     NSAppleEventDescriptor *a = get(property('NMCv', all('NmCl', at('NMCo', table, 1))));
     NSAppleEventDescriptor *b = get(property('NMCv', all('NmCl', at('NMCo', table, 2))));
     [report setObject:@{ @"row_count_type":fourcc([rows descriptorType]),
@@ -243,12 +374,12 @@ static NSArray *pairs(NSAppleEventDescriptor *table, BOOL ascending) {
                         @"column_value_types":@[fourcc([a descriptorType]), fourcc([b descriptorType])],
                         @"column_value_counts":@[@([a numberOfItems]), @([b numberOfItems])] }
                forKey:ascending ? @"after_shape" : @"before_shape"];
-    listCount(a, 32, @"first_column_value_shape"); listCount(b, 32, @"second_column_value_shape");
-    NSMutableArray *out = [NSMutableArray arrayWithCapacity:32];
+    listCount(a, expectedRows, @"first_column_value_shape"); listCount(b, expectedRows, @"second_column_value_shape");
+    NSMutableArray *out = [NSMutableArray arrayWithCapacity:(NSUInteger)expectedRows];
     NSMutableSet *types = [NSMutableSet set];
-    for (int i = 0; i < 32; ++i) {
+    for (int i = 0; i < expectedRows; ++i) {
         NSAppleEventDescriptor *ka = [a descriptorAtIndex:i + 1], *vb = [b descriptorAtIndex:i + 1];
-        int k = number(ka), v = number(vb), expected = ascending ? i + 1 : 32 - i;
+        int k = number(ka), v = number(vb), expected = ascending ? i + 1 : expectedRows - i;
         [types addObject:fourcc([ka descriptorType])]; [types addObject:fourcc([vb descriptorType])];
         [out addObject:@[@(k), @(v)]];
         if (k != expected || v != expected * 17 + 3) {
@@ -281,8 +412,14 @@ static NSString *fixture(const char *arg) {
     if (fd < 0 || fstat(fd, &opened) || opened.st_dev != fs.st_dev || opened.st_ino != fs.st_ino || opened.st_size != fs.st_size) {
         if (fd >= 0) close(fd); refuse(@"fixture_open_identity", 0, nil);
     }
-    char expected[1024], actual[1024]; size_t length = 0;
-    for (int k = 32; k >= 1; --k) length += (size_t)snprintf(expected + length, sizeof(expected) - length, "%d,%d\n", k, k * 17 + 3);
+    char expected[8192], actual[8192]; size_t length = 0;
+    for (int k = expectedRows; k >= 1; --k) {
+        int written = snprintf(expected + length, sizeof(expected) - length, "%d,%d\n", k, k * 17 + 3);
+        if (written < 0 || (size_t)written >= sizeof(expected) - length) {
+            close(fd); refuse(@"fixture_generation_bound", 0, nil);
+        }
+        length += (size_t)written;
+    }
     ssize_t got = 0;
     while (got < (ssize_t)sizeof(actual)) {
         ssize_t r = read(fd, actual + got, sizeof(actual) - (size_t)got);
@@ -307,8 +444,13 @@ int main(int argc, char **argv) {
             if (sysctlbyname("kern.osrelease", os, &osSize, NULL, 0) || strncmp(os, "13.", 3))
                 refuse(@"requires_guest_Darwin13", 0, nil);
             if (!timebase.numer || !timebase.denom) refuse(@"clock_timebase", 0, nil);
-            if (argc != 7 || strcmp(argv[1], "--pid") || strcmp(argv[3], "--csv") || strcmp(argv[5], "--uid"))
+            if ((argc != 7 && argc != 9) || strcmp(argv[1], "--pid") || strcmp(argv[3], "--csv") || strcmp(argv[5], "--uid"))
                 refuse(@"arguments", 0, nil);
+            if (argc == 9) {
+                if (strcmp(argv[7], "--rows") || strcmp(argv[8], "512")) refuse(@"rows_argument", 0, nil);
+                expectedRows = 512;
+            }
+            [report setObject:@(expectedRows) forKey:@"rows_requested"];
             char *pEnd = NULL, *uEnd = NULL; errno = 0;
             long p = strtol(argv[2], &pEnd, 10), u = strtol(argv[6], &uEnd, 10);
             if (errno || !argv[2][0] || !argv[6][0] || *pEnd || *uEnd || p <= 1 || p > INT_MAX ||
@@ -330,6 +472,7 @@ int main(int argc, char **argv) {
             NSData *urlBytes = [[[[NSURL fileURLWithPath:csv] absoluteURL] absoluteString] dataUsingEncoding:NSUTF8StringEncoding];
             NSAppleEventDescriptor *file = [NSAppleEventDescriptor descriptorWithDescriptorType:typeFileURL data:urlBytes];
             NSAppleEventDescriptor *files = [NSAppleEventDescriptor listDescriptor]; [files insertDescriptor:file atIndex:1];
+            cpuSnapshot(YES);
             (void)sendLegacyEvent('aevt', 'odoc', files, nil, NO);
             phase = @"opened_documents";
             double openDeadline = fmin(25.0, elapsed() + 15.0);
@@ -374,6 +517,7 @@ int main(int argc, char **argv) {
             [report setObject:@1 forKey:@"document_count"]; [report setObject:@1 forKey:@"sheet_count"];
             [report setObject:@1 forKey:@"table_count"];
             phase = @"before_readback"; [report setObject:pairs(table, NO) forKey:@"before_pairs"];
+            markPhase(INITIAL_MODEL_VERIFIED);
             /* Import may create an untitled document. Ownership then rests on the
              * same owned PID, zero initial documents, exactly one private open,
              * exactly one resulting document/table, and ALL fixture pairs. No
@@ -384,6 +528,8 @@ int main(int argc, char **argv) {
             (void)sendLegacyEvent('NmTb', 'SORT', table, at('NMCo', table, 1), NO);
             [report setObject:@0 forKey:@"sort_status"];
             phase = @"after_readback"; [report setObject:pairs(table, YES) forKey:@"after_pairs"];
+            markPhase(SORTED_MODEL_VERIFIED);
+            cpuSnapshot(NO);
             phase = @"complete"; identity(NO);
             [report setObject:@"NUMBERS_LEGACY_SORT_PASS" forKey:@"result"];
             alarm(0); emit(0);
