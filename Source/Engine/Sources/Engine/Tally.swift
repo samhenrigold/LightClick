@@ -39,6 +39,7 @@ public final class Tally: @unchecked Sendable {
     private var notes: [String] = []
     private var portWrites: [String] = []
     private var processLog: [String] = []
+    private var recentTerminalSignals = RecentTerminalSignals()
 
     init(engine: Engine, path: String) {
         self.engine = engine
@@ -155,6 +156,7 @@ public final class Tally: @unchecked Sendable {
         let c = engine.ctx.pointee
         let r = withUnsafeBytes(of: c.x) { Array($0.bindMemory(to: UInt64.self)) }
         var o = String(format: "proc %8.3f ", seconds(mach_absolute_time() &- startTicks)) + "cr3 \(hex(c.cr3)) "
+        var retainTerminalSignal = false
         switch c.req_a.0 {
         case 1:
             switch r[0] & 0xFFFFFF {
@@ -176,6 +178,7 @@ public final class Tally: @unchecked Sendable {
                 o += "wait4 failed, error \(result)"
                 break
             }
+            retainTerminalSignal = RecentTerminalSignals.isTerminalWait(result: result, status: status, failed: false)
             o += "wait4 returned \(result) status " + (status.map { hex(UInt64($0)) } ?? "unreadable")
             // With no child ready (WNOHANG returns 0) or an error, the kernel left the status word as it found it.
             if result > 0, let status, status & 0x7F != 0 {
@@ -199,6 +202,7 @@ public final class Tally: @unchecked Sendable {
         }
         lock.lock()
         if processLog.count < 2000 { processLog.append(o) }
+        if retainTerminalSignal { recentTerminalSignals.append(o) }
         lock.unlock()
     }
 
@@ -332,6 +336,10 @@ public final class Tally: @unchecked Sendable {
         o += "\n"
         o += "== process log: spawns, exits, wait4 results, user faults other than #PF and #NM, oldest first ==\n"
         for line in processLog { o += line + "\n" }
+        o += "\n"
+        o += "== recent terminal-signal waits (this vCPU; newest64 retained, oldest first; each <=8192 UTF8 bytes) ==\n"
+        o += "terminal_waits_observed \(recentTerminalSignals.observed) dropped \(recentTerminalSignals.dropped) truncated \(recentTerminalSignals.truncated)\n"
+        for line in recentTerminalSignals.notes { o += line + "\n" }
         o += "\n"
         if !portWrites.isEmpty {
             o +=
