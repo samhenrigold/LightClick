@@ -417,6 +417,26 @@ OBSERVE='\n'+textwrap.indent(inspect.getsource(generated_project_evidence)+inspe
                                     try:report['workflow'][key]=json.loads(command(argv,14))
                                     except Exception as error:report['workflow'][key]={'available':False,'reason':repr(error)}
                                 else:report['workflow'][key]={'available':False,'reason':'owned app exited before post-open observation'}
+                            if spec.get('workflow_inspect_master_share'):
+                                post_full=report['workflow'].get('post_project_open_full_observer',{})
+                                post_menu=report['workflow'].get('post_project_open_inventory',{})
+                                def same_owned_view(view,menu=False):
+                                    return (isinstance(view,dict) and view.get('result')==('MENU_INVENTORY' if menu else 'OBSERVED_WINDOWS')
+                                            and type(view.get('pid')) is int and view['pid']==app.pid
+                                            and view.get('variant' if menu else 'version')==spec['variant']
+                                            and (not menu or view.get('mode')=='inventory')
+                                            and all(native_true(view.get(k)) for k in ('identityMatched','identityStillMatched','axTrusted')))
+                                ready_share=(app.poll() is None and complete_hid_open(report['workflow'].get('project_open_action',{}),app.pid)
+                                             and same_owned_view(post_full) and same_owned_view(post_menu,True)
+                                             and not modal_present(post_full.get('windows',[])))
+                                report['workflow']['master_share_evidence_gate']=ready_share
+                                if ready_share:
+                                    report['workflow']['master_share_inspection_attempted']=True
+                                    try:
+                                        raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),'inspect-master-share',workflow_directory],28)
+                                        report['workflow']['master_share_inspection']=json.loads(raw)
+                                    except Exception as error:report['workflow']['master_share_inspection']={'available':False,'reason':repr(error)}
+                                else:report['workflow']['master_share_inspection_skipped']='complete HID open and fresh owned nonmodal observations required'
                         else:report['workflow']['project_open_skipped']='owned app, verified creation or exact generated-project evidence missing'
                     library=workflow_directory+'/private.fcpbundle'
                     report['workflow']['library_artifact']={'path':library,'exists':os.path.lexists(library),'is_directory':os.path.isdir(library),'is_symlink':os.path.islink(library)}
