@@ -121,8 +121,8 @@ def request(command, timeout):
     temporary = channel/'Request.tmp'
     temporary.write_bytes(encoded)
     temporary.rename(channel/'Request.json')
-    deadline = time.time()+timeout
-    while time.time() < deadline:
+    deadline = time.monotonic()+timeout
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise SystemExit(f'The app exited; see {work}/app.log')
         if (channel/'Result.json').exists():
@@ -143,11 +143,11 @@ def request(command, timeout):
 
 def stage(program):
     shutil.copyfile(program, channel/'Transfer.bin')
-    start = time.time()
+    start = time.monotonic()
     staged = request({'Action': 'stage-probe'}, 900)
     if 'Error' in staged:
         raise SystemExit(f'Staging failed: {staged}')
-    print(f'staged in {time.time()-start:.0f}s', flush=True)
+    print(f'staged in {time.monotonic()-start:.0f}s', flush=True)
     path = staged['Transfer']['Directory']+'/Transfer.bin'
     request({'Executable': '/bin/chmod', 'Arguments': ['0755', path]}, 120)
     return path
@@ -213,9 +213,9 @@ try:
         timeline.record('app_launched', pid=process.pid)
         timeline.start(machine, channel, process.pid, real)
     time.sleep(args.boot_wait)
-    deadline = time.time()+300
+    deadline = time.monotonic()+300
     while not channel.is_dir():
-        if time.time() > deadline:
+        if time.monotonic() > deadline:
             raise SystemExit('The diagnostics channel never appeared')
         time.sleep(1)
     if args.driver:

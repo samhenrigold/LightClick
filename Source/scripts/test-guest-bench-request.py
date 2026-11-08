@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Exercise the actual request function with a scratch channel and no process/VM."""
 import ast
+import io
 import json
 from pathlib import Path
 import tempfile
 import types
 import unittest
+from unittest.mock import Mock
 
 source=Path(__file__).with_name('guest-bench')
 tree=ast.parse(source.read_text())
@@ -36,7 +38,7 @@ class Checks(unittest.TestCase):
             return None
         def forbidden(*args):raise AssertionError('unexpected wait/timeout processing')
         ns=dict(json=types.SimpleNamespace(dumps=dumps,loads=json.loads),channel=channel,
-                time=types.SimpleNamespace(time=lambda:0,sleep=forbidden),process=types.SimpleNamespace(poll=poll),
+                time=types.SimpleNamespace(monotonic=lambda:0,sleep=forbidden),process=types.SimpleNamespace(poll=poll),
                 work=channel,stderr_path=channel.parent/'stderr.txt',retain_timeout=forbidden)
         exec(code,ns)
         return ns['request'],calls,response
@@ -86,5 +88,25 @@ class Checks(unittest.TestCase):
                     self.assertEqual(request(command,1),response)
                     self.assertEqual((channel/'Request.json').read_bytes(),encoded)
                 self.assertEqual(calls,[command])
+
+    def test_wall_clock_changes_do_not_extend_request_timeout(self):
+        for wall_time in (-1000000,1000000):
+            with tempfile.TemporaryDirectory(prefix='lightclick-request-deadline-') as temporary:
+                channel=Path(temporary)/'channel';channel.mkdir()
+                clock=Mock()
+                clock.monotonic.side_effect=[10,10,11,12,13]
+                clock.time.side_effect=[1000]+[wall_time]*10
+                process=Mock();process.poll.side_effect=[None,None,None,AssertionError('request exceeded elapsed deadline')]
+                retained=Mock(return_value='timeout-evidence')
+                ns=dict(json=json,channel=channel,time=clock,process=process,work=channel,
+                        stderr_path=channel.parent/'stderr.txt',retain_timeout=retained,
+                        source=channel,args=types.SimpleNamespace(tag='test'),sys=types.SimpleNamespace(stderr=io.StringIO()))
+                exec(code,ns)
+                with self.assertRaisesRegex(SystemExit,'Timed out waiting'):
+                    ns['request']({'Executable':'/usr/bin/true'},3)
+                self.assertEqual(process.poll.call_count,3)
+                self.assertEqual(clock.sleep.call_count,3)
+                clock.time.assert_not_called()
+                retained.assert_called_once()
 
 if __name__=='__main__':unittest.main()
