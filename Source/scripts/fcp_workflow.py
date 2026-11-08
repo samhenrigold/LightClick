@@ -520,8 +520,8 @@ OBSERVE='\n'+textwrap.indent(inspect.getsource(generated_project_evidence)+inspe
                                     report['workflow']['master_share_inspection_attempted']=True
                                     try:
                                         share_action=spec.get('workflow_master_share_action','inspect-master-share')
-                                        if share_action not in ('inspect-master-share','inspect-master-settings'):raise ValueError('unknown Master File inspection mode')
-                                        raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),share_action,workflow_directory],35 if share_action=='inspect-master-settings' else 28)
+                                        if share_action not in ('inspect-master-share','inspect-master-settings','inspect-master-transcode-save-panel'):raise ValueError('unknown Master File inspection mode')
+                                        raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),share_action,workflow_directory],60 if share_action=='inspect-master-transcode-save-panel' else 35 if share_action=='inspect-master-settings' else 28)
                                         report['workflow']['master_share_inspection']=json.loads(raw)
                                     except Exception as error:report['workflow']['master_share_inspection']={'available':False,'reason':repr(error)}
                                 else:report['workflow']['master_share_inspection_skipped']='complete HID open and fresh owned nonmodal observations required'

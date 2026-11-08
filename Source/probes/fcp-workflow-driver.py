@@ -1,4 +1,4 @@
-"""guest-bench CASE NEW_RESULTS EXISTING_AX_OBSERVER EXISTING_SURGICAL_HELPER [EXISTING_LIBRARY_ACTION_HELPER [new-private-library|create-private-library|create-and-open-private-project|create-open-and-retain-for-display|create-open-hid-and-retain-for-display|create-open-hid-inspect-master-share|create-open-hid-inspect-master-settings]].
+"""guest-bench CASE NEW_RESULTS EXISTING_AX_OBSERVER EXISTING_SURGICAL_HELPER [EXISTING_LIBRARY_ACTION_HELPER [new-private-library|create-private-library|create-and-open-private-project|create-open-and-retain-for-display|create-open-hid-and-retain-for-display|create-open-hid-inspect-master-share|create-open-hid-inspect-master-settings|create-open-hid-inspect-master-transcode-save-panel]].
 Prepares verified generated media/XML, then inventories the live editor's actual menus.
 One standard OS-open attempt of generated XML; optional grounded New-library dialog helper.
 No guessed Save controls or import/playback/export qualification.
@@ -23,13 +23,13 @@ def run_workflow():
     if len(arguments) not in (4,5,6):raise ValueError('requires fixed FCP case, new absolute results, existing observer, existing surgical helper')
     case,out,observer,helper=arguments[:4]
     requested_mode=arguments[5] if len(arguments)==6 else 'new-private-library'
-    inspect_share=requested_mode in ('create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings')
-    share_action='inspect-master-settings' if requested_mode=='create-open-hid-inspect-master-settings' else 'inspect-master-share'
-    hid_project=requested_mode in ('create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings')
+    inspect_share=requested_mode in ('create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel')
+    share_action={'create-open-hid-inspect-master-settings':'inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel':'inspect-master-transcode-save-panel'}.get(requested_mode,'inspect-master-share')
+    hid_project=requested_mode in ('create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel')
     retain_app=requested_mode in ('create-open-and-retain-for-display','create-open-hid-and-retain-for-display')
-    open_project=requested_mode in ('create-and-open-private-project','create-open-and-retain-for-display','create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings')
+    open_project=requested_mode in ('create-and-open-private-project','create-open-and-retain-for-display','create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel')
     action_mode='create-private-library' if open_project else requested_mode
-    if requested_mode not in ('new-private-library','create-private-library','create-and-open-private-project','create-open-and-retain-for-display','create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings') or (len(arguments)>=5 and case!='mavericks-10.1'):raise ValueError('library mode must be explicit and grounded for FCP10.1 before staging')
+    if requested_mode not in ('new-private-library','create-private-library','create-and-open-private-project','create-open-and-retain-for-display','create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel') or (len(arguments)>=5 and case!='mavericks-10.1'):raise ValueError('library mode must be explicit and grounded for FCP10.1 before staging')
     output=Path(out)
     if case not in ('mavericks-10.1','mojave-10.4.4') or not output.is_absolute() or output.exists():raise ValueError('fixed case and new absolute results required')
     if not stat.S_ISREG(FIXTURE.lstat().st_mode) or FIXTURE.resolve()!=FIXTURE:raise ValueError('fixed readonly fixture image unavailable')
