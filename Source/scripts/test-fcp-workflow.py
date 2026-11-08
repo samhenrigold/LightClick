@@ -12,6 +12,12 @@ from fcp_preflight import GUEST
 from fcp_workflow import OBSERVE, PLACEHOLDER, RETENTION_HELPERS, hold_retained_display_window, compose_guest, complete_hid_open, generated_project_evidence, replace_once, xml_template
 
 
+def ready_inventory(**values):
+    result=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory',fileLabelMatches=1,
+                fileMenu=dict(AXRole='AXMenuBarItem',AXTitle='File',children=[dict(AXRole='AXMenu',children=[dict(AXRole='AXMenuItem',AXTitle='New')])]))
+    result.update(values);return result
+
+
 class Checks(unittest.TestCase):
     def test_composition_keeps_existing_cleanup_and_refuses_anchor_drift(self):
         composed=compose_guest(GUEST)
@@ -71,7 +77,7 @@ class Checks(unittest.TestCase):
     def test_optional_action_targets_exact_owned_dialog_and_private_fixture(self):
         for wrong_after_pid in (False,True):
             calls=[];inventories=[0]
-            inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
+            inventory=ready_inventory(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
             def command(argv,seconds):
                 calls.append((argv,seconds))
                 if argv[0]=='/own/ax-workload':
@@ -97,7 +103,7 @@ class Checks(unittest.TestCase):
 
     def test_create_mode_has_explicit_bounded_route(self):
         calls=[]
-        inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
+        inventory=ready_inventory(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
         def command(argv,seconds):
             calls.append((argv,seconds))
             return json.dumps(inventory if argv[0]=='/own/ax-workload' else {}).encode()
@@ -114,7 +120,7 @@ class Checks(unittest.TestCase):
 
     def test_creation_waits_for_read_only_editor_readiness(self):
         calls=[];reads=[0]
-        inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
+        inventory=ready_inventory(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
         def command(argv,seconds):
             calls.append((argv,seconds))
             if argv[0]=='/own/ax-workload':
@@ -143,7 +149,7 @@ class Checks(unittest.TestCase):
     def test_post_library_full_observation_is_once_read_only_and_owned(self):
         for outcome in ('available','observer-error','app-exited'):
             calls=[];reads=[0];alive=[True]
-            inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
+            inventory=ready_inventory(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
             view=dict(result='OBSERVED_WINDOWS',pid=321,windows=[dict(AXRole='AXWindow',children=[dict(AXRole='AXStaticText',AXValue='LC-generated-8s')])],truncated=True)
             def command(argv,seconds):
                 calls.append((argv,seconds))
@@ -203,7 +209,7 @@ class Checks(unittest.TestCase):
                   windows=[dict(AXRole='AXWindow',AXSubrole='AXStandardWindow',children=[dict(AXRole='AXScrollArea',AXDescription='organizer',children=[dict(AXRole='AXGroup',AXDescription='events',children=[group])])])])
         for outcome in ('open','hid-open','missing-project','app-exited','open-error'):
             calls=[];alive=[True];full_reads=[0]
-            inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
+            inventory=ready_inventory(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
             def command(argv,seconds):
                 calls.append((argv,seconds))
                 if argv[0]=='/own/ax-workload':return json.dumps(inventory).encode()
@@ -464,6 +470,50 @@ class Checks(unittest.TestCase):
             observer.unlink();observer.write_bytes(data);observer.chmod(0o755);parent.chmod(0o755)
             with self.assertRaises(ValueError):ns['readonly_observer_receipt'](spec)
 
+    def test_initial_menu_readiness_is_bounded_read_only_and_precedes_xml_open(self):
+        for case in ('already-ready','slow-ready','exited','identity-changed','deadline','attempt-limit','command-failed'):
+            clock=[0.];alive=[True];opened=[False];reads=[0];calls=[];sleeps=[];report=dict(workflow=dict(import_attempted=False))
+            def command(argv,seconds):
+                calls.append((argv,seconds))
+                if argv[0]=='/usr/bin/open':
+                    self.assertEqual(report['workflow']['initial_menu_readiness']['result'],'READY')
+                    self.assertGreaterEqual(reads[0],4 if case=='slow-ready'else 1)
+                    opened[0]=True;return b''
+                self.assertEqual(argv,['/own/ax-workload','10.1','321','inventory'])
+                if opened[0]:return json.dumps(ready_inventory()).encode()
+                reads[0]+=1;self.assertLessEqual(seconds,14);self.assertLessEqual(seconds,90-clock[0])
+                if case=='command-failed':raise ValueError('acknowledged observer command failed')
+                if case=='deadline':clock[0]+=seconds
+                elif case!='attempt-limit':clock[0]+=1
+                value=ready_inventory()
+                if case not in ('already-ready','slow-ready')or(case=='slow-ready'and reads[0]<4):
+                    value.update(result='INCONCLUSIVE',fileLabelMatches=0);value.pop('fileMenu',None)
+                if case=='identity-changed'and reads[0]==2:value['pid']=999
+                return json.dumps(value).encode()
+            def sleep(seconds):
+                sleeps.append(seconds)
+                if case!='attempt-limit':clock[0]+=seconds
+                if case=='exited'and seconds==2:alive[0]=False
+            directory='/private/var/tmp/LightClickFCPFixture.ABC123'
+            ns=dict(app=types.SimpleNamespace(pid=321,poll=lambda:None if alive[0]else 1),report=report,command=command,json=json,
+                    time=types.SimpleNamespace(time=lambda:clock[0],sleep=sleep),launched_at=0,
+                    spec=dict(workflow_helper='/own/ax-workload',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
+            exec(compile('if True:\n'+OBSERVE,'<production bounded initial menu readiness>','exec'),ns)
+            readiness=report['workflow']['initial_menu_readiness'];opens=[c for c in calls if c[0][0]=='/usr/bin/open']
+            self.assertLessEqual(len(readiness['polls']),45);self.assertLessEqual(readiness['elapsed_seconds'],90)
+            if case in ('already-ready','slow-ready'):
+                self.assertEqual(len(opens),1);self.assertEqual(readiness['result'],'READY')
+                self.assertEqual(len(readiness['polls']),1 if case=='already-ready'else 4)
+                if case=='already-ready':self.assertNotIn(2,sleeps) # No new wait in the established ready path.
+                else:self.assertEqual(report['workflow']['inventory_before']['result'],'INCONCLUSIVE');self.assertEqual(readiness['elapsed_seconds'],10)
+            else:
+                self.assertEqual(opens,[]);self.assertFalse(report['workflow']['import_attempted'])
+                expected={'exited':'OWNED_APP_EXITED','identity-changed':'IDENTITY_CHANGED_OR_UNAVAILABLE','deadline':'DEADLINE','attempt-limit':'ATTEMPT_LIMIT','command-failed':'COMMAND_FAILED'}[case]
+                self.assertEqual(readiness['result'],expected)
+            if case=='deadline':self.assertEqual(readiness['elapsed_seconds'],90);self.assertEqual(readiness['polls'][-1]['timeout_seconds'],10)
+            if case=='attempt-limit':self.assertEqual(reads[0],45)
+            if case=='command-failed':self.assertIn('acknowledged observer command failed',readiness['polls'][0]['error'])
+
     def test_invalid_creation_modes_fail_before_staging(self):
         source=Path(__file__).resolve().parents[1]
         path=source/'probes/fcp-workflow-driver.py'
@@ -480,7 +530,7 @@ class Checks(unittest.TestCase):
     def test_open_exact_own_xml_only_after_trusted_inventory(self):
         for trusted in (1,0,'1'):
             calls=[];clock=[0]
-            inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=trusted,pid=321,variant='10.1',mode='inventory')
+            inventory=ready_inventory(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=trusted,pid=321,variant='10.1',mode='inventory')
             def command(argv,seconds):
                 calls.append((argv,seconds))
                 return json.dumps(inventory).encode() if argv[0]=='/own/ax-workload' else b''

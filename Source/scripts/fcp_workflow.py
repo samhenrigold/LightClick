@@ -280,16 +280,69 @@ def generated_project_evidence(view,pid,variant):
     return count[0]<=1024 and labels[0]==valid[0]==1
 
 
-OBSERVE='\n'+textwrap.indent(inspect.getsource(generated_project_evidence),'    ')+r'''
+def initial_menu_identity(view,pid,variant):
+    def true(value):return type(value) in (bool,int) and value in (0,1) and value==1
+    return (isinstance(view,dict) and type(view.get('pid')) is int and view['pid']==pid
+            and view.get('variant')==variant and view.get('mode')=='inventory'
+            and all(true(view.get(key)) for key in ('identityMatched','identityStillMatched')))
+
+
+def initial_menu_ready(view,pid,variant):
+    if not initial_menu_identity(view,pid,variant) or view.get('result')!='MENU_INVENTORY':return False
+    trusted=view.get('axTrusted');menu=view.get('fileMenu',{})
+    if not (type(trusted) in (bool,int) and trusted in (0,1) and trusted==1 and type(view.get('fileLabelMatches')) is int and view['fileLabelMatches']==1 and isinstance(menu,dict)
+            and menu.get('AXRole')=='AXMenuBarItem' and menu.get('AXTitle')=='File'):return False
+    children=menu.get('children',[])
+    return (isinstance(children,list) and len(children)==1 and isinstance(children[0],dict) and children[0].get('AXRole')=='AXMenu'
+            and isinstance(children[0].get('children'),list) and bool(children[0]['children']))
+
+
+OBSERVE='\n'+textwrap.indent(inspect.getsource(generated_project_evidence)+inspect.getsource(initial_menu_identity)+inspect.getsource(initial_menu_ready),'    ')+r'''
+
 
     if app.poll() is None:
         report['workflow']['inventory_started_seconds']=time.time()-launched_at
-        raw=command([spec['workflow_helper'],spec['variant'],str(app.pid),'inventory'],20)
-        inventory=json.loads(raw)
-        report['workflow']['inventory_before']=inventory
-        report['workflow']['inventory']=inventory
         def native_true(value):return type(value) in (bool,int) and value in (0,1) and value==1
-        if inventory.get('result')=='MENU_INVENTORY' and inventory.get('variant')==spec['variant'] and type(inventory.get('pid')) is int and inventory['pid']==app.pid and inventory.get('mode')=='inventory' and all(native_true(inventory.get(k)) for k in ('identityMatched','identityStillMatched','axTrusted')):
+        menu_started=time.time();menu_deadline=menu_started+90
+        readiness={'limit_seconds':90,'max_attempts':45,'polls':[],'result':'ATTEMPT_LIMIT'}
+        report['workflow']['initial_menu_readiness']=readiness
+        inventory={}
+        for attempt in range(1,46):
+            if app.poll() is not None:readiness['result']='OWNED_APP_EXITED';break
+            remaining=menu_deadline-time.time()
+            if remaining<=0:readiness['result']='DEADLINE';break
+            if attempt>1:
+                time.sleep(min(2,remaining))
+                if app.poll() is not None:readiness['result']='OWNED_APP_EXITED';break
+                remaining=menu_deadline-time.time()
+                if remaining<=0:readiness['result']='DEADLINE';break
+            row={'attempt':attempt,'elapsed_seconds':time.time()-menu_started,'timeout_seconds':min(14,remaining)}
+            readiness['polls'].append(row)
+            try:
+                raw=command([spec['workflow_helper'],spec['variant'],str(app.pid),'inventory'],row['timeout_seconds'])
+                inventory=json.loads(raw)
+                if not isinstance(inventory,dict):raise ValueError('initial menu inventory is not a dictionary')
+            except Exception as error:
+                row['error']=repr(error);readiness['result']='COMMAND_FAILED';inventory={'available':False,'reason':repr(error)}
+                report['workflow']['inventory']=inventory
+                if attempt==1:report['workflow']['inventory_before']=inventory
+                break
+            if attempt==1:report['workflow']['inventory_before']=inventory
+            report['workflow']['inventory']=inventory
+            row.update(result=inventory.get('result'),pid=inventory.get('pid'),variant=inventory.get('variant'),
+                       identityMatched=inventory.get('identityMatched'),identityStillMatched=inventory.get('identityStillMatched'),
+                       axTrusted=inventory.get('axTrusted'),fileLabelMatches=inventory.get('fileLabelMatches'),attributeFailures=inventory.get('attributeFailures'),
+                       nodes=inventory.get('nodes'),truncated=inventory.get('truncated'),deadlineExceeded=inventory.get('deadlineExceeded'))
+            row['finished_elapsed_seconds']=time.time()-menu_started;row['app_alive']=app.poll() is None
+            row['ready']=initial_menu_ready(inventory,app.pid,spec['variant'])
+            if not row['app_alive']:readiness['result']='OWNED_APP_EXITED';break
+            if time.time()>=menu_deadline:readiness['result']='DEADLINE';break
+            if not initial_menu_identity(inventory,app.pid,spec['variant']):readiness['result']='IDENTITY_CHANGED_OR_UNAVAILABLE';break
+            if not native_true(inventory.get('axTrusted')):readiness['result']='AX_NOT_TRUSTED';break
+            if row['ready']:
+                readiness['result']='READY';report['workflow']['inventory_ready']=inventory;break
+        readiness['elapsed_seconds']=time.time()-menu_started
+        if app.poll() is None and readiness['result']=='READY' and initial_menu_ready(inventory,app.pid,spec['variant']):
             # Standard LaunchServices open of ONLY our generated XML; no guessed AX actions or library paths.
             report['workflow']['import_attempted']=True
             command(['/usr/bin/open','-a',spec['app'],xml_path],10)
