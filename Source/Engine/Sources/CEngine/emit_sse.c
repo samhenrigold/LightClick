@@ -30,7 +30,10 @@ static void align16(int r) {
 
 static Addr mem16(const Insn *in, bool check) {
     int r = addr_reg(in);
-    if (check)
+    // RIP-relative addresses without FS/GS have known low bits. Address-size
+    // truncation preserves them, so an aligned constant cannot take #GP here.
+    bool aligned_constant = in->riprel && !in->seg && !((in->next + (u64)in->disp) & 15);
+    if (check && !aligned_constant)
         align16(r);
     Addr a = {.base = r};
     return a;
