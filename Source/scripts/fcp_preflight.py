@@ -3,6 +3,7 @@ import json
 
 # Python2-compatible. Expected identity/payload is supplied only from the host's fixed case table.
 GUEST = r'''import ctypes, hashlib, json, os, re, plistlib, pwd, resource, signal, stat, subprocess, sys, tempfile, threading, time, xml.etree.ElementTree as ET
+import errno
 spec,before=json.loads(sys.argv[1])
 CAP=131072
 owned=[]
@@ -29,7 +30,10 @@ def reader(stream):
     def drain():
         try:
             while True:
-                data=stream.read(4096)
+                try:data=os.read(stream.fileno(),4096)
+                except OSError as error:
+                    if error.errno==errno.EINTR:continue
+                    raise
                 if not data:break
                 remaining=max(0,CAP-state['bytes'])
                 if remaining:state['parts'].append(data[:remaining])
