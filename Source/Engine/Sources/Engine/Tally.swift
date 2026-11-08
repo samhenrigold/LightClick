@@ -411,6 +411,13 @@ public final class Tally: @unchecked Sendable {
         o += "pte_same64_nonempty_leaf_skips \(c.stat_pte_same64_leaf_skips)\n"
         o += "pte_same64_xmark_skips \(c.stat_pte_same64_xmark_skips)\n"
         o += "Leaf/xmark skips count shadow mirrors, not saved body kills or elapsed time. Flood/root/higher-level actions remain enabled.\n"
+        let repInvocations = withUnsafeBytes(of: c.stat_svc) { $0.bindMemory(to: UInt64.self)[Int(SVC_REP_PAGE)] }
+        o += "\n== experimental page REP service (this vCPU; enabled is repeated global configuration) ==\n"
+        o += "page_rep_enabled \(t.page_rep_enabled)\n"
+        o += "page_rep_invocations \(repInvocations)\n"
+        o += "page_rep_committed_prefixes \(c.stat_rep_page_prefixes)\n"
+        o += "page_rep_committed_bytes \(c.stat_rep_page_bytes)\n"
+        o += "Positive prefixes/bytes follow actual copy and architectural progress commit. Invocations include declines; async snapshots are not coherent.\n"
         if c.profile_mmu_observations != 0 {
             o += "\n== MMU observations (this vCPU; count/timing only, no skipped operations) ==\n"
             o += "mmu_observations_enabled \(c.profile_mmu_observations)\n"
@@ -516,6 +523,7 @@ public final class Tally: @unchecked Sendable {
         o += "retain_shared_dead_enabled \(t.retain_shared_dead_enabled)\n"
         o += "retain_shared_dead_retained_hints \(t.shared_dead_retained_hints)\n"
         o += "retain_shared_dead_cleared_hints \(t.shared_dead_cleared_hints)\n"
+        o += "Page REP is experimental: latched fixed ordinary-RAM GPAs per page prefix, not a freeze of page-table RAM. SVC 71 counts entries, not copied bytes or successful service.\n"
         o += "Enabled-only nonzero hint-slot actions since tr_init. The same hint can count at multiple flushes; not unique bodies, successful reuse, or saved time.\n\n"
         o += "== analyzed input recurrence (inert global translator census; repeated, do not sum vCPU files) ==\n"
         o += "compile_inputs_enabled \(t.compile_inputs_enabled)\n"
@@ -546,7 +554,7 @@ public final class Tally: @unchecked Sendable {
         }
         o += "Full cold-attempt population after existing reuse miss; first encountered rejection only. Exact returned bytes and coverage, including same-page liveness; zero holes.\n"
         o += "8192 direct-mapped entries, last observation only, reset at tr_init, survive executable-cache resets. Empty/eviction is missing retained history, not first-ever code.\n"
-        o += "Config schema 1 in high32; base low bits: precise/BMI/hybrid/KPTI/bulk/return/allflags/shift-profile/SHR8. Per-input bit16 is current SMP entry form.\n"
+        o += "Config schema 1 in high32; base low bits: precise/BMI/hybrid/KPTI/bulk/return/allflags/shift-profile/SHR8/page-REP. Per-input bit16 is current SMP entry form.\n"
         o += "Exact key/PFN splits compare preceding retained observation; no executable reuse, hit-rate projection, saved-time or CPU-fraction claim. Async snapshots may not conserve; qualify coherent endpoints only.\n\n"
         o +=
             "cold blocks a cache keyed by frame had: \(t.again_live) live in another view, \(t.again_dead) dead with the frame unchanged. Lower bounds\n\n"

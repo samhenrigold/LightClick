@@ -68,6 +68,12 @@
 #define STUB_OFF_REP_STOS 0x280ULL
 #define STUB_OFF_REP_STOS_HEAD 0x2C0ULL
 #define STUB_OFF_REP_END 0x300ULL
+// Experimental page service entries; the original bulk entries above remain the control.
+#define STUB_OFF_REP_PAGE_MOVS 0x300ULL
+#define STUB_OFF_REP_PAGE_MOVS_HEAD 0x340ULL
+#define STUB_OFF_REP_PAGE_STOS 0x380ULL
+#define STUB_OFF_REP_PAGE_STOS_HEAD 0x3C0ULL
+#define STUB_OFF_REP_PAGE_END 0x400ULL
 
 #define RSTACK_BYTES (16ULL << 10)
 #define RSTACK_SLOT (32ULL << 10)
@@ -143,6 +149,7 @@ enum {
     SVC_H_BITSCAN_UNUSED,
     SVC_H_PCMPISTRI, // x16, x17 the first operand, x22, x23 the second, x24 imm8. x16 the index, x22 to x24 flags as data
     SVC_H_RMWFLAGS_UNUSED,
+    SVC_REP_PAGE = 71, // internal only: exact page-REP stub head; x17=32/element bytes
 };
 
 // Opt-in metadata for SVC_H_SHIFT only. The semantic kind is bits 0..2 and
@@ -329,6 +336,7 @@ typedef struct {
     uint32_t pte_same64, pad_pte_same64;
     uint64_t stat_pte_same64_exchanges, stat_pte_same64_equal, stat_pte_same64_changed;
     uint64_t stat_pte_same64_leaf_skips, stat_pte_same64_xmark_skips;
+    uint64_t stat_rep_page_prefixes, stat_rep_page_bytes; // per-vCPU positive commits only; no invocation/decline inference
 } EngineCtx;
 _Static_assert(sizeof(EngineCtx) <= CTX_SLOT, "EngineCtx must fit its existing per-vCPU slot");
 

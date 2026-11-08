@@ -308,7 +308,7 @@ static void identity_and_collision(void) {
     CHECK(stats.compile_inputs_admitted==admitted+257&&stats.compile_inputs_sampling_shift==0);
     // Every fixed emitter configuration flag participates in a freshly cleared epoch.
     bool *flags[]={&cfg.precise_flags,&cfg.has_tzcnt_lzcnt,&cfg.hybrid,&cfg.keep_kernel_tables,&cfg.no_bulk_rep,
-                   &cfg.no_return_prediction,&cfg.all_flags_live,&cfg.profile_shift_helpers,&cfg.inline_shr8};
+                   &cfg.no_return_prediction,&cfg.all_flags_live,&cfg.profile_shift_helpers,&cfg.inline_shr8,&cfg.page_rep};
     for(unsigned i=0;i<sizeof flags/sizeof flags[0];i++) {
         *flags[i]=true;compile_inputs_init();CHECK(stats.compile_inputs_config_base==((1ULL<<32)|((1ULL<<(i+1))-1)));
         CHECK(stats.compile_inputs_attempts==0&&occupied()==0);

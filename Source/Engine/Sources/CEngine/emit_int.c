@@ -1276,7 +1276,9 @@ static void emit_string(const Insn *in) {
             for (int width = sz * 8; width < 64; width *= 2)
                 logic_sh(1, 1, 0, S2, S2, S2, 0, width); // orr x22, x22, x22, lsl #width
         }
-        bl_abs(STUB(PRIV_VA + OFF_STUBS + (sub == 0 ? STUB_OFF_REP_MOVS : STUB_OFF_REP_STOS)));
+        u64 stub = tr_page_rep ? (sub == 0 ? STUB_OFF_REP_PAGE_MOVS : STUB_OFF_REP_PAGE_STOS)
+                               : (sub == 0 ? STUB_OFF_REP_MOVS : STUB_OFF_REP_STOS);
+        bl_abs(STUB(PRIV_VA + OFF_STUBS + stub));
         for (int i = 0; i < 2; i++)
             if (wraps[i])
                 *wraps[i] |= ((u32)(tr_cc - wraps[i]) & 0x7ffff) << 5;

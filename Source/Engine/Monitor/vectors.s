@@ -8,6 +8,7 @@
 .set CTX_RS_TOP, 296
 .set CTX_RFLAGS_SYS, 304
 .set SVC_LOOKUP_MISS, 4
+.set SVC_REP_PAGE, 71
 .set HASH_MASK, 0xFFFF
 
 .macro SAVE_ALL
@@ -260,6 +261,7 @@ _stub_rep_movs:
     b 1b
 2:  ret
 
+
     .org _stub_base + 0x280
 // rep stos with the pattern already in x22. No NEON, as for movs: a kernel zeroes pages with CR0.TS set.
     .globl _stub_rep_stos
@@ -277,3 +279,37 @@ _stub_rep_stos:
     b 1b
 2:  ret
 
+    .org _stub_base + 0x300
+// Experimental page REP: the service either commits a page prefix or returns to
+// the emitter's scalar loop. It never enters the original bulk stubs above.
+    .globl _stub_rep_page_movs
+_stub_rep_page_movs:
+    ldr x16, [x18, #CTX_DF]
+    tbnz x16, #63, 2f
+    sub x16, x7, x6
+    lsr x20, x16, #5
+    cbz x20, 2f
+    sub x16, x6, x7
+    lsr x20, x16, #5
+    cbz x20, 2f
+    sub x20, x1, x17
+    tbnz x20, #63, 2f
+    b 1f
+2:  ret
+    .org _stub_base + 0x340
+1:  svc #SVC_REP_PAGE
+    ret
+
+    .org _stub_base + 0x380
+    .globl _stub_rep_page_stos
+_stub_rep_page_stos:
+    ldr x16, [x18, #CTX_DF]
+    tbnz x16, #63, 2f
+    sub x20, x1, x17
+    tbnz x20, #63, 2f
+    b 1f
+2:  ret
+    .org _stub_base + 0x3C0
+1:  svc #SVC_REP_PAGE
+    ret
+    .org _stub_base + 0x400

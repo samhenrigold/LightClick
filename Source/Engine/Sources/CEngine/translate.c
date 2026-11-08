@@ -16,6 +16,7 @@ u32 *tr_cc;
 bool tr_precise_flags, tr_has_tzcnt, tr_hybrid, tr_no_bulk_rep;
 bool tr_profile_shift_helpers;
 bool tr_inline_shr8;
+bool tr_page_rep;
 int tr_cpl;
 bool tr_compat;
 u64 tr_stub_lookup, tr_stub_ret_miss, tr_stub_pushf, tr_stub_sahf;
@@ -248,7 +249,7 @@ static void compile_inputs_init(void) {
     stats.compile_inputs_config_base = 1ULL << 32 | (u64)cfg.precise_flags | (u64)cfg.has_tzcnt_lzcnt << 1 |
         (u64)cfg.hybrid << 2 | (u64)cfg.keep_kernel_tables << 3 | (u64)cfg.no_bulk_rep << 4 |
         (u64)cfg.no_return_prediction << 5 | (u64)cfg.all_flags_live << 6 |
-        (u64)cfg.profile_shift_helpers << 7 | (u64)cfg.inline_shr8 << 8;
+        (u64)cfg.profile_shift_helpers << 7 | (u64)cfg.inline_shr8 << 8 | (u64)cfg.page_rep << 9;
     compile_inputs_table = calloc(COMPILE_INPUT_SLOTS, sizeof *compile_inputs_table);
     compile_inputs_capture = calloc(1, sizeof *compile_inputs_capture);
     if (!compile_inputs_table || !compile_inputs_capture) {
@@ -1396,7 +1397,9 @@ void tr_init(const TrConfig *config) {
     tr_no_bulk_rep = cfg.no_bulk_rep;
     tr_profile_shift_helpers = cfg.profile_shift_helpers;
     tr_inline_shr8 = cfg.inline_shr8;
+    tr_page_rep = cfg.page_rep;
     stats.inline_shr8_enabled = cfg.inline_shr8;
+    stats.page_rep_enabled = cfg.page_rep;
     stats.retain_shared_dead_enabled = cfg.retain_shared_dead;
     stats.shared_dead_retained_hints = stats.shared_dead_cleared_hints = 0;
     cc_limit = cfg.code_cache_bytes ? cfg.code_cache_bytes : CC_SIZE;

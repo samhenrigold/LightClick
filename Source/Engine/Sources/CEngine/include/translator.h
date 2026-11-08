@@ -33,6 +33,7 @@ typedef struct {
     bool inline_shr8; // experimental/default off: register-immediate byte SHR without the helper
     bool retain_shared_dead; // experimental/default off: preserve existing shared candidate hints across private-only resets
     bool profile_compile_inputs; // opt-in inert full-population analyzed-input recurrence census
+    bool page_rep; // experimental/default off: new page-service stubs, otherwise scalar; never old bulk
 } TrConfig;
 
 typedef struct {
@@ -112,6 +113,7 @@ typedef struct {
     uint64_t compile_inputs_exact_same_pfn, compile_inputs_exact_different_pfn;
     // Exact matches versus the preceding retained observation: index (different_key * 2 + different_pfn).
     uint64_t compile_inputs_exact_joint[4];
+    uint64_t page_rep_enabled; // configuration state, global and repeated; not a counter or per-vCPU value
 } TrStats;
 TrStats tr_stats(void);
 

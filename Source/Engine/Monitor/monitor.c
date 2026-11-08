@@ -468,14 +468,27 @@ static BlockEntry *find_block(u64 pc) {
 static inline u64 stubs_of(u64 pc) { return PRIV_VA + (pc >= PRIV_VA + OFF_STUBS2 ? OFF_STUBS2 : OFF_STUBS); } // of the copy in pc's part
 static inline bool in_rep_stub(u64 pc) {
     u64 s = stubs_of(pc);
-    return pc >= s + STUB_OFF_REP_MOVS && pc < s + STUB_OFF_REP_END;
+    return pc >= s + STUB_OFF_REP_MOVS && pc < s + STUB_OFF_REP_PAGE_END;
+}
+static bool rep_page_site(u64 pc, bool *movs) {
+    u64 s = stubs_of(pc);
+    if (pc == s + STUB_OFF_REP_PAGE_MOVS_HEAD) {
+        *movs = true;
+        return true;
+    }
+    if (pc == s + STUB_OFF_REP_PAGE_STOS_HEAD) {
+        *movs = false;
+        return true;
+    }
+    return false;
 }
 
 static u64 rip_of_pc(u64 pc, bool *exact, bool *found) {
     if (in_rep_stub(pc)) { // inside a rep instruction, called from its block; the loop heads are boundaries
         bool e;
         u64 s = stubs_of(pc), rip = rip_of_pc(c->x[R_LR] - 4, &e, found);
-        *exact = pc == s + STUB_OFF_REP_MOVS_HEAD || pc == s + STUB_OFF_REP_STOS_HEAD;
+        *exact = pc == s + STUB_OFF_REP_MOVS_HEAD || pc == s + STUB_OFF_REP_STOS_HEAD ||
+                 pc == s + STUB_OFF_REP_PAGE_MOVS_HEAD || pc == s + STUB_OFF_REP_PAGE_STOS_HEAD;
         return rip;
     }
     BlockEntry *b = find_block(pc);
@@ -3226,21 +3239,201 @@ static void do_cli_sti(bool sti) {
         c->rflags_sys &= ~RF_IF;
 }
 
+// ---- Experimental page REP service ----
+// The final walks latch ordinary-RAM GPAs for one bounded prefix, like cached
+// translations. They do not freeze page-table RAM: TCG/DMA may change it, and
+// ordinary data writes may race. No hostcall, guest callback, IRQ or shootdown/
+// HC_BOUNDARY acknowledgement occurs between that latch and the progress commit.
+// Guest RAM backing is fixed while vCPUs run; direct/remappable/device mappings
+// are excluded. mon_lock serializes PI_CODE/PT transitions and monitored writes.
+// Rewalk the next prefix after exit_check has drained notes and handled stops.
+// Physical aliases cannot become guest #PFs halfway through the committed copy.
+_Static_assert(SVC_REP_PAGE == 71, "vectors.s embeds this internal SVC number");
+
+static u64 rep_page_load(const void *p, u32 size) {
+    u64 value;
+    switch (size) {
+        case 1: __asm__ volatile("ldarb %w0, [%1]" : "=r"(value) : "r"(p) : "memory"); break;
+        case 2: __asm__ volatile("ldarh %w0, [%1]" : "=r"(value) : "r"(p) : "memory"); break;
+        case 4: __asm__ volatile("ldar %w0, [%1]" : "=r"(value) : "r"(p) : "memory"); break;
+        default: __asm__ volatile("ldar %0, [%1]" : "=r"(value) : "r"(p) : "memory"); break;
+    }
+    return value;
+}
+
+static void rep_page_store(void *p, u64 value, u32 size) {
+    switch (size) {
+        case 1: __asm__ volatile("stlrb %w0, [%1]" : : "r"(value), "r"(p) : "memory"); break;
+        case 2: __asm__ volatile("stlrh %w0, [%1]" : : "r"(value), "r"(p) : "memory"); break;
+        case 4: __asm__ volatile("stlr %w0, [%1]" : : "r"(value), "r"(p) : "memory"); break;
+        default: __asm__ volatile("stlr %0, [%1]" : : "r"(value), "r"(p) : "memory"); break;
+    }
+}
+
+static void rep_page_copy(u8 *dst, const u8 *src, u32 bytes, u32 size, bool movs, u64 pattern) {
+    // Aligned integer units only: no pair-store abort/atomicity or EL1 TSO assumption.
+    while (bytes >= 32 && !(((u64)dst | (movs ? (u64)src : 0)) & 7)) {
+        for (u32 i = 0; i < 32; i += 8) {
+            u64 value = movs ? rep_page_load(src + i, 8) : pattern;
+            rep_page_store(dst + i, value, 8);
+        }
+        dst += 32;
+        if (movs) src += 32;
+        bytes -= 32;
+    }
+    while (bytes) {
+        u64 value = movs ? rep_page_load(src, size) : pattern;
+        rep_page_store(dst, value, size);
+        dst += size;
+        if (movs) src += size;
+        bytes -= size;
+    }
+}
+
+static bool rep_page_tracked(const Walk *w) {
+    LOCK_REQUIRED();
+    for (int level = 3; level >= w->leaf_level; level--) {
+        u64 address = (u64)w->chain[level];
+        if (address < RAM_ALIAS_VA)
+            return false;
+        u64 gpa = address - RAM_ALIAS_VA;
+        if (!is_ram(gpa) || !(page_info[gpa >> 12] & PI_PT))
+            return false;
+        // Other walkers may set A/D without mon_lock; those changes preserve the mapping and permissions.
+        if ((*w->chain[level] & ~(X_A | X_D)) != (w->read[level] & ~(X_A | X_D)))
+            return false;
+    }
+    return true;
+}
+
+static void rep_page_fault(u64 va, u32 error, u64 rip) {
+    // Every caller has released mon_lock, and no copied prefix remains uncommitted.
+    if (error == ~0u)
+        raise_gp(0, rip);
+    else
+        raise_pf(va, error, rip);
+}
+
+static void rep_page_service(bool movs) {
+    bool site_movs;
+    u64 head = c->elr - 4, elements = c->x[R_S1];
+    if (!rep_page_site(head, &site_movs) || site_movs != movs ||
+        (elements != 4 && elements != 8 && elements != 16 && elements != 32))
+        stop(STOP_MONITOR_FAULT, 0, SVC_REP_PAGE, head, elements);
+    u64 here = rip_here(head);
+    c->elr = c->x[R_LR]; // Every zero-progress/completion/decline path runs the existing scalar fallthrough.
+    u32 size = 32 / (u32)elements;
+    u64 count = c->x[1], src = c->x[6], dst = c->x[7];
+    if (!count || !c->model_kernel || (c->cpl != 0 && c->cpl != 3) || c->compat > 1 ||
+        c->df != 1 || (c->rflags_sys & RF_TF) || me->smc_held || me->shadow_stepping ||
+        c->irq_shadow_rip != ~0ULL || c->stepping || pt_step_slot || c->stop_requested)
+        return;
+    if (((dst | (movs ? src : 0)) & (size - 1)) ||
+        (movs && ((dst - src) < 32 || (src - dst) < 32)))
+        return;
+    // Preserve the emitter's conservative whole-run compatibility-wrap exclusion.
+    if (c->compat && (((count | dst | (movs ? src : 0)) >> 32) ||
+        ((dst + count * size) >> 32) || (movs && ((src + count * size) >> 32))))
+        return;
+
+    mon_lock();
+    Walk source = {0};
+    u32 access = c->cpl == 3 ? 4 : 0;
+    if (movs) {
+        source = x86_walk(c->cr3, src, access, true); // source first, including its architectural A bit
+        if (!source.ok) {
+            mon_unlock();
+            rep_page_fault(src, source.fault_err, here);
+            return;
+        }
+        if (!is_ram(source.gpa) || is_direct(source.gpa) || !rep_page_tracked(&source)) {
+            mon_unlock();
+            return;
+        }
+    }
+    Walk dest = x86_walk(c->cr3, dst, access | 2, true);
+    if (!dest.ok) {
+        mon_unlock();
+        rep_page_fault(dst, dest.fault_err, here);
+        return;
+    }
+    if (!is_ram(dest.gpa) || is_direct(dest.gpa) || !rep_page_tracked(&dest) ||
+        (page_info[dest.gpa >> 12] & (PI_CODE | PI_PT)) ||
+        (movs && (source.gpa >> 12) == (dest.gpa >> 12))) {
+        mon_unlock();
+        return;
+    }
+    // Complete any path preparation before the final walks/latch. No hostcall or
+    // guest-visible acknowledgement is permitted after these and before commit.
+    if (movs) {
+        source = x86_walk(c->cr3, src, access, true);
+        if (!source.ok) {
+            mon_unlock();
+            rep_page_fault(src, source.fault_err, here);
+            return;
+        }
+        if (!is_ram(source.gpa) || is_direct(source.gpa) || !rep_page_tracked(&source)) {
+            mon_unlock();
+            return;
+        }
+    }
+    dest = x86_walk(c->cr3, dst, access | 2, true);
+    if (!dest.ok) {
+        mon_unlock();
+        rep_page_fault(dst, dest.fault_err, here);
+        return;
+    }
+    if (!is_ram(dest.gpa) || is_direct(dest.gpa) || !rep_page_tracked(&dest) ||
+        (page_info[dest.gpa >> 12] & (PI_CODE | PI_PT)) ||
+        (movs && (source.gpa >> 12) == (dest.gpa >> 12))) {
+        mon_unlock();
+        return;
+    }
+    u64 prefix = (4096 - (dst & 0xfff)) / size;
+    if (movs && prefix > (4096 - (src & 0xfff)) / size)
+        prefix = (4096 - (src & 0xfff)) / size;
+    if (prefix > count) prefix = count;
+    if (!prefix || dest.gpa >= c->ram_size || prefix * size > c->ram_size - dest.gpa ||
+        (movs && (source.gpa >= c->ram_size || prefix * size > c->ram_size - source.gpa))) {
+        mon_unlock();
+        return;
+    }
+    u32 bytes = (u32)(prefix * size);
+    rep_page_copy(RAM(dest.gpa), movs ? RAM(source.gpa) : NULL, bytes, size, movs, c->x[R_S2]);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST); // All copy stores precede architectural progress publication, including at one vCPU.
+    c->x[7] = c->compat ? (u32)(dst + bytes) : dst + bytes;
+    if (movs) c->x[6] = c->compat ? (u32)(src + bytes) : src + bytes;
+    c->x[1] = c->compat ? (u32)(count - prefix) : count - prefix;
+    c->stat_rep_page_prefixes++;
+    c->stat_rep_page_bytes += bytes;
+    mon_unlock();
+    if (c->x[1])
+        c->elr = head; // Positive progress only: exit_check can now stop/deliver IRQ before another bounded prefix.
+}
+// ---- End experimental page REP service ----
+
 #define HLT_POLL_TICKS 2400 // 100 us of the 24 MHz counter
 void mon_sync(void) {
-    if (me->smc_held)
+    u32 ec = (u32)(c->esr >> 26);
+    bool page_movs = false;
+    bool page_rep = ec == 0x15 && ((u32)c->esr & 0xffff) == SVC_REP_PAGE;
+    if (page_rep && !rep_page_site(c->elr - 4, &page_movs))
+        stop(STOP_MONITOR_FAULT, 0, SVC_REP_PAGE, c->elr, 0);
+    if (!page_rep && me->smc_held)
         __atomic_store_n(&me->smc_held, 0, __ATOMIC_RELEASE);
-    if (me->shadow_stepping) { // a synchronous way in: it ran, or faulted, which ends a shadow too
+    if (!page_rep && me->shadow_stepping) { // Internal zero-progress service entries have not executed an x86 element.
         me->shadow_stepping = false;
         c->irq_shadow_rip = ~0ULL;
     }
-    u32 ec = (u32)(c->esr >> 26);
     if (ec == 0x24) {
         handle_data_abort(true);
     } else if (ec == 0x15) {
         u32 n = (u32)c->esr & 0xffff;
         c->stat_svc[n & 127]++;
         switch (n) {
+            case SVC_REP_PAGE:
+                rep_page_service(page_movs);
+                break;
             case SVC_DIRECT:
             case SVC_JCC:
             case SVC_CALL:
