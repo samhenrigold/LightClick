@@ -228,8 +228,20 @@ static BOOL stillListed(AXUIElementRef application,AXUIElementRef save,AXUIEleme
     return NO;
 }
 static void actionResult(NSMutableArray *actions,NSString *action,NSString *target,AXError status){[actions addObject:@{@"action":action,@"target":target,@"status":@(status)}];}
+// Read-only polling after a single action. Never re-post a timed-out AXPress.
+static SaveControls waitForSave(AXUIElementRef application,pid_t pid,NSString *directory){
+    SaveControls save={0};double until=fmin(deadline,clockNow()+10);
+    while(room() && clockNow()<until && identity(pid) && privateFixture(directory,YES)){
+        save=findSave(application,pid);
+        if(save.window)return save;
+        double remaining=fmin(deadline,until)-clockNow();
+        if(remaining<.000001)break;usleep((useconds_t)(fmin(.2,remaining)*1e6));
+    }
+    return save;
+}
 static void createPrivate(AXUIElementRef application,pid_t pid,NSString *directory,NSMutableDictionary *report){
-    NSMutableArray *actions=report[@"actionsPerformed"];SaveControls save=findSave(application,pid);GoControls go={0};AXUIElementRef submittedGoPanel=NULL;
+    NSMutableArray *actions=report[@"actionsPerformed"];double saveWaitStarted=clockNow();SaveControls save=waitForSave(application,pid,directory);GoControls go={0};AXUIElementRef submittedGoPanel=NULL;
+    report[@"savePanelWaitElapsedSeconds"]=@(clockNow()-saveWaitStarted);report[@"savePanelWaitLimitSeconds"]=@10;report[@"savePanelReady"]=@(save.window!=NULL);
     report[@"result"]=@"CREATE_PRIVATE_LIBRARY_INCONCLUSIVE";
     if(!save.window || !focusedSave(application,&save,pid) || !privateFixture(directory,YES))goto done;
     report[@"saveControlsBeforeNavigation"]=snapshot(save.window,0);
@@ -252,7 +264,7 @@ static void createPrivate(AXUIElementRef application,pid_t pid,NSString *directo
         [actions addObject:@{@"action":post?@"CGEventPostToPid":@"CGEventPostToPSN",@"targetPID":@(pid),@"chord":@"Cmd-Shift-G",
             @"psnHigh":@(psn.highLongOfPSN),@"psnLow":@(psn.lowLongOfPSN),@"status":@"posted; unconfirmed"}];
     }
-    {double until=clockNow()+3;do{usleep(200000);go=findGo(application,&save,pid);}while(!go.panel && room() && identity(pid) && clockNow()<until);}
+    {double until=fmin(deadline,clockNow()+10);while(room() && clockNow()<until && identity(pid) && privateFixture(directory,YES)){go=findGo(application,&save,pid);if(go.panel)break;double remaining=until-clockNow();if(remaining<.000001)break;usleep((useconds_t)(fmin(.2,remaining)*1e6));}}
     report[@"panelsAfterGoChord"]=panels(application);
     if(!go.panel || !identity(pid) || !privateFixture(directory,YES)){report[@"result"]=@"GO_TO_FOLDER_CONTROLS_REQUIRE_REVIEW";goto done;}
     report[@"goToFolderControls"]=snapshot(go.panel,0);
@@ -264,9 +276,15 @@ static void createPrivate(AXUIElementRef application,pid_t pid,NSString *directo
         submittedGoPanel=(AXUIElementRef)CFRetain(go.panel);
         error=AXUIElementPerformAction(go.button,kAXPressAction);actionResult(actions,@"AXPress",@"verified Go-to-Folder Go button",error);
     }
-    usleep(500000);releaseGo(&go);releaseSave(&save);save=findSave(application,pid);
+    // Go may return CannotComplete before navigation finishes. Observe only;
+    // require both the dismissed exact sheet and the private Where value.
+    releaseGo(&go);releaseSave(&save);
+    {double until=fmin(deadline,clockNow()+10);while(room() && clockNow()<until && identity(pid) && privateFixture(directory,YES)){
+        releaseGo(&go);releaseSave(&save);save=findSave(application,pid);
+        if(save.window){go=findGo(application,&save,pid);if(!go.panel && submittedGoPanel && !stillListed(application,save.window,submittedGoPanel) && equals(save.where,kAXValueAttribute,directory.lastPathComponent))break;}
+        double remaining=until-clockNow();if(remaining<.000001)break;usleep((useconds_t)(fmin(.2,remaining)*1e6));
+    }}
     if(!save.window || !identity(pid) || !privateFixture(directory,YES))goto done;
-    go=findGo(application,&save,pid);
     report[@"goSheetDismissed"]=@(go.panel==NULL && submittedGoPanel && !stillListed(application,save.window,submittedGoPanel));report[@"whereMatchesPrivateDirectory"]=@(equals(save.where,kAXValueAttribute,directory.lastPathComponent));
     report[@"saveControlsAfterNavigation"]=snapshot(save.window,0);
     if(![report[@"goSheetDismissed"]boolValue] || ![report[@"whereMatchesPrivateDirectory"]boolValue] || !focusedSave(application,&save,pid))goto done;
