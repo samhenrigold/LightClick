@@ -1861,7 +1861,11 @@ static NSMenu *WithToolbarMenuTitle(NSMenu *menu, NSString *title) {
     if ([@[ @"passthrough-opengl-release-bql", @"opengl-pirq-f-pic" ] containsObject:command[@"Action"] ?: @""]) {
         BOOL routing = [command[@"Action"] isEqual:@"opengl-pirq-f-pic"];
         NSNumber *enabled = command[routing ? @"Route" : @"Enabled"];
-        if (!self.machine.openGLResearchGuest || (enabled && ![enabled isKindOfClass:NSNumber.class])) {
+        // Supported passthrough guests also need to attest the existing BQL
+        // property. Its read-only query makes no device or guest changes.
+        BOOL readOnlyBQL = !routing && enabled == nil;
+        if ((!readOnlyBQL && !self.machine.openGLResearchGuest) ||
+            (enabled && ![enabled isKindOfClass:NSNumber.class])) {
             finish(@{@"Error" : @"This diagnostic requires a research Mac and an optional Enabled boolean."});
             return;
         }
