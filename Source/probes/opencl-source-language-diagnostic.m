@@ -114,6 +114,28 @@ static id newLibrary(id self, SEL selector, id source, id options, NSError **err
         nativeLibraryDepth++;
         id library = nativeLibrary(self, selector, source, options, error ?: &local);
         NSError *failure = library ? nil : (error ? *error : local);
+        if (library) {
+            @try {
+                id names = [(id<MTLLibrary>)library functionNames];
+                NSMutableArray *observed = [NSMutableArray array];
+                BOOL typeFailure = ![names isKindOfClass:[NSArray class]], truncated = NO;
+                NSUInteger count = typeFailure ? 0 : [names count];
+                if (count > 32) truncated = YES;
+                for (NSUInteger i=0; !typeFailure && i<MIN(count,32);i++) {
+                    id name = names[i];
+                    if (![name isKindOfClass:[NSString class]]) { typeFailure=YES; break; }
+                    if ([name length]>64) { name=[name substringToIndex:64]; truncated=YES; }
+                    [observed addObject:name];
+                }
+                emit(@{@"event":@"libraryFunctions",@"functionCount":@(count),@"functionNames":observed,
+                       @"truncated":@(truncated),@"typeFailure":@(typeFailure),@"rendererExpectedPrefix":@"__entry_",
+                       @"note":@"Public metadata observation only; names are not rewritten and execution is unqualified"});
+            } @catch (NSException *exception) {
+                emit(@{@"event":@"libraryFunctions",@"typeFailure":@YES,@"truncated":@NO,
+                       @"exceptionName":diagnosticText(exception.name),@"exceptionReason":diagnosticText(exception.reason)});
+            }
+        }
+
         emit(@{@"event":@"libraryReturn", @"libraryCreated":@(library != nil),
                @"errorDomain":failure.domain ?: @"", @"errorCode":@(failure ? failure.code : 0),
                @"errorDescription":diagnosticText(failure.localizedDescription), @"errorDescriptionTruncated":@(failure.localizedDescription.length > 8192),

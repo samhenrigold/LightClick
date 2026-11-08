@@ -82,6 +82,7 @@ def main():
                         if case=='standard-header':
                             logs[1].update(mode='standard-header',sourceSHA256='f110a56696746ed66d54450f587bf4c063386815a5e79f5e7b13d83fef730d22',actualArguments='-cl-std=CL1.2 -std=cl1.2 -x cl -include /System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/31001/Libraries/lib/clang/31001.192/include/opencl-c.h')
                             logs.append(dict(event='headerVerified',path='/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/31001/Libraries/lib/clang/31001.192/include/opencl-c.h',sha256='388facd88852bbca216b87023cca7d31064b0ef901f582d3baf4b5960abafc72',bytes=805181,uid=0,inode=123))
+                        if case=='standard-header':logs.append(dict(event='libraryFunctions',functionCount=1,functionNames=['lc_integer_add'],truncated=False,typeFailure=False,rendererExpectedPrefix='__entry_'))
                         value['compute']['stderr']['text']='' if case=='missing-witness' else ''.join('LC_OPENCL_DIALECT '+json.dumps(x)+'\n' for x in logs)
                     return reply(value)
                 assert argv[:2] == ['-c', ns['EXPORT']]
@@ -134,6 +135,18 @@ def main():
                     assert report['source_language_diagnostic']['witnessed']==(case in ('dialect','standard-kernel','standard-header'))
                     assert report['source_language_diagnostic_dylib']['macho_header']['file_type']==6
                     if case=='standard-header':
+                        observed=[row for row in report['source_language_diagnostic']['events'] if row.get('event')=='libraryFunctions']
+                        assert observed==[dict(event='libraryFunctions',functionCount=1,functionNames=['lc_integer_add'],truncated=False,typeFailure=False,rendererExpectedPrefix='__entry_')]
+                        assert (results/'compute.stderr.txt').read_text().count('lc_integer_add')==1
+                        for observation in (dict(event='libraryFunctions',functionCount=0,functionNames=[],truncated=False,typeFailure=False),
+                                            dict(event='libraryFunctions',functionCount=40,functionNames=['x'*64]*32,truncated=True,typeFailure=False),
+                                            dict(event='libraryFunctions',functionCount=0,functionNames=[],truncated=False,typeFailure=True)):
+                            # Metadata availability/truncation stays explicit; no inference or name rewriting.
+                            fake=copy.deepcopy(report['diagnostic']['compute'])
+                            fake['stderr']['text']='LC_OPENCL_DIALECT '+json.dumps(observation)+'\n'
+                            captured=ns['dialect_witness'](fake,'standard-header')
+                            assert captured['events']==[observation] and not captured['witnessed']
+
                         bad=copy.deepcopy(report['diagnostic']['compute']);bad['stderr']['text']=bad['stderr']['text'].replace('388facd88852bbca216b87023cca7d31064b0ef901f582d3baf4b5960abafc72','0'*64)
                         assert not ns['dialect_witness'](bad,'standard-header')['witnessed']
                         bad=copy.deepcopy(report['diagnostic']['compute']);bad['stderr']['text']='\n'.join(line for line in bad['stderr']['text'].splitlines() if 'headerVerified' not in line)
