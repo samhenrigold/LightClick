@@ -53,6 +53,14 @@ elif sys.argv[2]=='install-library':
         remote=stage(artifact);target='/Library/Application Support/MavericksAppearance/'+name
         run('/bin/cp',[remote,target+'.next.dylib']);run('/bin/chmod',['0644',target+'.next.dylib']);run('/bin/mv',[target+'.next.dylib',target+'.dylib'])
     print('Installed platform-aware appearance loader and desktop library in cloned guest')
+elif sys.argv[2]=='copy-static-executable':
+    name=sys.argv[3]
+    if name not in ('Dock','Spotlight','SystemUIServer'):raise ValueError('Unsupported static executable')
+    executable=root/'StaticExecutableProbe'
+    subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-framework','Foundation',str(source/'probes/mavericks-static-executable.m'),'-o',str(executable)],check=True)
+    remote=stage(executable);pid=run('/usr/bin/pgrep',['-x',name]).strip()
+    if not pid.isdecimal():raise RuntimeError('Exactly one already-running process required; no process will be launched')
+    print(run(remote,[pid,'/System/Library/CoreServices/'+name+'.app/Contents/MacOS/'+name,'/tmp/MavericksStatic-'+name]))
 elif sys.argv[2]=='probe-button-labels':
     executable=root/'ButtonLabelProbe'
     subprocess.run(['xcrun','clang','-arch','x86_64','-mmacosx-version-min=10.9','-fno-objc-arc','-Wno-deprecated-declarations','-framework','Cocoa',str(source/'probes/mavericks-button-labels.m'),'-o',str(executable)],check=True)

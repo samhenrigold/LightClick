@@ -1,0 +1,65 @@
+{
+  "scope": "Static findings for the supplied Mavericks and Mojave builds; candidates require rendering qualification before global use.",
+  "localEvidence": "Source/Build/mavericks-appearance/design-static-evidence.json contains input hashes, selected disassembly, method inventories and constants. Apple binaries and generated disassembly remain local.",
+  "dock": {
+    "confirmed": [
+      "The original Dock has DOCKGlassFloorLayer and DOCKReflectionLayer; the inspected Mojave Dock uses Dock.FloorLayer and ECMaterialLayer.",
+      "Mojave's SLSSetMagicMirrorProperties implementation returns zero without doing work. The inspected SkyLight export table lacks the old mirror creation, space and opacity functions.",
+      "Original icon reflections have their own image-processing pipeline, separate from WindowServer's background/window mirror.",
+      "DOCKReflectionLayer initializes image-layer opacity to approximately 0.315. setImage: uses GradientBlurFilter, then CIColorControls with contrast 1.45, brightness 0.2 and saturation 1.0. Padding changes the reflection image bounds and reflectionScale."
+    ],
+    "nextSpike": "Reconstruct and qualify the original icon processing and placement against recovered reflection images. Do not treat a vertical flip plus a fade, or a no-op mirror export, as equivalent.",
+    "remaining": "Background/window reflections require a replacement compositor path; icon pipeline parity alone does not implement them."
+  },
+  "menuBar": {
+    "confirmed": [
+      "HIToolbox's _HIMenuUseBackdrops checks menu-bar transparency and _HIWindowUseBackdrops. The latter depends on acceleration and reduced transparency.",
+      "_HIThemeApplyNewLook is an acceleration check in the inspected build, not a hidden design preference.",
+      "_HIMenuBarSetAppearanceOverride stores an appearance override and broadcasts theme/transparency changes. A nonzero override disables transparency in IsMenuBarTransparencyEnabled; _HIMenuBarGetAppearance normally chooses 1 for light and 2 for dark.",
+      "HIMenuBarOpaque is read from the application's Info dictionary; it is not established as a defaults key. Signed Info.plist files must remain intact.",
+      "HIToolbox's TThemeMetaFont constructs UI fonts through CTFontCreateUIFontForLanguage. SystemUIServer's CLKDigitalView.updatedFont: uses NSFont.systemFontOfSize: and font descriptors. These are separate paths to verify."
+    ],
+    "nextSpike": "In one isolated process, qualify the light appearance override and original CoreUI menu drawing together. Measure font metrics and cached font use separately. Process exit restores the override; avoid editing signed metadata.",
+    "remaining": "Disabling blur does not by itself establish Mavericks' background, logo, font or geometry."
+  },
+  "legacyPreferences": {
+    "confirmed": "AppKit's _NSGetBoolAppConfig reads NSUserDefaults, honors the argument domain and caches the result. Per-process launch arguments are suitable for bounded qualification before any persistent defaults changes.",
+    "candidates": [
+      {
+        "key": "NSNeedsSnowLeopardTitlebarButtons",
+        "default": "Compatibility exceptions for older QuickTime Player X and Pixelmator",
+        "experimentValue": true
+      },
+      {
+        "key": "NSPopupRequiresLegacyPopUpIndicatorSize",
+        "default": "Executable linkage check",
+        "experimentValue": true
+      },
+      {
+        "key": "NSButtonUseLegacyAlignmentRectInsets",
+        "default": "Compatibility exception for older PowerPoint",
+        "experimentValue": true
+      },
+      {
+        "key": "NSTableHeaderViewUsesYosemiteHeight",
+        "default": "Compatibility exception for older Final Cut",
+        "experimentValue": false
+      },
+      {
+        "key": "NSVisualEffectViewAlwaysUsesClearProxyForTitlebarWithinWindow",
+        "default": "UIKitHostApp class check",
+        "experimentValue": true
+      }
+    ],
+    "nextSpike": "Compare each flag in a fresh process against native Mavericks metrics; do not enable the set globally or infer behavior from its name."
+  },
+  "spotlight": {
+    "confirmed": [
+      "The modern executable uses SPSearchPanel with separate defaultPositionOrigin, frame, collapse, saved-position and result-controller methods.",
+      "The linked Spotlight framework owns SPDefaults/SPAppDefaults. Inspected settings include search-source and suggestion controls; no complete classic-layout switch was identified in the inspected executable, defaults implementation or ParsecUI strings."
+    ],
+    "nextSpike": "Adapt the modern panel's placement, drawing, typography and result-row geometry while preserving the modern query and result controllers.",
+    "qualification": "The inspection does not prove that no hidden switch exists elsewhere in the system. No Spotlight presentation change has been applied."
+  },
+  "deployment": "No new appearance settings, shell restarts or runtime rendering changes were applied during this static pass. No attempt was made to unlock the experiment."
+}
