@@ -12,6 +12,104 @@ CLIP_SHA256='62dfa5b49d5f97d954c420d315c250015d8733f47c59752d002f8b841e650211'
 CLIP_BYTES=58747744
 PLACEHOLDER='/private/var/tmp/LightClickFCPFixture.PLACEHOLDER'
 
+RETENTION_HELPERS=r'''
+def launch_for_workflow(binary,env,spec,report):
+    with open(os.devnull,'rb') as null:
+        if spec.get('workflow_retain_owned_app'):
+            with open(os.devnull,'wb') as sink:
+                child=subprocess.Popen([binary],stdin=null,stdout=sink,stderr=sink,env=env,preexec_fn=limits,close_fds=True)
+            report['app_stdio']={'policy':'devnull','available':False,'reason':'explicit retention diagnostic; app output intentionally unavailable'}
+            report['app_log_at_limit']=None
+            return child,None
+        child=subprocess.Popen([binary],stdin=null,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,preexec_fn=limits,close_fds=True)
+    return child,(reader(child.stdout),reader(child.stderr))
+
+def current_executable(pid):
+    library=ctypes.CDLL('/usr/lib/libproc.dylib')
+    buffer=ctypes.create_string_buffer(4096)
+    if library.proc_pidpath(pid,buffer,ctypes.sizeof(buffer))<=0:return None
+    return buffer.value.decode('utf-8','strict')
+
+def owned_retention_receipt(app,spec,report):
+    if (not spec.get('workflow_retain_owned_app') or spec.get('variant')!='10.1'
+            or report.get('result')!='OBSERVED_LAUNCH' or report.get('error')
+            or report.get('app_stdio',{}).get('policy')!='devnull' or app is None or app.poll() is not None):return None
+    workflow=report.get('workflow',{});created=workflow.get('library_action',{});opened=workflow.get('project_open_action',{})
+    def true(value):return type(value) in (bool,int) and value in (0,1) and value==1
+    if (workflow.get('project_open_evidence_gate') is not True or workflow.get('project_open_attempted') is not True
+            or created.get('result')!='PRIVATE_LIBRARY_CREATED_REQUIRES_IMPORT_REVIEW' or not true(created.get('privateLibraryVerified'))
+            or opened.get('mode')!='open-generated-project' or opened.get('variant')!='10.1'
+            or type(opened.get('pid')) is not int or opened['pid']!=app.pid
+            or not all(true(opened.get(key)) for key in ('identityMatched','identityStillMatched','axTrusted'))):return None
+    directory=workflow.get('directory','')
+    if not re.match(r'\A/private/var/tmp/LightClickFCPFixture\.[A-Za-z0-9_-]{6,16}\Z',directory):return None
+    metadata=os.lstat(directory)
+    if os.path.realpath(directory)!=directory or not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid!=os.getuid() or stat.S_IMODE(metadata.st_mode)!=0o700:return None
+    for name,kind,cap in (('input-prores422.mov','file',58747744),('generated.fcpxml','xml',16384),('private.fcpbundle','directory',0)):
+        path=directory+'/'+name;info=os.lstat(path)
+        if os.path.realpath(path)!=path or info.st_uid!=os.getuid():return None
+        if kind=='directory':
+            if not stat.S_ISDIR(info.st_mode):return None
+        elif not stat.S_ISREG(info.st_mode) or (info.st_size!=cap if kind=='file' else not 0<info.st_size<=cap):return None
+    executable=spec['app']+'/Contents/MacOS/'+spec['identity']['CFBundleExecutable']
+    if current_executable(app.pid)!=executable or os.path.realpath(executable)!=executable or os.getpgid(app.pid)!=app.pid or app.poll() is not None:return None
+    receipt={'retained':True,'mode':'create-open-and-retain-for-display','pid':app.pid,'executable':executable,
+             'console_uid':os.getuid(),'process_group':os.getpgid(app.pid),'fixture_directory':directory,
+             'private_library':directory+'/private.fcpbundle','app_stdio_available':False,
+             'identity_scope':'owned live Popen child verified at collector exit; revalidate before later input',
+             'project_open_result':opened.get('result'),'max_host_observation_seconds':90}
+    for action in opened.get('actionsPerformed',[]):
+        if (action.get('targetPID')==app.pid and action.get('api',action.get('action'))=='CGEventPostToPSN'
+                and type(action.get('psnHigh')) is int and type(action.get('psnLow')) is int
+                and 0<=action['psnHigh']<=4294967295 and 0<=action['psnLow']<=4294967295 and (action['psnHigh'] or action['psnLow'])):
+            receipt['helper_psn']={'high':action['psnHigh'],'low':action['psnLow']};break
+    return receipt
+
+def cleanup_for_workflow(owned,app,spec,report):
+    errors=[];candidate=None
+    # Defer only our one app. All helpers still finish/stop normally before retention is granted.
+    for child in reversed(owned):
+        if child is app and spec.get('workflow_retain_owned_app'):candidate=child;continue
+        try:stop(child)
+        except Exception as error:errors.append(repr(error))
+    if candidate is not None:
+        receipt=None
+        if not errors:
+            try:receipt=owned_retention_receipt(candidate,spec,report)
+            except Exception as error:report['retention_validation_error']=repr(error)
+        if receipt is not None:report['retained_owned_app']=receipt
+        else:
+            report['retained_owned_app']={'retained':False,'reason':'retention setup/identity/cleanup gate not satisfied'}
+            try:stop(candidate)
+            except Exception as error:errors.append(repr(error))
+    return errors
+'''
+
+
+def hold_retained_display_window(evidence,save,clock=None,sleep=None):
+    """No commands/input here. Entire VM cleanup follows this finite diagnostic window."""
+    import time
+    clock=clock or time.monotonic;sleep=sleep or time.sleep
+    evidence['retained_display_observation']={'limit_seconds':90,'started_monotonic':clock(),'timing_qualified':False,
+        'cleanup_owner':'guest-bench whole disposable VM; no further diagnostic requests from this driver'}
+    deadline=evidence['retained_display_observation']['started_monotonic']+90
+    save()
+    print('RETAINED_DISPLAY_DIAGNOSTIC_READY (maximum90seconds; no presentation/export qualification)',flush=True)
+    while clock()<deadline:sleep(min(.25,max(0,deadline-clock())))
+    evidence['retained_display_observation']['finished_monotonic']=clock();save()
+
+
+def valid_retention_receipt(guest,spec):
+    receipt=guest.get('retained_owned_app',{});workflow=guest.get('workflow',{})
+    return (receipt.get('retained') is True and receipt.get('mode')=='create-open-and-retain-for-display'
+            and type(receipt.get('pid')) is int and receipt['pid']==guest.get('owned_app_pid')
+            and receipt.get('executable')==spec['app']+'/Contents/MacOS/'+spec['identity']['CFBundleExecutable']
+            and receipt.get('fixture_directory')==workflow.get('directory')
+            and receipt.get('private_library')==workflow.get('directory','')+'/private.fcpbundle'
+            and receipt.get('process_group')==receipt['pid'] and receipt.get('max_host_observation_seconds')==90
+            and receipt.get('app_stdio_available') is False and guest.get('cleanup_errors')==[])
+
+
 PREPARE=r'''
     # Workflow extension: only generated fixture media and verified observation helper.
     workflow_paths=[]
@@ -200,6 +298,16 @@ def compose_guest(base):
     text=replace_once(text,'    os.initgroups(user.pw_name,user.pw_gid);os.setgid(user.pw_gid);os.setuid(uid)',
                       '    for path in workflow_paths:os.chown(path,uid,user.pw_gid)\n    os.initgroups(user.pw_name,user.pw_gid);os.setgid(user.pw_gid);os.setuid(uid)')
     text=replace_once(text,"    report['result']='OBSERVED_LAUNCH'",OBSERVE+"\n    report['result']='OBSERVED_LAUNCH'")
+    launch_old="""    with open(os.devnull,'rb') as null:
+        app=subprocess.Popen([binary],stdin=null,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,preexec_fn=limits,close_fds=True)
+    log=(reader(app.stdout),reader(app.stderr))"""
+    text=replace_once(text,launch_old,"    app,log=launch_for_workflow(binary,env,spec,report)")
+    cleanup_old="""    errors=[]
+    for child in reversed(owned):
+        try:stop(child)
+        except Exception as error:errors.append(repr(error))"""
+    text=replace_once(text,cleanup_old,"    errors=cleanup_for_workflow(owned,app,spec,report)")
+    text=replace_once(text,"try:\n    def interrupted(n,frame):",RETENTION_HELPERS+"\ntry:\n    def interrupted(n,frame):")
     ast.parse(text)
     return text
 
