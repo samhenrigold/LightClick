@@ -483,18 +483,101 @@ static void openGenerated(AXUIElementRef application,pid_t pid,NSString *directo
     releaseProject(&fresh);releaseProject(&target);
 }
 
+/* Read actual menu children only; never infer an item from an index or shortcut. */
+static AXUIElementRef uniqueChild(AXUIElementRef parent,NSString *role,NSString *title,pid_t pid){
+    CFTypeRef children=attribute(parent,kAXChildrenAttribute);AXUIElementRef result=NULL;NSUInteger matches=0;
+    if(children && CFGetTypeID(children)==CFArrayGetTypeID() && CFArrayGetCount(children)<=64)for(CFIndex i=0;i<CFArrayGetCount(children) && room();i++){
+        CFTypeRef value=CFArrayGetValueAtIndex(children,i);if(!value || CFGetTypeID(value)!=AXUIElementGetTypeID())continue;
+        AXUIElementRef child=(AXUIElementRef)value;
+        if(ownedElement(child,pid) && equals(child,kAXRoleAttribute,role) && (!title || equals(child,kAXTitleAttribute,title))){matches++;result=child;}
+    }
+    if(matches==1 && result && room())CFRetain(result);else result=NULL;
+    if(children)CFRelease(children);return result;
+}
+static AXUIElementRef masterShareItem(AXUIElementRef application,pid_t pid){
+    CFTypeRef bar=attribute(application,kAXMenuBarAttribute);AXUIElementRef file=NULL,menu=NULL,share=NULL,submenu=NULL,item=NULL;
+    if(bar && CFGetTypeID(bar)==AXUIElementGetTypeID() && ownedElement((AXUIElementRef)bar,pid))file=uniqueChild((AXUIElementRef)bar,@"AXMenuBarItem",@"File",pid);
+    if(file)menu=uniqueChild(file,@"AXMenu",nil,pid);
+    if(menu)share=uniqueChild(menu,@"AXMenuItem",@"Share",pid);
+    if(share && enabled(share,YES))submenu=uniqueChild(share,@"AXMenu",nil,pid);
+    if(submenu)item=uniqueChild(submenu,@"AXMenuItem",@"Master File (default)…",pid);
+    if(item && (!enabled(item,YES) || !pressAvailable(item))){CFRelease(item);item=NULL;}
+    if(submenu)CFRelease(submenu);if(share)CFRelease(share);if(menu)CFRelease(menu);if(file)CFRelease(file);if(bar)CFRelease(bar);
+    return item;
+}
+typedef struct { NSUInteger scanned,runtime,project,clip;BOOL incomplete; } TimelineEvidence;
+static void timelineEvidence(AXUIElementRef element,pid_t pid,NSUInteger depth,TimelineEvidence *e){
+    if(!room() || ++e->scanned>256 || depth>10 || !ownedElement(element,pid)){e->incomplete=YES;return;}
+    if(equals(element,kAXRoleAttribute,@"AXStaticText") && equals(element,CFSTR("AXDescription"),@"runtime") && equals(element,kAXValueAttribute,@"08:00 total - 1920\u2009×\u20091080 | 30 fps Stereo"))e->runtime++;
+    if(equals(element,kAXRoleAttribute,@"AXButton") && equals(element,kAXTitleAttribute,@"LC-generated-8s") && enabled(element,YES))e->project++;
+    if(equals(element,kAXRoleAttribute,@"AXLayoutItem") && equals(element,kAXSubroleAttribute,@"AXTimeline") && equals(element,CFSTR("AXDescription"),@"Video-Clip:LC-generated-prores422") && equals(element,kAXValueAttribute,@"00:00:08:00") && enabled(element,YES))e->clip++;
+    // Browser/listing contents are irrelevant: the generated browser target is verified separately.
+    if(equals(element,kAXRoleAttribute,@"AXImage") || equals(element,CFSTR("AXDescription"),@"organizer") || equals(element,kAXRoleAttribute,@"AXTable") || equals(element,kAXRoleAttribute,@"AXList") || equals(element,kAXRoleAttribute,@"AXOutline"))return;
+    CFTypeRef children=attribute(element,kAXChildrenAttribute);
+    if(children && CFGetTypeID(children)==CFArrayGetTypeID()){
+        CFIndex count=CFArrayGetCount(children);if(count>64 || (depth==10 && count))e->incomplete=YES;
+        else for(CFIndex i=0;i<count && room();i++){CFTypeRef child=CFArrayGetValueAtIndex(children,i);if(child && CFGetTypeID(child)==AXUIElementGetTypeID())timelineEvidence((AXUIElementRef)child,pid,depth+1,e);}
+    }
+    if(children)CFRelease(children);if(!room())e->incomplete=YES;
+}
+static BOOL verifiedTimeline(AXUIElementRef window,pid_t pid,NSMutableDictionary *report){
+    TimelineEvidence evidence={0};timelineEvidence(window,pid,0,&evidence);
+    report[@"generatedTimelineEvidence"]=@{@"scanned":@(evidence.scanned),@"incomplete":@(evidence.incomplete),@"runtimeMatches":@(evidence.runtime),@"projectButtonMatches":@(evidence.project),@"timelineClipMatches":@(evidence.clip),@"expectedRuntime":@"08:00 total - 1920\u2009×\u20091080 | 30 fps Stereo",@"expectedClipDuration":@"00:00:08:00"};
+    return !evidence.incomplete && evidence.runtime==1 && evidence.project==1 && evidence.clip==1;
+}
+static void inspectMasterShare(AXUIElementRef application,pid_t pid,NSString *directory,NSMutableDictionary *report){
+    ProjectTarget target={0};AXUIElementRef item=NULL,fresh=NULL;
+    report[@"result"]=@"MASTER_SHARE_GUARD_INCONCLUSIVE";report[@"guestDarwin13"]=@(guestDarwin13());
+    if(![report[@"guestDarwin13"]boolValue] || !ownLibrary(directory) || !frontmostOwned(pid,NULL))goto done;
+    target=findProject(application,pid,report);
+    if(!target.window || !verifiedTimeline(target.window,pid,report) || !plainFocusedWindow(application,target.window,pid))goto done;
+    item=masterShareItem(application,pid);report[@"uniqueEnabledMasterFile"]=@(item!=NULL);if(!item)goto done;
+    fresh=masterShareItem(application,pid);
+    if(!fresh || !CFEqual(item,fresh) || !plainFocusedWindow(application,target.window,pid) || !frontmostOwned(pid,NULL) || !ownLibrary(directory) || !guestDarwin13() || !room())goto done;
+    {
+        AXError error=AXUIElementPerformAction(fresh,kAXPressAction);
+        actionResult(report[@"actionsPerformed"],@"AXPress",@"File > Share > Master File (default)…",error);
+        report[@"masterShareActionStatus"]=@(error);
+        report[@"result"]=error==kAXErrorSuccess?@"MASTER_SHARE_PRESS_SENT_REQUIRES_PANE_REVIEW":@"MASTER_SHARE_PRESS_UNCONFIRMED";
+        // CannotComplete/timeout may have opened the pane. Never retry the action.
+        double until=clockNow()+3;NSArray *observed=@[];
+        do{
+            usleep(200000);
+            if(!identity(pid) || !ownLibrary(directory) || !room())break;
+            observed=panels(application);
+        }while(!observed.count && clockNow()<until && room());
+        report[@"sharePanels"]=observed;
+        if(!observed.count && identity(pid) && ownLibrary(directory) && room()){
+            CFTypeRef windows=attribute(application,kAXWindowsAttribute);NSMutableArray *others=[NSMutableArray array];
+            if(windows && CFGetTypeID(windows)==CFArrayGetTypeID() && CFArrayGetCount(windows)<=8)for(CFIndex i=0;i<CFArrayGetCount(windows) && room();i++){
+                CFTypeRef value=CFArrayGetValueAtIndex(windows,i);if(value && CFGetTypeID(value)==AXUIElementGetTypeID() && ownedElement((AXUIElementRef)value,pid) && !CFEqual(value,target.window))[others addObject:snapshot((AXUIElementRef)value,0)];
+            }
+            if(windows)CFRelease(windows);report[@"otherWindowsAfterShare"]=others;
+        }
+    }
+ done:
+    report[@"exportAttempted"]=@NO;report[@"nextOrSavePressed"]=@NO;
+    if(fresh)CFRelease(fresh);if(item)CFRelease(item);releaseProject(&target);
+}
+
 int main(int argc,const char **argv) {
     @autoreleasepool {
-        if(argc!=5 || strcmp(argv[1],"10.1") || (strcmp(argv[3],"new-private-library") && strcmp(argv[3],"create-private-library") && strcmp(argv[3],"open-generated-project") && strcmp(argv[3],"open-generated-project-hid"))){fprintf(stderr,"usage: fcp-ax-actions 10.1 ownedPID new-private-library|create-private-library|open-generated-project|open-generated-project-hid ownFixtureDirectory\n");return 2;}
+        if(argc!=5 || strcmp(argv[1],"10.1") || (strcmp(argv[3],"new-private-library") && strcmp(argv[3],"create-private-library") && strcmp(argv[3],"open-generated-project") && strcmp(argv[3],"open-generated-project-hid") && strcmp(argv[3],"inspect-master-share"))){fprintf(stderr,"usage: fcp-ax-actions 10.1 ownedPID new-private-library|create-private-library|open-generated-project|open-generated-project-hid|inspect-master-share ownFixtureDirectory\n");return 2;}
         char *end=NULL;long number=strtol(argv[2],&end,10);if(!argv[2][0] || *end || number<=1 || number>INT_MAX)return 2;
         pid_t pid=(pid_t)number;NSString *directory=[NSString stringWithUTF8String:argv[4]];if(!directory)return 2;
-        BOOL createMode=!strcmp(argv[3],"create-private-library"),hidMode=!strcmp(argv[3],"open-generated-project-hid"),openMode=!strcmp(argv[3],"open-generated-project")||hidMode;surgicalCreation=createMode||openMode;
-        alarm(createMode?55:16);deadline=clockNow()+(createMode?48:12);
+        BOOL shareMode=!strcmp(argv[3],"inspect-master-share"),createMode=!strcmp(argv[3],"create-private-library"),hidMode=!strcmp(argv[3],"open-generated-project-hid"),openMode=!strcmp(argv[3],"open-generated-project")||hidMode;surgicalCreation=createMode||openMode||shareMode;
+        alarm(createMode?55:shareMode?24:16);deadline=clockNow()+(createMode?48:shareMode?20:12);
         NSMutableArray *actions=[NSMutableArray array];
         NSMutableDictionary *report=[@{@"result":@"INCONCLUSIVE",@"variant":@"10.1",@"pid":@(pid),@"mode":[NSString stringWithUTF8String:argv[3]],@"directory":directory,
             @"intendedLibraryPath":[directory stringByAppendingPathComponent:@"private.fcpbundle"],@"actionsPerformed":actions,@"libraryCreationAttempted":@NO,
-            @"trustRequested":@NO,@"axTrusted":@(AXIsProcessTrusted()),@"identityMatched":@(identity(pid)),@"privateFixtureValid":@(privateFixture(directory,!openMode))}mutableCopy];
+            @"trustRequested":@NO,@"axTrusted":@(AXIsProcessTrusted()),@"identityMatched":@(identity(pid)),@"privateFixtureValid":@(privateFixture(directory,!(openMode||shareMode)))}mutableCopy];
         AXUIElementRef application=NULL,dialog=NULL,button=NULL;
+        if(shareMode){
+            if(guestDarwin13() && [report[@"identityMatched"]boolValue] && [report[@"axTrusted"]boolValue] && [report[@"privateFixtureValid"]boolValue]){
+                application=AXUIElementCreateApplication(pid);AXUIElementSetMessagingTimeout(application,.15);inspectMasterShare(application,pid,directory,report);
+            }
+            goto output;
+        }
         if(openMode){
             if(hidMode){report[@"guestDarwin13"]=@(guestDarwin13());if(![report[@"guestDarwin13"]boolValue]){report[@"result"]=@"PROJECT_HID_REQUIRES_GUEST_DARWIN13";goto output;}}
             if([report[@"identityMatched"]boolValue] && [report[@"axTrusted"]boolValue] && [report[@"privateFixtureValid"]boolValue]){
@@ -537,7 +620,7 @@ int main(int argc,const char **argv) {
         report[@"identityStillMatched"]=@(identity(pid));report[@"nodes"]=@(nodes);report[@"attributeFailures"]=@(failures);
         report[@"truncated"]=@(truncated);report[@"deadlineExceeded"]=@(expired);
         struct stat info;BOOL exists=lstat([report[@"intendedLibraryPath"]fileSystemRepresentation],&info)==0;report[@"intendedLibraryExists"]=@(exists);
-        report[@"qualification"]=hidMode ? @"One guest-global HID double-click attempt only, gated to Darwin13 and an exact owned fixture. Delivery unqualified; fresh read-only post-action tree requires review. No timeline/render/export qualification." : openMode ? @"One exact generated-project open attempt only. Read-only post-action state is required; no timeline/render/export qualification." : createMode ? @"Explicit private-library creation attempt only; all input targets the owned guest FCP. No existing library selection or import/render/export qualification." : @"One verified New-button press only. Save-panel controls are inventoried; no path entered, Save pressed or existing library selected.";
+        report[@"qualification"]=shareMode ? @"One exact Master File menu press only; bounded Share pane inventory requires review. No Next, Save, export or performance qualification." : hidMode ? @"One guest-global HID double-click attempt only, gated to Darwin13 and an exact owned fixture. Delivery unqualified; fresh read-only post-action tree requires review. No timeline/render/export qualification." : openMode ? @"One exact generated-project open attempt only. Read-only post-action state is required; no timeline/render/export qualification." : createMode ? @"Explicit private-library creation attempt only; all input targets the owned guest FCP. No existing library selection or import/render/export qualification." : @"One verified New-button press only. Save-panel controls are inventoried; no path entered, Save pressed or existing library selected.";
         if(button)CFRelease(button);if(dialog)CFRelease(dialog);if(application)CFRelease(application);
         NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:NULL];if(!json || json.length>1048576)return 3;
         fwrite(json.bytes,1,json.length,stdout);putchar('\n');alarm(0);return 0;
