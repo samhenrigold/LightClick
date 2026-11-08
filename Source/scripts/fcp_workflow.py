@@ -550,8 +550,8 @@ OBSERVE='\n'+textwrap.indent(inspect.getsource(generated_project_evidence)+inspe
 
             else:report['workflow']['open_error']='owned app exited after OS open'
         report['workflow']['inventory_finished_seconds']=time.time()-launched_at
-        report['workflow']['owned_app_exit_code_after_workflow']=app.poll()
     else:report['workflow']['inventory_error']='owned app exited'
+    report['workflow']['owned_app_exit_code_after_workflow']=app.poll()
 '''
 
 

@@ -24,6 +24,14 @@ def ready_inventory(**values):
 
 
 class Checks(unittest.TestCase):
+    def test_exit_before_inventory_retains_exact_owned_child_status(self):
+        for code in (0,-8,-11):
+            report={'workflow':{}}
+            scope=dict(app=types.SimpleNamespace(poll=lambda:code),report=report)
+            exec(compile(textwrap.dedent(OBSERVE),'<actual early-exit workflow>','exec'),scope)
+            self.assertEqual(report['workflow']['inventory_error'],'owned app exited')
+            self.assertEqual(report['workflow']['owned_app_exit_code_after_workflow'],code)
+
     def test_empty_or_invalid_verifier_receipt_preserves_diagnostics_without_fetch(self):
         source=(Path(__file__).parents[1]/'probes/fcp-workflow-driver.py').read_text()
         start=source.index("        if export_private:\n            verification=workflow.get('export_verification',{})")
