@@ -156,6 +156,7 @@ public final class Engine {
         config.invalidation_membership = environment["LC_HVDBT_INVALIDATION_MEMBERSHIP"] == "1"
         config.profile_shift_helpers = environment["LC_HVDBT_PROFILE_SHIFT_HELPERS"] == "1"
         config.inline_shr8 = environment["LC_HVDBT_INLINE_SHR8"] == "1"
+        config.retain_shared_dead = environment["LC_HVDBT_RETAIN_SHARED_DEAD"] == "1"
         config.no_return_prediction = options.hybrid && environment["LC_HVDBT_NO_RETURN_PREDICTION"] == "1"
         config.all_flags_live = options.hybrid && environment["LC_HVDBT_ALL_FLAGS"] == "1"
         config.keep_kernel_tables = !options.hybrid || environment["LC_HVDBT_KEEP_KPTI"] == "1"
@@ -517,6 +518,8 @@ public final class Engine {
                 + "suppressed \(ctx.pointee.stat_keeper_inactive_suppressed) thresholdFallbacks \(ctx.pointee.stat_keeper_inactive_threshold_fallbacks) "
                 + "sharedDirs \(firstContext.pointee.shared_dir_count)"
         }
+        line += "\nshared dead hints (global translator; repeated, do not sum): enabled \(t.retain_shared_dead_enabled) "
+            + "retained \(t.shared_dead_retained_hints) cleared \(t.shared_dead_cleared_hints)"
         return line
     }
 

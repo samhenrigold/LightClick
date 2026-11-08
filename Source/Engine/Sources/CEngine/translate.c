@@ -506,6 +506,29 @@ static u32 read_copied[2] = {1, READ_COPY_BYTES / 2};
 
 static inline u32 dead_slot(u32 key, u64 rip) { return (u32)((rip * 0x9E3779B97F4A7C15ULL + key) >> 40) & (DEAD_SLOTS - 1); }
 
+static void flush_dead_slots(bool everything) {
+    if (!cfg.retain_shared_dead) {
+        memset(dead_slots, 0, DEAD_SLOTS * sizeof(u32));
+        return;
+    }
+    // Values are encoded block index + 1. A private reset preserves P0's code,
+    // HostBlocks and saved bytes; P1 indices will be recycled. Keep only existing
+    // allocated P0 hints, without repopulating candidates lost to a collision.
+    // Reuse still applies every original key/frame/byte/permission/entry guard.
+    u32 shared_count = hblock_count[0];
+    for (u32 slot = 0; slot < DEAD_SLOTS; slot++) {
+        u32 hint = dead_slots[slot];
+        if (!hint)
+            continue;
+        if (!everything && hint <= shared_count && hint <= BLOCKS_MAX) {
+            stats.shared_dead_retained_hints++;
+        } else {
+            dead_slots[slot] = 0;
+            stats.shared_dead_cleared_hints++;
+        }
+    }
+}
+
 static void remember_reads(HostBlock *hb, u64 rip) {
     u64 page_end = (rip & ~0xfffULL) + 4096, lo = fetch_lo, hi = fetch_hi < page_end ? fetch_hi : page_end;
     u32 end = cur_part ? READ_COPY_BYTES : READ_COPY_BYTES / 2;
@@ -1192,6 +1215,8 @@ void tr_init(const TrConfig *config) {
     tr_profile_shift_helpers = cfg.profile_shift_helpers;
     tr_inline_shr8 = cfg.inline_shr8;
     stats.inline_shr8_enabled = cfg.inline_shr8;
+    stats.retain_shared_dead_enabled = cfg.retain_shared_dead;
+    stats.shared_dead_retained_hints = stats.shared_dead_cleared_hints = 0;
     cc_limit = cfg.code_cache_bytes ? cfg.code_cache_bytes : CC_SIZE;
     tr_stub_lookup = cfg.stub_lookup;
     tr_stub_ret_miss = cfg.stub_ret_miss;
@@ -1618,7 +1643,7 @@ void tr_flush_parked(bool everything) {
     memset(page_head, 0, PAGE_HEADS * sizeof(u32));
     memset(view_head, 0, sizeof view_head);
     memset(block_map, 0, MAP_SIZE * sizeof(MapEntry));
-    memset(dead_slots, 0, DEAD_SLOTS * sizeof(u32));
+    flush_dead_slots(everything);
     for (int v = 0; v <= view_high; v++)
         memset(hash_table(v), 0, HASH_BYTES);
     memset(hash_slots_used, 0, sizeof hash_slots_used);

@@ -180,6 +180,7 @@ def prepare(engine, work):
     old_ctx = old_ctx[:begin]+'} EngineCtx;'
     old_config = struct(config, 'TrConfig').replace('    bool profile_shift_helpers; // opt-in: descriptor metadata for the per-vCPU monitor helper census\n', '')
     old_config = old_config.replace('    bool inline_shr8; // experimental/default off: register-immediate byte SHR without the helper\n', '')
+    old_config = old_config.replace('    bool retain_shared_dead; // experimental/default off: preserve existing shared candidate hints across private-only resets\n', '')
     legacy = old_ctx.replace('} EngineCtx;', '} LegacyEngineCtx;')+'\n'+old_config.replace('} TrConfig;', '} LegacyTrConfig;')
     assertions = [f'_Static_assert(offsetof({new}, {field}) == offsetof({old}, {field}), "old {new}.{field} offset");'
                   for new, old, declaration in [('EngineCtx','LegacyEngineCtx',old_ctx),('TrConfig','LegacyTrConfig',old_config)]

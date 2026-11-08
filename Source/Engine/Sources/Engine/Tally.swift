@@ -512,6 +512,11 @@ public final class Tally: @unchecked Sendable {
             }
             o += "First failed condition only, original short-circuit order. no_read_copy includes unsupported/cross-page/read-copy-budget cases.\n\n"
         }
+        o += "== shared dead candidate hints (global translator; repeated in every vCPU file, do not sum) ==\n"
+        o += "retain_shared_dead_enabled \(t.retain_shared_dead_enabled)\n"
+        o += "retain_shared_dead_retained_hints \(t.shared_dead_retained_hints)\n"
+        o += "retain_shared_dead_cleared_hints \(t.shared_dead_cleared_hints)\n"
+        o += "Enabled-only nonzero hint-slot actions since tr_init. The same hint can count at multiple flushes; not unique bodies, successful reuse, or saved time.\n\n"
         o +=
             "cold blocks a cache keyed by frame had: \(t.again_live) live in another view, \(t.again_dead) dead with the frame unchanged. Lower bounds\n\n"
         o +=

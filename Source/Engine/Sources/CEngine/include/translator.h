@@ -26,6 +26,7 @@ typedef struct {
     bool invalidation_membership; // opt-in prototype: conservative view-membership bits for shared-block hash invalidation
     bool profile_shift_helpers; // opt-in: descriptor metadata for the per-vCPU monitor helper census
     bool inline_shr8; // experimental/default off: register-immediate byte SHR without the helper
+    bool retain_shared_dead; // experimental/default off: preserve existing shared candidate hints across private-only resets
 } TrConfig;
 
 typedef struct {
@@ -91,6 +92,9 @@ typedef struct {
     // Opt-in global translator census (profile_invalidations). First rejected condition only, in original check order.
     uint64_t reuse_attempts, reuse_reject[TR_REUSE_REJECT_KINDS];
     uint64_t inline_shr8_enabled; // configuration state, not a counter or per-vCPU value
+    // Global, repeated in each vCPU tally. Enabled state is not a delta. Counts are populated only when enabled,
+    // since tr_init: nonzero hint-slot actions per flush, not unique bodies, successful reuse, or saved time.
+    uint64_t retain_shared_dead_enabled, shared_dead_retained_hints, shared_dead_cleared_hints;
 } TrStats;
 TrStats tr_stats(void);
 
