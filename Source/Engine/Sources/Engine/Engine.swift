@@ -147,6 +147,7 @@ public final class Engine {
         config.no_reuse = environment["LC_HVDBT_NO_REUSE"] == "1"
         config.profile_invalidations = environment["LC_HVDBT_PROFILE_INVALIDATION"] == "1"
         config.invalidation_membership = environment["LC_HVDBT_INVALIDATION_MEMBERSHIP"] == "1"
+        config.profile_shift_helpers = environment["LC_HVDBT_PROFILE_SHIFT_HELPERS"] == "1"
         config.no_return_prediction = options.hybrid && environment["LC_HVDBT_NO_RETURN_PREDICTION"] == "1"
         config.all_flags_live = options.hybrid && environment["LC_HVDBT_ALL_FLAGS"] == "1"
         config.keep_kernel_tables = !options.hybrid || environment["LC_HVDBT_KEEP_KPTI"] == "1"
@@ -336,6 +337,7 @@ public final class Engine {
         let environment = ProcessInfo.processInfo.environment
         ctx.pointee.profile_mmu_observations = environment["LC_HVDBT_MMU_OBSERVATIONS"] == "1" ? 1 : 0
         ctx.pointee.keeper_inactive_guard = environment["LC_HVDBT_KEEPER_INACTIVE_GUARD"] == "1" ? 1 : 0
+        ctx.pointee.profile_shift_helpers = environment["LC_HVDBT_PROFILE_SHIFT_HELPERS"] == "1" ? 1 : 0
         // ENGINE_SHARE: the keeper rule in a test with no fallbacks, as --smp is, so that it runs with vCPUs really side by side.
         ctx.pointee.share_user = (options.hybrid && environment["LC_HVDBT_NO_SHARE"] != "1") || environment["ENGINE_SHARE"] == "1" ? 1 : 0
         ctx.pointee.clts_on_host = options.hybrid && ProcessInfo.processInfo.environment["LC_HVDBT_CLTS_TCG"] == "1" ? 1 : 0

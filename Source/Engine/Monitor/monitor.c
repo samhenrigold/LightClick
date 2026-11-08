@@ -2981,9 +2981,33 @@ static void h_pcmpistri(void) {
     c->x[R_S4] = 1;
 }
 
+static void count_shift_helper(u64 descriptor, u64 count) {
+    if (!c->profile_shift_helpers)
+        return;
+    u32 size = (u32)(descriptor >> 8) & 0xff, width;
+    switch (size) {
+        case 1: width = 0; break;
+        case 2: width = 1; break;
+        case 4: width = 2; break;
+        case 8: width = 3; break;
+        default: c->stat_shift_helpers_unclassified++; return;
+    }
+    u64 allowed = 7 | (0xffULL << 8) | SHIFT_HELPER_PROFILE_MARK | SHIFT_HELPER_PROFILE_MEM | SHIFT_HELPER_PROFILE_CL;
+    if (!(descriptor & SHIFT_HELPER_PROFILE_MARK) || (descriptor & ~allowed)) {
+        c->stat_shift_helpers_unclassified++;
+        return;
+    }
+    u32 memory = (descriptor & SHIFT_HELPER_PROFILE_MEM) != 0;
+    u32 by_cl = (descriptor & SHIFT_HELPER_PROFILE_CL) != 0;
+    u32 zero = (count & (size == 8 ? 63 : 31)) == 0;
+    u32 bucket = (((((u32)descriptor & 7) * 4 + width) * 2 + memory) * 2 + by_cl) * 2 + zero;
+    c->stat_shift_helpers[bucket]++;
+}
+
 static void h_shift(void) {
     u64 v = c->x[R_S0], cnt = c->x[R_S1], desc_ = c->x[R_S2];
-    u32 kind = desc_ & 7, size = (u32)(desc_ >> 8);
+    u32 kind = desc_ & 7, size = (u32)(desc_ >> 8) & 0xff;
+    count_shift_helper(desc_, cnt);
     u32 bits = size * 8;
     u64 mask = bits == 64 ? ~0ULL : (1ULL << bits) - 1;
     cnt &= size == 8 ? 63 : 31;

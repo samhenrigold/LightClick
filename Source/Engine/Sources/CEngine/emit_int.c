@@ -646,6 +646,18 @@ static void apply_helper_flags(void) {
     mov_reg(1, R_AF, S4);
 }
 
+static u64 shift_helper_descriptor(const Insn *in, int kind) {
+    u64 descriptor = (u64)kind | (u64)in->sz << 8;
+    if (tr_profile_shift_helpers) {
+        descriptor |= SHIFT_HELPER_PROFILE_MARK;
+        if (!in->rm_reg)
+            descriptor |= SHIFT_HELPER_PROFILE_MEM;
+        if (in->by_cl)
+            descriptor |= SHIFT_HELPER_PROFILE_CL;
+    }
+    return descriptor;
+}
+
 static void emit_shift(const Insn *in, int live) {
     int sz = in->sz, sf = sz == 8, bits = sz * 8, kind = in->sub == SH_SAL ? SH_SHL : in->sub;
     bool mem = !in->rm_reg, rot = kind < SH_SHL, thru = kind == SH_RCL || kind == SH_RCR;
@@ -720,7 +732,7 @@ static void emit_shift(const Insn *in, int live) {
             mov_reg(1, S1, 1);
         else
             movimm(S1, (u64)in->imm);
-        movimm(S2, (u64)kind | (u64)sz << 8);
+        movimm(S2, shift_helper_descriptor(in, kind));
         svc(SVC_H_SHIFT);
         if (mem)
             ldst(0, sz, S0, a);

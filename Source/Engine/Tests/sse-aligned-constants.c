@@ -5,6 +5,7 @@
 #include <assert.h>
 #include "tr_internal.h"
 bool tr_precise_flags=true,tr_has_tzcnt=false,tr_hybrid=true,tr_no_bulk_rep=false,tr_compat=false;
+bool tr_profile_shift_helpers=false;
 int tr_cpl=3,cur_part=0;
 u64 tr_stub_lookup,tr_stub_ret_miss,tr_stub_pushf,tr_stub_sahf;
 static u32 encoded[65536];u32 *tr_cc=encoded;

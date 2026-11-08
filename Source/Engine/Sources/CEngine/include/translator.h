@@ -24,6 +24,7 @@ typedef struct {
     uint64_t ram_below_4g; // 0: RAM is one piece. Otherwise GPA 4 GB and up is host RAM at this offset
     bool profile_invalidations; // opt-in: time and count hash probes for one of every 256 non-dead block kills
     bool invalidation_membership; // opt-in prototype: conservative view-membership bits for shared-block hash invalidation
+    bool profile_shift_helpers; // opt-in: descriptor metadata for the per-vCPU monitor helper census
 } TrConfig;
 
 typedef struct {

@@ -9,6 +9,7 @@ void baseline_emit_int(const Insn *,int);
 void candidate_emit_int(const Insn *,int);
 bool baseline_logimm(u64,int,u32 *);
 bool tr_precise_flags=true,tr_has_tzcnt=false,tr_hybrid=true,tr_no_bulk_rep=false,tr_compat=false;
+bool tr_profile_shift_helpers=false;
 int tr_cpl=3,cur_part=0;u64 tr_stub_lookup,tr_stub_ret_miss,tr_stub_pushf,tr_stub_sahf;
 u32 *tr_cc;static u32 *current_words;
 u64 tr_cc_va(const u32 *p){return 0x10000000ULL+(u64)(p-current_words)*4;}

@@ -145,6 +145,13 @@ enum {
     SVC_H_RMWFLAGS_UNUSED,
 };
 
+// Opt-in metadata for SVC_H_SHIFT only. The semantic kind is bits 0..2 and
+// operand bytes are bits 8..15; profiling must never become part of the width.
+#define SHIFT_HELPER_PROFILE_MEM (1ULL << 16)
+#define SHIFT_HELPER_PROFILE_CL (1ULL << 17)
+#define SHIFT_HELPER_PROFILE_MARK (1ULL << 18)
+#define SHIFT_HELPER_PROFILE_BUCKETS 256
+
 // Hypervisor calls from monitor to host: hvc #code, arguments and results in EngineCtx.req.
 enum {
     HC_NONE = 0,
@@ -311,6 +318,12 @@ typedef struct {
     // Experimental/default off. State is per-vCPU; counters do not imply elapsed time or saved body kills.
     uint32_t keeper_inactive_guard, pad_keeper_inactive_guard;
     uint64_t stat_keeper_inactive_suppressed, stat_keeper_inactive_threshold_fallbacks;
+    // Opt-in, per-vCPU helper-entry counts, not retired instructions or time.
+    // Index: ((((kind*4 + log2(bytes))*2 + memory)*2 + CL)*2 + masked_zero).
+    // masked_zero tests the x86 31/63 mask, before a rotate's further modulo.
+    uint32_t profile_shift_helpers, pad_shift_helpers;
+    uint64_t stat_shift_helpers_unclassified;
+    uint64_t stat_shift_helpers[SHIFT_HELPER_PROFILE_BUCKETS];
 } EngineCtx;
 _Static_assert(sizeof(EngineCtx) <= CTX_SLOT, "EngineCtx must fit its existing per-vCPU slot");
 

@@ -453,6 +453,22 @@ public final class Tally: @unchecked Sendable {
         }
         o += String(format: "translation time     %12.1f ms\n", seconds(t.translate_ns) * 1000)
         o += "blocks invalidated   " + perSecond(t.invalidated) + "\n"
+        o += "\n== shift helper census (this vCPU; entries, not retired instructions or time) ==\n"
+        o += "shift_helpers_enabled \(c.profile_shift_helpers)\n"
+        if c.profile_shift_helpers != 0 {
+            let shiftCounts = withUnsafeBytes(of: c.stat_shift_helpers) { Array($0.bindMemory(to: UInt64.self)) }
+            let shiftSVC = withUnsafeBytes(of: c.stat_svc) { Array($0.bindMemory(to: UInt64.self)) }
+            o += "shift_helpers_cpu_index \(engine.cpuIndex)\n"
+            o += "shift_helpers_svc64_entries \(shiftSVC[Int(SVC_H_SHIFT)])\n"
+            o += "shift_helpers_unclassified \(c.stat_shift_helpers_unclassified)\n"
+            o += "masked_zero uses the x86 31/63 count mask, before rotate modulo; immediate-zero and inline paths are not counted.\n"
+            o += "A memory-store fault/retry can count again; snapshots are asynchronous. Never sum duplicated global translator counters.\n"
+            for bucket in 0..<Int(SHIFT_HELPER_PROFILE_BUCKETS) {
+                let kind = bucket >> 5, bytes = 1 << ((bucket >> 3) & 3)
+                let memory = (bucket >> 2) & 1, cl = (bucket >> 1) & 1, zero = bucket & 1
+                o += "shift_helpers_bucket kind=\(kind) bytes=\(bytes) memory=\(memory) cl=\(cl) masked_zero=\(zero) count=\(shiftCounts[bucket])\n"
+            }
+        }
         o += "\n== invalidation membership prototype (global translator; flags/state are not interval deltas) ==\n"
         o += "invalidation_membership_enabled \(t.invalidation_membership_enabled)\n"
         o += "invalidation_membership_reliable \(t.invalidation_membership_reliable)\n"
