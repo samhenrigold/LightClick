@@ -356,6 +356,10 @@ public final class Tally: @unchecked Sendable {
         o += "  dropping a table   " + perSecond(c.stat_pt_writes_zap) + "\n"
         o += "  by one-word step   " + perSecond(c.stat_pt_step) + "\n"
         o += "  tables unshadowed  " + perSecond(c.stat_pt_unshadow) + "\n"
+        o += "\n== keeper inactive flood guard (this vCPU; enabled is configuration state) ==\n"
+        o += "keeper_inactive_guard_enabled \(c.keeper_inactive_guard)\n"
+        o += "keeper_inactive_guard_suppressed \(c.stat_keeper_inactive_suppressed)\n"
+        o += "keeper_inactive_guard_threshold_fallbacks \(c.stat_keeper_inactive_threshold_fallbacks)\n"
         if c.profile_mmu_observations != 0 {
             o += "\n== MMU observations (this vCPU; count/timing only, no skipped operations) ==\n"
             o += "mmu_observations_enabled \(c.profile_mmu_observations)\n"

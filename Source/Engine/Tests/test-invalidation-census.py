@@ -17,6 +17,7 @@ engine = Path(__file__).resolve().parents[1]
 current = (engine / 'Sources/CEngine/translate.c').read_text()
 baseline = subprocess.check_output(['git', 'show', 'a0c12f4f:Source/Engine/Sources/CEngine/translate.c'], cwd=engine, text=True)
 monitor = (engine / 'Monitor/monitor.c').read_text()
+baseline_monitor = subprocess.check_output(['git', 'show', 'd5207348:Source/Engine/Monitor/monitor.c'], cwd=engine, text=True)
 
 
 def function(source, name):
@@ -35,6 +36,9 @@ args = parser.parse_args()
 # Retain the original state-changing dispatch, walks, invalidation and return-stack reset sites.
 assert 'if (pt_flood_decision(d, nobody_home)) {' in monitor
 assert 'mmu_xmark_zap(v, d->view);\n            walk_any_tables = true;' in monitor
+for name in ('pt_slot_changed', 'handle_data_abort', 'shadow_write_finish', 'pool_reclaim'):
+    assert function(monitor, name) == function(baseline_monitor, name), name + ' behavior unexpectedly changed'
+assert 'environment["LC_HVDBT_KEEPER_INACTIVE_GUARD"] == "1" ? 1 : 0' in (engine / 'Sources/Engine/Engine.swift').read_text()
 header = json.dumps(str(engine / 'Sources/CEngine/include/translator.h'))
 prefix = r'''
 #include <assert.h>
@@ -134,7 +138,28 @@ int main(void){
         mmu_xmark_zap((1ULL<<55)|valid,0);
         for(u32 i=0;i<KILL_KINDS*4;i++)assert(context.stat_mmu_xmark_zaps[i]==(u64)(enabled&&i==reason*4+(u32)keeper*2+(u32)valid));
     }
-    puts("PASS: reuse result/state/fetch-byte-CAS order equivalent in every rejection bin/on/off; flood eligibility/write increments and X-mark census");
+    // Experimental guard alters only eligible inactive-keeper decisions below the unchanged threshold.
+    for(int profile=0;profile<2;profile++)for(int guard=0;guard<2;guard++)for(u32 level=0;level<4;level++)
+    for(int parent=0;parent<2;parent++)for(int inactive=0;inactive<2;inactive++)for(int keeper=0;keeper<2;keeper++)for(size_t i=0;i<4;i++){
+        memset(&context,0,sizeof(context));context.profile_mmu_observations=profile;context.keeper_inactive_guard=guard;views[0].keeper=keeper;
+        ShadowDesc a={level,0,writes[i],parent?(u64 *)words:NULL},b=a;
+        bool eligible=a.level<3&&a.parent;
+        bool old=eligible&&(++a.writes>PT_FLOOD_WRITES||inactive);
+        bool suppressed=guard&&eligible&&inactive&&keeper&&a.writes<=PT_FLOOD_WRITES;
+        bool fallback=guard&&eligible&&inactive&&keeper&&a.writes>PT_FLOOD_WRITES;
+        bool now=pt_flood_decision(&b,inactive);
+        assert(now==(old&&!suppressed)&&a.writes==b.writes);
+        assert(context.stat_keeper_inactive_suppressed==(u64)suppressed);
+        assert(context.stat_keeper_inactive_threshold_fallbacks==(u64)fallback);
+        u64 decisions=0;for(u32 k=0;k<6;k++)decisions+=context.stat_mmu_flood_decisions[k];
+        assert(decisions==(u64)(profile&&now));
+    }
+    // With no walks resetting writes, stores1..64 stay tracked and store65 takes the original fallback.
+    memset(&context,0,sizeof(context));context.keeper_inactive_guard=1;views[0].keeper=1;
+    ShadowDesc table={0,0,0,(u64 *)words};
+    for(u32 n=1;n<=65;n++){assert(pt_flood_decision(&table,true)==(n>64));assert(table.writes==n);}
+    assert(context.stat_keeper_inactive_suppressed==64&&context.stat_keeper_inactive_threshold_fallbacks==1);
+    puts("PASS: reuse state/order and flood baseline equivalence; guard on/off eligibility/increments/wrap/counters and65-store fallback");
     return 0;
 }
 '''

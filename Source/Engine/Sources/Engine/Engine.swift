@@ -335,6 +335,7 @@ public final class Engine {
         ctx.pointee.hybrid = options.hybrid ? 1 : 0
         let environment = ProcessInfo.processInfo.environment
         ctx.pointee.profile_mmu_observations = environment["LC_HVDBT_MMU_OBSERVATIONS"] == "1" ? 1 : 0
+        ctx.pointee.keeper_inactive_guard = environment["LC_HVDBT_KEEPER_INACTIVE_GUARD"] == "1" ? 1 : 0
         // ENGINE_SHARE: the keeper rule in a test with no fallbacks, as --smp is, so that it runs with vCPUs really side by side.
         ctx.pointee.share_user = (options.hybrid && environment["LC_HVDBT_NO_SHARE"] != "1") || environment["ENGINE_SHARE"] == "1" ? 1 : 0
         ctx.pointee.clts_on_host = options.hybrid && ProcessInfo.processInfo.environment["LC_HVDBT_CLTS_TCG"] == "1" ? 1 : 0
@@ -499,6 +500,11 @@ public final class Engine {
             line += "\nmembership (global translator, not per-vCPU): enabled \(t.invalidation_membership_enabled) reliable \(t.invalidation_membership_reliable) bytes \(t.invalidation_membership_bytes) "
                 + "inserts \(t.invalidation_membership_inserts) visits \(t.invalidation_membership_view_visits) stales \(t.invalidation_membership_stale_visits) removals \(t.invalidation_membership_removals) "
                 + "trackFailures \(t.invalidation_membership_tracking_failures) fullScans \(t.invalidation_membership_full_scans)"
+        }
+        if ctx.pointee.keeper_inactive_guard != 0 {
+            line += "\nkeeper inactive guard (this vCPU): enabled \(ctx.pointee.keeper_inactive_guard) "
+                + "suppressed \(ctx.pointee.stat_keeper_inactive_suppressed) thresholdFallbacks \(ctx.pointee.stat_keeper_inactive_threshold_fallbacks) "
+                + "sharedDirs \(firstContext.pointee.shared_dir_count)"
         }
         return line
     }

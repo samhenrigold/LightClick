@@ -1298,6 +1298,13 @@ static inline bool pt_flood_decision(ShadowDesc *d, bool nobody_home) {
     if (!(d->level < 3 && d->parent))
         return false;
     bool threshold = ++d->writes > PT_FLOOD_WRITES; // Exactly the original eligibility and increment, including u32 wrap.
+    if (c->keeper_inactive_guard && nobody_home && views[d->view].keeper) {
+        if (!threshold) {
+            c->stat_keeper_inactive_suppressed++;
+            return false; // Keep tracking: the caller still zaps the written slot, including all affected execute marks.
+        }
+        c->stat_keeper_inactive_threshold_fallbacks++;
+    }
     if (!(threshold || nobody_home))
         return false;
     if (c->profile_mmu_observations) {

@@ -308,6 +308,9 @@ typedef struct {
     uint64_t stat_mmu_store_observed[4], stat_mmu_store_unchanged[4];
     // Per-vCPU count-only census: cause(threshold/inactive/both)*2 + keeper; X marks reason*4 + keeper*2 + valid.
     uint64_t stat_mmu_flood_decisions[6], stat_mmu_xmark_zaps[KILL_KINDS * 4];
+    // Experimental/default off. State is per-vCPU; counters do not imply elapsed time or saved body kills.
+    uint32_t keeper_inactive_guard, pad_keeper_inactive_guard;
+    uint64_t stat_keeper_inactive_suppressed, stat_keeper_inactive_threshold_fallbacks;
 } EngineCtx;
 _Static_assert(sizeof(EngineCtx) <= CTX_SLOT, "EngineCtx must fit its existing per-vCPU slot");
 
