@@ -113,9 +113,13 @@ stderr_path.unlink(missing_ok=True)
 
 
 def request(command, timeout):
+    serialized = json.dumps(command)
+    encoded = serialized.encode('utf-8')
+    if len(encoded) > 65536:
+        raise ValueError(f'Diagnostics request is {len(encoded)} UTF-8 bytes; limit is 65536 bytes')
     (channel/'Result.json').unlink(missing_ok=True)
     temporary = channel/'Request.tmp'
-    temporary.write_text(json.dumps(command))
+    temporary.write_bytes(encoded)
     temporary.rename(channel/'Request.json')
     deadline = time.time()+timeout
     while time.time() < deadline:
