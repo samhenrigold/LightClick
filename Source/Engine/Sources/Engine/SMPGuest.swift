@@ -36,6 +36,7 @@ public final class SMPGuest: @unchecked Sendable {
     fileprivate var vcpuCount: UInt32 { count }
 
     public func run(image: MachOImage) throws -> Int32 {
+        guard (1...8).contains(count) else { throw EngineError.stop("SMP vCPU count must be 1...8") }
         guard let entry = image.entry else { throw EngineError.badImage("no entry") }
         let first = try Engine(options: options)
         first.prepareCount(count)
@@ -55,17 +56,22 @@ public final class SMPGuest: @unchecked Sendable {
 
         // All of them exist before any runs, as an IPI may be sent to any at once.
         let created = DispatchSemaphore(value: 0), go = DispatchSemaphore(value: 0)
-        final class Box: @unchecked Sendable { var engine: Engine? }
+        final class Box: @unchecked Sendable {
+            var engine: Engine?
+            var outcome: RunOutcome?
+            let finished = DispatchSemaphore(value: 0)
+        }
         let boxes = (1..<max(count, 1)).map { _ in Box() }
         for (i, box) in boxes.enumerated() {
             Thread.detachNewThread { [self] in
+                defer { box.finished.signal() }
                 pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
                 do {
                     let engine = try Engine(secondaryOf: first, index: UInt32(i + 1))
                     box.engine = engine
                     created.signal()
                     go.wait()
-                    _ = try engine.run(entry: entry)
+                    box.outcome = try engine.run(entry: entry)
                 } catch {
                     FileHandle.standardError.write(Data("engine stop on vCPU \(i + 1): \(error)\n".utf8))
                     exit(2)
@@ -79,9 +85,54 @@ public final class SMPGuest: @unchecked Sendable {
             cpus.append(SMPCPU(guest: self, engine: box.engine!))
         }
         for _ in boxes { go.signal() }
-        _ = try first.run(entry: entry)
+        func finishSecondaries() throws {
+            // Give guests which explicitly exit every CPU a brief chance to finish.
+            // Other SMP fixtures halt their peers: wake those at an x86 boundary.
+            // The semaphore is also the publication boundary for each outcome and
+            // context. Never read final statistics while a peer can still write them.
+            let grace = DispatchTime.now() + .milliseconds(100)
+            var joined = boxes.map { $0.finished.wait(timeout: grace) == .success }
+            for (i, cpu) in cpus.dropFirst().enumerated() where !joined[i] {
+                cpu.stopAtBoundary()
+            }
+            let deadline = DispatchTime.now() + .seconds(5)
+            for i in boxes.indices where !joined[i] {
+                guard boxes[i].finished.wait(timeout: deadline) == .success else {
+                    throw EngineError.stop("SMP secondary \(i + 1) did not stop within join deadline")
+                }
+                joined[i] = true
+            }
+        }
+        let firstOutcome: RunOutcome
+        do {
+            firstOutcome = try first.run(entry: entry)
+        } catch {
+            try? finishSecondaries()
+            throw error
+        }
+        try finishSecondaries()
         if ProcessInfo.processInfo.environment["ENGINE_STATS"] != nil {
-            for cpu in cpus { FileHandle.standardError.write(Data((cpu.engine.stats() + "\n").utf8)) }
+            FileHandle.standardError.write(Data("SMP_JOIN expected \(count) stopped \(cpus.count)\n".utf8))
+            let shared = first.ctx.pointee.shared_dir_count
+            for (i, cpu) in cpus.enumerated() {
+                let result = i == 0 ? firstOutcome : boxes[i - 1].outcome
+                let kind: String
+                let code: Int32
+                if case .exited(let exitCode) = result {
+                    kind = "exited"
+                    code = exitCode
+                } else if case .halted = result {
+                    kind = "halted"
+                    code = -1
+                } else {
+                    kind = "boundary"
+                    code = -1
+                }
+                let c = cpu.engine.ctx.pointee
+                let line = "SMP_FINAL cpu \(i) stopped 1 outcome \(kind) exit \(code) guard \(c.keeper_inactive_guard) "
+                    + "suppressed \(c.stat_keeper_inactive_suppressed) thresholdFallbacks \(c.stat_keeper_inactive_threshold_fallbacks) sharedDirsGlobal \(shared)\n"
+                FileHandle.standardError.write(Data((line + cpu.engine.stats() + "\n").utf8))
+            }
         }
         return first.exitCode ?? -1
     }
@@ -92,6 +143,14 @@ final class SMPCPU: EngineMachine, @unchecked Sendable {
     private unowned let guest: SMPGuest
     let engine: Engine
     private let wake = DispatchSemaphore(value: 0)
+    private let stopLock = NSLock()
+    private var stopRun = false
+
+    var shouldStopRun: Bool {
+        stopLock.lock()
+        defer { stopLock.unlock() }
+        return stopRun
+    }
 
     init(guest: SMPGuest, engine: Engine) {
         self.guest = guest
@@ -102,6 +161,15 @@ final class SMPCPU: EngineMachine, @unchecked Sendable {
     /// Any thread.
     func post(_ vector: UInt8) {
         engine.postVector(vector, level: false)
+        wake.signal()
+    }
+
+    /// Any thread. A boundary request is atomic; wake a peer sleeping in HLT too.
+    func stopAtBoundary() {
+        stopLock.lock()
+        stopRun = true
+        stopLock.unlock()
+        engine.requestBoundary()
         wake.signal()
     }
 

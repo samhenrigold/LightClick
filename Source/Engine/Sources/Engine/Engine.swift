@@ -22,8 +22,15 @@ public protocol EngineMachine: AnyObject {
     func apicICR(_ icr: UInt64)
     /// True when an interrupt wants delivering; the engine then raises the guest's IRQ line on the vCPU thread.
     func hasInterruptWaiting() -> Bool
+    /// End this run at a host-visible boundary, including a completed HLT.
+    /// Read on the vCPU thread; a machine publishing this from another thread must synchronize it.
+    var shouldStopRun: Bool { get }
     /// User-mode shim only: an x86 `syscall` with no kernel model. Registers are in `state`.
     func syscall(_ state: UnsafeMutablePointer<EngineCtx>, engine: Engine) throws
+}
+
+extension EngineMachine {
+    public var shouldStopRun: Bool { false }
 }
 
 public struct EngineOptions {
@@ -635,6 +642,9 @@ public final class Engine {
             if asleep { gate.leave() }
             let wake = machine.waitForInterrupt(deadlineNanos: deadlineNanos)
             if asleep { gate.enter() }
+            // With IF clear, the monitor can keep sleeping in the HLT host-call
+            // loop without reaching HC_BOUNDARY. HLT has already completed here.
+            if !options.hybrid && machine.shouldStopRun { return .halted(rax: c.pointee.x.0) }
             if let vector = machine.acknowledgeInterrupt() {
                 c.pointee.req_r.0 = UInt64(vector)
             } else {
@@ -646,7 +656,7 @@ public final class Engine {
         case Int(HC_APIC_ICR):
             machine?.apicICR(c.pointee.req_a.0)
         case Int(HC_BOUNDARY):
-            if !options.hybrid && severalVCPUs { // only a code cache reset asks this here, and this vCPU stays in the monitor for it
+            if !options.hybrid && severalVCPUs && machine?.shouldStopRun != true { // a cache reset keeps this vCPU in the monitor; an explicit machine stop does not
                 gate.leave()
                 gate.enter()
                 return nil
