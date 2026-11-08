@@ -430,15 +430,12 @@ static void emit_alu(const Insn *in, int live) {
             bool sub = alu != ALU_ADD;
             if (imm >= 0 && imm < 4096) {
                 if (live & F_A) {
+                    // Lazy AF observes only bit 4 of (R_AF ^ R_PF).
                     u32 enc;
-                    if (imm && logimm((u64)imm, 1, &enc))
+                    if (logimm((u64)imm & 0x10, 1, &enc))
                         E(0xD2000000u | enc | dst << 5 | R_AF);
-                    else if (!imm)
+                    else
                         mov_reg(1, R_AF, dst);
-                    else {
-                        movimm(S1, (u64)imm);
-                        logic_reg(1, 2, 0, R_AF, dst, S1);
-                    }
                 }
                 if (rd == XZR && !sets)
                     return; // a dead compare
