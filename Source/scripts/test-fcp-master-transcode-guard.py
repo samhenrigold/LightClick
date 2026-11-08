@@ -126,3 +126,35 @@ if args.check:
     old=subprocess.run([str(args.check),'legacy'],capture_output=True,text=True,timeout=10,preexec_fn=no_core)
     assert old.returncode!=0 and 'borrowed AX child expired before retain' in old.stderr,(old.returncode,old.stderr[:1024])
     print(f'PASS ownership witness: reconstructed old ordering fails({old.returncode}); actual corrected body passes(0); cores disabled')
+
+# Focus relaxation is read-only and confined to new transcode selection handling.
+wrapper=s[s.index('static AXUIElementRef masterPane('):s.index('static AXUIElementRef masterPaneWithFocus(',s.index('static AXUIElementRef masterPane('))]
+assert 'return masterPaneWithFocus(application,pid,requireInfo,YES);' in wrapper
+internal=s[s.index('static AXUIElementRef masterPaneWithFocus(',s.index('static AXUIElementRef masterPane(')):s.index('typedef struct { AXUIElementRef group,info,settings;')]
+assert 'named==1 && blank<=1 && editor<=1' in internal
+assert '(!requireFocus || (focused && CFEqual(focused,result)))' in internal
+assert 'blankShareCompanion(window,pid)' in internal and 'AXSheet' in internal and 'AXAlert' in internal
+recovery=s[s.index('static BOOL ensureTranscodeFocus('):s.index('static BOOL selectTranscodePopup(')]
+assert recovery.count('AXUIElementPerformAction(')==1
+raise_at=recovery.index('AXUIElementPerformAction(')
+assert recovery.index('evidence[@"raiseAttempted"]=@YES')<raise_at
+for witness in ('masterPaneWithFocus(application,pid,NO,NO)','transcodeMetadata(structural,pid)','settingsPopup(structural,pid,@"H.264")','settingsPopup(structural,pid,desiredValue)','paneStillOwned(pane,pid,directory)','AXUIElementCopyActionNames(pane,&actions)','kAXRaiseAction','transcodeRaiseAllowed('):assert recovery.index(witness)<raise_at
+assert '[evidence[@"raiseAttempted"]boolValue]' in recovery
+assert 'clockNow()+3' in recovery and 'masterPane(application,pid,NO)' in recovery[raise_at:]
+for loop in re.findall(r'do\{(.*?)\}while\(room\(\)\);',recovery,re.S):assert 'AXUIElementPerformAction' not in loop
+assert 'focusFailureState' in recovery and 'sameStructuralPaneVerified' in recovery and 'focusAfterRaise' in recovery
+assert 'masterPaneWithFocus(application,pid,NO,NO)' in select
+assert select.index('windowStateBeforeMenuRelease')<select.index('CFRelease(currentItem);currentItem=NULL;')<select.index('windowStateAfterMenuRelease')<select.index('// Acknowledgement may be uncertain')
+assert select.index('CFRelease(menu);menu=NULL;')<select.index('until=fmin(deadline,clockNow()+3);',select.index('// Acknowledgement may be uncertain'))
+assert 'stoppedWindowState' in select
+metadata=s[s.index('static NSDictionary *transcodeWindowMetadata('):s.index('static BOOL transcodeRaiseAllowed(')]
+assert 'MIN(count,8)' in metadata and 'kAXChildrenAttribute' in metadata
+assert 'snapshot(' not in metadata and 'AXIdentifier' not in metadata
+raise_expression=re.search(r'return ([^;]+);',s[s.index('static BOOL transcodeRaiseAllowed('):]).group(1)
+raise_checks=[]
+for values in itertools.product((0,1),repeat=7):
+    expr=raise_expression
+    for key,value in zip(('sameStructuralPane','metadata','codec','desired','context','available','attempted'),values):expr=re.sub(r'\b'+key+r'\b',str(value),expr)
+    raise_checks.append('_Static_assert((%s)==%d,"actual focus-only raise gate");'%(expr,int(all(values[:6]) and not values[6])))
+subprocess.run(['xcrun','clang','-std=c11','-Wall','-Wextra','-Werror','-fsyntax-only','-x','c','-'],input='\n'.join(raise_checks).encode(),timeout=20,check=True)
+print('PASS 128 actual raise gates, strict old-mode wrapper, bounded metadata, menu cleanup and no-resend focus recovery')

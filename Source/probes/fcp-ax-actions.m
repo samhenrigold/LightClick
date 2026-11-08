@@ -554,7 +554,11 @@ static BOOL blankShareCompanion(AXUIElementRef window,pid_t pid){
     BOOL blank=children && CFGetTypeID(children)==CFArrayGetTypeID() && CFArrayGetCount(children)==0;
     if(children)CFRelease(children);return blank;
 }
+static AXUIElementRef masterPaneWithFocus(AXUIElementRef application,pid_t pid,BOOL requireInfo,BOOL requireFocus);
 static AXUIElementRef masterPane(AXUIElementRef application,pid_t pid,BOOL requireInfo){
+    return masterPaneWithFocus(application,pid,requireInfo,YES);
+}
+static AXUIElementRef masterPaneWithFocus(AXUIElementRef application,pid_t pid,BOOL requireInfo,BOOL requireFocus){
     CFTypeRef windows=attribute(application,kAXWindowsAttribute),focused=attribute(application,kAXFocusedWindowAttribute);
     AXUIElementRef result=NULL;NSUInteger named=0,blank=0,editor=0;BOOL okay=YES;
     if(!windows || CFGetTypeID(windows)!=CFArrayGetTypeID() || CFArrayGetCount(windows)>3)okay=NO;
@@ -576,7 +580,7 @@ static AXUIElementRef masterPane(AXUIElementRef application,pid_t pid,BOOL requi
         }
         else okay=NO;
     }
-    okay=okay && named==1 && blank<=1 && editor<=1 && focused && result && CFEqual(focused,result) && room();
+    okay=okay && named==1 && blank<=1 && editor<=1 && result && (!requireFocus || (focused && CFEqual(focused,result))) && room();
     if(okay && requireInfo){MasterPaneEvidence e={0};masterPaneEvidence(result,pid,0,&e);okay=masterPaneEvidenceComplete(e);}
     if(okay)CFRetain(result);else result=NULL;
     if(windows)CFRelease(windows);if(focused)CFRelease(focused);return result;
@@ -667,6 +671,79 @@ static NSArray *transcodeOwnedPanels(AXUIElementRef application,pid_t pid,BOOL s
     }
     if(windows)CFRelease(windows);return result;
 }
+static NSDictionary *transcodeWindowMetadata(AXUIElementRef window,pid_t pid){
+    pid_t actual=0;BOOL identified=AXUIElementGetPid(window,&actual)==kAXErrorSuccess;
+    NSMutableDictionary *row=[@{@"pidAvailable":@(identified),@"owned":@(identified && actual==pid)}mutableCopy];
+    if(identified)row[@"pid"]=@(actual);
+    if(identified && actual==pid && room()){
+        for(NSString *name in @[@"AXRole",@"AXSubrole",@"AXTitle"]){CFTypeRef value=attribute(window,(__bridge CFStringRef)name);id text=scalar(value);if(text)row[name]=text;if(value)CFRelease(value);}
+        CFTypeRef children=attribute(window,kAXChildrenAttribute);
+        if(children && CFGetTypeID(children)==CFArrayGetTypeID())row[@"childCount"]=@(CFArrayGetCount(children));
+        if(children)CFRelease(children);
+    }
+    return [row autorelease];
+}
+static NSDictionary *transcodeWindowDiagnostics(AXUIElementRef application,pid_t pid){
+    NSMutableDictionary *result=[NSMutableDictionary dictionary];NSMutableArray *rows=[NSMutableArray array];
+    if(!room()){result[@"deadlineOrNodeBudget"]=@YES;return result;}
+    CFTypeRef focused=attribute(application,kAXFocusedWindowAttribute),windows=attribute(application,kAXWindowsAttribute);
+    result[@"focusedAttributeAvailable"]=@(focused && CFGetTypeID(focused)==AXUIElementGetTypeID());
+    if(focused && CFGetTypeID(focused)==AXUIElementGetTypeID())result[@"focusedWindow"]=transcodeWindowMetadata((AXUIElementRef)focused,pid);
+    if(windows && CFGetTypeID(windows)==CFArrayGetTypeID()){
+        CFIndex count=CFArrayGetCount(windows);result[@"windowCount"]=@(count);result[@"windowMetadataTruncated"]=@(count>8);
+        for(CFIndex i=0;i<MIN(count,8) && room();i++){
+            CFTypeRef child=CFArrayGetValueAtIndex(windows,i);
+            if(child && CFGetTypeID(child)==AXUIElementGetTypeID())[rows addObject:transcodeWindowMetadata((AXUIElementRef)child,pid)];
+        }
+    }else result[@"windowListUnavailable"]=@YES;
+    result[@"windows"]=rows;if(windows)CFRelease(windows);if(focused)CFRelease(focused);return result;
+}
+static BOOL transcodeRaiseAllowed(BOOL sameStructuralPane,BOOL metadata,BOOL codec,BOOL desired,BOOL context,BOOL available,BOOL attempted){
+    return sameStructuralPane && metadata && codec && desired && context && available && !attempted;
+}
+static BOOL ensureTranscodeFocus(AXUIElementRef application,AXUIElementRef pane,pid_t pid,NSString *directory,NSString *desiredValue,NSString *transition,NSMutableDictionary *evidence,NSMutableDictionary *report){
+    if(transcodeFocused(application,pane,pid)){evidence[@"focusedForContinuation"]=@YES;return YES;}
+    evidence[@"focusFailureState"]=transcodeWindowDiagnostics(application,pid);
+    AXUIElementRef structural=masterPaneWithFocus(application,pid,NO,NO),codec=NULL,desired=NULL;
+    BOOL same=structural && CFEqual(structural,pane),metadata=same && transcodeMetadata(structural,pid);
+    if(metadata){codec=settingsPopup(structural,pid,@"H.264");desired=settingsPopup(structural,pid,desiredValue);}
+    evidence[@"sameStructuralPaneVerified"]=@(same);evidence[@"metadataVerified"]=@(metadata);
+    evidence[@"codecH264Observed"]=@(codec!=NULL);evidence[@"selectedValueObserved"]=@(desired!=NULL);
+    BOOL context=paneStillOwned(pane,pid,directory),available=NO;CFArrayRef actions=NULL;
+    if(same && metadata && codec && desired && context && AXUIElementCopyActionNames(pane,&actions)==kAXErrorSuccess && actions && CFArrayGetCount(actions)<=32)
+        available=CFArrayContainsValue(actions,CFRangeMake(0,CFArrayGetCount(actions)),kAXRaiseAction);
+    if(actions)CFRelease(actions);
+    evidence[@"raiseAvailable"]=@(available);
+    BOOL allowed=transcodeRaiseAllowed(same,metadata,codec!=NULL,desired!=NULL,context,available,[evidence[@"raiseAttempted"]boolValue]);
+    if(desired)CFRelease(desired);if(codec)CFRelease(codec);if(structural)CFRelease(structural);
+    if(!allowed){evidence[@"focusedForContinuation"]=@NO;return NO;}
+    // Recheck the entire structural domain and values immediately before one raise.
+    structural=masterPaneWithFocus(application,pid,NO,NO);codec=NULL;desired=NULL;
+    if(structural && CFEqual(structural,pane) && transcodeMetadata(structural,pid)){codec=settingsPopup(structural,pid,@"H.264");desired=settingsPopup(structural,pid,desiredValue);}
+    allowed=structural && CFEqual(structural,pane) && codec && desired && paneStillOwned(pane,pid,directory);
+    if(desired)CFRelease(desired);if(codec)CFRelease(codec);if(structural)CFRelease(structural);
+    if(!allowed){evidence[@"focusedForContinuation"]=@NO;return NO;}
+    if(transcodeFocused(application,pane,pid)){evidence[@"focusedForContinuation"]=@YES;return YES;}
+    actions=NULL;available=NO;
+    if(paneStillOwned(pane,pid,directory) && AXUIElementCopyActionNames(pane,&actions)==kAXErrorSuccess && actions && CFArrayGetCount(actions)<=32)
+        available=CFArrayContainsValue(actions,CFRangeMake(0,CFArrayGetCount(actions)),kAXRaiseAction);
+    if(actions)CFRelease(actions);
+    if(!available || !paneStillOwned(pane,pid,directory)){evidence[@"focusedForContinuation"]=@NO;return NO;}
+    evidence[@"raiseAttempted"]=@YES;
+    AXError error=AXUIElementPerformAction(pane,kAXRaiseAction);
+    actionResult(report[@"actionsPerformed"],@"AXRaise",[@"Master File after " stringByAppendingString:transition],error);evidence[@"raiseActionStatus"]=@(error);
+    BOOL ready=NO;double until=fmin(deadline,clockNow()+3);
+    do{
+        if(!paneStillOwned(pane,pid,directory))break;
+        AXUIElementRef focused=masterPane(application,pid,NO),readback=NULL,currentCodec=NULL;
+        if(focused && CFEqual(focused,pane) && transcodeMetadata(focused,pid)){readback=settingsPopup(focused,pid,desiredValue);currentCodec=settingsPopup(focused,pid,@"H.264");}
+        ready=readback && currentCodec;if(currentCodec)CFRelease(currentCodec);if(readback)CFRelease(readback);if(focused)CFRelease(focused);
+        if(ready || !room() || clockNow()>=until)break;usleep(200000);
+    }while(room());
+    evidence[@"focusAfterRaise"]=transcodeWindowDiagnostics(application,pid);evidence[@"focusedForContinuation"]=@(ready);
+    return ready;
+}
+
 static BOOL selectTranscodePopup(AXUIElementRef application,AXUIElementRef pane,pid_t pid,NSString *directory,NSString *oldValue,NSString *newValue,NSString *key,NSMutableDictionary *report){
     AXUIElementRef popup=NULL,fresh=NULL,menu=NULL,currentMenu=NULL,item=NULL,currentItem=NULL,focused=NULL;
     BOOL changed=NO;NSMutableDictionary *evidence=[NSMutableDictionary dictionary];report[key]=evidence;
@@ -699,19 +776,28 @@ static BOOL selectTranscodePopup(AXUIElementRef application,AXUIElementRef pane,
         if(!currentItem || !CFEqual(item,currentItem) || !enabled(currentItem,YES) || !pressAvailable(currentItem) || !equals(fresh,kAXValueAttribute,oldValue) || !paneStillOwned(pane,pid,directory))goto done;
         error=AXUIElementPerformAction(currentItem,kAXPressAction);
         actionResult(report[@"actionsPerformed"],@"AXPress",newValue,error);evidence[@"selectionActionStatus"]=@(error);
+        evidence[@"windowStateBeforeMenuRelease"]=transcodeWindowDiagnostics(application,pid);
+        // Consumed AX handles are no longer needed; snapshots own their values.
+        CFRelease(currentItem);currentItem=NULL;CFRelease(item);item=NULL;
+        CFRelease(currentMenu);currentMenu=NULL;CFRelease(menu);menu=NULL;
+        evidence[@"windowStateAfterMenuRelease"]=transcodeWindowDiagnostics(application,pid);
         // Acknowledgement may be uncertain; only fresh state permits continuing.
         until=fmin(deadline,clockNow()+3);
         do{
             if(!paneStillOwned(pane,pid,directory))break;
-            AXUIElementRef observed=masterPane(application,pid,NO),readback=NULL;
+            AXUIElementRef observed=masterPaneWithFocus(application,pid,NO,NO),readback=NULL;
             if(observed && CFEqual(observed,pane) && transcodeMetadata(observed,pid))readback=settingsPopup(observed,pid,newValue);
             changed=readback!=NULL;if(readback)CFRelease(readback);if(observed)CFRelease(observed);
             if(changed || !room() || clockNow()>=until)break;usleep(200000);
         }while(room());
         evidence[@"desiredValueObserved"]=@(changed);evidence[@"desiredValue"]=newValue;
-        if(!changed && paneStillOwned(pane,pid,directory) && room())evidence[@"paneAfterSelection"]=snapshot(pane,0);
+        if(!changed){
+            evidence[@"selectionReadbackFailureState"]=transcodeWindowDiagnostics(application,pid);
+            if(paneStillOwned(pane,pid,directory) && room())evidence[@"paneAfterSelection"]=snapshot(pane,0);
+        }else changed=ensureTranscodeFocus(application,pane,pid,directory,newValue,key,evidence,report);
     }
  done:
+    if(!changed)evidence[@"stoppedWindowState"]=transcodeWindowDiagnostics(application,pid);
     if(focused)CFRelease(focused);if(currentItem)CFRelease(currentItem);if(item)CFRelease(item);if(currentMenu)CFRelease(currentMenu);if(menu)CFRelease(menu);if(fresh)CFRelease(fresh);if(popup)CFRelease(popup);
     return changed;
 }
