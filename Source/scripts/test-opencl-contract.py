@@ -84,8 +84,9 @@ def main():
                             logs.append(dict(event='headerVerified',path='/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/31001/Libraries/lib/clang/31001.192/include/opencl-c.h',sha256='388facd88852bbca216b87023cca7d31064b0ef901f582d3baf4b5960abafc72',bytes=805181,uid=0,inode=123))
                         value['compute']['stderr']['text']='' if case=='missing-witness' else ''.join('LC_OPENCL_DIALECT '+json.dumps(x)+'\n' for x in logs)
                     return reply(value)
-                assert argv[:2] == ['-c', ns['EXPORT']] and 0 < timeout <= 20
+                assert argv[:2] == ['-c', ns['EXPORT']]
                 selector, operation = argv[2:4]
+                assert timeout==(120 if selector=='metal' and operation=='describe' else 20)
                 events.append((selector, operation))
                 if case == 'cancel': raise SystemExit('ambiguous host timeout')
                 data = payloads[selector]
@@ -116,6 +117,9 @@ def main():
                 assert (results / 'Metal.partial').exists()
             else:
                 assert all(x['result'] == 'EXPORTED' for x in report['exports'])
+                assert report['exports'][0]['first_describe_queued_allowance_seconds']==120
+                assert report['exports'][0]['guest_export_alarm_seconds']==15
+                assert all(x['first_describe_queued_allowance_seconds']==20 for x in report['exports'][1:])
                 assert (results / 'Metal').read_bytes() == payloads['metal']
                 header = report['exports'][0]['macho_header']
                 assert header['cpu_type'] == 0x1000007 and header['load_commands'] == 4
@@ -138,6 +142,22 @@ def main():
                     assert (results / 'opencl-response.oversize-prefix.txt').stat().st_size == 1048576
                     assert not (results / 'opencl-response.json').exists()
                 elif case == 'bad-stage': assert 'collector' not in events
+        # The first allowance is clipped by the unchanged overall export deadline; never retry it.
+        old_time=ns['time'];clock=iter((100.0,350.0));requests=[]
+        clipped=root/'clipped';clipped.mkdir()
+        def timeout_request(command,timeout):
+            requests.append((command,timeout))
+            raise SystemExit('one queued request timed out')
+        ns.update(time=SimpleNamespace(monotonic=lambda:next(clock)),request=timeout_request)
+        try:
+            try:ns['export_fixed'](clipped,'metal')
+            except SystemExit:pass
+            else:raise AssertionError('ambiguous request was swallowed')
+            assert len(requests)==1 and requests[0][1]==50
+            manifest=json.loads((clipped/'metal-export.json').read_text())
+            assert manifest['first_describe_queued_allowance_seconds']==120
+            assert manifest['first_describe_host_timeout_seconds']==50
+        finally:ns['time']=old_time
         # Exclusive final publication cannot replace existing output.
         results = root / 'exclusive'; results.mkdir(); (results / 'Metal').write_bytes(b'keep-existing')
         ns.update(request=request)

@@ -216,13 +216,21 @@ def macho_header(path):
 
 def export_fixed(results, selector):
     path, name, cap = FILES[selector]
-    manifest = {'selector': selector, 'path': path, 'result': 'INCONCLUSIVE', 'chunks': []}
+    manifest = {'selector': selector, 'path': path, 'result': 'INCONCLUSIVE', 'chunks': [],
+                'first_describe_queued_allowance_seconds':120 if selector=='metal' else 20,
+                'guest_export_alarm_seconds':15}
     deadline = time.monotonic() + 300
+    calls=0
     def call(operation, args):
+        nonlocal calls
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ValueError('fixed export deadline exhausted')
-        response = request({'Executable': '/usr/bin/python', 'Arguments': ['-c', EXPORT, selector, operation, *args]}, min(20, remaining))
+        first_metal_describe=calls==0 and selector=='metal' and operation=='describe'
+        calls+=1
+        timeout=min(120 if first_metal_describe else 20,remaining)
+        if calls==1:manifest['first_describe_host_timeout_seconds']=timeout
+        response = request({'Executable': '/usr/bin/python', 'Arguments': ['-c', EXPORT, selector, operation, *args]}, timeout)
         encoded = json.dumps(response).encode()
         manifest['last_response'] = response if len(encoded) <= RESPONSE_CAP else {
             'error': 'response outside 1MiB envelope', 'response_bytes': len(encoded),
