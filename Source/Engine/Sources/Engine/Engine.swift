@@ -157,6 +157,7 @@ public final class Engine {
         config.profile_shift_helpers = environment["LC_HVDBT_PROFILE_SHIFT_HELPERS"] == "1"
         config.inline_shr8 = environment["LC_HVDBT_INLINE_SHR8"] == "1"
         config.retain_shared_dead = environment["LC_HVDBT_RETAIN_SHARED_DEAD"] == "1"
+        config.profile_compile_inputs = environment["LC_HVDBT_PROFILE_COMPILE_INPUTS"] == "1"
         config.no_return_prediction = options.hybrid && environment["LC_HVDBT_NO_RETURN_PREDICTION"] == "1"
         config.all_flags_live = options.hybrid && environment["LC_HVDBT_ALL_FLAGS"] == "1"
         config.keep_kernel_tables = !options.hybrid || environment["LC_HVDBT_KEEP_KPTI"] == "1"
@@ -520,6 +521,9 @@ public final class Engine {
         }
         line += "\nshared dead hints (global translator; repeated, do not sum): enabled \(t.retain_shared_dead_enabled) "
             + "retained \(t.shared_dead_retained_hints) cleared \(t.shared_dead_cleared_hints)"
+        line += "\ncompile inputs (inert global census; repeated, do not sum): requested \(t.compile_inputs_enabled) "
+            + "available \(t.compile_inputs_available) bytes \(t.compile_inputs_bytes) attempts \(t.compile_inputs_attempts) "
+            + "admitted \(t.compile_inputs_admitted) exact \(t.compile_inputs_exact) evictions \(t.compile_inputs_evictions)"
         return line
     }
 

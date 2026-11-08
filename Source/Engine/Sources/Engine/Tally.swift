@@ -517,6 +517,37 @@ public final class Tally: @unchecked Sendable {
         o += "retain_shared_dead_retained_hints \(t.shared_dead_retained_hints)\n"
         o += "retain_shared_dead_cleared_hints \(t.shared_dead_cleared_hints)\n"
         o += "Enabled-only nonzero hint-slot actions since tr_init. The same hint can count at multiple flushes; not unique bodies, successful reuse, or saved time.\n\n"
+        o += "== analyzed input recurrence (inert global translator census; repeated, do not sum vCPU files) ==\n"
+        o += "compile_inputs_enabled \(t.compile_inputs_enabled)\n"
+        o += "compile_inputs_available \(t.compile_inputs_available)\n"
+        o += "compile_inputs_bytes \(t.compile_inputs_bytes)\n"
+        o += "compile_inputs_allocation_failures \(t.compile_inputs_allocation_failures)\n"
+        o += "compile_inputs_sampling_shift \(t.compile_inputs_sampling_shift)\n"
+        o += "compile_inputs_config_base \(t.compile_inputs_config_base)\n"
+        o += "compile_inputs_attempts \(t.compile_inputs_attempts)\n"
+        o += "compile_inputs_admitted \(t.compile_inputs_admitted)\n"
+        let compileRejected = withUnsafeBytes(of: t.compile_inputs_reject) { Array($0.bindMemory(to: UInt64.self)) }
+        for (index, name) in ["single", "unavailable", "cross_page", "partial", "inconsistent", "mixed_frame", "unprotected", "fetch_fault", "unsupported", "empty"].enumerated() {
+            o += "compile_inputs_reject_\(name) \(compileRejected[index])\n"
+        }
+        o += "compile_inputs_empty \(t.compile_inputs_empty)\n"
+        o += "compile_inputs_evictions \(t.compile_inputs_evictions)\n"
+        o += "compile_inputs_prior \(t.compile_inputs_prior)\n"
+        o += "compile_inputs_exact \(t.compile_inputs_exact)\n"
+        o += "compile_inputs_coverage_mismatch \(t.compile_inputs_coverage_mismatch)\n"
+        o += "compile_inputs_bytes_mismatch \(t.compile_inputs_bytes_mismatch)\n"
+        o += "compile_inputs_exact_same_key \(t.compile_inputs_exact_same_key)\n"
+        o += "compile_inputs_exact_different_key \(t.compile_inputs_exact_different_key)\n"
+        o += "compile_inputs_exact_same_pfn \(t.compile_inputs_exact_same_pfn)\n"
+        o += "compile_inputs_exact_different_pfn \(t.compile_inputs_exact_different_pfn)\n"
+        let compileJoint = withUnsafeBytes(of: t.compile_inputs_exact_joint) { Array($0.bindMemory(to: UInt64.self)) }
+        for (index, name) in ["same_key_same_pfn", "same_key_different_pfn", "different_key_same_pfn", "different_key_different_pfn"].enumerated() {
+            o += "compile_inputs_exact_\(name) \(compileJoint[index])\n"
+        }
+        o += "Full cold-attempt population after existing reuse miss; first encountered rejection only. Exact returned bytes and coverage, including same-page liveness; zero holes.\n"
+        o += "8192 direct-mapped entries, last observation only, reset at tr_init, survive executable-cache resets. Empty/eviction is missing retained history, not first-ever code.\n"
+        o += "Config schema 1 in high32; base low bits: precise/BMI/hybrid/KPTI/bulk/return/allflags/shift-profile/SHR8. Per-input bit16 is current SMP entry form.\n"
+        o += "Exact key/PFN splits compare preceding retained observation; no executable reuse, hit-rate projection, saved-time or CPU-fraction claim. Async snapshots may not conserve; qualify coherent endpoints only.\n\n"
         o +=
             "cold blocks a cache keyed by frame had: \(t.again_live) live in another view, \(t.again_dead) dead with the frame unchanged. Lower bounds\n\n"
         o +=

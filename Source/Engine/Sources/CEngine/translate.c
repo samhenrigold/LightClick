@@ -203,20 +203,192 @@ ok:
 
 static u64 fetch_lo, fetch_hi; // all a translation has read
 
+// ---- Inert analyzed-input recurrence census ----
+// One entry per direct-mapped identity, full population: this is not a sampled cache with an inflated retention budget.
+// Canonical zero holes plus an exact occupancy mask describe only bytes actually returned by tr_fetch, including liveness.
+// No executable pointers, cached instructions, extra guest reads, or changes to compilation decisions live here.
+#define COMPILE_INPUT_SLOTS 8192u
+#define COMPILE_INPUT_PAGE 4096u
+typedef struct {
+    u64 rip, config, frame;
+    u32 key;
+    u8 cpl;
+    bool compat, valid;
+    u64 mask[COMPILE_INPUT_PAGE / 64];
+    u8 bytes[COMPILE_INPUT_PAGE];
+} CompileInputEntry;
+typedef struct {
+    CompileInputEntry input;
+    u32 reject;
+    bool active;
+} CompileInputCapture;
+_Static_assert(sizeof(CompileInputEntry) * COMPILE_INPUT_SLOTS + sizeof(CompileInputCapture) <= 40u * 1024 * 1024,
+               "compile-input census must remain bounded by 40 MiB");
+static CompileInputEntry *compile_inputs_table;
+static CompileInputCapture *compile_inputs_capture;
+
+static void compile_inputs_init(void) {
+    free(compile_inputs_table);
+    free(compile_inputs_capture);
+    compile_inputs_table = NULL;
+    compile_inputs_capture = NULL;
+    stats.compile_inputs_enabled = cfg.profile_compile_inputs;
+    stats.compile_inputs_available = stats.compile_inputs_bytes = stats.compile_inputs_allocation_failures = 0;
+    stats.compile_inputs_sampling_shift = stats.compile_inputs_config_base = 0;
+    stats.compile_inputs_attempts = stats.compile_inputs_admitted = 0;
+    memset(stats.compile_inputs_reject, 0, sizeof stats.compile_inputs_reject);
+    stats.compile_inputs_empty = stats.compile_inputs_evictions = stats.compile_inputs_prior = stats.compile_inputs_exact = 0;
+    stats.compile_inputs_coverage_mismatch = stats.compile_inputs_bytes_mismatch = 0;
+    stats.compile_inputs_exact_same_key = stats.compile_inputs_exact_different_key = 0;
+    stats.compile_inputs_exact_same_pfn = stats.compile_inputs_exact_different_pfn = 0;
+    memset(stats.compile_inputs_exact_joint, 0, sizeof stats.compile_inputs_exact_joint);
+    if (!cfg.profile_compile_inputs)
+        return;
+    // Schema 1. The table is cleared only here, so this tr_init is its fixed configuration epoch.
+    stats.compile_inputs_config_base = 1ULL << 32 | (u64)cfg.precise_flags | (u64)cfg.has_tzcnt_lzcnt << 1 |
+        (u64)cfg.hybrid << 2 | (u64)cfg.keep_kernel_tables << 3 | (u64)cfg.no_bulk_rep << 4 |
+        (u64)cfg.no_return_prediction << 5 | (u64)cfg.all_flags_live << 6 |
+        (u64)cfg.profile_shift_helpers << 7 | (u64)cfg.inline_shr8 << 8;
+    compile_inputs_table = calloc(COMPILE_INPUT_SLOTS, sizeof *compile_inputs_table);
+    compile_inputs_capture = calloc(1, sizeof *compile_inputs_capture);
+    if (!compile_inputs_table || !compile_inputs_capture) {
+        free(compile_inputs_table);
+        free(compile_inputs_capture);
+        compile_inputs_table = NULL;
+        compile_inputs_capture = NULL;
+        stats.compile_inputs_allocation_failures = 1;
+        return;
+    }
+    stats.compile_inputs_available = 1;
+    stats.compile_inputs_bytes = sizeof(CompileInputEntry) * COMPILE_INPUT_SLOTS + sizeof(CompileInputCapture);
+}
+
+static void compile_inputs_begin(u64 rip, int cpl, bool compat, u32 key, u64 frame, bool single) {
+    if (!cfg.profile_compile_inputs)
+        return;
+    stats.compile_inputs_attempts++;
+    if (compile_inputs_capture)
+        compile_inputs_capture->active = false;
+    if (single || !compile_inputs_capture) {
+        stats.compile_inputs_reject[single ? TR_CI_SINGLE : TR_CI_UNAVAILABLE]++;
+        return;
+    }
+    memset(compile_inputs_capture, 0, sizeof *compile_inputs_capture);
+    CompileInputCapture *c = compile_inputs_capture;
+    c->active = true;
+    c->reject = TR_CI_REJECT_KINDS;
+    c->input.rip = rip;
+    // vcpu_count is installed after tr_init and can grow on SMP attachment: capture the emitter-relevant bit now.
+    c->input.config = stats.compile_inputs_config_base | (u64)(ctx_ptr->vcpu_count > 1) << 16;
+    c->input.frame = frame;
+    c->input.key = key;
+    c->input.cpl = (u8)cpl;
+    c->input.compat = compat;
+}
+
+static void compile_inputs_reject(u32 reason) {
+    CompileInputCapture *c = compile_inputs_capture;
+    if (cfg.profile_compile_inputs && c && c->active && c->reject == TR_CI_REJECT_KINDS)
+        c->reject = reason;
+}
+
+static void compile_inputs_request(u64 va, int n) {
+    CompileInputCapture *c = compile_inputs_capture;
+    if (!c || !c->active)
+        return;
+    u64 page = c->input.rip & ~0xfffULL;
+    if (n <= 0)
+        compile_inputs_reject(TR_CI_EMPTY);
+    else if (va < page || va - page >= COMPILE_INPUT_PAGE || (u64)n > COMPILE_INPUT_PAGE - (va - page))
+        compile_inputs_reject(TR_CI_CROSS_PAGE);
+}
+
+static void compile_inputs_read(u64 va, const u8 *bytes, int n, u64 gpa) {
+    CompileInputCapture *c = compile_inputs_capture;
+    if (!c || !c->active || c->reject != TR_CI_REJECT_KINDS)
+        return;
+    compile_inputs_request(va, n);
+    if (c->reject != TR_CI_REJECT_KINDS)
+        return;
+    if ((gpa & ~0xfffULL) != c->input.frame) {
+        compile_inputs_reject(TR_CI_MIXED_FRAME);
+        return;
+    }
+    u32 off = (u32)(va & 0xfff);
+    for (int i = 0; i < n; i++) {
+        u32 at = off + (u32)i;
+        u64 bit = 1ULL << (at & 63);
+        if ((c->input.mask[at >> 6] & bit) && c->input.bytes[at] != bytes[i]) {
+            compile_inputs_reject(TR_CI_INCONSISTENT);
+            return;
+        }
+        c->input.mask[at >> 6] |= bit;
+        c->input.bytes[at] = bytes[i];
+    }
+}
+
+static void compile_inputs_finish(void) {
+    CompileInputCapture *c = compile_inputs_capture;
+    if (!cfg.profile_compile_inputs || !c || !c->active)
+        return;
+    c->active = false;
+    bool any = false;
+    for (u32 i = 0; i < COMPILE_INPUT_PAGE / 64; i++)
+        any |= c->input.mask[i] != 0;
+    if (!any && c->reject == TR_CI_REJECT_KINDS)
+        c->reject = TR_CI_EMPTY;
+    if (c->reject != TR_CI_REJECT_KINDS) {
+        stats.compile_inputs_reject[c->reject]++;
+        return;
+    }
+    stats.compile_inputs_admitted++;
+    CompileInputEntry *in = &c->input;
+    u64 hash = (in->rip ^ in->config ^ (u64)in->cpl << 61 ^ (u64)in->compat << 60) * 0x9E3779B97F4A7C15ULL;
+    CompileInputEntry *old = &compile_inputs_table[hash >> (64 - 13)];
+    if (!old->valid) {
+        stats.compile_inputs_empty++;
+    } else if (old->rip != in->rip || old->config != in->config || old->cpl != in->cpl || old->compat != in->compat) {
+        stats.compile_inputs_evictions++;
+    } else {
+        stats.compile_inputs_prior++;
+        if (memcmp(old->mask, in->mask, sizeof in->mask)) {
+            stats.compile_inputs_coverage_mismatch++;
+        } else if (memcmp(old->bytes, in->bytes, sizeof in->bytes)) {
+            stats.compile_inputs_bytes_mismatch++;
+        } else {
+            stats.compile_inputs_exact++;
+            bool dk = old->key != in->key, df = old->frame != in->frame;
+            if (dk) stats.compile_inputs_exact_different_key++; else stats.compile_inputs_exact_same_key++;
+            if (df) stats.compile_inputs_exact_different_pfn++; else stats.compile_inputs_exact_same_pfn++;
+            stats.compile_inputs_exact_joint[dk * 2 + df]++;
+        }
+    }
+    // Keep only the most recent observation of this identity, including mismatches; no multi-version history.
+    *old = *in;
+    old->valid = true;
+}
+// ---- End inert analyzed-input recurrence census ----
+
 int tr_fetch(u64 va, u8 *out, int n) {
     int got = 0;
+    if (cfg.profile_compile_inputs)
+        compile_inputs_request(va, n);
     if (va < fetch_lo)
         fetch_lo = va;
     if (va + (u64)n > fetch_hi)
         fetch_hi = va + (u64)n;
     while (got < n) {
         u64 gpa;
-        if (!fetch_walk(va + got, &gpa))
+        if (!fetch_walk(va + got, &gpa)) {
+            compile_inputs_reject(TR_CI_PARTIAL);
             return got;
+        }
         int chunk = 4096 - (int)((va + got) & 0xfff);
         if (chunk > n - got)
             chunk = n - got;
         memcpy(out + got, ram_at(gpa), chunk);
+        if (cfg.profile_compile_inputs)
+            compile_inputs_read(va + got, out + got, chunk, gpa);
         got += chunk;
     }
     return got;
@@ -280,6 +452,7 @@ static Pending pend[MAX_PENDING];
 static int pend_count;
 
 void emit_stop(u64 rip, const char *why) {
+    compile_inputs_reject(TR_CI_UNSUPPORTED);
     (void)rip;
     u32 idx = stop_reason_count;
     for (u32 i = 0; i < stop_reason_count; i++)
@@ -656,11 +829,14 @@ static TrResult do_translate(int key, int view, u64 cr3, int cpl, u64 rip, bool 
     u64 gpa0 = 0, gpa1 = ~0ULL;
     fetch_walk(rip, &gpa0);
     res.frames[0] = gpa0 & ~0xfffULL;
+    compile_inputs_begin(rip, cpl, tr_compat, (u32)key, res.frames[0], single);
     do {
         if ((pc & 0xfff) > 4096 - 15) {
             if (!fetch_walk((pc | 0xfff) + 1, &gpa1))
                 gpa1 = ~0ULL;
             if (!single && frame_unprotected((pc | 0xfff) + 1, &frame)) {
+                compile_inputs_reject(TR_CI_UNPROTECTED);
+                compile_inputs_finish();
                 res.unprotected = frame + 1;
                 return res;
             }
@@ -669,11 +845,15 @@ static TrResult do_translate(int key, int view, u64 cr3, int cpl, u64 rip, bool 
         Insn *in = &list[count];
         if (in->op == OP_BAD && in->why && !strcmp(in->why, "FETCH_FAULT")) {
             if (count == 0) {
+                compile_inputs_reject(TR_CI_FETCH_FAULT);
+                compile_inputs_finish();
                 res.fetch_fault_va = in->target ? in->target : pc;
                 return res;
             }
             break; // cut the block before it, the fault belongs to the instruction when it runs
         }
+        if (in->op == OP_BAD || in->op == OP_UD)
+            compile_inputs_reject(TR_CI_UNSUPPORTED);
         pc = in->next;
         count++;
         if (in->next > page + 4096 && count > 0) {
@@ -822,6 +1002,7 @@ static TrResult do_translate(int key, int view, u64 cr3, int cpl, u64 rip, bool 
             E((u32)(stub - pend[i].site));
         fix(pend[i].site, pend[i].form, stub);
     }
+    compile_inputs_finish();
     (void)tail;
 
     // How many blocks a cache keyed by frame would have saved, and of those, 32-bit user code's: i386 libraries aren't in SHARED_USER_BASE.
@@ -1208,6 +1389,7 @@ void tr_init(const TrConfig *config) {
     block_table = (BlockEntry *)(cfg.priv + OFF_BLOCKS);
     pc_map = (PcMap *)(cfg.priv + OFF_PCMAP);
     ctx_ptr = (EngineCtx *)(cfg.priv + OFF_CTX);
+    compile_inputs_init();
     tr_precise_flags = cfg.precise_flags;
     tr_has_tzcnt = cfg.has_tzcnt_lzcnt;
     tr_hybrid = cfg.hybrid;

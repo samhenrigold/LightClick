@@ -9,6 +9,11 @@ enum {
     TR_REUSE_NO_READ_COPY, TR_REUSE_CPL, TR_REUSE_COMPAT, TR_REUSE_FETCH, TR_REUSE_FRAME,
     TR_REUSE_SMP_ENTRY, TR_REUSE_BYTES, TR_REUSE_ENTRY_CAS, TR_REUSE_REJECT_KINDS
 };
+enum {
+    TR_CI_SINGLE, TR_CI_UNAVAILABLE, TR_CI_CROSS_PAGE, TR_CI_PARTIAL, TR_CI_INCONSISTENT,
+    TR_CI_MIXED_FRAME, TR_CI_UNPROTECTED, TR_CI_FETCH_FAULT, TR_CI_UNSUPPORTED, TR_CI_EMPTY,
+    TR_CI_REJECT_KINDS
+};
 
 typedef struct {
     uint8_t *priv; // host mapping of private memory
@@ -27,6 +32,7 @@ typedef struct {
     bool profile_shift_helpers; // opt-in: descriptor metadata for the per-vCPU monitor helper census
     bool inline_shr8; // experimental/default off: register-immediate byte SHR without the helper
     bool retain_shared_dead; // experimental/default off: preserve existing shared candidate hints across private-only resets
+    bool profile_compile_inputs; // opt-in inert full-population analyzed-input recurrence census
 } TrConfig;
 
 typedef struct {
@@ -95,6 +101,17 @@ typedef struct {
     // Global, repeated in each vCPU tally. Enabled state is not a delta. Counts are populated only when enabled,
     // since tr_init: nonzero hint-slot actions per flush, not unique bodies, successful reuse, or saved time.
     uint64_t retain_shared_dead_enabled, shared_dead_retained_hints, shared_dead_cleared_hints;
+    // Global translator census, repeated per vCPU: never sum. Full population (sampling_shift=0), no cached execution.
+    // Empty/evicted means missing bounded history, not first-ever code. Reject is the first encountered reason.
+    uint64_t compile_inputs_enabled, compile_inputs_available, compile_inputs_bytes, compile_inputs_allocation_failures;
+    uint64_t compile_inputs_sampling_shift, compile_inputs_config_base;
+    uint64_t compile_inputs_attempts, compile_inputs_admitted, compile_inputs_reject[TR_CI_REJECT_KINDS];
+    uint64_t compile_inputs_empty, compile_inputs_evictions, compile_inputs_prior, compile_inputs_exact;
+    uint64_t compile_inputs_coverage_mismatch, compile_inputs_bytes_mismatch;
+    uint64_t compile_inputs_exact_same_key, compile_inputs_exact_different_key;
+    uint64_t compile_inputs_exact_same_pfn, compile_inputs_exact_different_pfn;
+    // Exact matches versus the preceding retained observation: index (different_key * 2 + different_pfn).
+    uint64_t compile_inputs_exact_joint[4];
 } TrStats;
 TrStats tr_stats(void);
 
