@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Focused provenance checks; fixtures only, no app launch or guest access."""
+import ast
+import hashlib
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import bench_launch_receipt as receipt
+
+
+class LaunchReceiptTests(unittest.TestCase):
+    def test_records_prepared_clone_and_driver_not_source_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, machine, clone, guest = [root/name for name in ('source', 'machine', 'clone', 'guest')]
+            for path in (source, machine, clone, guest):
+                path.mkdir()
+            files = {
+                clone/'Contents/MacOS/Light Click': b'app',
+                clone/'Contents/Resources/Runtime/bin/qemu-system-x86_64.real': b'signed prepared qemu',
+                clone/'Contents/Resources/Runtime/bin/qemu-system-x86_64': b'wrapper',
+                guest/'Machine.plist': b'fresh clone identifier',
+                root/'driver.py': b'driver',
+            }
+            for path, data in files.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            output = root/'receipt.json'
+            result = receipt.write_launch_receipt(output, source, machine, clone, guest, root/'driver.py')
+            self.assertEqual(result, json.loads(output.read_text()))
+            self.assertEqual(result['cloned_qemu_real']['sha256'], hashlib.sha256(b'signed prepared qemu').hexdigest())
+            self.assertEqual(result['driver']['sha256'], hashlib.sha256(b'driver').hexdigest())
+            self.assertIn('not runtime image', result['scope'])
+            # Tags may be reused just as their other benchmark reports are reused.
+            (root/'driver.py').write_bytes(b'next driver')
+            second = receipt.write_launch_receipt(output, source, machine, clone, guest)
+            self.assertIsNone(second['driver'])
+
+    def test_changed_input_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'qemu'
+            path.write_bytes(b'original')
+            original = receipt.hashlib.sha256
+            digest = original()
+            class ChangingDigest:
+                def update(self, data):
+                    digest.update(data)
+                    path.write_bytes(b'changed input size')
+                def hexdigest(self):
+                    return digest.hexdigest()
+            with patch.object(receipt.hashlib, 'sha256', return_value=ChangingDigest()):
+                with self.assertRaisesRegex(ValueError, 'changed during hashing'):
+                    receipt.fingerprint(path)
+
+    def test_fifo_is_rejected_without_waiting_for_writer(self):
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'fifo'
+            os.mkfifo(path)
+            with self.assertRaisesRegex(ValueError, 'not a regular file'):
+                receipt.fingerprint(path)
+
+    def test_changed_driver_cannot_replace_recorded_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'driver.py'
+            path.write_bytes(b'original code')
+            recorded = receipt.fingerprint(path)
+            self.assertEqual(receipt.read_recorded_driver(path, recorded), b'original code')
+            path.write_bytes(b'changed code!')
+            with self.assertRaisesRegex(ValueError, 'driver changed'):
+                receipt.read_recorded_driver(path, recorded)
+
+    def test_receipt_precedes_app_launch(self):
+        tree = ast.parse(Path(__file__).with_name('guest-bench').read_text())
+        calls = []
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == 'write_launch_receipt':
+                calls.append(('receipt', node.lineno))
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == 'Popen':
+                calls.append(('launch', node.lineno))
+        self.assertEqual([name for name, _ in calls], ['receipt', 'launch'])
+
+
+if __name__ == '__main__':
+    unittest.main()

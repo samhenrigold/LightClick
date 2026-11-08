@@ -34,6 +34,7 @@ from xml.parsers.expat import ExpatError
 from startup_timeline import StartupTimeline, preserve_startup_logs
 from diagnostics_evidence import retain_timeout
 from sampling_entitlements import prepare_sampling_entitlements
+from bench_launch_receipt import read_recorded_driver, write_launch_receipt
 
 from clone_lease import CloneLease, LeaseRefused, process_identity
 
@@ -227,6 +228,8 @@ if args.startup_timeline:
                     preparation_delay_policy_seconds=90 if 'LC_SEAMLESS_CLICK_LOG' in env else 20,
                     preparation_enabled='LC_SEAMLESS_CLICK_LOG' in env,
                     preparation_policy='test' if 'LC_SEAMLESS_CLICK_LOG' in env else 'product; diagnostics suppresses prearm')
+launch_inputs = write_launch_receipt(source/'Build/bench'/f'{args.tag}.launch-inputs.json',
+                                    args.app, args.machine, app, machine, args.driver)
 process = subprocess.Popen([str(app/'Contents/MacOS/Light Click'), '--open-vm', str(machine), '--guest-diagnostics-root',
                             str(diagnostics)], env=env, stdout=(work/'app.log').open('w'), stderr=subprocess.STDOUT,
                            stdin=subprocess.DEVNULL)
@@ -244,7 +247,8 @@ try:
             raise SystemExit('The diagnostics channel never appeared')
         time.sleep(1)
     if args.driver:
-        exec(compile(args.driver.read_text(), str(args.driver), 'exec'),
+        driver_source = read_recorded_driver(args.driver, launch_inputs['driver'])
+        exec(compile(driver_source, str(args.driver), 'exec'),
              {'arguments': args.driver_arg, 'channel': channel, 'request': request, 'source': source, 'stage': stage,
               'tag': args.tag, **({'record_phase': timeline.record} if timeline else {})})
     elif args.workload:
