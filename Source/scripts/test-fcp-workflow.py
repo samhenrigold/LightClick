@@ -112,6 +112,34 @@ class Checks(unittest.TestCase):
         self.assertFalse(report['workflow']['library_artifact']['exists'])
         self.assertNotIn('PASS',json.dumps(report))
 
+    def test_creation_waits_for_read_only_editor_readiness(self):
+        calls=[];reads=[0]
+        inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
+        def command(argv,seconds):
+            calls.append((argv,seconds))
+            if argv[0]=='/own/ax-workload':
+                reads[0]+=1
+                value=dict(inventory)
+                if reads[0]==3:value['result']='INCONCLUSIVE'
+                if reads[0]>=4:
+                    value['windows']=[dict(AXRole='AXWindow',AXSubrole='AXStandardWindow')]
+                    value['fileMenu']=dict(AXRole='AXMenuItem',AXTitle='Export XML\u2026',AXEnabled=True)
+                return json.dumps(value).encode()
+            return b'{}'
+        directory='/private/var/tmp/LightClickFCPFixture.Abc123'
+        report=dict(workflow=dict(import_attempted=False))
+        ns=dict(app=types.SimpleNamespace(pid=321,poll=lambda:None),report=report,command=command,json=json,
+                os=types.SimpleNamespace(path=types.SimpleNamespace(lexists=lambda p:True,isdir=lambda p:True,islink=lambda p:False)),
+                time=types.SimpleNamespace(time=lambda:0,sleep=lambda sec:None),launched_at=0,workflow_directory=directory,
+                spec=dict(workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
+        exec(compile('if True:\n'+OBSERVE,'<production asynchronous import wait>','exec'),ns)
+        self.assertEqual(reads[0],4)
+        self.assertEqual(len([c for c in calls if c[0][0]=='/usr/bin/open']),1)
+        self.assertEqual(len([c for c in calls if c[0][0]=='/own/ax-actions']),1)
+        self.assertEqual([x['export_menu_available'] for x in report['workflow']['post_library_observations']],[False,True])
+        self.assertTrue(report['workflow']['owned_app_alive_after_library'])
+        compose_guest(GUEST).encode('ascii')
+
     def test_invalid_creation_modes_fail_before_staging(self):
         source=Path(__file__).resolve().parents[1]
         path=source/'probes/fcp-workflow-driver.py'

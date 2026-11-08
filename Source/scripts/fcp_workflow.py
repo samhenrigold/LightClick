@@ -92,9 +92,31 @@ OBSERVE=r'''
                     report['workflow']['library_action_mode']=action_mode
                     raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),action_mode,workflow_directory],60 if action_mode=='create-private-library' else 20)
                     report['workflow']['library_action']=json.loads(raw)
-                    if app.poll() is None:
+                    report['workflow']['post_library_observations']=[]
+                    def export_menu_available(node):
+                        if isinstance(node,dict):
+                            if node.get('AXRole')=='AXMenuItem' and node.get('AXTitle') in (u'Export XML\u2026',u'Master File (default)\u2026',u'Apple Devices 1080p\u2026') and native_true(node.get('AXEnabled')):return True
+                            return any(export_menu_available(value) for value in node.values())
+                        if isinstance(node,list):return any(export_menu_available(value) for value in node)
+                        return False
+                    def modal_present(node):
+                        if isinstance(node,dict):
+                            if node.get('AXRole') in ('AXSheet','AXAlert') or node.get('AXSubrole') in ('AXDialog','AXSystemDialog'):return True
+                            return any(modal_present(value) for value in node.values())
+                        if isinstance(node,list):return any(modal_present(value) for value in node)
+                        return False
+                    # Library creation starts asynchronous import. Poll only read-only inventories;
+                    # never resend New, Save, or the XML-open command while waiting for the editor.
+                    for attempt in range(8 if action_mode=='create-private-library' else 1):
+                        if app.poll() is not None:break
+                        if action_mode=='create-private-library':time.sleep(2)
                         raw=command([spec['workflow_helper'],spec['variant'],str(app.pid),'inventory'],14)
-                        report['workflow']['inventory_after_library_action']=json.loads(raw)
+                        current=json.loads(raw)
+                        report['workflow']['inventory_after_library_action']=current
+                        ready=current.get('result')=='MENU_INVENTORY' and not modal_present(current.get('windows',[])) and export_menu_available(current.get('fileMenu',{}))
+                        report['workflow']['post_library_observations'].append({'elapsed_seconds':time.time()-launched_at,'result':current.get('result'),'export_menu_available':ready,'alive':app.poll() is None})
+                        if ready:break
+                    report['workflow']['owned_app_alive_after_library']=app.poll() is None
                     library=workflow_directory+'/private.fcpbundle'
                     report['workflow']['library_artifact']={'path':library,'exists':os.path.lexists(library),'is_directory':os.path.isdir(library),'is_symlink':os.path.islink(library)}
 
