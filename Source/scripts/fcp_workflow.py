@@ -117,6 +117,18 @@ OBSERVE=r'''
                         report['workflow']['post_library_observations'].append({'elapsed_seconds':time.time()-launched_at,'result':current.get('result'),'export_menu_available':ready,'alive':app.poll() is None})
                         if ready:break
                     report['workflow']['owned_app_alive_after_library']=app.poll() is None
+                    # One read-only full-window capture using the already verified/staged observer.
+                    # This reveals browser/timeline names after the surgical menu readiness polls;
+                    # it does not select a project or establish import/render/timing correctness.
+                    if app.poll() is None:
+                        report['workflow']['post_library_full_observer_started_seconds']=time.time()-launched_at
+                        try:
+                            raw=command([spec['ax_helper'],spec['variant'],str(app.pid)],14)
+                            report['workflow']['post_library_full_observer']=json.loads(raw)
+                        except Exception as error:
+                            report['workflow']['post_library_full_observer']={'available':False,'reason':repr(error)}
+                        report['workflow']['post_library_full_observer_finished_seconds']=time.time()-launched_at
+                    else:report['workflow']['post_library_full_observer']={'available':False,'reason':'owned app exited before read-only capture'}
                     library=workflow_directory+'/private.fcpbundle'
                     report['workflow']['library_artifact']={'path':library,'exists':os.path.lexists(library),'is_directory':os.path.isdir(library),'is_symlink':os.path.islink(library)}
 

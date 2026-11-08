@@ -85,7 +85,7 @@ class Checks(unittest.TestCase):
             ns=dict(app=types.SimpleNamespace(pid=321,poll=lambda:None),report=report,command=command,json=json,
                     os=types.SimpleNamespace(path=types.SimpleNamespace(lexists=lambda p:False,isdir=lambda p:False,islink=lambda p:False)),
                     time=types.SimpleNamespace(time=lambda:0,sleep=lambda sec:None),launched_at=0,workflow_directory=directory,
-                    spec=dict(workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
+                    spec=dict(ax_helper='/own/ax-observe',workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
             exec(compile('if True:\n'+OBSERVE,'<production optional library action>','exec'),ns)
             actions=[call for call in calls if call[0][0]=='/own/ax-actions']
             if wrong_after_pid:self.assertEqual(actions,[])
@@ -106,7 +106,7 @@ class Checks(unittest.TestCase):
         ns=dict(app=types.SimpleNamespace(pid=321,poll=lambda:None),report=report,command=command,json=json,
                 os=types.SimpleNamespace(path=types.SimpleNamespace(lexists=lambda p:False,isdir=lambda p:False,islink=lambda p:False)),
                 time=types.SimpleNamespace(time=lambda:0,sleep=lambda sec:None),launched_at=0,workflow_directory=directory,
-                spec=dict(workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
+                spec=dict(ax_helper='/own/ax-observe',workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
         exec(compile('if True:\n'+OBSERVE,'<production explicit creation route>','exec'),ns)
         self.assertEqual([c for c in calls if c[0][0]=='/own/ax-actions'],[(['/own/ax-actions','10.1','321','create-private-library',directory],60)])
         self.assertFalse(report['workflow']['library_artifact']['exists'])
@@ -131,7 +131,7 @@ class Checks(unittest.TestCase):
         ns=dict(app=types.SimpleNamespace(pid=321,poll=lambda:None),report=report,command=command,json=json,
                 os=types.SimpleNamespace(path=types.SimpleNamespace(lexists=lambda p:True,isdir=lambda p:True,islink=lambda p:False)),
                 time=types.SimpleNamespace(time=lambda:0,sleep=lambda sec:None),launched_at=0,workflow_directory=directory,
-                spec=dict(workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
+                spec=dict(ax_helper='/own/ax-observe',workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
         exec(compile('if True:\n'+OBSERVE,'<production asynchronous import wait>','exec'),ns)
         self.assertEqual(reads[0],4)
         self.assertEqual(len([c for c in calls if c[0][0]=='/usr/bin/open']),1)
@@ -139,6 +139,42 @@ class Checks(unittest.TestCase):
         self.assertEqual([x['export_menu_available'] for x in report['workflow']['post_library_observations']],[False,True])
         self.assertTrue(report['workflow']['owned_app_alive_after_library'])
         compose_guest(GUEST).encode('ascii')
+
+    def test_post_library_full_observation_is_once_read_only_and_owned(self):
+        for outcome in ('available','observer-error','app-exited'):
+            calls=[];reads=[0];alive=[True]
+            inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
+            view=dict(result='OBSERVED_WINDOWS',pid=321,windows=[dict(AXRole='AXWindow',children=[dict(AXRole='AXStaticText',AXValue='LC-generated-8s')])],truncated=True)
+            def command(argv,seconds):
+                calls.append((argv,seconds))
+                if argv[0]=='/own/ax-workload':
+                    reads[0]+=1
+                    if reads[0]==10 and outcome=='app-exited':alive[0]=False
+                    return json.dumps(inventory).encode()
+                if argv[0]=='/own/ax-observe':
+                    if outcome=='observer-error':raise ValueError('bounded observer failed')
+                    return json.dumps(view).encode()
+                return b'{}'
+            directory='/private/var/tmp/LightClickFCPFixture.Abc123'
+            report=dict(workflow=dict(import_attempted=False))
+            ns=dict(app=types.SimpleNamespace(pid=321,poll=lambda:None if alive[0]else 1),report=report,command=command,json=json,
+                    os=types.SimpleNamespace(path=types.SimpleNamespace(lexists=lambda p:True,isdir=lambda p:True,islink=lambda p:False)),
+                    time=types.SimpleNamespace(time=lambda:0,sleep=lambda sec:None),launched_at=0,workflow_directory=directory,
+                    spec=dict(ax_helper='/own/ax-observe',workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
+            exec(compile('if True:\n'+OBSERVE,'<production post-library full observation>','exec'),ns)
+            full=[c for c in calls if c[0][0]=='/own/ax-observe']
+            observed=report['workflow']['post_library_full_observer']
+            self.assertEqual(reads[0],10) # Two initial reads plus all8 bounded readiness inventories.
+            self.assertEqual(len([c for c in calls if c[0][0]=='/own/ax-actions']),1)
+            self.assertEqual(len([c for c in calls if c[0][0]=='/usr/bin/open']),1)
+            if outcome=='app-exited':
+                self.assertEqual(full,[]);self.assertIn('exited',observed['reason'])
+            else:
+                self.assertEqual(full,[(['/own/ax-observe','10.1','321'],14)])
+                self.assertEqual(calls[-1],full[0])
+                if outcome=='available':self.assertEqual(observed,view) # Retain actual tree and its incomplete flag.
+                else:self.assertFalse(observed['available']);self.assertIn('bounded observer failed',observed['reason'])
+            self.assertNotIn('PASS',json.dumps(report))
 
     def test_invalid_creation_modes_fail_before_staging(self):
         source=Path(__file__).resolve().parents[1]
