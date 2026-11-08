@@ -1,6 +1,6 @@
 """guest-bench: fixed native Metal export, then diagnostic guest OpenCL query/compute helpers.
 
-Arguments: NEWRESULTS QUERYHELPER COMPUTEHELPER [SOURCE_LANGUAGE_DIAGNOSTIC_DYLIB [dialect-only|standard-kernel]]. No host Apple binary execution or performance qualification.
+Arguments: NEWRESULTS QUERYHELPER COMPUTEHELPER [SOURCE_LANGUAGE_DIAGNOSTIC_DYLIB [dialect-only|standard-kernel|standard-header]]. No host Apple binary execution or performance qualification.
 """
 import base64
 import hashlib
@@ -153,7 +153,7 @@ try:
     query=staged(sys.argv[1],sys.argv[2]);compute=staged(sys.argv[3],sys.argv[4])
     diagnostic=staged(sys.argv[5],sys.argv[6]) if len(sys.argv)>=7 else None
     diagnostic_mode=sys.argv[7] if len(sys.argv)==8 else 'dialect-only'
-    if diagnostic_mode not in ('dialect-only','standard-kernel'):raise ValueError('unknown source diagnostic mode')
+    if diagnostic_mode not in ('dialect-only','standard-kernel','standard-header'):raise ValueError('unknown source diagnostic mode')
     if diagnostic is not None and (len(diagnostic)<32 or struct.unpack('<4I',diagnostic[:16])[:2]!=(0xfeedfacf,0x1000007) or struct.unpack('<4I',diagnostic[:16])[3]!=6):raise ValueError('diagnostic must be x86_64 MH_DYLIB')
     report['console_uid']=join_console()
     directory=tempfile.mkdtemp(prefix='LightClickOpenCLContract.',dir='/private/var/tmp');os.chmod(directory,0o700)
@@ -289,18 +289,21 @@ def dialect_witness(compute,mode='dialect-only'):
         if row.get('sourceSHA256')!='f110a56696746ed66d54450f587bf4c063386815a5e79f5e7b13d83fef730d22':return False
         try:
             removed={'-fapplecl-lax-vector-conversions','-fapplecl-functional-casts','-fapplecl-inline-definitions'}
-            return shlex.split(actual)==[x for x in shlex.split(caller) if x not in removed]+['-std=cl1.2','-x','cl']
+            suffix=['-std=cl1.2','-x','cl']
+            if mode=='standard-header':suffix+=['-include','/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/31001/Libraries/lib/clang/31001.192/include/opencl-c.h']
+            return shlex.split(actual)==[x for x in shlex.split(caller) if x not in removed]+suffix
         except ValueError:return False
     transformed=any(transformed_arguments(row) for row in rows)
-    return dict(witnessed=installed and transformed,constructor_witness=installed,transformed_arguments_witness=transformed,events=rows,
+    header_verified=any(row.get('event')=='headerVerified' and row.get('path')=='/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/31001/Libraries/lib/clang/31001.192/include/opencl-c.h' and row.get('sha256')=='388facd88852bbca216b87023cca7d31064b0ef901f582d3baf4b5960abafc72' and row.get('bytes')==805181 and row.get('uid')==0 and type(row.get('inode')) is int and row['inode']>0 for row in rows)
+    return dict(witnessed=installed and transformed and (mode!='standard-header' or header_verified),header_verified=header_verified,constructor_witness=installed,transformed_arguments_witness=transformed,events=rows,
                 qualification='Dialect diagnostic only. Compilation progress, pipeline creation and integer readback do not qualify OpenCL semantics or FCP.')
 
 
 def run():
     if len(arguments) not in (3,4,5):
-        raise ValueError('expected NEWRESULTS QUERYHELPER COMPUTEHELPER [DIAGNOSTIC_DYLIB [dialect-only|standard-kernel]]')
+        raise ValueError('expected NEWRESULTS QUERYHELPER COMPUTEHELPER [DIAGNOSTIC_DYLIB [dialect-only|standard-kernel|standard-header]]')
     mode=arguments[4] if len(arguments)==5 else 'dialect-only'
-    if mode not in ('dialect-only','standard-kernel'):raise ValueError('unknown source diagnostic mode')
+    if mode not in ('dialect-only','standard-kernel','standard-header'):raise ValueError('unknown source diagnostic mode')
     results = Path(arguments[0])
     if not results.is_dir() or any(results.iterdir()):
         raise ValueError('results must be a fresh existing empty directory')

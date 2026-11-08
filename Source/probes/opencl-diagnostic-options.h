@@ -9,7 +9,9 @@ static inline bool lc_opencl_diagnostic_source_allowed(const char *sha, size_t b
     return sha && bytes == 154 && !strcmp(sha, LC_OPENCL_DIAGNOSTIC_SOURCE_SHA);
 }
 // Remove only exact, unquoted unsupported tokens. Every other byte is preserved.
-static inline bool lc_opencl_diagnostic_options(const char *input, bool standard, char *output, size_t capacity) {
+#define LC_OPENCL_DIAGNOSTIC_HEADER_PATH "/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/31001/Libraries/lib/clang/31001.192/include/opencl-c.h"
+#define LC_OPENCL_DIAGNOSTIC_HEADER_SHA "388facd88852bbca216b87023cca7d31064b0ef901f582d3baf4b5960abafc72"
+static inline bool lc_opencl_diagnostic_options_with_header(const char *input, bool standard, bool header, char *output, size_t capacity) {
     const char *removed[] = {"-fapplecl-lax-vector-conversions", "-fapplecl-functional-casts", "-fapplecl-inline-definitions"};
     size_t written = 0, i = 0;
     while (input[i]) {
@@ -32,11 +34,14 @@ static inline bool lc_opencl_diagnostic_options(const char *input, bool standard
             memcpy(output+written,input+start,i-start); written += i-start;
         }
     }
-    const char *suffix = standard ? "-std=cl1.2 -x cl" : "-x cl";
+    const char *suffix = header ? "-std=cl1.2 -x cl -include " LC_OPENCL_DIAGNOSTIC_HEADER_PATH : (standard ? "-std=cl1.2 -x cl" : "-x cl");
     size_t extra = strlen(suffix) + (written ? 1 : 0);
     if (extra >= capacity-written) return false;
     if (written) output[written++] = ' ';
     memcpy(output+written,suffix,strlen(suffix)+1);
     return true;
+}
+static inline bool lc_opencl_diagnostic_options(const char *input, bool standard, char *output, size_t capacity) {
+    return lc_opencl_diagnostic_options_with_header(input,standard,false,output,capacity);
 }
 #endif

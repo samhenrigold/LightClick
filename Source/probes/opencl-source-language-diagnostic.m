@@ -10,10 +10,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 static Class optionsClass;
 static char languageKey, sourceKey;
-static BOOL standardKernel;
+static BOOL standardKernel, standardHeader;
+static NSString *diagnosticMode;
 static __thread unsigned nativeLibraryDepth;
 static NSString *const requiredSourceSHA = @LC_OPENCL_DIAGNOSTIC_SOURCE_SHA;
 static id (*nativeArguments)(id, SEL);
@@ -42,6 +45,9 @@ static NSString *bounded(id value) {
     if (![value isKindOfClass:[NSString class]] || [value length] > 8192) refuse(@"native arguments are not a bounded NSString");
     return value;
 }
+static NSString *diagnosticText(NSString *text) {
+    return text.length > 8192 ? [[text substringToIndex:8192] stringByAppendingString:@" [truncated]"] : (text ?: @"");
+}
 static void setSourceLanguage(id self, SEL selector, NSUInteger value) {
     if (![self isKindOfClass:optionsClass] || value != 1) refuse(@"only sourceLanguage=1 on actual compile options is authorized");
     objc_setAssociatedObject(self, &languageKey, @1, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -55,7 +61,7 @@ static id additionalArguments(id self, SEL selector) {
     NSString *caller = bounded(original);
     if (standardKernel && ![objc_getAssociatedObject(self,&sourceKey) isEqual:requiredSourceSHA]) refuse(@"standard mode requires exact synthetic source identity");
     char transformed[32768];
-    if (!lc_opencl_diagnostic_options(caller.UTF8String,standardKernel,transformed,sizeof(transformed))) refuse(@"transformed arguments exceed budget");
+    if (!lc_opencl_diagnostic_options_with_header(caller.UTF8String,standardKernel,standardHeader,transformed,sizeof(transformed))) refuse(@"transformed arguments exceed budget");
     NSString *actual = [NSString stringWithUTF8String:transformed];
     Dl_info site = {0};
     void *returnAddress = __builtin_return_address(0);
@@ -63,7 +69,7 @@ static id additionalArguments(id self, SEL selector) {
     NSString *image = identified ? [NSString stringWithUTF8String:site.dli_fname] : @"";
     uintptr_t offset = identified ? (uintptr_t)returnAddress-(uintptr_t)site.dli_fbase : 0;
     emit(@{@"event":@"arguments", @"selector":NSStringFromSelector(selector), @"callerArguments":caller,
-           @"actualArguments":actual, @"mode":standardKernel ? @"standard-kernel" : @"dialect-only",
+           @"actualArguments":actual, @"mode":diagnosticMode,
            @"nativeLibraryScope":@(nativeLibraryDepth > 0), @"callerImage":image, @"callerImageOffset":@(offset),
            @"sourceSHA256":objc_getAssociatedObject(self,&sourceKey) ?: @"", @"languageVersion":@([(MTLCompileOptions *)self languageVersion]),
            @"note":@"Mojave still emits its native Metal standard; this is a dialect experiment only"});
@@ -80,10 +86,29 @@ static id newLibrary(id self, SEL selector, id source, id options, NSError **err
     NSMutableString *hash = [NSMutableString stringWithCapacity:64];
     for (unsigned i=0;i<CC_SHA256_DIGEST_LENGTH;i++) [hash appendFormat:@"%02x",digest[i]];
     if (standardKernel && !lc_opencl_diagnostic_source_allowed(hash.UTF8String,bytes.length)) refuse(@"standard mode refuses non-fixture source");
+    if (standardHeader) {
+        char canonical[4096];
+        const char *path = LC_OPENCL_DIAGNOSTIC_HEADER_PATH;
+        if (!realpath(path,canonical) || strcmp(path,canonical)) refuse(@"OpenCL header path is not canonical");
+        int fd = open(path,O_RDONLY|O_NOFOLLOW|O_NONBLOCK);
+        if (fd < 0) refuse(@"supplied OpenCL header unavailable");
+        struct stat info;
+        if (fstat(fd,&info) || !S_ISREG(info.st_mode) || info.st_uid != 0 || info.st_size != 805181) { close(fd); refuse(@"OpenCL header metadata differs from supplied resource"); }
+        CC_SHA256_CTX context; CC_SHA256_Init(&context);
+        unsigned char block[16384], headerDigest[CC_SHA256_DIGEST_LENGTH]; ssize_t count; size_t total=0;
+        while ((count=read(fd,block,sizeof(block))) > 0) { total+=(size_t)count; if(total>805181) break; CC_SHA256_Update(&context,block,(CC_LONG)count); }
+        struct stat after;
+        BOOL stable = !fstat(fd,&after) && info.st_dev==after.st_dev && info.st_ino==after.st_ino && info.st_size==after.st_size && info.st_mtime==after.st_mtime && info.st_ctime==after.st_ctime;
+        close(fd); CC_SHA256_Final(headerDigest,&context);
+        NSMutableString *headerHash=[NSMutableString stringWithCapacity:64];
+        for(unsigned i=0;i<CC_SHA256_DIGEST_LENGTH;i++) [headerHash appendFormat:@"%02x",headerDigest[i]];
+        if (!stable || count < 0 || total != 805181 || ![headerHash isEqual:@LC_OPENCL_DIAGNOSTIC_HEADER_SHA]) refuse(@"OpenCL header bytes differ from supplied resource");
+        emit(@{@"event":@"headerVerified",@"path":@LC_OPENCL_DIAGNOSTIC_HEADER_PATH,@"bytes":@(total),@"sha256":headerHash,@"device":@(info.st_dev),@"inode":@(info.st_ino),@"uid":@(info.st_uid)});
+    }
     objc_setAssociatedObject(options,&sourceKey,hash,OBJC_ASSOCIATION_COPY_NONATOMIC);
     emit(@{@"event":@"libraryBegin", @"sourceCharacters":@([source length]), @"sourceBytes":@(bytes.length),
            @"sourceSHA256":hash, @"languageVersion":@([(MTLCompileOptions *)options languageVersion]),
-           @"mode":standardKernel ? @"standard-kernel" : @"dialect-only"});
+           @"mode":diagnosticMode});
     NSError *local = nil;
     @try {
         nativeLibraryDepth++;
@@ -91,11 +116,11 @@ static id newLibrary(id self, SEL selector, id source, id options, NSError **err
         NSError *failure = library ? nil : (error ? *error : local);
         emit(@{@"event":@"libraryReturn", @"libraryCreated":@(library != nil),
                @"errorDomain":failure.domain ?: @"", @"errorCode":@(failure ? failure.code : 0),
-               @"errorDescription":bounded(failure.localizedDescription),
+               @"errorDescription":diagnosticText(failure.localizedDescription), @"errorDescriptionTruncated":@(failure.localizedDescription.length > 8192),
                @"note":@"Compilation progress is not semantic or FCP success; pipeline mode remains untouched"});
         return library;
     } @catch (NSException *exception) {
-        emit(@{@"event":@"libraryException", @"name":bounded(exception.name), @"reason":bounded(exception.reason)});
+        emit(@{@"event":@"libraryException", @"name":diagnosticText(exception.name), @"reason":diagnosticText(exception.reason), @"reasonTruncated":@(exception.reason.length > 8192)});
         @throw;
     } @finally {
         if (nativeLibraryDepth) nativeLibraryDepth--;
@@ -106,8 +131,10 @@ __attribute__((constructor)) static void installDiagnostic(void) {
         const char *enabled = getenv("LC_OPENCL_SOURCE_LANGUAGE_DIAGNOSTIC");
         if (!enabled || strcmp(enabled, "1")) return;
         const char *mode = getenv("LC_OPENCL_DIAGNOSTIC_MODE");
-        if (mode && strcmp(mode,"dialect-only") && strcmp(mode,"standard-kernel")) refuse(@"unknown diagnostic mode");
-        standardKernel = mode && !strcmp(mode,"standard-kernel");
+        if (mode && strcmp(mode,"dialect-only") && strcmp(mode,"standard-kernel") && strcmp(mode,"standard-header")) refuse(@"unknown diagnostic mode");
+        standardHeader = mode && !strcmp(mode,"standard-header");
+        standardKernel = standardHeader || (mode && !strcmp(mode,"standard-kernel"));
+        diagnosticMode = standardHeader ? @"standard-header" : (standardKernel ? @"standard-kernel" : @"dialect-only");
         NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
         if (os.majorVersion != 10 || os.minorVersion != 14) refuse(@"diagnostic requires Mojave10.14");
         optionsClass = objc_getClass("MTLCompileOptionsInternal");
@@ -128,7 +155,7 @@ __attribute__((constructor)) static void installDiagnostic(void) {
         method_setImplementation(library, (IMP)newLibrary);
         emit(@{@"event":@"installed", @"pid":@(getpid()), @"class":NSStringFromClass(optionsClass),
                @"getterEncoding":@(method_getTypeEncoding(getter)), @"libraryEncoding":@(method_getTypeEncoding(library)),
-               @"pipelineModeChanged":@NO, @"mode":standardKernel ? @"standard-kernel" : @"dialect-only",
+               @"pipelineModeChanged":@NO, @"mode":diagnosticMode,
                @"requiredSourceSHA256":standardKernel ? requiredSourceSHA : @"", @"qualification":@"probe-only dialect diagnostic; never a compatibility fix"});
     }
 }

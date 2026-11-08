@@ -59,7 +59,7 @@ def main():
             try:ns['validate_diagnostic_dylib'](bad)
             except ValueError:pass
             else:raise AssertionError('accepted non-dylib')
-        for case in ('good', 'tamper', 'cancel', 'oversize', 'bad-stage','dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only'):
+        for case in ('good', 'tamper', 'cancel', 'oversize', 'bad-stage','dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only','standard-header'):
             results = root / case
             results.mkdir()
             events = []
@@ -68,17 +68,20 @@ def main():
                 argv = command['Arguments']
                 if argv[1] == ns['COLLECTOR']:
                     events.append('collector')
-                    injected=case in ('dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only')
+                    injected=case in ('dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only','standard-header')
                     assert events[-(4 if injected else 3):] == ['stage']*(3 if injected else 2)+['collector']
                     assert timeout == 110 and len(argv) == (9 if injected else 6)
                     if case == 'oversize': return reply(dict(diagnostic, extra='x' * 1100000))
                     value=copy.deepcopy(diagnostic)
                     if injected:
                         value['compute']['pid']=1234
-                        assert argv[-1]==('standard-kernel' if case=='standard-kernel' else 'dialect-only')
+                        assert argv[-1]==(case if case in ('standard-kernel','standard-header') else 'dialect-only')
                         logs=[dict(event='installed',pid=999 if case=='wrong-pid' else 1234,**{'class':'MTLCompileOptionsInternal'},pipelineModeChanged=False),dict(event='arguments',callerArguments='-cl-std=CL1.2',actualArguments='wrong' if case=='malformed-options' else '-cl-std=CL1.2 -x cl',languageVersion=131074,mode='dialect-only',nativeLibraryScope=case!='preview-only',callerImage='/System/Library/Frameworks/Metal.framework/Versions/A/Metal',callerImageOffset=0x50471)]
                         if case=='standard-kernel':
                             logs[1].update(mode='standard-kernel',sourceSHA256='f110a56696746ed66d54450f587bf4c063386815a5e79f5e7b13d83fef730d22',callerArguments='-fapplecl-lax-vector-conversions -cl-std=CL1.2',actualArguments=' -cl-std=CL1.2 -std=cl1.2 -x cl')
+                        if case=='standard-header':
+                            logs[1].update(mode='standard-header',sourceSHA256='f110a56696746ed66d54450f587bf4c063386815a5e79f5e7b13d83fef730d22',actualArguments='-cl-std=CL1.2 -std=cl1.2 -x cl -include /System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/31001/Libraries/lib/clang/31001.192/include/opencl-c.h')
+                            logs.append(dict(event='headerVerified',path='/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/31001/Libraries/lib/clang/31001.192/include/opencl-c.h',sha256='388facd88852bbca216b87023cca7d31064b0ef901f582d3baf4b5960abafc72',bytes=805181,uid=0,inode=123))
                         value['compute']['stderr']['text']='' if case=='missing-witness' else ''.join('LC_OPENCL_DIALECT '+json.dumps(x)+'\n' for x in logs)
                     return reply(value)
                 assert argv[:2] == ['-c', ns['EXPORT']] and 0 < timeout <= 20
@@ -99,10 +102,10 @@ def main():
                 events.append('stage')
                 assert all((selector, 'describe') in events for selector in ns['FILES'])
                 return '/Users/not-a-stage/Transfer.bin' if case == 'bad-stage' else '/private/var/tmp/VirtualIntelMac.ABC123/Transfer.bin'
-            ns.update(arguments=[str(results), *map(str, helpers)]+([str(dylib)] if case in ('dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only') else [])+(['standard-kernel'] if case=='standard-kernel' else []), request=request, stage=stage)
+            ns.update(arguments=[str(results), *map(str, helpers)]+([str(dylib)] if case in ('dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only','standard-header') else [])+([case] if case in ('standard-kernel','standard-header') else []), request=request, stage=stage)
             try: ns['run']()
             except (ValueError, SystemExit): assert case in ('cancel', 'oversize', 'bad-stage')
-            else: assert case in ('good', 'tamper','dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only')
+            else: assert case in ('good', 'tamper','dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only','standard-header')
             report = json.loads((results / 'opencl-contract.json').read_text())
             if case == 'cancel':
                 assert events == [('metal', 'describe')]
@@ -122,10 +125,15 @@ def main():
                     assert report['diagnostic']['query']['signal'] == 6
                     assert report['diagnostic']['compute']['parsed_stdout_lines'][0]['api'] == 'clBuildProgram'
                     assert (results / 'compute.stdout.txt').read_text().endswith('partial crash line')
-                elif case in ('dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only'):
-                    assert report['result']==('DIALECT_DIAGNOSTIC_CAPTURED' if case in ('dialect','standard-kernel') else 'INCONCLUSIVE')
-                    assert report['source_language_diagnostic']['witnessed']==(case in ('dialect','standard-kernel'))
+                elif case in ('dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only','standard-header'):
+                    assert report['result']==('DIALECT_DIAGNOSTIC_CAPTURED' if case in ('dialect','standard-kernel','standard-header') else 'INCONCLUSIVE')
+                    assert report['source_language_diagnostic']['witnessed']==(case in ('dialect','standard-kernel','standard-header'))
                     assert report['source_language_diagnostic_dylib']['macho_header']['file_type']==6
+                    if case=='standard-header':
+                        bad=copy.deepcopy(report['diagnostic']['compute']);bad['stderr']['text']=bad['stderr']['text'].replace('388facd88852bbca216b87023cca7d31064b0ef901f582d3baf4b5960abafc72','0'*64)
+                        assert not ns['dialect_witness'](bad,'standard-header')['witnessed']
+                        bad=copy.deepcopy(report['diagnostic']['compute']);bad['stderr']['text']='\n'.join(line for line in bad['stderr']['text'].splitlines() if 'headerVerified' not in line)
+                        assert not ns['dialect_witness'](bad,'standard-header')['witnessed']
                 elif case == 'oversize':
                     assert (results / 'opencl-response.oversize-prefix.txt').stat().st_size == 1048576
                     assert not (results / 'opencl-response.json').exists()
