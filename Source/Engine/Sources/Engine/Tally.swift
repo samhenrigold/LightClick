@@ -453,6 +453,7 @@ public final class Tally: @unchecked Sendable {
         }
         o += String(format: "translation time     %12.1f ms\n", seconds(t.translate_ns) * 1000)
         o += "blocks invalidated   " + perSecond(t.invalidated) + "\n"
+        o += "inline_shr8_enabled \(t.inline_shr8_enabled) (global translator configuration; not a counter or delta)\n"
         o += "\n== shift helper census (this vCPU; entries, not retired instructions or time) ==\n"
         o += "shift_helpers_enabled \(c.profile_shift_helpers)\n"
         if c.profile_shift_helpers != 0 {

@@ -15,6 +15,7 @@
 u32 *tr_cc;
 bool tr_precise_flags, tr_has_tzcnt, tr_hybrid, tr_no_bulk_rep;
 bool tr_profile_shift_helpers;
+bool tr_inline_shr8;
 int tr_cpl;
 bool tr_compat;
 u64 tr_stub_lookup, tr_stub_ret_miss, tr_stub_pushf, tr_stub_sahf;
@@ -1189,6 +1190,8 @@ void tr_init(const TrConfig *config) {
     tr_hybrid = cfg.hybrid;
     tr_no_bulk_rep = cfg.no_bulk_rep;
     tr_profile_shift_helpers = cfg.profile_shift_helpers;
+    tr_inline_shr8 = cfg.inline_shr8;
+    stats.inline_shr8_enabled = cfg.inline_shr8;
     cc_limit = cfg.code_cache_bytes ? cfg.code_cache_bytes : CC_SIZE;
     tr_stub_lookup = cfg.stub_lookup;
     tr_stub_ret_miss = cfg.stub_ret_miss;

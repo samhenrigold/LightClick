@@ -724,6 +724,28 @@ static void emit_shift(const Insn *in, int live) {
         gpr_write(in->rm, sz, in->high_rm, S0);
         return;
     }
+    if (tr_inline_shr8 && !mem && sz == 1 && kind == SH_SHR && in->has_imm) {
+        // Match h_shift, including its deterministic undefined OF/AF model.
+        // Keep the original byte for CF/OF; high-byte aliases were extracted above.
+        int n = (int)in->imm & 31; // the masked-zero path returned before any write
+        ubfx(0, S1, d, 0, 8);
+        if (n < 8)
+            lsr_imm(0, S0, S1, n);
+        else
+            movimm(S0, 0);
+        logic_reg(0, 3, 0, XZR, S0, S0); // N/Z, C=0, V=0
+        if ((live & F_C) && n <= 8)
+            rmif(S1, (n - 2) & 63, 2);
+        cfinv(); // CF is zero for counts above 8; canonical C is inverted
+        if (live & F_V)
+            rmif(S1, 7, 1); // h_shift keeps the original bit 7 for every nonzero count
+        if (live & (F_P | F_A))
+            mov_reg(0, R_PF, S0);
+        if (live & F_A)
+            mov_reg(1, R_AF, R_PF); // AF = bit4(R_AF ^ R_PF) = 0, even for AF-only liveness
+        gpr_write(in->rm, sz, in->high_rm, S0);
+        return;
+    }
     if (sz < 4 || thru || (in->by_cl && rot && live)) {
         // Helper: exact semantics for the rare forms. Flags come back as data so a store can still fault first.
         if (d != S0)

@@ -48,6 +48,7 @@ void baseline_emit_int(const Insn *, int);
 void candidate_emit_int(const Insn *, int);
 bool tr_precise_flags=true,tr_has_tzcnt=false,tr_hybrid=true,tr_no_bulk_rep=false,tr_compat=false;
 bool tr_profile_shift_helpers=false;
+bool tr_inline_shr8=false;
 int tr_cpl=3,cur_part=0;
 u64 tr_stub_lookup,tr_stub_ret_miss,tr_stub_pushf,tr_stub_sahf;
 u32 *tr_cc; static u32 *current_words;
@@ -178,6 +179,7 @@ def prepare(engine, work):
     begin = old_ctx.index('    // Opt-in, per-vCPU helper-entry counts')
     old_ctx = old_ctx[:begin]+'} EngineCtx;'
     old_config = struct(config, 'TrConfig').replace('    bool profile_shift_helpers; // opt-in: descriptor metadata for the per-vCPU monitor helper census\n', '')
+    old_config = old_config.replace('    bool inline_shr8; // experimental/default off: register-immediate byte SHR without the helper\n', '')
     legacy = old_ctx.replace('} EngineCtx;', '} LegacyEngineCtx;')+'\n'+old_config.replace('} TrConfig;', '} LegacyTrConfig;')
     assertions = [f'_Static_assert(offsetof({new}, {field}) == offsetof({old}, {field}), "old {new}.{field} offset");'
                   for new, old, declaration in [('EngineCtx','LegacyEngineCtx',old_ctx),('TrConfig','LegacyTrConfig',old_config)]
