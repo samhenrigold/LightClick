@@ -25,28 +25,55 @@ def compile_source(source):
     return original, original.replace(old, new)
 
 
-COLLECTOR = r'''import base64, ctypes, hashlib, json, os, plistlib, pwd, resource, signal, stat, subprocess, sys, tempfile, time
+COLLECTOR = r'''import base64, ctypes, hashlib, json, os, plistlib, pwd, resource, signal, stat, subprocess, sys, tempfile, threading, time
 APP='/Applications/Numbers.app'
 CAP=65536
 owned=[]
 report={'result':'INCONCLUSIVE','scope':'fixed Numbers launch and compile ONLY; no script/document execution', 'commands':[]}
+def reader(stream):
+    state={'parts':[],'bytes':0,'at_limit':False}
+    def drain():
+        try:
+            while True:
+                data=stream.read(4096)
+                if not data:break
+                remaining=max(0,CAP-state['bytes'])
+                if remaining:state['parts'].append(data[:remaining])
+                state['bytes']+=len(data)
+                if state['bytes']>CAP:state['at_limit']=True
+        finally:stream.close()
+    thread=threading.Thread(target=drain);thread.daemon=True;thread.start()
+    return state,thread
+
+def captured(pair):
+    state,thread=pair
+    thread.join(2)
+    return {'text':b''.join(state['parts']).decode('utf-8','replace'),'at_limit':state['at_limit'],
+            'bytes':state['bytes'],'reader_finished':not thread.is_alive()}
+
+def limits():
+    # Payload/cache/app-owned files remain unrestricted; bound diagnostic pipes only.
+    os.setsid()
+
 def command(argv, seconds, directory, env):
-    out=tempfile.TemporaryFile(dir=directory);err=tempfile.TemporaryFile(dir=directory)
-    def limits():
-        os.setsid()
-        resource.setrlimit(resource.RLIMIT_FSIZE,(CAP,CAP))
+    def command_limits():
+        limits()
         resource.setrlimit(resource.RLIMIT_CPU,(20,20))
-    child=subprocess.Popen(argv,stdout=out,stderr=err,env=env,preexec_fn=limits)
+    with open(os.devnull,'rb') as null:
+        child=subprocess.Popen(argv,stdin=null,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                               env=env,preexec_fn=command_limits,close_fds=True)
     owned.append(child)
+    out,err=reader(child.stdout),reader(child.stderr)
     until=time.time()+seconds
-    while child.poll() is None and time.time()<until:time.sleep(.05)
-    expired=child.poll() is None
-    if expired:stop(child)
-    out.seek(0);err.seek(0)
+    while child.poll() is None and time.time()<until and not out[0]['at_limit'] and not err[0]['at_limit']:time.sleep(.05)
+    expired=child.poll() is None and time.time()>=until
+    if child.poll() is None:stop(child)
+    a,b=captured(out),captured(err)
     result={'argv':argv,'timeout_seconds':seconds,'timed_out':expired,'exit_code':child.poll(),
-            'stdout':out.read(CAP+1).decode('utf-8','replace'),'stderr':err.read(CAP+1).decode('utf-8','replace')}
-    out.close();err.close()
+            'stdout':a['text'],'stderr':b['text'],'at_limit':a['at_limit'] or b['at_limit'],
+            'readers_finished':a['reader_finished'] and b['reader_finished']}
     report['commands'].append(result)
+    if result['at_limit'] or not result['readers_finished']:raise ValueError('command diagnostics incomplete/outside budget')
     return result
 
 def stop(child):
@@ -117,11 +144,11 @@ try:
     script=directory+'/cell-repaint.applescript';compiled=directory+'/cell-repaint.scpt'
     fd=os.open(script,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     with os.fdopen(fd,'wb')as stream:stream.write(data)
-    log=tempfile.TemporaryFile(dir=directory)
-    def launch_limits():
-        os.setsid();resource.setrlimit(resource.RLIMIT_FSIZE,(CAP,CAP))
-    app=subprocess.Popen([binary],stdout=log,stderr=subprocess.STDOUT,env=env,preexec_fn=launch_limits)
+    with open(os.devnull,'rb') as null:
+        app=subprocess.Popen([binary],stdin=null,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                             env=env,preexec_fn=limits,close_fds=True)
     owned.append(app);report['owned_app_pid']=app.pid
+    log=(reader(app.stdout),reader(app.stderr))
     time.sleep(2)
     if app.poll() is not None:raise ValueError('owned Numbers process exited before compilation')
     result=command(['/usr/bin/osacompile','-o',compiled,script],30,directory,env)
@@ -137,7 +164,10 @@ finally:
         try:stop(child)
         except Exception as error:errors.append(repr(error))
     if 'log'in globals():
-        log.seek(0);report['app_log']=log.read(CAP+1).decode('utf-8','replace');log.close()
+        a,b=captured(log[0]),captured(log[1])
+        report['app_stdout']=a;report['app_stderr']=b
+        report['app_log_at_limit']=a['at_limit'] or b['at_limit'] or not a['reader_finished'] or not b['reader_finished']
+        if report['app_log_at_limit']:report['result']='INCONCLUSIVE'
     report['cleanup_errors']=errors
     if errors:report['result']='INCONCLUSIVE'
     signal.alarm(0)
@@ -162,7 +192,9 @@ def parse_response(response):
     if not re.fullmatch(r'/private/var/tmp/LightClickNumbersCompile\.[A-Za-z0-9_-]{6,16}', directory):
         raise ValueError('invalid generated compile directory')
     if (compiler.get('argv') != ['/usr/bin/osacompile', '-o', directory+'/cell-repaint.scpt', directory+'/cell-repaint.applescript']
-            or compiler.get('exit_code') != 0 or compiler.get('timed_out') is not False or report.get('cleanup_errors') != []):
+            or compiler.get('exit_code') != 0 or compiler.get('timed_out') is not False or compiler.get('at_limit') is not False
+            or compiler.get('readers_finished') is not True or report.get('app_log_at_limit') is not False
+            or report.get('cleanup_errors') != []):
         raise ValueError('compiler/cleanup result invalid')
     compiled = report.get('compiled', {})
     if (type(compiled.get('bytes')) is not int or not 0 < compiled['bytes'] <= 1048576
