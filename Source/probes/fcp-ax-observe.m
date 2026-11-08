@@ -8,6 +8,7 @@
 #import <mach/mach_time.h>
 
 static NSUInteger nodes, failures;
+static NSMutableArray *attributeErrors;
 static BOOL truncated, expired;
 static double deadline;
 static double now(void) {
@@ -23,7 +24,11 @@ static CFTypeRef copyAttribute(AXUIElementRef element, CFStringRef key) {
     if (!available()) return NULL;
     CFTypeRef value = NULL;
     AXError error = AXUIElementCopyAttributeValue(element, key, &value);
-    if (error != kAXErrorSuccess && error != kAXErrorNoValue && error != kAXErrorAttributeUnsupported) failures++;
+    if (error != kAXErrorSuccess && error != kAXErrorNoValue && error != kAXErrorAttributeUnsupported) {
+        failures++;
+        if (attributeErrors.count < 16)
+            [attributeErrors addObject:@{@"attribute":(__bridge NSString *)key, @"error":@(error)}];
+    }
     return value;
 }
 static id scalar(CFTypeRef value) {
@@ -91,6 +96,7 @@ int main(int argc, const char **argv) {
         report[@"axTrusted"] = @(AXIsProcessTrusted()); // Observation only; deliberately no prompting API.
         if (matched) {
             deadline = now()+8;
+            attributeErrors = [NSMutableArray array];
             AXUIElementRef application = AXUIElementCreateApplication(pid);
             AXError timeoutError = AXUIElementSetMessagingTimeout(application, .2);
             report[@"messagingTimeoutError"] = @(timeoutError);
@@ -113,6 +119,7 @@ int main(int argc, const char **argv) {
             CFRelease(application);
             report[@"identityStillMatched"] = @(identity(pid,binary));
             report[@"nodes"] = @(nodes); report[@"attributeFailures"] = @(failures);
+            report[@"attributeErrors"] = attributeErrors;
             report[@"truncated"] = @(truncated); report[@"deadlineExceeded"] = @(expired);
             if ([report[@"identityStillMatched"] boolValue] && observed.count && !expired && !failures) report[@"result"] = @"OBSERVED_WINDOWS";
         }
