@@ -9,6 +9,7 @@ import textwrap
 from pathlib import Path
 import runpy
 import zlib
+from fcp_export import guest_export_source
 
 CLIP_SHA256='62dfa5b49d5f97d954c420d315c250015d8733f47c59752d002f8b841e650211'
 CLIP_BYTES=58747744
@@ -301,6 +302,7 @@ PREPARE=r'''
     manifest=bounded_file(source_manifest,131072)
     report['workflow']={'scope':'verified generated fixture prepared; surgical inventory and OS-open attempt only; no import/render/export qualification',
                         'directory':workflow_directory,'source_manifest':json.loads(manifest)}
+    if spec.get('workflow_master_share_action')=='export-h264-private-fixture':report['workflow']['scope']='Explicit one private generated H264 export attempt and independent media verification; no performance or fidelity qualification'
     clip=bounded_file(source_clip,58747744)
     if len(clip)!=58747744 or hashlib.sha256(clip).hexdigest()!='62dfa5b49d5f97d954c420d315c250015d8733f47c59752d002f8b841e650211':raise ValueError('generated media identity mismatch')
     clip_path=workflow_directory+'/input-prores422.mov'
@@ -335,6 +337,18 @@ PREPARE=r'''
         os.chmod(action_path,0o755)
         spec['workflow_action_helper']=action_path
         workflow_paths.append(action_path)
+    if spec.get('workflow_export_verifier'):
+        verifier=spec['workflow_export_verifier']
+        if not re.match(r'\A/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin\Z',verifier):raise ValueError('invalid export verifier receipt')
+        parent=os.path.dirname(verifier);parent_info=os.lstat(parent)
+        if os.path.realpath(parent)!=parent or not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid!=0 or stat.S_IMODE(parent_info.st_mode)!=0o700:raise ValueError('verifier staging parent changed')
+        data=bounded_file(verifier,2097152)
+        if hashlib.sha256(data).hexdigest()!=spec['workflow_export_verifier_sha256'] or data[:8]!=b'\xcf\xfa\xed\xfe\x07\x00\x00\x01':raise ValueError('export verifier bytes/architecture changed')
+        verifier_path=directory+'/export-verify'
+        with open(verifier_path,'wb') as stream:stream.write(data)
+        os.chmod(verifier_path,0o755)
+        spec['workflow_export_verifier']=verifier_path
+        workflow_paths.append(verifier_path)
 
 '''
 
@@ -520,9 +534,14 @@ OBSERVE='\n'+textwrap.indent(inspect.getsource(generated_project_evidence)+inspe
                                     report['workflow']['master_share_inspection_attempted']=True
                                     try:
                                         share_action=spec.get('workflow_master_share_action','inspect-master-share')
-                                        if share_action not in ('inspect-master-share','inspect-master-settings','inspect-master-transcode-save-panel'):raise ValueError('unknown Master File inspection mode')
-                                        raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),share_action,workflow_directory],60 if share_action=='inspect-master-transcode-save-panel' else 35 if share_action=='inspect-master-settings' else 28)
+                                        if share_action not in ('inspect-master-share','inspect-master-settings','inspect-master-transcode-save-panel','export-h264-private-fixture'):raise ValueError('unknown Master File inspection mode')
+                                        raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),share_action,workflow_directory],230 if share_action=='export-h264-private-fixture' else 60 if share_action=='inspect-master-transcode-save-panel' else 35 if share_action=='inspect-master-settings' else 28)
                                         report['workflow']['master_share_inspection']=json.loads(raw)
+                                        if share_action=='export-h264-private-fixture':
+                                            try:
+                                                export_spec=dict(spec,workflow_export_action_mode=share_action,workflow_export_action=report['workflow']['master_share_inspection'])
+                                                report['workflow']['export_verification']=run_private_export_verifier(export_spec,app,workflow_directory)
+                                            except Exception as error:report['workflow']['export_verification']={'result':'VERIFICATION_SUPERVISOR_FAILED','reason':repr(error)}
                                     except Exception as error:report['workflow']['master_share_inspection']={'available':False,'reason':repr(error)}
                                 else:report['workflow']['master_share_inspection_skipped']='complete HID open and fresh owned nonmodal observations required'
                         else:report['workflow']['project_open_skipped']='owned app, verified creation or exact generated-project evidence missing'
@@ -555,7 +574,7 @@ def compose_guest(base):
         except Exception as error:errors.append(repr(error))"""
     text=replace_once(text,cleanup_old,"    errors=cleanup_for_workflow(owned,app,spec,report)")
     transport="import base64, zlib\n"+inspect.getsource(encode_workflow_report)+"\n"
-    text=replace_once(text,"try:\n    def interrupted(n,frame):",transport+RETENTION_HELPERS+"\ntry:\n    def interrupted(n,frame):")
+    text=replace_once(text,"try:\n    def interrupted(n,frame):",transport+RETENTION_HELPERS+guest_export_source()+"\ntry:\n    def interrupted(n,frame):")
     text=replace_once(text,'    print(json.dumps(report))','    print(encode_workflow_report(report))')
     ast.parse(text)
     return text

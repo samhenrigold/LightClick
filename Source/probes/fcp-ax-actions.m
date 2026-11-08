@@ -523,6 +523,207 @@ static AXUIElementRef masterShareItem(AXUIElementRef application,pid_t pid){
     if(submenu)CFRelease(submenu);if(share)CFRelease(share);if(menu)CFRelease(menu);if(file)CFRelease(file);if(bar)CFRelease(bar);
     return item;
 }
+// Forward declarations for the separate private-export controller.
+static AXUIElementRef
+masterPaneWithFocus(AXUIElementRef application,pid_t pid,BOOL requireInfo,BOOL requireFocus);
+static BOOL
+transcodeMetadata(AXUIElementRef pane,pid_t pid);
+static AXUIElementRef
+settingsPopup(AXUIElementRef pane,pid_t pid,NSString *value);
+static BOOL
+masterRadioValue(AXUIElementRef element,int expected);
+static BOOL
+blankShareCompanion(AXUIElementRef window,pid_t pid);
+typedef struct {NSUInteger names,saves,cancels,wheres,saveLabels,whereLabels,disclosures;BOOL complete;} ExportSaveEvidence;
+static BOOL exportSaveEvidenceComplete(ExportSaveEvidence e){
+    return e.complete && e.names==1 && e.saves==1 && e.cancels==1 && e.wheres==1 && e.saveLabels==1 && e.whereLabels==1 && e.disclosures==1;
+}
+static BOOL exportPathAbsent(const char *path){struct stat info;errno=0;return lstat(path,&info)==-1 && errno==ENOENT;}
+static BOOL exportCandidateValid(mode_t mode,uid_t owner,uid_t current,uint64_t links,uint64_t bytes){
+    return S_ISREG(mode) && current>0 && owner==current && links==1 && bytes>0 && bytes<=512ULL*1024*1024;
+}
+static BOOL exportSaveAllowed(BOOL controls,BOOL sameSheet,BOOL navigation,BOOL absent,BOOL name,BOOL context,BOOL attempted){
+    return controls && sameSheet && navigation && absent && name && context && !attempted;
+}
+static BOOL exportOutputAbsent(NSString *directory){
+    return ownLibrary(directory) && exportPathAbsent([directory stringByAppendingPathComponent:@"export.mov"].fileSystemRepresentation);
+}
+static SaveControls exportSheetControls(AXUIElementRef sheet,pid_t pid,NSString *expectedName){
+    SaveControls result={0},candidate={0};ExportSaveEvidence e={0};
+    if(!ownedElement(sheet,pid) || !equals(sheet,kAXRoleAttribute,@"AXSheet") || !equals(sheet,CFSTR("AXDescription"),@"save"))return result;
+    CFTypeRef children=attribute(sheet,kAXChildrenAttribute);
+    e.complete=children && CFGetTypeID(children)==CFArrayGetTypeID() && CFArrayGetCount(children)==7;
+    if(e.complete)for(CFIndex i=0;i<CFArrayGetCount(children) && room();i++){
+        CFTypeRef value=CFArrayGetValueAtIndex(children,i);if(!value || CFGetTypeID(value)!=AXUIElementGetTypeID() || !ownedElement((AXUIElementRef)value,pid)){e.complete=NO;continue;}
+        AXUIElementRef child=(AXUIElementRef)value;
+        if(equals(child,kAXRoleAttribute,@"AXTextField") && equals(child,CFSTR("AXIdentifier"),@"_NS:135") && enabled(child,YES) && writable(child,kAXValueAttribute) && equals(child,kAXValueAttribute,expectedName)){e.names++;candidate.name=child;}
+        if(equals(child,kAXRoleAttribute,@"AXButton") && equals(child,kAXTitleAttribute,@"Save") && equals(child,CFSTR("AXIdentifier"),@"_NS:55") && enabled(child,YES) && pressAvailable(child)){e.saves++;candidate.button=child;}
+        if(equals(child,kAXRoleAttribute,@"AXButton") && equals(child,kAXTitleAttribute,@"Cancel") && equals(child,CFSTR("AXIdentifier"),@"_NS:53") && enabled(child,YES))e.cancels++;
+        if(equals(child,kAXRoleAttribute,@"AXStaticText") && equals(child,kAXValueAttribute,@"Save As:"))e.saveLabels++;
+        if(equals(child,kAXRoleAttribute,@"AXStaticText") && equals(child,kAXValueAttribute,@"Where:"))e.whereLabels++;
+        if(equals(child,kAXRoleAttribute,@"AXPopUpButton") && enabled(child,YES)){e.wheres++;candidate.where=child;}
+        if(equals(child,kAXRoleAttribute,@"AXCheckBox") && equals(child,CFSTR("AXDescription"),@"disclosure") && enabled(child,YES) && masterRadioValue(child,0))e.disclosures++;
+    }
+    e.complete=e.complete && room();
+    // Retain each borrowed proxy while the children array still owns it.
+    if(exportSaveEvidenceComplete(e)){result.window=(AXUIElementRef)CFRetain(sheet);result.name=(AXUIElementRef)CFRetain(candidate.name);result.button=(AXUIElementRef)CFRetain(candidate.button);result.where=(AXUIElementRef)CFRetain(candidate.where);}
+    if(children)CFRelease(children);return result;
+}
+static BOOL exportSettingsMatch(AXUIElementRef parent,pid_t pid){
+    if(!transcodeMetadata(parent,pid))return NO;
+    AXUIElementRef codec=settingsPopup(parent,pid,@"H.264"),open=settingsPopup(parent,pid,@"Do Nothing");
+    BOOL okay=codec && open;if(open)CFRelease(open);if(codec)CFRelease(codec);return okay;
+}
+static SaveControls findExportSheet(AXUIElementRef application,pid_t pid,NSString *directory,NSString *name,AXUIElementRef *parentOut){
+    SaveControls result={0};AXUIElementRef parent=NULL,sheet=NULL;NSUInteger count=0;BOOL valid=YES;
+    *parentOut=NULL;if(!guestDarwin13() || !identity(pid) || !ownLibrary(directory) || !frontmostOwned(pid,NULL) || !room() || truncated)return result;
+    parent=masterPaneWithFocus(application,pid,NO,NO);if(!parent || !exportSettingsMatch(parent,pid))goto done;
+    {CFTypeRef children=attribute(parent,kAXChildrenAttribute);
+        if(!children || CFGetTypeID(children)!=CFArrayGetTypeID() || CFArrayGetCount(children)>32)valid=NO;
+        else for(CFIndex i=0;i<CFArrayGetCount(children) && room();i++){
+            CFTypeRef value=CFArrayGetValueAtIndex(children,i);if(!value || CFGetTypeID(value)!=AXUIElementGetTypeID()){valid=NO;continue;}
+            AXUIElementRef child=(AXUIElementRef)value;
+            if(equals(child,kAXRoleAttribute,@"AXAlert"))valid=NO;
+            if(equals(child,kAXRoleAttribute,@"AXSheet")){count++;sheet=child;}
+        }
+        if(valid && count==1 && room())result=exportSheetControls(sheet,pid,name);
+        if(children)CFRelease(children);
+    }
+    if(result.window){*parentOut=parent;parent=NULL;}
+ done:if(parent)CFRelease(parent);return result;
+}
+static BOOL focusedExportSheet(AXUIElementRef application,AXUIElementRef parent,SaveControls *save,pid_t pid){
+    if(!parent || !save->window || !identity(pid) || !ownedElement(parent,pid) || !ownedElement(save->window,pid))return NO;
+    CFTypeRef focused=attribute(application,kAXFocusedWindowAttribute);
+    BOOL same=focused && CFGetTypeID(focused)==AXUIElementGetTypeID() && (CFEqual(focused,parent) || CFEqual(focused,save->window));
+    if(focused)CFRelease(focused);return same && room();
+}
+static CFMutableArrayRef exportGoCandidates(AXUIElementRef application,AXUIElementRef parent,SaveControls *save,pid_t pid){
+    CFMutableArrayRef candidates=CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);
+    for(int scope=0;scope<3 && room();scope++){
+        CFTypeRef list=attribute(scope==0?application:scope==1?parent:save->window,scope==0?kAXWindowsAttribute:kAXChildrenAttribute);
+        if(list && CFGetTypeID(list)==CFArrayGetTypeID() && CFArrayGetCount(list)<=32)for(CFIndex i=0;i<CFArrayGetCount(list) && room();i++){
+            CFTypeRef value=CFArrayGetValueAtIndex(list,i);if(!value || CFGetTypeID(value)!=AXUIElementGetTypeID())continue;
+            AXUIElementRef panel=(AXUIElementRef)value;
+            if(CFEqual(panel,parent) || CFEqual(panel,save->window) || !ownedElement(panel,pid) || blankShareCompanion(panel,pid))continue;
+            if((equals(panel,kAXRoleAttribute,@"AXSheet") || (scope==0 && equals(panel,kAXRoleAttribute,@"AXWindow") && equals(panel,kAXSubroleAttribute,@"AXDialog"))) && !CFArrayContainsValue(candidates,CFRangeMake(0,CFArrayGetCount(candidates)),panel) && CFArrayGetCount(candidates)<8)CFArrayAppendValue(candidates,panel);
+        }
+        if(list)CFRelease(list);
+    }
+    return candidates;
+}
+static void exportGoDescendants(AXUIElementRef element,CFMutableArrayRef flat,NSUInteger depth,BOOL *complete){
+    if(!room() || CFArrayGetCount(flat)>=64 || depth>3){*complete=NO;return;}
+    CFArrayAppendValue(flat,element);
+    if(equals(element,kAXRoleAttribute,@"AXTable") || equals(element,kAXRoleAttribute,@"AXBrowser") || equals(element,kAXRoleAttribute,@"AXOutline")){*complete=NO;return;}
+    CFTypeRef children=attribute(element,kAXChildrenAttribute);
+    if(children && CFGetTypeID(children)==CFArrayGetTypeID()){
+        CFIndex count=CFArrayGetCount(children);if(count>32 || (depth==3 && count))*complete=NO;
+        else for(CFIndex i=0;i<count && room();i++){CFTypeRef child=CFArrayGetValueAtIndex(children,i);if(child && CFGetTypeID(child)==AXUIElementGetTypeID())exportGoDescendants((AXUIElementRef)child,flat,depth+1,complete);else *complete=NO;}
+    }
+    if(children)CFRelease(children);if(!room())*complete=NO;
+}
+static GoControls findExportGo(AXUIElementRef application,AXUIElementRef parent,SaveControls *save,pid_t pid){
+    GoControls result={0};NSUInteger matches=0;CFMutableArrayRef candidates=exportGoCandidates(application,parent,save,pid);
+    for(CFIndex i=0;i<CFArrayGetCount(candidates) && room();i++){
+        AXUIElementRef panel=(AXUIElementRef)CFArrayGetValueAtIndex(candidates,i);CFMutableArrayRef flat=CFArrayCreateMutable(NULL,0,&kCFTypeArrayCallBacks);BOOL complete=YES;exportGoDescendants(panel,flat,0,&complete);
+        NSUInteger questions=0,fields=0,gos=0,cancels=0;AXUIElementRef field=NULL,button=NULL;BOOL owned=YES;
+        for(CFIndex j=0;j<CFArrayGetCount(flat) && room();j++){
+            AXUIElementRef child=(AXUIElementRef)CFArrayGetValueAtIndex(flat,j);if(!ownedElement(child,pid)){owned=NO;continue;}
+            if(equals(child,kAXRoleAttribute,@"AXStaticText") && equals(child,kAXValueAttribute,@"Go to the folder:"))questions++;
+            if(equals(child,kAXRoleAttribute,@"AXTextField") && !equals(child,CFSTR("AXDescription"),@"tag editor") && enabled(child,YES) && writable(child,kAXValueAttribute)){fields++;field=child;}
+            if(equals(child,kAXRoleAttribute,@"AXButton") && equals(child,kAXTitleAttribute,@"Go") && enabled(child,YES) && pressAvailable(child)){gos++;button=child;}
+            if(equals(child,kAXRoleAttribute,@"AXButton") && equals(child,kAXTitleAttribute,@"Cancel") && enabled(child,YES))cancels++;
+        }
+        if(complete && owned && questions==1 && fields==1 && gos==1 && cancels==1 && room()){matches++;releaseGo(&result);result.panel=(AXUIElementRef)CFRetain(panel);result.field=(AXUIElementRef)CFRetain(field);result.button=(AXUIElementRef)CFRetain(button);}
+        CFRelease(flat);
+    }
+    CFRelease(candidates);if(matches!=1)releaseGo(&result);return result;
+}
+static BOOL exportGoGone(AXUIElementRef application,AXUIElementRef parent,SaveControls *save,AXUIElementRef go){
+    return go && !stillListed(application,parent,go) && !stillListed(application,save->window,go);
+}
+static BOOL exportContext(pid_t pid,NSString *directory){return guestDarwin13() && identity(pid) && ownLibrary(directory) && frontmostOwned(pid,NULL) && room() && !truncated;}
+static NSDictionary *exportStat(struct stat s,double stable){return @{@"device":@((uint64_t)s.st_dev),@"inode":@(s.st_ino),@"bytes":@(s.st_size),@"uid":@(s.st_uid),@"links":@(s.st_nlink),@"mode":@(s.st_mode),@"mtimeSeconds":@(s.st_mtimespec.tv_sec),@"mtimeNanoseconds":@(s.st_mtimespec.tv_nsec),@"ctimeSeconds":@(s.st_ctimespec.tv_sec),@"ctimeNanoseconds":@(s.st_ctimespec.tv_nsec),@"stableSeconds":@(stable),@"scope":@"regular owned stable-file candidate only; media verification required"};}
+static BOOL exportSameStat(const struct stat *a,const struct stat *b){return a->st_dev==b->st_dev && a->st_ino==b->st_ino && a->st_size==b->st_size && a->st_uid==b->st_uid && a->st_mode==b->st_mode && a->st_nlink==b->st_nlink && a->st_mtimespec.tv_sec==b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec==b->st_mtimespec.tv_nsec && a->st_ctimespec.tv_sec==b->st_ctimespec.tv_sec && a->st_ctimespec.tv_nsec==b->st_ctimespec.tv_nsec;}
+static void exportH264PrivateFixture(AXUIElementRef application,pid_t pid,NSString *directory,NSMutableDictionary *report){
+    SaveControls save={0},fresh={0};GoControls go={0};AXUIElementRef parent=NULL,freshParent=NULL,submittedGo=NULL,initialSheet=NULL;
+    NSString *path=[directory stringByAppendingPathComponent:@"export.mov"];
+    report[@"outputPath"]=path;report[@"privateExportControlsVerified"]=@NO;report[@"pathNavigationVerified"]=@NO;report[@"exportAttempted"]=@NO;report[@"savePressed"]=@NO;report[@"candidateFileVerified"]=@NO;report[@"result"]=@"PRIVATE_EXPORT_GUARD_INCONCLUSIVE";
+    if(!report[@"nextActionStatus"] || !exportContext(pid,directory) || !exportOutputAbsent(directory))goto done;
+    {double until=fmin(deadline,clockNow()+10);do{save=findExportSheet(application,pid,directory,@"LC-generated-8s",&parent);if(save.window || !exportContext(pid,directory) || clockNow()>=until)break;usleep(200000);}while(room());}
+    if(!save.window || !focusedExportSheet(application,parent,&save,pid) || !exportOutputAbsent(directory))goto done;
+    initialSheet=(AXUIElementRef)CFRetain(save.window);report[@"privateExportControlsVerified"]=@YES;report[@"exportSaveSheetBeforeNavigation"]=snapshot(save.window,0);
+    {
+        ProcessSerialNumber psn={0,0};pid_t mapped=0;
+        if(GetProcessForPID(pid,&psn)!=noErr || GetProcessPID(&psn,&mapped)!=noErr || mapped!=pid || !exportContext(pid,directory) || !focusedExportSheet(application,parent,&save,pid) || !exportOutputAbsent(directory))goto done;
+        CGEventRef down=CGEventCreateKeyboardEvent(NULL,(CGKeyCode)kVK_ANSI_G,true),up=CGEventCreateKeyboardEvent(NULL,(CGKeyCode)kVK_ANSI_G,false);
+        if(!down || !up){if(down)CFRelease(down);if(up)CFRelease(up);goto done;}
+        CGEventSetFlags(down,kCGEventFlagMaskCommand|kCGEventFlagMaskShift);CGEventSetFlags(up,kCGEventFlagMaskCommand|kCGEventFlagMaskShift);
+        if(!exportContext(pid,directory) || !focusedExportSheet(application,parent,&save,pid) || !exportOutputAbsent(directory)){CFRelease(down);CFRelease(up);goto done;}
+        uint64_t first=eventTimestamp();CGEventSetTimestamp(down,first);CGEventPostToPSN(&psn,down);
+        uint64_t second=eventTimestamp();if(second<=first)second=first+1;CGEventSetTimestamp(up,second);CGEventPostToPSN(&psn,up);
+        CFRelease(up);CFRelease(down);
+        [report[@"actionsPerformed"]addObject:@{@"action":@"CGEventPostToPSN",@"targetPID":@(pid),@"psnHigh":@(psn.highLongOfPSN),@"psnLow":@(psn.lowLongOfPSN),@"chord":@"Cmd-Shift-G",@"downsPosted":@1,@"upsPosted":@1,@"balancedRelease":@YES,@"status":@"posted; unconfirmed"}];
+    }
+    {double until=fmin(deadline,clockNow()+10);do{releaseGo(&go);go=findExportGo(application,parent,&save,pid);if(go.panel || !exportContext(pid,directory) || clockNow()>=until)break;usleep(200000);}while(room());}
+    if(!go.panel){
+        CFMutableArrayRef candidates=exportGoCandidates(application,parent,&save,pid);NSMutableArray *trees=[NSMutableArray array];for(CFIndex i=0;i<MIN(CFArrayGetCount(candidates),2) && room();i++)[trees addObject:snapshot((AXUIElementRef)CFArrayGetValueAtIndex(candidates,i),0)];CFRelease(candidates);report[@"unqualifiedExportGoPanels"]=trees;goto done;
+    }
+    report[@"exportGoSheet"]=snapshot(go.panel,0);
+    {
+        CFTypeRef focused=attribute(application,kAXFocusedWindowAttribute);BOOL focusedGo=focused && CFGetTypeID(focused)==AXUIElementGetTypeID() && (CFEqual(focused,go.panel) || CFEqual(focused,parent) || CFEqual(focused,save.window));if(focused)CFRelease(focused);
+        if(!focusedGo || !exportContext(pid,directory) || !exportOutputAbsent(directory))goto done;
+        AXError error=AXUIElementSetAttributeValue(go.field,kAXValueAttribute,(__bridge CFStringRef)directory);actionResult(report[@"actionsPerformed"],@"AXSetAttributeValue",@"private export Go-to-Folder path",error);
+        report[@"exportAbsolutePathReadbackMatches"]=@(equals(go.field,kAXValueAttribute,directory));
+        if(![report[@"exportAbsolutePathReadbackMatches"]boolValue] || !exportContext(pid,directory) || !exportOutputAbsent(directory) || !enabled(go.button,YES) || !pressAvailable(go.button))goto done;
+        GoControls current=findExportGo(application,parent,&save,pid);
+        BOOL same=current.panel && CFEqual(current.panel,go.panel) && CFEqual(current.field,go.field) && CFEqual(current.button,go.button) && equals(current.field,kAXValueAttribute,directory) && enabled(current.button,YES) && pressAvailable(current.button);
+        if(!same || !exportContext(pid,directory) || !exportOutputAbsent(directory)){releaseGo(&current);goto done;}
+        releaseGo(&go);go=current;
+        submittedGo=(AXUIElementRef)CFRetain(go.panel);error=AXUIElementPerformAction(go.button,kAXPressAction);actionResult(report[@"actionsPerformed"],@"AXPress",@"private export Go-to-Folder Go",error);report[@"exportGoActionStatus"]=@(error);
+    }
+    releaseGo(&go);releaseSave(&save);if(parent){CFRelease(parent);parent=NULL;}
+    {double until=fmin(deadline,clockNow()+10);do{
+        releaseGo(&go);releaseSave(&save);if(parent){CFRelease(parent);parent=NULL;}
+        save=findExportSheet(application,pid,directory,@"LC-generated-8s",&parent);
+        if(save.window && CFEqual(save.window,initialSheet)){
+            go=findExportGo(application,parent,&save,pid);
+            if(!go.panel && exportGoGone(application,parent,&save,submittedGo) && equals(save.where,kAXValueAttribute,directory.lastPathComponent) && focusedExportSheet(application,parent,&save,pid))break;
+        }
+        if(!exportContext(pid,directory) || clockNow()>=until)break;usleep(200000);
+    }while(room());}
+    if(!save.window || !CFEqual(save.window,initialSheet) || go.panel || !exportGoGone(application,parent,&save,submittedGo) || !equals(save.where,kAXValueAttribute,directory.lastPathComponent) || !focusedExportSheet(application,parent,&save,pid) || !exportContext(pid,directory) || !exportOutputAbsent(directory))goto done;
+    report[@"pathNavigationVerified"]=@YES;
+    {
+        AXError error=AXUIElementSetAttributeValue(save.name,kAXValueAttribute,CFSTR("export.mov"));actionResult(report[@"actionsPerformed"],@"AXSetAttributeValue",@"private export Save name",error);
+        if(!equals(save.name,kAXValueAttribute,@"export.mov") || !exportContext(pid,directory) || !exportOutputAbsent(directory))goto done;
+        fresh=findExportSheet(application,pid,directory,@"export.mov",&freshParent);
+        BOOL controls=fresh.window && freshParent && exportSettingsMatch(freshParent,pid) && enabled(fresh.button,YES) && pressAvailable(fresh.button);
+        BOOL same=controls && CFEqual(fresh.window,initialSheet) && CFEqual(freshParent,parent) && CFEqual(fresh.button,save.button) && CFEqual(fresh.name,save.name);
+        BOOL navigation=same && exportGoGone(application,freshParent,&fresh,submittedGo) && equals(fresh.where,kAXValueAttribute,directory.lastPathComponent);
+        BOOL context=same && exportContext(pid,directory) && focusedExportSheet(application,freshParent,&fresh,pid);
+        if(!exportSaveAllowed(controls,same,navigation,exportOutputAbsent(directory),same && equals(fresh.name,kAXValueAttribute,@"export.mov"),context,[report[@"savePressed"]boolValue]))goto done;
+        report[@"exportAttempted"]=@YES;report[@"savePressed"]=@YES;
+        error=AXUIElementPerformAction(fresh.button,kAXPressAction);actionResult(report[@"actionsPerformed"],@"AXPress",@"private export Save",error);report[@"exportSaveActionStatus"]=@(error);
+    }
+    {
+        struct stat previous={0};BOOL havePrevious=NO;double stableSince=0,until=fmin(deadline,clockNow()+90);
+        do{
+            struct stat current;char canonical[PATH_MAX]={0};double stamp=clockNow();
+            if(!identity(pid) || !ownLibrary(directory) || !room())break;
+            if(!lstat(path.fileSystemRepresentation,&current) && exportCandidateValid(current.st_mode,current.st_uid,getuid(),current.st_nlink,(uint64_t)current.st_size) && realpath(path.fileSystemRepresentation,canonical) && !strcmp(path.fileSystemRepresentation,canonical)){
+                if(!havePrevious || !exportSameStat(&previous,&current)){previous=current;stableSince=stamp;havePrevious=YES;}
+                else if(stamp-stableSince>=2){report[@"candidateFile"]=exportStat(current,stamp-stableSince);report[@"candidateFileVerified"]=@YES;report[@"result"]=@"PRIVATE_EXPORT_CANDIDATE_REQUIRES_MEDIA_VERIFICATION";break;}
+            }else havePrevious=NO;
+            if(stamp>=until)break;usleep(200000);
+        }while(room());
+    }
+ done:
+    if(initialSheet)CFRelease(initialSheet);if(submittedGo)CFRelease(submittedGo);if(freshParent)CFRelease(freshParent);if(parent)CFRelease(parent);releaseGo(&go);releaseSave(&fresh);releaseSave(&save);
+}
+
+
 typedef struct { NSUInteger scanned,project,duration,geometry,rate,movie;BOOL incomplete; } MasterPaneEvidence;
 static BOOL masterPaneEvidenceComplete(MasterPaneEvidence e){
     return !e.incomplete && e.project==1 && e.duration==1 && e.geometry==1 && e.rate==1 && e.movie==1;
@@ -924,11 +1125,11 @@ static void inspectMasterShare(AXUIElementRef application,pid_t pid,NSString *di
 
 int main(int argc,const char **argv) {
     @autoreleasepool {
-        if(argc!=5 || strcmp(argv[1],"10.1") || (strcmp(argv[3],"new-private-library") && strcmp(argv[3],"create-private-library") && strcmp(argv[3],"open-generated-project") && strcmp(argv[3],"open-generated-project-hid") && strcmp(argv[3],"inspect-master-share") && strcmp(argv[3],"inspect-master-settings") && strcmp(argv[3],"inspect-master-transcode-save-panel"))){fprintf(stderr,"usage: fcp-ax-actions 10.1 ownedPID new-private-library|create-private-library|open-generated-project|open-generated-project-hid|inspect-master-share|inspect-master-settings|inspect-master-transcode-save-panel ownFixtureDirectory\n");return 2;}
+        if(argc!=5 || strcmp(argv[1],"10.1") || (strcmp(argv[3],"new-private-library") && strcmp(argv[3],"create-private-library") && strcmp(argv[3],"open-generated-project") && strcmp(argv[3],"open-generated-project-hid") && strcmp(argv[3],"inspect-master-share") && strcmp(argv[3],"inspect-master-settings") && strcmp(argv[3],"inspect-master-transcode-save-panel") && strcmp(argv[3],"export-h264-private-fixture"))){fprintf(stderr,"usage: fcp-ax-actions 10.1 ownedPID new-private-library|create-private-library|open-generated-project|open-generated-project-hid|inspect-master-share|inspect-master-settings|inspect-master-transcode-save-panel|export-h264-private-fixture ownFixtureDirectory\n");return 2;}
         char *end=NULL;long number=strtol(argv[2],&end,10);if(!argv[2][0] || *end || number<=1 || number>INT_MAX)return 2;
         pid_t pid=(pid_t)number;NSString *directory=[NSString stringWithUTF8String:argv[4]];if(!directory)return 2;
-        BOOL transcodeMode=!strcmp(argv[3],"inspect-master-transcode-save-panel"),settingsMode=transcodeMode||!strcmp(argv[3],"inspect-master-settings"),shareMode=settingsMode||!strcmp(argv[3],"inspect-master-share"),createMode=!strcmp(argv[3],"create-private-library"),hidMode=!strcmp(argv[3],"open-generated-project-hid"),openMode=!strcmp(argv[3],"open-generated-project")||hidMode;surgicalCreation=createMode||openMode||shareMode;
-        alarm(createMode?55:transcodeMode?55:settingsMode?30:shareMode?24:16);deadline=clockNow()+(createMode?48:transcodeMode?48:settingsMode?26:shareMode?20:12);
+        BOOL exportMode=!strcmp(argv[3],"export-h264-private-fixture"),transcodeMode=exportMode||!strcmp(argv[3],"inspect-master-transcode-save-panel"),settingsMode=transcodeMode||!strcmp(argv[3],"inspect-master-settings"),shareMode=settingsMode||!strcmp(argv[3],"inspect-master-share"),createMode=!strcmp(argv[3],"create-private-library"),hidMode=!strcmp(argv[3],"open-generated-project-hid"),openMode=!strcmp(argv[3],"open-generated-project")||hidMode;surgicalCreation=createMode||openMode||shareMode;
+        alarm(exportMode?220:createMode?55:transcodeMode?55:settingsMode?30:shareMode?24:16);deadline=clockNow()+(exportMode?210:createMode?48:transcodeMode?48:settingsMode?26:shareMode?20:12);
         NSMutableArray *actions=[NSMutableArray array];
         NSMutableDictionary *report=[@{@"result":@"INCONCLUSIVE",@"variant":@"10.1",@"pid":@(pid),@"mode":[NSString stringWithUTF8String:argv[3]],@"directory":directory,
             @"intendedLibraryPath":[directory stringByAppendingPathComponent:@"private.fcpbundle"],@"actionsPerformed":actions,@"libraryCreationAttempted":@NO,
@@ -939,6 +1140,7 @@ int main(int argc,const char **argv) {
                 application=AXUIElementCreateApplication(pid);AXUIElementSetMessagingTimeout(application,.15);inspectMasterShare(application,pid,directory,report);
                 if(settingsMode)inspectMasterSettings(application,pid,directory,report);
                 if(transcodeMode)inspectMasterTranscodeSavePanel(application,pid,directory,report);
+                if(exportMode)exportH264PrivateFixture(application,pid,directory,report);
             }
             goto output;
         }
@@ -984,7 +1186,7 @@ int main(int argc,const char **argv) {
         report[@"identityStillMatched"]=@(identity(pid));report[@"nodes"]=@(nodes);report[@"attributeFailures"]=@(failures);
         report[@"truncated"]=@(truncated);report[@"deadlineExceeded"]=@(expired);
         struct stat info;BOOL exists=lstat([report[@"intendedLibraryPath"]fileSystemRepresentation],&info)==0;report[@"intendedLibraryExists"]=@(exists);
-        report[@"qualification"]=transcodeMode ? @"Only observed H.264 and Do Nothing selections, then one guarded Next press and Save panel inventory. No path entry, Save or export." : settingsMode ? @"One Master File menu press and one guarded Settings press only; new controls require review. No Next, Save, export or performance qualification." : shareMode ? @"One exact Master File menu press only; bounded Share pane inventory requires review. No Next, Save, export or performance qualification." : hidMode ? @"One guest-global HID double-click attempt only, gated to Darwin13 and an exact owned fixture. Delivery unqualified; fresh read-only post-action tree requires review. No timeline/render/export qualification." : openMode ? @"One exact generated-project open attempt only. Read-only post-action state is required; no timeline/render/export qualification." : createMode ? @"Explicit private-library creation attempt only; all input targets the owned guest FCP. No existing library selection or import/render/export qualification." : @"One verified New-button press only. Save-panel controls are inventoried; no path entered, Save pressed or existing library selected.";
+        report[@"qualification"]=exportMode ? @"One private-fixture H264 Save attempt only. Stable-file candidate requires independent media verification; no completion, performance or fidelity qualification." : transcodeMode ? @"Only observed H.264 and Do Nothing selections, then one guarded Next press and Save panel inventory. No path entry, Save or export." : settingsMode ? @"One Master File menu press and one guarded Settings press only; new controls require review. No Next, Save, export or performance qualification." : shareMode ? @"One exact Master File menu press only; bounded Share pane inventory requires review. No Next, Save, export or performance qualification." : hidMode ? @"One guest-global HID double-click attempt only, gated to Darwin13 and an exact owned fixture. Delivery unqualified; fresh read-only post-action tree requires review. No timeline/render/export qualification." : openMode ? @"One exact generated-project open attempt only. Read-only post-action state is required; no timeline/render/export qualification." : createMode ? @"Explicit private-library creation attempt only; all input targets the owned guest FCP. No existing library selection or import/render/export qualification." : @"One verified New-button press only. Save-panel controls are inventoried; no path entered, Save pressed or existing library selected.";
         if(button)CFRelease(button);if(dialog)CFRelease(dialog);if(application)CFRelease(application);
         NSData *json=[NSJSONSerialization dataWithJSONObject:report options:0 error:NULL];if(!json || json.length>1048576)return 3;
         fwrite(json.bytes,1,json.length,stdout);putchar('\n');alarm(0);return 0;

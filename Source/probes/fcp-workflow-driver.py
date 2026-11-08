@@ -1,4 +1,4 @@
-"""guest-bench CASE NEW_RESULTS EXISTING_AX_OBSERVER EXISTING_SURGICAL_HELPER [EXISTING_LIBRARY_ACTION_HELPER [new-private-library|create-private-library|create-and-open-private-project|create-open-and-retain-for-display|create-open-hid-and-retain-for-display|create-open-hid-inspect-master-share|create-open-hid-inspect-master-settings|create-open-hid-inspect-master-transcode-save-panel]].
+"""guest-bench CASE NEW_RESULTS EXISTING_AX_OBSERVER EXISTING_SURGICAL_HELPER [EXISTING_LIBRARY_ACTION_HELPER [new-private-library|create-private-library|create-and-open-private-project|create-open-and-retain-for-display|create-open-hid-and-retain-for-display|create-open-hid-inspect-master-share|create-open-hid-inspect-master-settings|create-open-hid-inspect-master-transcode-save-panel|create-open-hid-export-h264] [PRIVATE_EXPORT_VERIFIER]].
 Prepares verified generated media/XML, then inventories the live editor's actual menus.
 One standard OS-open attempt of generated XML; optional grounded New-library dialog helper.
 No guessed Save controls or import/playback/export qualification.
@@ -15,21 +15,24 @@ import time
 sys.path.insert(0,str(source/'scripts'))
 from fcp_workflow import compose_guest, hold_retained_display_window, load_preflight, valid_retention_receipt, workflow_checked_response, xml_template
 from fcp_preflight import wire_bool
+from fcp_export import fetch_private_export_report
 
 FIXTURE=Path('/private/tmp/lightclick-fcp-fixture-v1.dmg')
 
 
 def run_workflow():
-    if len(arguments) not in (4,5,6):raise ValueError('requires fixed FCP case, new absolute results, existing observer, existing surgical helper')
+    if len(arguments) not in (4,5,6,7):raise ValueError('requires fixed FCP case, new absolute results, existing observer, existing surgical helper')
     case,out,observer,helper=arguments[:4]
-    requested_mode=arguments[5] if len(arguments)==6 else 'new-private-library'
-    inspect_share=requested_mode in ('create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel')
-    share_action={'create-open-hid-inspect-master-settings':'inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel':'inspect-master-transcode-save-panel'}.get(requested_mode,'inspect-master-share')
-    hid_project=requested_mode in ('create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel')
+    requested_mode=arguments[5] if len(arguments)>=6 else 'new-private-library'
+    export_private=requested_mode=='create-open-hid-export-h264'
+    if export_private != (len(arguments)==7):raise ValueError('private export requires its explicit grounded verifier argument')
+    inspect_share=requested_mode in ('create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel','create-open-hid-export-h264')
+    share_action={'create-open-hid-inspect-master-settings':'inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel':'inspect-master-transcode-save-panel','create-open-hid-export-h264':'export-h264-private-fixture'}.get(requested_mode,'inspect-master-share')
+    hid_project=requested_mode in ('create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel','create-open-hid-export-h264')
     retain_app=requested_mode in ('create-open-and-retain-for-display','create-open-hid-and-retain-for-display')
-    open_project=requested_mode in ('create-and-open-private-project','create-open-and-retain-for-display','create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel')
+    open_project=requested_mode in ('create-and-open-private-project','create-open-and-retain-for-display','create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel','create-open-hid-export-h264')
     action_mode='create-private-library' if open_project else requested_mode
-    if requested_mode not in ('new-private-library','create-private-library','create-and-open-private-project','create-open-and-retain-for-display','create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel') or (len(arguments)>=5 and case!='mavericks-10.1'):raise ValueError('library mode must be explicit and grounded for FCP10.1 before staging')
+    if requested_mode not in ('new-private-library','create-private-library','create-and-open-private-project','create-open-and-retain-for-display','create-open-hid-and-retain-for-display','create-open-hid-inspect-master-share','create-open-hid-inspect-master-settings','create-open-hid-inspect-master-transcode-save-panel','create-open-hid-export-h264') or (len(arguments)>=5 and case!='mavericks-10.1'):raise ValueError('library mode must be explicit and grounded for FCP10.1 before staging')
     output=Path(out)
     if case not in ('mavericks-10.1','mojave-10.4.4') or not output.is_absolute() or output.exists():raise ValueError('fixed case and new absolute results required')
     if not stat.S_ISREG(FIXTURE.lstat().st_mode) or FIXTURE.resolve()!=FIXTURE:raise ValueError('fixed readonly fixture image unavailable')
@@ -44,6 +47,7 @@ def run_workflow():
     output.mkdir(parents=True)
     evidence=dict(result='INCONCLUSIVE',case=case,fixture_image=str(FIXTURE),xml_template_manifest=manifest,setup_commands=[],
                   scope='Generated media/XML open and observations, with an optional grounded New-library dialog action; no import/library/playback/export qualification or performance claim.')
+    if export_private:evidence['scope']='One private generated H264 export and bounded media verification; no app performance or full fidelity qualification'
     attached=False;ambiguous=False;retained_for_observation=False
     def save(): (output/'result.json').write_text(json.dumps(evidence,indent=2)+'\n')
     def tracked(command,timeout):
@@ -83,6 +87,17 @@ def run_workflow():
             if not isinstance(action_receipt,str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin',action_receipt):raise ValueError('invalid action helper staging receipt')
             extra.update(workflow_master_share_action=share_action,workflow_inspect_master_share=inspect_share,workflow_open_project_hid=hid_project,workflow_close_system_memory_notice=hid_project,workflow_retain_owned_app=retain_app,workflow_open_generated_project=open_project,workflow_action_mode=action_mode,workflow_action_helper=action_receipt,workflow_action_helper_sha256=hashlib.sha256(action_helper.read_bytes()).hexdigest())
             evidence['library_actions_requested']=True;evidence['requested_workflow_mode']=requested_mode;save()
+        if export_private:
+            verifier=Path(arguments[6])
+            if not verifier.is_file() or verifier.is_symlink() or not 0<verifier.stat().st_size<=2097152:raise ValueError('bounded existing export verifier required')
+            verifier_data=verifier.read_bytes()
+            verifier_sha=hashlib.sha256(verifier_data).hexdigest()
+            if verifier_data[:8]!=bytes.fromhex('cffaedfe07000001') or verifier_sha!='4ea324317573d13665904794855f26852aecbb0f86a0c4ec5b08edb9210278ee':raise ValueError('pinned x86_64 export verifier changed')
+            verifier_receipt=tracked_stage(verifier)
+            if not isinstance(verifier_receipt,str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin',verifier_receipt):raise ValueError('invalid export verifier staging receipt')
+            extra.update(workflow_export_verifier=verifier_receipt,workflow_export_verifier_sha256=verifier_sha)
+            evidence['export_verifier_sha256']=verifier_sha;save()
+
         baseline=disks()
         inserted=setup({'Action':'insert-disc','Path':str(FIXTURE),'Slot':1},120)
         if inserted.get('Error') or not wire_bool(inserted.get('Inserted'),True):raise ValueError('fixture insertion unconfirmed')
@@ -142,6 +157,18 @@ def run_workflow():
         elif open_project:evidence['project_open_skipped']=workflow.get('project_open_skipped','project evidence missing')
         if inspect_share:
             evidence['result']='MASTER_SHARE_INSPECTION_REQUIRES_REVIEW' if workflow.get('master_share_inspection_attempted') is True else 'MASTER_SHARE_EVIDENCE_GATE_NOT_SATISFIED'
+
+        if export_private:
+            verification=workflow.get('export_verification',{})
+            evidence['export_verification']=verification
+            evidence['result']='PRIVATE_EXPORT_VERIFICATION_INCONCLUSIVE'
+            export_receipt=verification.get('stdout_receipt')
+            if isinstance(export_receipt,dict):
+                evidence['export_verification_artifacts']=fetch_private_export_report(tracked,export_receipt,workflow['directory'],preflight['guest']['console_uid'],output/'export-verification')
+                artifact=evidence['export_verification_artifacts']
+                if verification.get('structure_qualified') is True and verification.get('app_alive_after') is True and artifact.get('closed_media_revalidated') is True:
+                    evidence['result']='PRIVATE_EXPORT_STRUCTURE_QUALIFIED_FIDELITY_REQUIRES_REVIEW'
+            save()
 
         if retain_app:
             guest=preflight.get('guest',{})
