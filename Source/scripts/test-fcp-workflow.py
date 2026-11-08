@@ -568,7 +568,7 @@ class Checks(unittest.TestCase):
     def test_master_share_inspection_is_one_guarded_call_after_fresh_project_views(self):
         group=dict(AXRole='AXGroup',AXDescription='LC-generated-8s',children=[dict(AXRole='AXTextField',AXDescription='display name',AXValue='LC-generated-8s',AXEnabled=1),dict(AXRole='AXImage',AXTitle='LC-generated-8s',AXEnabled=1),dict(AXRole='AXLayoutItem',AXDescription='range selection',AXValue=8)])
         view=dict(result='OBSERVED_WINDOWS',version='10.1',pid=321,identityMatched=1,identityStillMatched=1,axTrusted=1,windows=[dict(AXRole='AXWindow',AXSubrole='AXStandardWindow',children=[dict(AXRole='AXScrollArea',AXDescription='organizer',children=[dict(AXRole='AXGroup',AXDescription='events',children=[group])])])])
-        for case in ('inspect','partial-hid','wrong-full-pid','wrong-menu-pid','exited','modal','helper-error'):
+        for case in ('inspect','settings','partial-hid','wrong-full-pid','wrong-menu-pid','exited','modal','helper-error'):
             calls=[];opened=[False];full_reads=[0];alive=[True]
             def command(argv,seconds):
                 calls.append((argv,seconds))
@@ -585,21 +585,21 @@ class Checks(unittest.TestCase):
                     if argv[3]=='open-generated-project-hid':
                         opened[0]=True
                         return json.dumps(dict(mode='open-generated-project-hid',result='PROJECT_HID_DOUBLE_CLICK_PARTIAL_UNCONFIRMED'if case=='partial-hid'else'PROJECT_HID_DOUBLE_CLICK_POSTED_REQUIRES_REVIEW',pid=321,actionsPerformed=[dict(action='doubleClick',api='CGEventPost(kCGHIDEventTap)',targetPID=321,eventsPosted=2 if case=='partial-hid'else 4,downsPosted=1 if case=='partial-hid'else 2,upsPosted=1 if case=='partial-hid'else 2,balancedRelease=True)])).encode()
-                    self.assertEqual(argv[3],'inspect-master-share');self.assertEqual(seconds,28)
+                    self.assertEqual(argv[3],'inspect-master-settings' if case=='settings' else 'inspect-master-share');self.assertEqual(seconds,35 if case=='settings' else 28)
                     if case=='helper-error':raise ValueError('share action unconfirmed')
-                    return json.dumps(dict(mode='inspect-master-share',result='MASTER_SHARE_PRESS_SENT_REQUIRES_PANE_REVIEW',exportAttempted=False,nextOrSavePressed=False,sharePanels=[dict(AXTitle='Master File')])).encode()
+                    return json.dumps(dict(mode=argv[3],result='MASTER_SHARE_PRESS_SENT_REQUIRES_PANE_REVIEW',exportAttempted=False,nextOrSavePressed=False,sharePanels=[dict(AXTitle='Master File')])).encode()
                 return b'{}'
             directory='/private/var/tmp/LightClickFCPFixture.ABC123';report=dict(workflow=dict(import_attempted=False))
             ns=dict(complete_hid_open=complete_hid_open,app=types.SimpleNamespace(pid=321,poll=lambda:None if alive[0]else 1),report=report,command=command,json=json,
                     os=types.SimpleNamespace(path=types.SimpleNamespace(lexists=lambda p:True,isdir=lambda p:True,islink=lambda p:False)),
                     time=types.SimpleNamespace(time=lambda:0,sleep=lambda sec:None),launched_at=0,workflow_directory=directory,
-                    spec=dict(ax_helper='/own/ax-observe',workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',workflow_open_generated_project=True,workflow_open_project_hid=True,workflow_inspect_master_share=True,workflow_retain_owned_app=False,variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
+                    spec=dict(ax_helper='/own/ax-observe',workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',workflow_open_generated_project=True,workflow_open_project_hid=True,workflow_inspect_master_share=True,workflow_master_share_action='inspect-master-settings' if case=='settings' else 'inspect-master-share',workflow_retain_owned_app=False,variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
             exec(compile('if True:\n'+OBSERVE,'<production one-shot master share>','exec'),ns)
             actions=[c for c in calls if c[0][0]=='/own/ax-actions']
             self.assertEqual([c[0][3]for c in actions[:2]],['create-private-library','open-generated-project-hid'])
-            if case in ('inspect','helper-error'):
-                self.assertEqual([c[0][3]for c in actions[2:]],['inspect-master-share'])
-                if case=='inspect':self.assertFalse(report['workflow']['master_share_inspection']['exportAttempted'])
+            if case in ('inspect','settings','helper-error'):
+                self.assertEqual([c[0][3]for c in actions[2:]],['inspect-master-settings' if case=='settings' else 'inspect-master-share'])
+                if case in ('inspect','settings'):self.assertFalse(report['workflow']['master_share_inspection']['exportAttempted'])
                 else:self.assertIn('unconfirmed',report['workflow']['master_share_inspection']['reason'])
             else:self.assertEqual(len(actions),2)
             self.assertEqual(full_reads[0],2)
@@ -613,7 +613,7 @@ class Checks(unittest.TestCase):
         function.body=function.body[:stop]+[ast.Return(value=ast.Dict(keys=[ast.Constant(k)for k in ('inspect_share','hid_project','retain_app','open_project','action_mode')],values=[ast.Name(id=k,ctx=ast.Load())for k in ('inspect_share','hid_project','retain_app','open_project','action_mode')]))]
         extracted=ast.fix_missing_locations(ast.Module(body=[function],type_ignores=[]));namespace={}
         exec(compile(extracted,'<actual outer Share routing>','exec'),namespace)
-        for mode,share,hid,retain in [('create-open-hid-inspect-master-share',True,True,False),('create-open-hid-and-retain-for-display',False,True,True),('create-and-open-private-project',False,False,False)]:
+        for mode,share,hid,retain in [('create-open-hid-inspect-master-settings',True,True,False),('create-open-hid-inspect-master-share',True,True,False),('create-open-hid-and-retain-for-display',False,True,True),('create-and-open-private-project',False,False,False)]:
             namespace['arguments']=['mavericks-10.1','/own/results','observer','workload','actions',mode]
             self.assertEqual(namespace['run_workflow'](),dict(inspect_share=share,hid_project=hid,retain_app=retain,open_project=True,action_mode='create-private-library'))
         namespace['arguments']=['mojave-10.4.4','/own/results','observer','workload','actions','create-open-hid-inspect-master-share']
@@ -624,7 +624,7 @@ class Checks(unittest.TestCase):
         source=Path(__file__).resolve().parents[1]
         path=source/'probes/fcp-workflow-driver.py'
         tree=ast.parse(path.read_text());tree.body.pop()
-        for case,mode in (('mavericks-10.1','unknown'),('mojave-10.4.4','create-private-library'),('mojave-10.4.4','create-and-open-private-project'),('mojave-10.4.4','create-open-and-retain-for-display'),('mojave-10.4.4','create-open-hid-and-retain-for-display'),('mojave-10.4.4','create-open-hid-inspect-master-share')):
+        for case,mode in (('mavericks-10.1','unknown'),('mojave-10.4.4','create-private-library'),('mojave-10.4.4','create-and-open-private-project'),('mojave-10.4.4','create-open-and-retain-for-display'),('mojave-10.4.4','create-open-hid-and-retain-for-display'),('mojave-10.4.4','create-open-hid-inspect-master-share'),('mojave-10.4.4','create-open-hid-inspect-master-settings')):
             with tempfile.TemporaryDirectory() as tmp:
                 output=Path(tmp)/'result'
                 ns=dict(source=source,arguments=[case,str(output),'observer','inventory','actions',mode],
