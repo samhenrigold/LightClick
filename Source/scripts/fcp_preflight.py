@@ -83,6 +83,13 @@ def observe(pid):
     raw=command([spec['ax_helper'],spec['variant'],str(pid)],14)
     return json.loads(raw)
 
+
+def validate_package_metadata(package,distribution):
+    identity={'identifier':package.get('identifier'),'version':package.get('version')}
+    if identity!={'identifier':'com.apple.pkg.FinalCutProXTrial','version':'10.4.4.0.1.1539134424'}:raise ValueError('trial package identity mismatch')
+    if not any(e.tag=='pkg-ref' and e.get('id')=='com.apple.pkg.FinalCutTrial' and e.get('version')=='10.4.4.0.1.1539134424' for e in distribution.iter()):raise ValueError('trial Distribution identity mismatch')
+    return identity
+
 try:
     def interrupted(n,frame):raise RuntimeError('bounded collector interrupted '+str(n))
     for n in (signal.SIGALRM,signal.SIGTERM,signal.SIGINT):signal.signal(n,interrupted)
@@ -130,9 +137,7 @@ try:
             with open(path,'rb') as stream:return ET.fromstring(stream.read(524289))
         package=xml_metadata('FinalCutProXTrial.pkg/PackageInfo')
         distribution=xml_metadata('Distribution')
-        report['package_identity']={'identifier':package.get('identifier'),'version':package.get('version')}
-        if report['package_identity']!={'identifier':'com.apple.pkg.FinalCutProXTrial','version':'10.4.4.0.1.1539134424'}:raise ValueError('trial package identity mismatch')
-        if not any(e.tag=='pkg-ref' and e.get('id')=='com.apple.FinalCutTrial' and e.get('version')=='10.4.4.0.1.1539134424' for e in distribution.iter()):raise ValueError('trial Distribution identity mismatch')
+        report['package_identity']=validate_package_metadata(package,distribution)
     else:raise ValueError('unknown fixed install type')
     if os.path.exists(target):
         report['preexisting_app']=exact_identity(target)

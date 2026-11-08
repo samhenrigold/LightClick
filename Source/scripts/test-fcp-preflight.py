@@ -77,6 +77,20 @@ class Checks(unittest.TestCase):
             self.assertEqual([x for x in calls if x.get('Action')=='insert-disc'],[dict(Action='insert-disc',Path=str(dmg),Slot=0)])
             self.assertEqual(json.loads((root/'results/result.json').read_text())['result'],'INCONCLUSIVE')
 
+    def test_actual_trial_distribution_package_id_not_application_id(self):
+        import xml.etree.ElementTree as ET
+        node=next(node for node in ast.parse(GUEST).body if isinstance(node,ast.FunctionDef) and node.name=='validate_package_metadata')
+        ns={};exec(compile(ast.Module(body=[node],type_ignores=[]),'<production package validator>','exec'),ns)
+        # Minimal transcription of the supplied PackageInfo/Distribution attributes; no vendor XML copied.
+        package=ET.fromstring('<pkg-info identifier="com.apple.pkg.FinalCutProXTrial" version="10.4.4.0.1.1539134424"/>')
+        distribution=ET.fromstring('<installer-gui-script><choices-outline/><pkg-ref id="com.apple.pkg.FinalCutTrial">#FinalCutProXTrial.pkg</pkg-ref><pkg-ref id="com.apple.pkg.FinalCutTrial" installKBytes="3738794" version="10.4.4.0.1.1539134424"/></installer-gui-script>')
+        self.assertEqual(ns['validate_package_metadata'](package,distribution)['identifier'],'com.apple.pkg.FinalCutProXTrial')
+        for key,value in (('id','com.apple.FinalCutTrial'),('version','10.4.4')):
+            bad=copy.deepcopy(distribution);bad[-1].set(key,value)
+            with self.assertRaisesRegex(ValueError,'Distribution'):ns['validate_package_metadata'](package,bad)
+        package.set('identifier','com.apple.FinalCutTrial')
+        with self.assertRaisesRegex(ValueError,'package'):ns['validate_package_metadata'](package,distribution)
+
     def test_diagnostic_pipe_cap_does_not_limit_payload_files(self):
         import os, subprocess, sys, threading, time
         nodes=ast.parse(GUEST).body
