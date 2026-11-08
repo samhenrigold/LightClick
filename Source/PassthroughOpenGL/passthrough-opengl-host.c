@@ -205,6 +205,7 @@ struct DGHostContext {
     struct DGBackingTicket *scatter_predecessor;
 #endif
 };
+#include "direct-opcodes.h"
 // Explicit research-oracle selection. Zero keeps normal host GPU selection.
 static GLint dg_reference_renderer;
 struct DGHostDrawable {
@@ -224,6 +225,7 @@ struct DGHostDrawable {
     uint64_t write_serial;
     struct DGHostDrawable *next;
 };
+#include "backing-transition-trace-host.c"
 #ifdef VIM_BACKING_CANONICAL_EXPERIMENT
 #ifndef VIM_VRAM_RENDER_TARGET_EXPERIMENT
 #error Canonical backing requires explicit scoped-render ownership
@@ -991,6 +993,7 @@ static int DGResize(struct DGHostContext *c, int width, int height) {
     glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, (GLuint)renderbuffer);
     if (!good)
         fprintf(stderr, "PassthroughOpenGL default framebuffer incomplete, GL error=%x\n", glGetError());
+    DGTransitionLocal(c,VIM_TRANSITION_ALLOC,good?0:1,width,height,0,0);
     return good;
 }
 /* Reserve only during our explicit internal attach transaction. A generic
@@ -1137,6 +1140,7 @@ static int DGImportDrawableSurface(struct DGHostContext *c, const void *pixels, 
         c->error = GL_INVALID_OPERATION;
     c->drawable->alias_dirty = 1;
     ++c->drawable->write_serial;
+    DGTransitionLocal(c,VIM_TRANSITION_FRONT_SEED,c->error,(int)width,(int)height,x,y);
     return 1;
 }
 static int DGDrawablePixels(struct DGHostContext *c, struct DGMessage *m, int reading) {
@@ -1226,6 +1230,7 @@ static int DGDrawablePixels(struct DGHostContext *c, struct DGMessage *m, int re
     glPixelStorei(reading ? GL_PACK_SWAP_BYTES : GL_UNPACK_SWAP_BYTES, swap);
     glPixelStorei(reading ? GL_PACK_LSB_FIRST : GL_UNPACK_LSB_FIRST, lsb);
     DGRestoreColorTransfer(&transfer);
+    if(!reading)DGTransitionLocal(c,VIM_TRANSITION_FRONT_SEED,UINT32_MAX,(int)width,(int)height,x,y);
     return 0;
 }
 /* Quartz samples its just-rendered accelerator surface while constructing
@@ -1374,6 +1379,7 @@ static int DGSelectDrawableMode(struct DGHostContext *c, uint32_t name, int widt
             return 0;
     }
 #endif
+    struct DGHostDrawable *selected_before=c->drawable;
     struct DGHostDrawable *d = c->drawables;
     for (; d; d = d->next)
         if (d->name == name)
@@ -1436,6 +1442,7 @@ static int DGSelectDrawableMode(struct DGHostContext *c, uint32_t name, int widt
         DGSetBuffer(c, c->read_mode, 1);
     if ((GLuint)draw_fb == old)
         DGSetBuffer(c, c->draw_mode, 0);
+    if(selected_before!=d)DGTransitionLocal(c,VIM_TRANSITION_SELECT,0,width,height,(uintptr_t)selected_before,d->prepared);
     return 1;
 }
 static int DGSelectDrawable(struct DGHostContext *c, uint32_t name, int width, int height) {
@@ -1881,6 +1888,8 @@ static int DGRendererMemory(struct DGHostContext *context, struct DGReply *reply
  * A connection must serialize calls and bind/unbind its CGL contexts when
  * changing threads. Socket/memory-worker semantics remain unchanged. */
 struct DGInterpreter {
+    struct VIMTransitionState *transition;
+    unsigned transition_attempted;
     struct DGHostContext contexts[256];
     unsigned next, client_features;
     int hello, service_only;
@@ -1998,6 +2007,10 @@ static int DGInterpretCommand(struct DGInterpreter *s, int fd, struct DGMessage 
     // scalar traverses the SAME prepared/scoped/error/validation path below.
     if (m->op == DG_COMPACT_SCALARS)
         return DGInterpretCompact(s, fd, m);
+    if(VIMTransitionEnabled()){
+        if(!s->transition_attempted){s->transition_attempted=1;s->transition=VIMTransitionStart((uintptr_t)s);}
+        vim_transition_session=s->transition?s->transition->session:0;
+    }
     if (dg_seamless_dir)
         DGSeamlessObserve(s, m);
     struct DGHostContext *contexts = s->contexts;
@@ -2516,8 +2529,10 @@ static int DGInterpretCommand(struct DGInterpreter *s, int fd, struct DGMessage 
         }
     } else if (m->op == DG_DRAW || m->op == DG_DRAW_INSTANCED_ARRAYS)
         error = DGHostDraw(context, m);
-    else
+    else {
         error = DGExecute(context, m, &reply);
+        if(m->op==DG_OP_blit_framebuffer_EXT)DGTransitionBlit(context,m);
+    }
 #ifdef VIM_GL_DRAW_WITNESS
     if (!error)
         DGTraceDrawWitness(context, m);
@@ -2660,6 +2675,7 @@ static void DGInterpreterDestroy(struct DGInterpreter *s) {
     }
     DGDisplaySenderStop(&s->surface_holds);
     DGDestroySurfaceHolds(&s->surface_holds);
+    VIMTransitionFinish(s->transition);
     free(s);
 }
 static void *DGServe(void *opaque) {

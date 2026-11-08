@@ -57,6 +57,14 @@ struct DGSurfaceLease {
     unsigned upload_rows;
     struct DGSurfaceLease *next;
 };
+/* Epochs below are captured under the resource's existing access lock.
+ * Append after unlocking: diagnostics never extend the resource critical section. */
+static void DGTransitionFamily(struct DGHostContext *c,struct DGSharedSurface *s,unsigned kind,unsigned status,unsigned opcode,uint64_t before,uint64_t after,const uint64_t args[10]){
+    if(!VIMTransitionEnabled() || !vim_transition_session)return;
+    struct VIMTransitionRow r=DGTransitionRow(c,kind,status);
+    r.opcode=opcode;r.object=s->resource;r.incarnation=s->incarnation;r.before=before;r.after=after;
+    if(args)memcpy(r.args,args,sizeof(r.args));VIMTransitionAppend(r);
+}
 static pthread_mutex_t dg_surface_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct DGSharedSurface *dg_surfaces;
 static size_t dg_surface_bytes;
@@ -660,7 +668,9 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c, struct DGMessage *m, st
             r->error = GL_INVALID_VALUE;
             return 0;
         }
+        uint64_t trace_before=0,trace_after=0;
         pthread_mutex_lock(&s->access);
+        if(VIMTransitionEnabled())trace_before=s->epoch;
         if (s->retired || s->epoch != m->args[1])
             r->error = GL_INVALID_OPERATION;
         else {
@@ -697,7 +707,9 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c, struct DGMessage *m, st
                 ++c->drawable->write_serial;
             }
         }
+        if(VIMTransitionEnabled())trace_after=s->epoch;
         pthread_mutex_unlock(&s->access);
+        DGTransitionFamily(c,s,VIM_TRANSITION_FAMILY_IMPORT,r->error,m->op,trace_before,trace_after,&m->args[1]);
     } else if (m->op == DG_SURFACE_PUBLISH_REGIONS || seal) {
         struct DGSharedSurface *s = p->resource;
         unsigned count = (unsigned)m->args[3];
@@ -740,7 +752,9 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c, struct DGMessage *m, st
             }
         }
         struct DGSurfaceSnapshot *old = NULL;
+        uint64_t trace_before=0,trace_after=0;
         pthread_mutex_lock(&s->access);
+        if(VIMTransitionEnabled())trace_before=s->epoch;
         if (s->retired || s->epoch != m->args[1])
             r->error = GL_INVALID_OPERATION;
         else {
@@ -777,13 +791,17 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c, struct DGMessage *m, st
             if (r->error)
                 __atomic_store_n(&s->retired, 1, __ATOMIC_RELEASE); // No coherent version after partial GPU failure.
         }
+        if(VIMTransitionEnabled())trace_after=s->epoch;
         pthread_mutex_unlock(&s->access);
+        DGTransitionFamily(c,s,VIM_TRANSITION_FAMILY_PUBLISH,r->error,m->op,trace_before,trace_after,&m->args[1]);
         DGSurfaceSnapshotDestroy(old);
     } else if (m->op == DG_SURFACE_PUBLISH) {
         if (m->args[1] > 1 || m->args[2] > 1)
             r->error = GL_INVALID_VALUE;
         else {
+            uint64_t trace_before=0,trace_after=0;
             pthread_mutex_lock(&p->resource->access);
+            if(VIMTransitionEnabled())trace_before=p->resource->epoch;
             if (p->resource->retired || (!m->args[3] && p->resource->epoch))
                 r->error = GL_INVALID_OPERATION;
             else if (!m->args[3] || m->args[3] >= p->resource->epoch) {
@@ -791,7 +809,9 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c, struct DGMessage *m, st
                 if (!r->error)
                     p->resource->epoch = m->args[3];
             }
+            if(VIMTransitionEnabled())trace_after=p->resource->epoch;
             pthread_mutex_unlock(&p->resource->access);
+            DGTransitionFamily(c,p->resource,VIM_TRANSITION_FAMILY_PUBLISH,r->error,m->op,trace_before,trace_after,&m->args[1]);
         }
     } else if (m->op == DG_SURFACE_BIND) {
         GLint texture = 0;
@@ -827,6 +847,7 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c, struct DGMessage *m, st
     } else if (m->op == DG_SURFACE_UPLOAD) {
         struct DGSharedSurface *s = p->resource;
         uint64_t first = m->args[5], rows = m->args[6];
+        uint64_t trace_before=0,trace_after=0;int trace_upload=0;
         size_t row = (size_t)s->width * VIMGLPixelBytes(s->format);
         if (!m->args[1] || m->args[2] != (uint64_t)s->width || m->args[3] != (uint64_t)s->height ||
             (rows ? s->format != VIM_GL_PIXEL_BGRA8 || first >= (uint64_t)s->height ||
@@ -835,11 +856,13 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c, struct DGMessage *m, st
             r->error = GL_INVALID_VALUE;
         else {
             pthread_mutex_lock(&s->access);
+            if(VIMTransitionEnabled())trace_before=s->epoch;
             if (s->retired)
                 r->error = GL_INVALID_OPERATION;
             else if (m->args[1] > s->epoch) {
                 if (!rows) {
                     DGSurfaceDropUpload(p);
+                    trace_upload=1;
                     r->error = DGSurfaceUpload(c, p, m + 1);
                     if (!r->error)
                         s->epoch = m->args[1];
@@ -865,6 +888,7 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c, struct DGMessage *m, st
                         memcpy(p->upload + (size_t)first * row, m + 1, m->bytes);
                         p->upload_rows += (unsigned)rows;
                         if (p->upload_rows == (unsigned)s->height) {
+                            trace_upload=1;
                             r->error = DGSurfaceUpload(c, p, p->upload);
                             if (!r->error)
                                 s->epoch = m->args[1];
@@ -874,8 +898,10 @@ static int DGSurfaceCommandImpl(struct DGHostContext *c, struct DGMessage *m, st
                 }
             } else
                 DGSurfaceDropUpload(p);
+            if(VIMTransitionEnabled())trace_after=s->epoch;
             pthread_mutex_unlock(&s->access);
         }
+        if(trace_upload)DGTransitionFamily(c,s,VIM_TRANSITION_FAMILY_UPLOAD,r->error,m->op,trace_before,trace_after,&m->args[1]);
         if (r->error)
             DGSurfaceDropUpload(p);
     } else if (m->op == DG_SURFACE_RETIRE) {
