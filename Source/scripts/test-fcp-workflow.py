@@ -95,6 +95,36 @@ class Checks(unittest.TestCase):
                 self.assertIn('inventory_after_library_action',report['workflow'])
                 self.assertNotIn('PASS',json.dumps(report))
 
+    def test_create_mode_has_explicit_bounded_route(self):
+        calls=[]
+        inventory=dict(result='MENU_INVENTORY',identityMatched=1,identityStillMatched=1,axTrusted=1,pid=321,variant='10.1',mode='inventory')
+        def command(argv,seconds):
+            calls.append((argv,seconds))
+            return json.dumps(inventory if argv[0]=='/own/ax-workload' else {}).encode()
+        directory='/private/var/tmp/LightClickFCPFixture.Abc123'
+        report=dict(workflow=dict(import_attempted=False))
+        ns=dict(app=types.SimpleNamespace(pid=321,poll=lambda:None),report=report,command=command,json=json,
+                os=types.SimpleNamespace(path=types.SimpleNamespace(lexists=lambda p:False,isdir=lambda p:False,islink=lambda p:False)),
+                time=types.SimpleNamespace(time=lambda:0,sleep=lambda sec:None),launched_at=0,workflow_directory=directory,
+                spec=dict(workflow_helper='/own/ax-workload',workflow_action_helper='/own/ax-actions',workflow_action_mode='create-private-library',variant='10.1',app='/Applications/Final Cut Pro.app'),xml_path=directory+'/generated.fcpxml')
+        exec(compile('if True:\n'+OBSERVE,'<production explicit creation route>','exec'),ns)
+        self.assertEqual([c for c in calls if c[0][0]=='/own/ax-actions'],[(['/own/ax-actions','10.1','321','create-private-library',directory],60)])
+        self.assertFalse(report['workflow']['library_artifact']['exists'])
+        self.assertNotIn('PASS',json.dumps(report))
+
+    def test_invalid_creation_modes_fail_before_staging(self):
+        source=Path(__file__).resolve().parents[1]
+        path=source/'probes/fcp-workflow-driver.py'
+        tree=ast.parse(path.read_text());tree.body.pop()
+        for case,mode in (('mavericks-10.1','unknown'),('mojave-10.4.4','create-private-library')):
+            with tempfile.TemporaryDirectory() as tmp:
+                output=Path(tmp)/'result'
+                ns=dict(source=source,arguments=[case,str(output),'observer','inventory','actions',mode],
+                        stage=lambda *a:self.fail('invalid mode staged a helper'),request=lambda *a:self.fail('invalid mode issued a request'))
+                exec(compile(tree,str(path),'exec'),ns)
+                with self.assertRaisesRegex(ValueError,'grounded'):ns['run_workflow']()
+                self.assertFalse(output.exists())
+
     def test_open_exact_own_xml_only_after_trusted_inventory(self):
         for trusted in (1,0,'1'):
             calls=[];clock=[0]

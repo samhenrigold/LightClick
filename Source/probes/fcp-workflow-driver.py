@@ -1,4 +1,4 @@
-"""guest-bench CASE NEW_RESULTS EXISTING_AX_OBSERVER EXISTING_SURGICAL_HELPER [EXISTING_LIBRARY_ACTION_HELPER].
+"""guest-bench CASE NEW_RESULTS EXISTING_AX_OBSERVER EXISTING_SURGICAL_HELPER [EXISTING_LIBRARY_ACTION_HELPER [new-private-library|create-private-library]].
 Prepares verified generated media/XML, then inventories the live editor's actual menus.
 One standard OS-open attempt of generated XML; optional grounded New-library dialog helper.
 No guessed Save controls or import/playback/export qualification.
@@ -20,8 +20,10 @@ FIXTURE=Path('/private/tmp/lightclick-fcp-fixture-v1.dmg')
 
 
 def run_workflow():
-    if len(arguments) not in (4,5):raise ValueError('requires fixed FCP case, new absolute results, existing observer, existing surgical helper')
+    if len(arguments) not in (4,5,6):raise ValueError('requires fixed FCP case, new absolute results, existing observer, existing surgical helper')
     case,out,observer,helper=arguments[:4]
+    action_mode=arguments[5] if len(arguments)==6 else 'new-private-library'
+    if action_mode not in ('new-private-library','create-private-library') or (len(arguments)>=5 and case!='mavericks-10.1'):raise ValueError('library mode must be explicit and grounded for FCP10.1 before staging')
     output=Path(out)
     if case not in ('mavericks-10.1','mojave-10.4.4') or not output.is_absolute() or output.exists():raise ValueError('fixed case and new absolute results required')
     if not stat.S_ISREG(FIXTURE.lstat().st_mode) or FIXTURE.resolve()!=FIXTURE:raise ValueError('fixed readonly fixture image unavailable')
@@ -64,7 +66,7 @@ def run_workflow():
         if not isinstance(receipt,str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin',receipt):raise ValueError('invalid surgical helper staging receipt')
         extra=dict(workflow_helper=receipt,workflow_helper_sha256=hashlib.sha256(helper.read_bytes()).hexdigest(),
                    workflow_xml_template=base64.b64encode(template).decode(),workflow_xml_template_sha256=hashlib.sha256(template).hexdigest())
-        if len(arguments)==5:
+        if len(arguments)>=5:
             if case!='mavericks-10.1':raise ValueError('library action helper currently grounded only for FCP10.1')
             action_helper=Path(arguments[4])
             if not action_helper.is_file() or action_helper.is_symlink() or not 0<action_helper.stat().st_size<=2097152:raise ValueError('bounded existing action helper required')
@@ -72,7 +74,7 @@ def run_workflow():
             if header!=bytes.fromhex('cffaedfe07000001'):raise ValueError('action helper must be thin x86_64')
             action_receipt=tracked_stage(action_helper)
             if not isinstance(action_receipt,str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin',action_receipt):raise ValueError('invalid action helper staging receipt')
-            extra.update(workflow_action_helper=action_receipt,workflow_action_helper_sha256=hashlib.sha256(action_helper.read_bytes()).hexdigest())
+            extra.update(workflow_action_mode=action_mode,workflow_action_helper=action_receipt,workflow_action_helper_sha256=hashlib.sha256(action_helper.read_bytes()).hexdigest())
             evidence['library_actions_requested']=True;save()
         baseline=disks()
         inserted=setup({'Action':'insert-disc','Path':str(FIXTURE),'Slot':1},120)
@@ -120,6 +122,13 @@ def run_workflow():
                     and type(action.get('pid')) is int and action['pid']==preflight.get('guest',{}).get('owned_app_pid')
                     and all(wire_bool(action.get(key),True) for key in ('identityMatched','identityStillMatched','axTrusted'))
                     and valid_inventory(workflow.get('inventory_after_library_action',{}))):evidence['result']='LIBRARY_PANEL_OBSERVED_REQUIRES_REVIEW'
+            artifact=workflow.get('library_artifact',{})
+            if (action_mode=='create-private-library' and action.get('result')=='PRIVATE_LIBRARY_CREATED_REQUIRES_IMPORT_REVIEW'
+                    and action.get('variant')==ns['CASES'][case]['variant'] and type(action.get('pid')) is int and action['pid']==preflight.get('guest',{}).get('owned_app_pid')
+                    and all(wire_bool(action.get(key),True) for key in ('identityMatched','identityStillMatched','axTrusted','privateLibraryVerified'))
+                    and artifact.get('path')==workflow.get('directory','')+'/private.fcpbundle' and artifact.get('exists') is True and artifact.get('is_directory') is True and artifact.get('is_symlink') is False
+                    and valid_inventory(workflow.get('inventory_after_library_action',{}))):evidence['result']='PRIVATE_LIBRARY_CREATED_REQUIRES_IMPORT_REVIEW'
+
 
     except BaseException as error:
         evidence['error']=repr(error);save();raise

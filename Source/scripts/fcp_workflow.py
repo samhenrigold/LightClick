@@ -87,7 +87,10 @@ OBSERVE=r'''
                 after_open=report['workflow']['inventory_after_open']
                 if spec.get('workflow_action_helper') and app.poll() is None and after_open.get('result')=='MENU_INVENTORY' and after_open.get('variant')==spec['variant'] and type(after_open.get('pid')) is int and after_open['pid']==app.pid and after_open.get('mode')=='inventory' and all(native_true(after_open.get(k)) for k in ('identityMatched','identityStillMatched','axTrusted')):
                     report['workflow']['library_action_attempted']=True
-                    raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),'new-private-library',workflow_directory],20)
+                    action_mode=spec.get('workflow_action_mode','new-private-library')
+                    if action_mode not in ('new-private-library','create-private-library'):raise ValueError('unknown library action mode')
+                    report['workflow']['library_action_mode']=action_mode
+                    raw=command([spec['workflow_action_helper'],spec['variant'],str(app.pid),action_mode,workflow_directory],60 if action_mode=='create-private-library' else 20)
                     report['workflow']['library_action']=json.loads(raw)
                     if app.poll() is None:
                         raw=command([spec['workflow_helper'],spec['variant'],str(app.pid),'inventory'],14)
