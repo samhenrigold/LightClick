@@ -324,6 +324,11 @@ typedef struct {
     uint32_t profile_shift_helpers, pad_shift_helpers;
     uint64_t stat_shift_helpers_unclassified;
     uint64_t stat_shift_helpers[SHIFT_HELPER_PROFILE_BUCKETS];
+    // Experimental/default off. Append only: preserve all earlier emitter/assembly offsets.
+    // Exchanges/equal/changed count stores; leaf/xmark skips count nonempty shadow mirrors, not saved bodies or time.
+    uint32_t pte_same64, pad_pte_same64;
+    uint64_t stat_pte_same64_exchanges, stat_pte_same64_equal, stat_pte_same64_changed;
+    uint64_t stat_pte_same64_leaf_skips, stat_pte_same64_xmark_skips;
 } EngineCtx;
 _Static_assert(sizeof(EngineCtx) <= CTX_SLOT, "EngineCtx must fit its existing per-vCPU slot");
 

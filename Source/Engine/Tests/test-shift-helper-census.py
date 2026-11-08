@@ -185,7 +185,7 @@ def prepare(engine, work):
                   for new, old, declaration in [('EngineCtx','LegacyEngineCtx',old_ctx),('TrConfig','LegacyTrConfig',old_config)]
                   for field in fields(declaration)]
     assertions += ['_Static_assert(offsetof(EngineCtx, profile_shift_helpers) == sizeof(LegacyEngineCtx), "append only");',
-                   '_Static_assert(sizeof(EngineCtx) == sizeof(LegacyEngineCtx)+2064, "bounded census bytes");',
+                   '_Static_assert(offsetof(EngineCtx, stat_shift_helpers)+sizeof(((EngineCtx *)0)->stat_shift_helpers)-offsetof(EngineCtx, profile_shift_helpers) == 2064, "bounded census span; later appended fields allowed");',
                    '_Static_assert(sizeof(EngineCtx) <= CTX_SLOT, "existing slot");']
     helpers = '\n\n'.join(function(monitor,name) for name in ['cur_nzcv','helper_flags','helper_keep_flags','count_shift_helper'])
     functions = descriptor+'\n'+helpers+'\n'+old_h_shift.replace('h_shift(', 'baseline_h_shift(',1)+'\n'+h_shift

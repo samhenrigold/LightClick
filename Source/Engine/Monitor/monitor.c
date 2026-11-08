@@ -1314,7 +1314,7 @@ static inline bool pt_flood_decision(ShadowDesc *d, bool nobody_home) {
     return true;
 }
 
-static void pt_slot_changed(u64 gpa_slot) {
+static void pt_slot_changed_impl(u64 gpa_slot, bool same64) {
     u32 fr = (u32)(gpa_slot >> 12), i = (u32)((gpa_slot & 0xfff) >> 3);
     zap_why = KILL_PT_LEAF;
     for (u32 it = mirror_head[fr], next; it; it = next) {
@@ -1362,6 +1362,16 @@ static void pt_slot_changed(u64 gpa_slot) {
             continue;
         }
         if (t[i]) {
+            // Only an exact pre-store value returned by the opt-in aligned64
+            // atomic exchange supplies this witness. Still run every flood,
+            // root-retirement and higher-level action above/as before: repeated
+            // identical stores may be a freed table being overwritten as data.
+            if (same64 && d->level == 0) {
+                c->stat_pte_same64_leaf_skips++;
+                if (t[i] & PTE_X_MARK)
+                    c->stat_pte_same64_xmark_skips++;
+                continue;
+            }
             bool table = d->level > 0;
             zap_why = table ? KILL_PT_TABLE : KILL_PT_LEAF;
             zap_entry(&t[i], d);
@@ -1372,6 +1382,9 @@ static void pt_slot_changed(u64 gpa_slot) {
         }
     }
 }
+
+// All legacy callers retain their original invalidation and retirement behavior.
+static void pt_slot_changed(u64 gpa_slot) { pt_slot_changed_impl(gpa_slot, false); }
 
 // ---- ARM load and store decode, for the forms the translator emits ----
 typedef struct {
@@ -1871,7 +1884,18 @@ static void handle_data_abort(bool lower) {
             u64 observed_old = 0;
             if (observe_plain)
                 observed_old = n == 8 ? *(u64 *)RAM(w.gpa) : *(u32 *)RAM(w.gpa);
-            if (n == 8)
+            bool same64 = false;
+            if (c->pte_same64 && n == 8 && !(w.gpa & 7) && is_ram(w.gpa)) {
+                // Preserve the actual guest store. Unlike a separate old-value
+                // read, exchange sees an intervening lock-free walker A/D CAS.
+                u64 old = __atomic_exchange_n((u64 *)RAM(w.gpa), val, __ATOMIC_SEQ_CST);
+                c->stat_pte_same64_exchanges++;
+                same64 = old == val;
+                if (same64)
+                    c->stat_pte_same64_equal++;
+                else
+                    c->stat_pte_same64_changed++;
+            } else if (n == 8)
                 *(u64 *)RAM(w.gpa) = val;
             else if (n == 4 && !(w.gpa & 3)) // one piece: another vCPU can read the table while this runs
                 *(u32 *)RAM(w.gpa) = (u32)val;
@@ -1879,7 +1903,7 @@ static void handle_data_abort(bool lower) {
                 memcpy(RAM(w.gpa), &val, n);
             if (observe_plain)
                 mmu_observe_store(n == 8 ? 1 : 0, observed_old, val);
-            pt_slot_changed(w.gpa & ~7ULL);
+            pt_slot_changed_impl(w.gpa & ~7ULL, same64);
             if (((w.gpa & 7) + n) > 8)
                 pt_slot_changed((w.gpa & ~7ULL) + 8);
             arm_finish(&a, 0);

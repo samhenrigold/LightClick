@@ -131,7 +131,10 @@ public final class SMPGuest: @unchecked Sendable {
                 let c = cpu.engine.ctx.pointee
                 let line = "SMP_FINAL cpu \(i) stopped 1 outcome \(kind) exit \(code) guard \(c.keeper_inactive_guard) "
                     + "suppressed \(c.stat_keeper_inactive_suppressed) thresholdFallbacks \(c.stat_keeper_inactive_threshold_fallbacks) sharedDirsGlobal \(shared)\n"
-                FileHandle.standardError.write(Data((line + cpu.engine.stats() + "\n").utf8))
+                let sameStore = "PTE_SAME64_FINAL cpu \(i) enabled \(c.pte_same64) exchanges \(c.stat_pte_same64_exchanges) "
+                    + "equal \(c.stat_pte_same64_equal) changed \(c.stat_pte_same64_changed) "
+                    + "leafSkips \(c.stat_pte_same64_leaf_skips) xmarkSkips \(c.stat_pte_same64_xmark_skips)\n"
+                FileHandle.standardError.write(Data((line + sameStore + cpu.engine.stats() + "\n").utf8))
             }
         }
         return first.exitCode ?? -1
