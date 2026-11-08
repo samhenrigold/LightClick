@@ -21,6 +21,7 @@ import atexit
 import json
 import os
 from pathlib import Path
+import plistlib
 import shlex
 import shutil
 import signal
@@ -28,6 +29,7 @@ import subprocess
 import sys
 import time
 import uuid
+from xml.parsers.expat import ExpatError
 
 from startup_timeline import StartupTimeline, preserve_startup_logs
 from diagnostics_evidence import retain_timeout
@@ -36,6 +38,25 @@ from sampling_entitlements import prepare_sampling_entitlements
 from clone_lease import CloneLease, LeaseRefused, process_identity
 
 source = Path(__file__).resolve().parents[1]
+
+
+def preflight_inputs(app, machine):
+    """Refuse missing/unusable inputs before acquiring a lease or making clones."""
+    executable = app/'Contents/MacOS/Light Click'
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ValueError(f'App main executable is missing or not executable: {executable}')
+    configuration = machine/'Machine.plist'
+    if not configuration.is_file():
+        raise ValueError(f'Machine.plist is missing or not a regular file: {configuration}')
+    try:
+        with configuration.open('rb') as file:
+            contents = plistlib.load(file)
+    except (OSError, ValueError, plistlib.InvalidFileException, ExpatError) as error:
+        raise ValueError(f'Cannot read valid Machine.plist at {configuration}: {error}') from error
+    if not isinstance(contents, dict):
+        raise ValueError(f'Machine.plist must contain a dictionary: {configuration}')
+
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('app', type=Path)
 parser.add_argument('machine', type=Path)
@@ -56,6 +77,10 @@ parser.add_argument('--fresh-identifier', action='store_true', help='give the cl
 parser.add_argument('--startup-timeline', action='store_true', help='retain passive startup phase observations as <tag>.startup.jsonl')
 parser.add_argument('--allow-running-vms', action='store_true', help='allow unrelated running VMs while retaining this harness\'s exclusive clone-test lease')
 args = parser.parse_args()
+try:
+    preflight_inputs(args.app, args.machine)
+except (OSError, ValueError) as error:
+    parser.error(str(error))
 clone_lease = CloneLease(check_running=not args.allow_running_vms)
 try:
     clone_lease.acquire()
