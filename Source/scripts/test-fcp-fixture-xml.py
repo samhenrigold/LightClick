@@ -20,6 +20,7 @@ def main():
     project=root.find('project');assert [x.tag for x in project]==['resources','sequence']
     fmt=project.find('resources/format');asset=project.find('resources/asset');seq=project.find('sequence');video=seq.find('spine/clip/video')
     assert (fmt.get('width'),fmt.get('height'),fmt.get('frameDuration'))==('1920','1080','1/30s')
+    assert fmt.get('name')==manifest['project_format_name']=='FFVideoFormat1080p30'
     assert (asset.get('src'),asset.get('hasAudio'),asset.get('duration'))==('file://'+clip,'0','8s')
     assert seq.get('format')==fmt.get('id') and asset.get('format')==fmt.get('id') and video.get('ref')==asset.get('id')
     assert seq.get('duration')==video.get('duration')=='8s'

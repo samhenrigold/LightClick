@@ -28,7 +28,7 @@ def build_fixture(guest_clip, guest_directory):
     root = ET.Element('fcpxml', version='1.3')
     project = ET.SubElement(root, 'project', name='LC-generated-8s')
     resources = ET.SubElement(project, 'resources')
-    ET.SubElement(resources, 'format', id='r1', frameDuration='1/30s', width='1920', height='1080', fieldOrder='progressive', paspH='1', paspV='1')
+    ET.SubElement(resources, 'format', id='r1', name='FFVideoFormat1080p30', frameDuration='1/30s', width='1920', height='1080', fieldOrder='progressive', paspH='1', paspV='1')
     ET.SubElement(resources, 'asset', id='r2', name='LC-generated-prores422', src='file://'+guest_clip,
                   start='0s', duration='8s', hasVideo='1', hasAudio='0', format='r1')
     sequence = ET.SubElement(project, 'sequence', format='r1', duration='8s', tcStart='0s', tcFormat='NDF')
@@ -36,7 +36,7 @@ def build_fixture(guest_clip, guest_directory):
     clip = ET.SubElement(spine, 'clip', name='LC-generated-prores422', offset='0s', start='0s', duration='8s', format='r1')
     ET.SubElement(clip, 'video', ref='r2', offset='0s', start='0s', duration='8s')
     data = ET.tostring(root, encoding='utf-8', xml_declaration=True) + b'\n'
-    manifest = {'format':'FCPXML1.3', 'guest_xml_destination':guest_directory+'/generated.fcpxml',
+    manifest = {'format':'FCPXML1.3', 'project_format_name':'FFVideoFormat1080p30', 'guest_xml_destination':guest_directory+'/generated.fcpxml',
                 'guest_clip':guest_clip, 'xml_sha256':hashlib.sha256(data).hexdigest(), 'xml_bytes':len(data),
                 'expected_input':{'sha256':CLIP_SHA256,'bytes':CLIP_BYTES,'video':'ProRes422 Standard',
                                   'width':1920,'height':1080,'frame_duration':'1/30s','frames':240,'duration':'8s','audio_tracks':0},
