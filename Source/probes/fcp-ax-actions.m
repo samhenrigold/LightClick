@@ -1068,10 +1068,25 @@ static void inspectMasterSettings(AXUIElementRef application,pid_t pid,NSString 
     releaseMasterTabs(&current);releaseMasterTabs(&tabs);if(finalPane)CFRelease(finalPane);if(fresh)CFRelease(fresh);if(pane)CFRelease(pane);
 }
 
-typedef struct { NSUInteger scanned,runtime,project,clip;BOOL incomplete; } TimelineEvidence;
+// Exact labels observed for the same generated8s/1080p30 project, with and
+// without an explicit named-format token. No generic resolution/title matching.
+static unsigned timelineFormatLabel(const char *label,size_t length){
+    static const char legacy[]="08:00 total - 1920\u2009×\u20091080 | 30 fps Stereo";
+    static const char named[]="08:00 total - 1080p HD 30p Stereo";
+    if(!label)return 0;
+    if(length==sizeof(legacy)-1 && !memcmp(label,legacy,length))return 1;
+    if(length==sizeof(named)-1 && !memcmp(label,named,length))return 2;
+    return 0;
+}
+typedef struct { NSUInteger scanned,runtime,project,clip;BOOL incomplete;NSUInteger legacyRuntime,namedRuntime; } TimelineEvidence;
 static void timelineEvidence(AXUIElementRef element,pid_t pid,NSUInteger depth,TimelineEvidence *e){
     if(!room() || ++e->scanned>256 || depth>10 || !ownedElement(element,pid)){e->incomplete=YES;return;}
-    if(equals(element,kAXRoleAttribute,@"AXStaticText") && equals(element,CFSTR("AXDescription"),@"runtime") && equals(element,kAXValueAttribute,@"08:00 total - 1920\u2009×\u20091080 | 30 fps Stereo"))e->runtime++;
+    if(equals(element,kAXRoleAttribute,@"AXStaticText") && equals(element,CFSTR("AXDescription"),@"runtime")){
+        CFTypeRef value=attribute(element,kAXValueAttribute);
+        unsigned label=value && CFGetTypeID(value)==CFStringGetTypeID()?timelineFormatLabel([(__bridge NSString *)value UTF8String],[(__bridge NSString *)value lengthOfBytesUsingEncoding:NSUTF8StringEncoding]):0;
+        if(label){e->runtime++;if(label==1)e->legacyRuntime++;else e->namedRuntime++;}
+        if(value)CFRelease(value);
+    }
     if(equals(element,kAXRoleAttribute,@"AXButton") && equals(element,kAXTitleAttribute,@"LC-generated-8s") && enabled(element,YES))e->project++;
     if(equals(element,kAXRoleAttribute,@"AXLayoutItem") && equals(element,kAXSubroleAttribute,@"AXTimeline") && equals(element,CFSTR("AXDescription"),@"Video-Clip:LC-generated-prores422") && equals(element,kAXValueAttribute,@"00:00:08:00") && enabled(element,YES))e->clip++;
     // Browser/listing contents are irrelevant: the generated browser target is verified separately.
@@ -1085,7 +1100,10 @@ static void timelineEvidence(AXUIElementRef element,pid_t pid,NSUInteger depth,T
 }
 static BOOL verifiedTimeline(AXUIElementRef window,pid_t pid,NSMutableDictionary *report){
     TimelineEvidence evidence={0};timelineEvidence(window,pid,0,&evidence);
-    report[@"generatedTimelineEvidence"]=@{@"scanned":@(evidence.scanned),@"incomplete":@(evidence.incomplete),@"runtimeMatches":@(evidence.runtime),@"projectButtonMatches":@(evidence.project),@"timelineClipMatches":@(evidence.clip),@"expectedRuntime":@"08:00 total - 1920\u2009×\u20091080 | 30 fps Stereo",@"expectedClipDuration":@"00:00:08:00"};
+    NSMutableArray *recognized=[NSMutableArray array];
+    if(evidence.legacyRuntime)[recognized addObject:@"08:00 total - 1920\u2009×\u20091080 | 30 fps Stereo"];
+    if(evidence.namedRuntime)[recognized addObject:@"08:00 total - 1080p HD 30p Stereo"];
+    report[@"generatedTimelineEvidence"]=@{@"scanned":@(evidence.scanned),@"incomplete":@(evidence.incomplete),@"runtimeMatches":@(evidence.runtime),@"projectButtonMatches":@(evidence.project),@"timelineClipMatches":@(evidence.clip),@"expectedRuntime":@"08:00 total - 1920\u2009×\u20091080 | 30 fps Stereo",@"allowedRuntimeLabels":@[@"08:00 total - 1920\u2009×\u20091080 | 30 fps Stereo",@"08:00 total - 1080p HD 30p Stereo"],@"recognizedRuntimeLabels":recognized,@"expectedClipDuration":@"00:00:08:00"};
     return !evidence.incomplete && evidence.runtime==1 && evidence.project==1 && evidence.clip==1;
 }
 static void inspectMasterShare(AXUIElementRef application,pid_t pid,NSString *directory,NSMutableDictionary *report){
