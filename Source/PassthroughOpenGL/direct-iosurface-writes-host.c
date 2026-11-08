@@ -71,6 +71,7 @@ static void DGMarkIOSurfaceAlias(struct DGHostContext *c, struct DGAlias *p) {
         p->iosurface_write_serial = ++g->iosurface_write_clock;
     p->iosurface_writer = c;
     p->iosurface_submitted_serial = 0;
+    DGCoherenceTrace(c,p,VIM_COHERENCE_ALIAS_WRITE,1,p->copied_serial);
 }
 /* Native Flush submits only the CURRENT context. A different shared context's
  * Flush cannot acknowledge queued writes whose producer has not flushed yet.

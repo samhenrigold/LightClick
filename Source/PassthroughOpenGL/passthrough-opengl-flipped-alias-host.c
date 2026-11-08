@@ -60,14 +60,20 @@ static void DGRefreshFlippedAliases(struct DGHostContext *c, int sampled_only) {
     GLuint source = IOSurfaceGetID(c->color_storage);
     GLuint back = c->back_storage ? IOSurfaceGetID(c->back_storage) : 0;
     for (struct DGAlias *alias = c->alias_group->aliases; alias; alias = alias->next) {
-        if ((alias->source_storage != source && (!back || alias->source_storage != back)) ||
-            alias->copied_serial == c->drawable->write_serial)
+        if (alias->source_storage != source && (!back || alias->source_storage != back))
             continue;
+        if (alias->copied_serial == c->drawable->write_serial){
+            DGCoherenceTrace(c,alias,VIM_COHERENCE_UNCHANGED,1,alias->copied_serial);
+            continue;
+        }
         int selected = !sampled_only;
         for (GLint unit = 0; !selected && unit < c->texture_units; ++unit)
             selected = c->sampled_textures[unit] == alias->texture;
-        if (selected && !DGCopyFlippedAlias(c, alias) && !c->error)
-            c->error = GL_INVALID_OPERATION;
+        if (selected){
+            uint64_t before=alias->copied_serial;int good=DGCopyFlippedAlias(c,alias);
+            DGCoherenceTrace(c,alias,VIM_COHERENCE_REFRESH_COPY,good,before);
+            if(!good && !c->error)c->error=GL_INVALID_OPERATION;
+        }else DGCoherenceTrace(c,alias,VIM_COHERENCE_UNSELECTED,1,alias->copied_serial);
     }
 }
 static int DGBindFlippedAlias(struct DGHostContext *c, GLuint texture, GLenum internal, int width, int height, int back,
@@ -85,7 +91,9 @@ static int DGBindFlippedAlias(struct DGHostContext *c, GLuint texture, GLenum in
     GLuint source = IOSurfaceGetID(storage);
     if (alias && alias->source_storage == source && alias->width == width && alias->height == height &&
         alias->internal == internal) {
-        if (!DGCopyFlippedAlias(c, alias))
+        uint64_t before=alias->copied_serial;int good=DGCopyFlippedAlias(c,alias);
+        DGCoherenceTrace(c,alias,VIM_COHERENCE_BIND_COPY,good,before);
+        if (!good)
             reply->error = GL_INVALID_OPERATION;
         return 0;
     }
@@ -128,7 +136,9 @@ static int DGBindFlippedAlias(struct DGHostContext *c, GLuint texture, GLenum in
     alias->width = width;
     alias->height = height;
     alias->internal = internal;
-    if (!DGCopyFlippedAlias(c, alias))
+    uint64_t before=alias->copied_serial;int good=DGCopyFlippedAlias(c,alias);
+    DGCoherenceTrace(c,alias,VIM_COHERENCE_BIND_COPY,good,before);
+    if (!good)
         reply->error = GL_INVALID_OPERATION;
     return 0;
 }

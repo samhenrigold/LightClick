@@ -391,6 +391,7 @@ static void DGDestroySyncs(struct DGAliasGroup *);
 static void DGDestroyMappings(struct DGAliasGroup *);
 static void DGRefreshFlippedAliases(struct DGHostContext *, int);
 #include "passthrough-opengl-alias-host.c"
+#include "backing-coherence-trace-host.c"
 #include "direct-uniform-query-host.c"
 #include "direct-iosurface-texture-host.c"
 #include "direct-iosurface-writes-host.c"
