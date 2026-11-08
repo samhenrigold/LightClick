@@ -2,6 +2,7 @@
 """Local fake-transport/collector-helper tests only; never execute Apple binaries, apps or guests."""
 import ast
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -51,7 +52,14 @@ def main():
         root = Path(temporary)
         helpers = [root / 'query', root / 'compute']
         for helper in helpers: helper.write_bytes(b'fake-helper-source-identity')
-        for case in ('good', 'tamper', 'cancel', 'oversize', 'bad-stage'):
+        dylib=root/'diagnostic.dylib';dylib.write_bytes(struct.pack('<8I',0xfeedfacf,0x1000007,3,6,0,0,0,0))
+        ns['validate_diagnostic_dylib'](dylib)
+        for file_type in (2,8):
+            bad=root/('wrongtype'+str(file_type));bad.write_bytes(struct.pack('<8I',0xfeedfacf,0x1000007,3,file_type,0,0,0,0))
+            try:ns['validate_diagnostic_dylib'](bad)
+            except ValueError:pass
+            else:raise AssertionError('accepted non-dylib')
+        for case in ('good', 'tamper', 'cancel', 'oversize', 'bad-stage','dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only'):
             results = root / case
             results.mkdir()
             events = []
@@ -60,10 +68,19 @@ def main():
                 argv = command['Arguments']
                 if argv[1] == ns['COLLECTOR']:
                     events.append('collector')
-                    assert events[-3:] == ['stage', 'stage', 'collector']
-                    assert timeout == 110 and len(argv) == 6
+                    injected=case in ('dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only')
+                    assert events[-(4 if injected else 3):] == ['stage']*(3 if injected else 2)+['collector']
+                    assert timeout == 110 and len(argv) == (9 if injected else 6)
                     if case == 'oversize': return reply(dict(diagnostic, extra='x' * 1100000))
-                    return reply(diagnostic)
+                    value=copy.deepcopy(diagnostic)
+                    if injected:
+                        value['compute']['pid']=1234
+                        assert argv[-1]==('standard-kernel' if case=='standard-kernel' else 'dialect-only')
+                        logs=[dict(event='installed',pid=999 if case=='wrong-pid' else 1234,**{'class':'MTLCompileOptionsInternal'},pipelineModeChanged=False),dict(event='arguments',callerArguments='-cl-std=CL1.2',actualArguments='wrong' if case=='malformed-options' else '-cl-std=CL1.2 -x cl',languageVersion=131074,mode='dialect-only',nativeLibraryScope=case!='preview-only',callerImage='/System/Library/Frameworks/Metal.framework/Versions/A/Metal',callerImageOffset=0x50471)]
+                        if case=='standard-kernel':
+                            logs[1].update(mode='standard-kernel',sourceSHA256='f110a56696746ed66d54450f587bf4c063386815a5e79f5e7b13d83fef730d22',callerArguments='-fapplecl-lax-vector-conversions -cl-std=CL1.2',actualArguments=' -cl-std=CL1.2 -std=cl1.2 -x cl')
+                        value['compute']['stderr']['text']='' if case=='missing-witness' else ''.join('LC_OPENCL_DIALECT '+json.dumps(x)+'\n' for x in logs)
+                    return reply(value)
                 assert argv[:2] == ['-c', ns['EXPORT']] and 0 < timeout <= 20
                 selector, operation = argv[2:4]
                 events.append((selector, operation))
@@ -82,10 +99,10 @@ def main():
                 events.append('stage')
                 assert all((selector, 'describe') in events for selector in ns['FILES'])
                 return '/Users/not-a-stage/Transfer.bin' if case == 'bad-stage' else '/private/var/tmp/VirtualIntelMac.ABC123/Transfer.bin'
-            ns.update(arguments=[str(results), *map(str, helpers)], request=request, stage=stage)
+            ns.update(arguments=[str(results), *map(str, helpers)]+([str(dylib)] if case in ('dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only') else [])+(['standard-kernel'] if case=='standard-kernel' else []), request=request, stage=stage)
             try: ns['run']()
             except (ValueError, SystemExit): assert case in ('cancel', 'oversize', 'bad-stage')
-            else: assert case in ('good', 'tamper')
+            else: assert case in ('good', 'tamper','dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only')
             report = json.loads((results / 'opencl-contract.json').read_text())
             if case == 'cancel':
                 assert events == [('metal', 'describe')]
@@ -105,6 +122,10 @@ def main():
                     assert report['diagnostic']['query']['signal'] == 6
                     assert report['diagnostic']['compute']['parsed_stdout_lines'][0]['api'] == 'clBuildProgram'
                     assert (results / 'compute.stdout.txt').read_text().endswith('partial crash line')
+                elif case in ('dialect','missing-witness','wrong-pid','malformed-options','standard-kernel','preview-only'):
+                    assert report['result']==('DIALECT_DIAGNOSTIC_CAPTURED' if case in ('dialect','standard-kernel') else 'INCONCLUSIVE')
+                    assert report['source_language_diagnostic']['witnessed']==(case in ('dialect','standard-kernel'))
+                    assert report['source_language_diagnostic_dylib']['macho_header']['file_type']==6
                 elif case == 'oversize':
                     assert (results / 'opencl-response.oversize-prefix.txt').stat().st_size == 1048576
                     assert not (results / 'opencl-response.json').exists()
@@ -133,6 +154,10 @@ def main():
         child_ns = {key: globals()[key] for key in ('os', 'signal', 'subprocess', 'threading', 'time')}
         child_ns.update(CAP=1024, owned=[], report={'commands': []})
         exec(compile(ast.Module(body=definitions, type_ignores=[]), 'collector functions only', 'exec'), child_ns)
+        dirty={'DYLD_INSERT_LIBRARIES':'wrong','LC_OPENCL_SOURCE_LANGUAGE_DIAGNOSTIC':'wrong','KEEP':'yes'}
+        assert child_ns['helper_environment'](dirty,'query','/own/diagnostic.dylib')=={'KEEP':'yes'}
+        assert child_ns['helper_environment'](dirty,'compute',None)=={'KEEP':'yes'}
+        assert child_ns['helper_environment'](dirty,'compute','/own/diagnostic.dylib')==dict(KEEP='yes',DYLD_INSERT_LIBRARIES='/own/diagnostic.dylib',LC_OPENCL_SOURCE_LANGUAGE_DIAGNOSTIC='1',LC_OPENCL_DIAGNOSTIC_MODE='dialect-only')
         payload = root / 'headless-payload'
         code = "import sys;open(sys.argv[1],'wb').write(b'x'*200000);print('{\"event\":\"checkpoint\"}');sys.exit(7)"
         try:

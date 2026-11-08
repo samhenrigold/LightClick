@@ -1,6 +1,6 @@
 """guest-bench: fixed native Metal export, then diagnostic guest OpenCL query/compute helpers.
 
-Arguments: NEWRESULTS QUERYHELPER COMPUTEHELPER. No host Apple binary execution or performance qualification.
+Arguments: NEWRESULTS QUERYHELPER COMPUTEHELPER [SOURCE_LANGUAGE_DIAGNOSTIC_DYLIB [dialect-only|standard-kernel]]. No host Apple binary execution or performance qualification.
 """
 import base64
 import hashlib
@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import struct
+import shlex
 import time
 
 FILES = {
@@ -60,7 +61,7 @@ sys.stdout.write(json.dumps(export(sys.argv[1],sys.argv[2],sys.argv[3:])))
 '''
 
 # Python2 guest. Stage verification/copy and audit-session entry follow the established FCP/Numbers collectors.
-COLLECTOR = r'''import ctypes, hashlib, json, os, pwd, re, signal, stat, subprocess, sys, tempfile, threading, time
+COLLECTOR = r'''import ctypes, hashlib, json, os, pwd, re, signal, stat, subprocess, sys, tempfile, threading, time, struct
 CAP=65536
 owned=[]
 report={'result':'DIAGNOSTIC','scope':'OpenCL inventory and bounded integer GPU qualifier; no performance claim','commands':[]}
@@ -119,10 +120,16 @@ def command(argv,seconds,env):
     expired=child.poll() is None and time.time()>=until
     if child.poll() is None:stop(child)
     out,err=captured(a),captured(b);code=child.poll()
-    row={'argv':argv,'timeout_seconds':seconds,'timed_out':expired,'exit_code':code,'signal':-code if code is not None and code<0 else None,
+    row={'pid':child.pid,'argv':argv,'timeout_seconds':seconds,'timed_out':expired,'exit_code':code,'signal':-code if code is not None and code<0 else None,
          'stdout':out,'stderr':err,'diagnostics_complete':not(out['at_limit'] or err['at_limit'] or out['error'] or err['error']) and out['reader_finished'] and err['reader_finished']}
     report['commands'].append(row)
     return row
+def helper_environment(base,name,diagnostic_path,mode='dialect-only'):
+    result=dict(base)
+    result.pop('DYLD_INSERT_LIBRARIES',None);result.pop('LC_OPENCL_SOURCE_LANGUAGE_DIAGNOSTIC',None);result.pop('LC_OPENCL_DIAGNOSTIC_MODE',None)
+    if name=='compute' and diagnostic_path:
+        result.update(DYLD_INSERT_LIBRARIES=diagnostic_path,LC_OPENCL_SOURCE_LANGUAGE_DIAGNOSTIC='1',LC_OPENCL_DIAGNOSTIC_MODE=mode)
+    return result
 def join_console():
     uid=os.stat('/dev/console').st_uid
     if uid==0:raise ValueError('no logged-in guest console user')
@@ -142,17 +149,26 @@ try:
     def interrupted(n,frame):raise RuntimeError('OpenCL collector interrupted '+str(n))
     for n in (signal.SIGALRM,signal.SIGTERM,signal.SIGINT):signal.signal(n,interrupted)
     signal.alarm(100)
-    if len(sys.argv)!=5:raise ValueError('expected exactly two staged helper/hash pairs')
+    if len(sys.argv) not in (5,7,8):raise ValueError('expected two staged helper/hash pairs plus optional diagnostic dylib/hash')
     query=staged(sys.argv[1],sys.argv[2]);compute=staged(sys.argv[3],sys.argv[4])
+    diagnostic=staged(sys.argv[5],sys.argv[6]) if len(sys.argv)>=7 else None
+    diagnostic_mode=sys.argv[7] if len(sys.argv)==8 else 'dialect-only'
+    if diagnostic_mode not in ('dialect-only','standard-kernel'):raise ValueError('unknown source diagnostic mode')
+    if diagnostic is not None and (len(diagnostic)<32 or struct.unpack('<4I',diagnostic[:16])[:2]!=(0xfeedfacf,0x1000007) or struct.unpack('<4I',diagnostic[:16])[3]!=6):raise ValueError('diagnostic must be x86_64 MH_DYLIB')
     report['console_uid']=join_console()
     directory=tempfile.mkdtemp(prefix='LightClickOpenCLContract.',dir='/private/var/tmp');os.chmod(directory,0o700)
     report['private_directory']=directory
     home=directory+'/home';os.mkdir(home,0o700)
     env=dict(os.environ,HOME=home,CFFIXED_USER_HOME=home,TMPDIR=directory+'/')
     env.pop('PYTHONPATH',None);env.pop('PYTHONHOME',None)
+    env.pop('DYLD_INSERT_LIBRARIES',None);env.pop('LC_OPENCL_SOURCE_LANGUAGE_DIAGNOSTIC',None)
+    diagnostic_path=None
+    if diagnostic is not None:
+        diagnostic_path=directory+'/source-language-diagnostic.dylib';store(diagnostic_path,diagnostic)
     for name,data,seconds in (('query',query,12),('compute',compute,35)):
         path=directory+'/'+name;store(path,data)
-        row=command([path],seconds,env);report[name]=row
+        child_env=helper_environment(env,name,diagnostic_path,diagnostic_mode)
+        row=command([path],seconds,child_env);report[name]=row
 except Exception as error:report.update(result='INCONCLUSIVE',error=repr(error))
 finally:
     errors=[]
@@ -250,9 +266,41 @@ def export_fixed(results, selector):
     return manifest
 
 
+def validate_diagnostic_dylib(path):
+    if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<=2097152:raise ValueError('diagnostic dylib outside regular/size budget')
+    header=macho_header(path)
+    if header.get('magic')!=0xfeedfacf or header.get('cpu_type')!=0x1000007 or header.get('file_type')!=6:raise ValueError('diagnostic must be thin x86_64 MH_DYLIB')
+    return header
+
+
+def dialect_witness(compute,mode='dialect-only'):
+    rows=[]
+    for line in compute.get('stderr',{}).get('text','').splitlines():
+        if line.startswith('LC_OPENCL_DIALECT '):
+            try:row=json.loads(line[len('LC_OPENCL_DIALECT '):])
+            except ValueError:continue
+            if isinstance(row,dict):rows.append(row)
+    installed=any(row.get('event')=='installed' and type(row.get('pid')) is int and row['pid']==compute.get('pid') and row.get('class')=='MTLCompileOptionsInternal' and type(row.get('pipelineModeChanged')) in (bool,int) and row['pipelineModeChanged']==0 for row in rows)
+    def transformed_arguments(row):
+        if row.get('event')!='arguments' or row.get('mode')!=mode or type(row.get('nativeLibraryScope')) not in (bool,int) or row['nativeLibraryScope']!=1 or not isinstance(row.get('callerImage'),str) or not row['callerImage'].endswith('/Metal.framework/Versions/A/Metal') or type(row.get('callerImageOffset')) is not int or row['callerImageOffset']<=0 or type(row.get('languageVersion')) is not int:return False
+        caller,actual=row.get('callerArguments'),row.get('actualArguments')
+        if not isinstance(caller,str) or not isinstance(actual,str):return False
+        if mode=='dialect-only':return actual==(caller+' -x cl' if caller else '-x cl')
+        if row.get('sourceSHA256')!='f110a56696746ed66d54450f587bf4c063386815a5e79f5e7b13d83fef730d22':return False
+        try:
+            removed={'-fapplecl-lax-vector-conversions','-fapplecl-functional-casts','-fapplecl-inline-definitions'}
+            return shlex.split(actual)==[x for x in shlex.split(caller) if x not in removed]+['-std=cl1.2','-x','cl']
+        except ValueError:return False
+    transformed=any(transformed_arguments(row) for row in rows)
+    return dict(witnessed=installed and transformed,constructor_witness=installed,transformed_arguments_witness=transformed,events=rows,
+                qualification='Dialect diagnostic only. Compilation progress, pipeline creation and integer readback do not qualify OpenCL semantics or FCP.')
+
+
 def run():
-    if len(arguments) != 3:
-        raise ValueError('expected NEWRESULTS QUERYHELPER COMPUTEHELPER')
+    if len(arguments) not in (3,4,5):
+        raise ValueError('expected NEWRESULTS QUERYHELPER COMPUTEHELPER [DIAGNOSTIC_DYLIB [dialect-only|standard-kernel]]')
+    mode=arguments[4] if len(arguments)==5 else 'dialect-only'
+    if mode not in ('dialect-only','standard-kernel'):raise ValueError('unknown source diagnostic mode')
     results = Path(arguments[0])
     if not results.is_dir() or any(results.iterdir()):
         raise ValueError('results must be a fresh existing empty directory')
@@ -274,7 +322,17 @@ def run():
             if not isinstance(staged, str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin', staged):
                 raise ValueError('invalid helper stage receipt')
             helper_paths.append(staged)
-        response = request({'Executable': '/usr/bin/python', 'Arguments': ['-c', COLLECTOR, helper_paths[0], hashes[0], helper_paths[1], hashes[1]]}, 110)
+        collector_arguments=['-c',COLLECTOR,helper_paths[0],hashes[0],helper_paths[1],hashes[1]]
+        if len(arguments)>=4:
+            p=Path(arguments[3])
+            header=validate_diagnostic_dylib(p)
+            digest=hashlib.sha256(p.read_bytes()).hexdigest()
+            report['source_language_diagnostic_dylib']=dict(path=str(p),bytes=p.stat().st_size,sha256=digest,macho_header=header)
+            staged=stage(p)
+            if not isinstance(staged,str) or not re.fullmatch(r'/private/var/tmp/VirtualIntelMac\.[A-Za-z0-9]{6}/Transfer\.bin',staged):raise ValueError('invalid diagnostic stage receipt')
+            collector_arguments += [staged,digest,mode]
+            report['source_language_diagnostic_mode']=mode
+        response = request({'Executable':'/usr/bin/python','Arguments':collector_arguments},110)
         encoded = (json.dumps(response, separators=(',', ':')) + '\n').encode()
         if len(encoded) > RESPONSE_CAP:
             save_new(results / 'opencl-response.oversize-prefix.txt', encoded[:RESPONSE_CAP])
@@ -297,6 +355,9 @@ def run():
                 except ValueError: malformed.append(line)
             row['parsed_stdout_lines'], row['malformed_stdout_lines'] = parsed, malformed
         report['result'] = 'DIAGNOSTIC' if diagnostic.get('result') == 'DIAGNOSTIC' and diagnostic.get('cleanup_errors') == [] else 'INCONCLUSIVE'
+        if len(arguments)>=4:
+            report['source_language_diagnostic']=dialect_witness(diagnostic.get('compute',{}),mode)
+            report['result']='DIALECT_DIAGNOSTIC_CAPTURED' if report['result']=='DIAGNOSTIC' and report['source_language_diagnostic']['witnessed'] else 'INCONCLUSIVE'
         print('OpenCL DIAGNOSTIC captured; no performance qualification; evidence ' + str(results), flush=True)
     except BaseException as error:
         report['error'] = repr(error)
